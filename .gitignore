@@ -8,6 +8,7 @@ managed_components/
 _build.cmd
 _flash.cmd
 _erase_flash.cmd
+_merge.cmd
 
 # Build/flash logs
 *.log

@@ -1,0 +1,32 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "config.c"
+        "http_server.c"
+        "tube.c"
+        "ntp.c"
+        "transmission.c"
+        "bme280.c"
+        "applog.c"
+        "log_ftp.c"
+        "speaker.c"
+        "display.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        esp_driver_gpio
+        esp_driver_gptimer
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_http_client
+        esp_http_server
+        esp-tls
+        mbedtls
+        lwip
+        app_update
+        esp_partition
+)

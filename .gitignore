@@ -1,0 +1,13 @@
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Local-only developer helper scripts (hardcode absolute paths)
+_build.cmd
+_flash.cmd
+_erase_flash.cmd
+
+# Build/flash logs
+*.log

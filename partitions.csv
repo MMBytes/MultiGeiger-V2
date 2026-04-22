@@ -1,0 +1,12 @@
+# Custom 8 MB partition table — factory + dual OTA.
+# Spike binary at M6/M7 is ~988 KB; default 1 MB partition had 4% free.
+# 2 MB per app gives ~50% headroom for OLED/web/BME680/OTA/CA-bundle growth.
+# Tail at 0x620000–0x800000 (1.9 MB) reserved for future spiffs/littlefs.
+#
+# Name,     Type, SubType, Offset,   Size,      Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+factory,    app,  factory, 0x20000,  0x200000,
+ota_0,      app,  ota_0,   0x220000, 0x200000,
+ota_1,      app,  ota_1,   0x420000, 0x200000,

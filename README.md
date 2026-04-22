@@ -29,13 +29,60 @@ Running. First overnight soak passed without crashes, uploading to all three def
 
 This firmware does **not** currently target the Heltec Wireless Stick Lite / V3 / V4 or other ESP32 variants. The pin map and HV timing are specific to V2.
 
-## Build requirements
+## Installation
+
+### Flashing a prebuilt release (no build environment needed)
+
+Every [release](https://github.com/MMBytes/MultiGeiger-V2/releases) attaches five `.bin` artefacts. Which one you use depends on what you're doing. Install [`esptool`](https://github.com/espressif/esptool) first (`pip install esptool`); replace `COM3` with your actual serial port.
+
+**First flash of a blank / fresh / bricked device — use `merged_<VERSION>.bin`:**
+
+```
+esptool.py --chip esp32 --port COM3 write-flash 0x0 merged_V2.1.11.bin
+```
+
+The merged image bundles the bootloader, partition table, OTA slot pointer, and the app at their correct flash offsets — a single-file factory flash. Use this after `esptool.py erase-flash` or for a device that's never run this firmware before.
+
+**Upgrading a device already running this firmware:**
+
+- **OTA (recommended)** — browse to `http://<device-ip>/update`, log in (user `admin`, password is your configured AP password), pick `geiger_v2.bin`. No cable, keeps your configuration.
+- **Wired app-only upgrade** — keeps NVS (WiFi credentials, etc.) intact:
+  ```
+  esptool.py --chip esp32 --port COM3 write-flash 0x20000 geiger_v2.bin
+  ```
+
+**Flashing components separately** (advanced — if the merged image doesn't suit your toolchain):
+
+| File | Offset | Purpose |
+|---|---|---|
+| `bootloader.bin` | `0x1000` | Second-stage bootloader |
+| `partition-table.bin` | `0x8000` | Partition table |
+| `ota_data_initial.bin` | `0xf000` | OTA slot pointer (factory) |
+| `geiger_v2.bin` | `0x20000` | App image |
+
+```
+esptool.py --chip esp32 --port COM3 write-flash \
+  0x1000 bootloader.bin \
+  0x8000 partition-table.bin \
+  0xf000 ota_data_initial.bin \
+  0x20000 geiger_v2.bin
+```
+
+### First boot
+
+The device comes up as an open WiFi AP named after its chip ID (derived from the MAC). Connect to it, browse to `http://192.168.4.1/config`, and set WiFi credentials, admin password, and back-end choices. After the 2-minute boot window or a manual reboot, it joins your network in STA mode.
+
+## Build from source
+
+Needed only if you want to modify the firmware.
+
+### Requirements
 
 - [ESP-IDF v6.0](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html) (pure IDF — not arduino-esp32, not PlatformIO)
 - A Windows / Linux / macOS host with the IDF tools installed
 - USB cable with data lines
 
-## Build and flash
+### Commands
 
 With the IDF environment sourced (`export.ps1` on Windows, `export.sh` on Linux/macOS):
 
@@ -45,7 +92,11 @@ idf.py -p <PORT> flash
 idf.py -p <PORT> monitor
 ```
 
-On first boot the device comes up as an open AP named after its chip ID (derived from the MAC). Connect and browse to `http://192.168.4.1/config` to set WiFi credentials, admin password, and back-end choices. After a restart it joins your network.
+To produce the merged single-file image like the ones attached to releases:
+
+```
+idf.py merge-bin -o merged_<VERSION>.bin
+```
 
 ## Repository layout
 

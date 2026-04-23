@@ -93,7 +93,10 @@ static int do_request(const char *url, esp_http_client_method_t method,
     esp_err_t err = esp_http_client_perform(client);
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "perform error: %s (%s)", esp_err_to_name(err), url);
+        // Truncate at '?' to avoid logging query-string credentials.
+        const char *q = strchr(url, '?');
+        int url_len = q ? (int)(q - url) : (int)strlen(url);
+        ESP_LOGW(TAG, "perform error: %s (%.*s)", esp_err_to_name(err), url_len, url);
     }
     esp_http_client_cleanup(client);
     return status;
@@ -147,7 +150,7 @@ static int do_request_on_client(esp_http_client_handle_t client,
 static int post_with_retry(esp_http_client_handle_t client,
                            const char *target, const char *label,
                            const char *x_pin, const char *body) {
-    for (int i = 0; i <= HTTP_MAX_RETRIES; i++) {
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
         int rc = do_request_on_client(client, x_pin, body);
         if (rc > 0 && rc != 408 && rc < 500) return rc;
@@ -374,7 +377,7 @@ static int send_radmon(const tx_context_t *c) {
              "%s?function=submit&user=%s&password=%s&value=%lu&unit=CPM",
              base, c->radmon_user, c->radmon_password, (unsigned long)c->cpm);
 
-    for (int i = 0; i <= HTTP_MAX_RETRIES; i++) {
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
         char buf[RESP_BUF_SIZE];
         resp_ctx_t resp = { .buf = buf, .cap = sizeof(buf), .len = 0 };

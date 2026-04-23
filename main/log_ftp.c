@@ -219,11 +219,22 @@ static int io_recv1(ftp_io_t *io, char *out) {
 static bool io_send_all(ftp_io_t *io, const void *buf, size_t len) {
     const unsigned char *p = (const unsigned char *)buf;
     size_t sent = 0;
+    // Deadline resets each time bytes are actually written. WANT_WRITE spins
+    // without making progress, so SO_SNDTIMEO (which fires EAGAIN → WANT_WRITE)
+    // never terminates the loop on its own — we need a wall-clock guard here.
+    int64_t deadline_us = esp_timer_get_time() + (int64_t)FTP_WRITE_STALL_MS * 1000;
     while (sent < len) {
         int n;
         if (io->tls) {
             n = mbedtls_ssl_write(&io->ssl, p + sent, len - sent);
-            if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if (esp_timer_get_time() > deadline_us) {
+                    ESP_LOGW(TAG, "io_send_all: TLS stall at %u/%u bytes",
+                             (unsigned)sent, (unsigned)len);
+                    return false;
+                }
+                continue;
+            }
         } else {
             n = send(io->sock, p + sent, len - sent, 0);
         }
@@ -233,6 +244,7 @@ static bool io_send_all(ftp_io_t *io, const void *buf, size_t len) {
             return false;
         }
         sent += (size_t)n;
+        deadline_us = esp_timer_get_time() + (int64_t)FTP_WRITE_STALL_MS * 1000;
     }
     return true;
 }

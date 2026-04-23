@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -206,11 +207,26 @@ static void format_net_info(char *out, size_t sz) {
     snprintf(out, sz, "<b>Network:</b> No connection<br>");
 }
 
+// Favicon — radiation trefoil ☢ (U+2622) on yellow, served as SVG.
+static const char s_favicon_svg[] =
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+    "<rect width='100' height='100' rx='14' fill='#FFE000'/>"
+    "<text x='50' y='82' font-size='80' text-anchor='middle' fill='#111'>"
+    "\xe2\x98\xa2"   // UTF-8 for ☢
+    "</text></svg>";
+
+static esp_err_t favicon_get(httpd_req_t *req) {
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
+    return httpd_resp_send(req, s_favicon_svg, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t status_get(httpd_req_t *req) {
     log_access(req, "GET /");
-    char body[1600];
+    char body[1700];
     unsigned long uptime_s = (unsigned long)(esp_timer_get_time() / 1000000);
     uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     char uptime_buf[32];
     format_uptime(uptime_s, uptime_buf, sizeof(uptime_buf));
     char net_info[400];
@@ -218,6 +234,7 @@ static esp_err_t status_get(httpd_req_t *req) {
 
     int n = snprintf(body, sizeof(body),
         "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.ico\">"
         "<title>MultiGeiger</title>"
         "<style>body{font-family:sans-serif;max-width:600px;margin:20px auto;padding:0 10px}"
         "h1{color:#333}a{color:#0066cc}"
@@ -230,6 +247,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         "%s"
         "<b>AP SSID:</b> %s<br>"
         "<b>Free heap:</b> %lu bytes<br>"
+        "<b>Max allocation:</b> %lu bytes<br>"
         "<b>Uptime:</b> %s"
         "</div>"
         "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
@@ -242,6 +260,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         net_info,
         s_cfg->ap_name,
         (unsigned long)free_heap,
+        (unsigned long)max_alloc,
         uptime_buf);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, body, n > 0 ? n : 0);
@@ -310,6 +329,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "if(bg.checked){ht.checked=true;ht.disabled=true;}"
         "else{ht.disabled=false;}"
         "}syncHt20();</script>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" %s> "
+        "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops)</label></div>"
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
         "<h3>Transmission targets</h3>"
@@ -369,8 +390,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<a href=\"/update\">Firmware update</a></p>"
         "</body></html>",
         e_ssid, e_pw, e_host, e_apn,
-        s_cfg->wifi_11bg_only ? "checked" : "",
-        s_cfg->wifi_ht20_only ? "checked" : "",
+        s_cfg->wifi_11bg_only   ? "checked" : "",
+        s_cfg->wifi_ht20_only   ? "checked" : "",
+        s_cfg->wifi_ps_disabled ? "checked" : "",
         e_chip, s_mac_str,
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
@@ -449,6 +471,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.show_display           = false;
     next.wifi_11bg_only         = false;
     next.wifi_ht20_only         = false;
+    next.wifi_ps_disabled       = false;
 
     char *p = buf;
     while (*p) {
@@ -464,8 +487,9 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "wifi_pw"))   assign_str(next.wifi_password, sizeof(next.wifi_password), val);
         else if (!strcmp(p, "wifi_host")) assign_str(next.wifi_hostname, sizeof(next.wifi_hostname), val);
         else if (!strcmp(p, "ap_name"))   assign_str(next.ap_name,       sizeof(next.ap_name),       val);
-        else if (!strcmp(p, "wifi_11bg")) next.wifi_11bg_only = true;
-        else if (!strcmp(p, "wifi_ht20")) next.wifi_ht20_only = true;
+        else if (!strcmp(p, "wifi_11bg"))  next.wifi_11bg_only   = true;
+        else if (!strcmp(p, "wifi_ht20"))  next.wifi_ht20_only   = true;
+        else if (!strcmp(p, "wifi_ps_dis")) next.wifi_ps_disabled = true;
         else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
         else if (!strcmp(p, "mad_https")) next.madavi_https  = true;
         else if (!strcmp(p, "send_sc"))   next.send_sensorc  = true;
@@ -719,7 +743,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers = 9;             // / /config GET+POST /update GET+POST /reboot /log
+    hc.max_uri_handlers = 10;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log
     hc.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&s_server, &hc);
@@ -729,6 +753,9 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         return;
     }
 
+    static const httpd_uri_t uri_favicon = {
+        .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get,
+    };
     static const httpd_uri_t uri_root = {
         .uri = "/", .method = HTTP_GET, .handler = status_get,
     };
@@ -750,6 +777,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     static const httpd_uri_t uri_log_get = {
         .uri = "/log", .method = HTTP_GET, .handler = log_get,
     };
+    httpd_register_uri_handler(s_server, &uri_favicon);
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_config_get);
     httpd_register_uri_handler(s_server, &uri_config_post);
@@ -757,7 +785,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_update_post);
     httpd_register_uri_handler(s_server, &uri_reboot_post);
     httpd_register_uri_handler(s_server, &uri_log_get);
-    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /config /update /reboot /log)");
+    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log)");
 }
 
 bool http_server_restart_requested(void) {

@@ -35,6 +35,11 @@ typedef struct {
     bool     wifi_11bg_only;
     bool     wifi_ht20_only;
 
+    // When true, WiFi modem sleep is disabled (WIFI_PS_NONE). When false
+    // (default), minimum modem sleep is used (WIFI_PS_MIN_MODEM), matching
+    // the upstream MultiGeiger behaviour and reducing power draw slightly.
+    bool     wifi_ps_disabled;
+
     // Upload targets — per-target enable plus HTTPS toggle.
     bool     send_madavi;
     bool     madavi_https;

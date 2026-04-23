@@ -454,7 +454,7 @@ static void tx_run(tx_context_t *c) {
             ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 madavi_fail_streak = 0;
-            } else {
+            } else if (rc == -1) {  // only full retry exhaustion counts
                 madavi_fail_streak++;
                 if (madavi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     madavi_skip_remaining = TX_CB_SKIP_CYCLES;
@@ -477,7 +477,7 @@ static void tx_run(tx_context_t *c) {
             ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 sensorc_fail_streak = 0;
-            } else {
+            } else if (rc == -1) {  // only full retry exhaustion counts
                 sensorc_fail_streak++;
                 if (sensorc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     sensorc_skip_remaining = TX_CB_SKIP_CYCLES;
@@ -500,7 +500,7 @@ static void tx_run(tx_context_t *c) {
             ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 radmon_fail_streak = 0;
-            } else if (rc != -3) {  // -3 = no creds; don't count
+            } else if (rc == -1) {  // only full retry exhaustion counts
                 radmon_fail_streak++;
                 if (radmon_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     radmon_skip_remaining = TX_CB_SKIP_CYCLES;

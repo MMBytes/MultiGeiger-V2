@@ -371,7 +371,7 @@ void app_main(void) {
     // closes in the main loop, so the radio is never shared.
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &apc));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(g_cfg.wifi_ps_disabled ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM));
 
     // Tube runs from boot regardless of WiFi state — counts accumulate in ISR.
     tube_setup();

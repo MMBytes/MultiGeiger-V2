@@ -8,10 +8,6 @@
 
 static const char *TAG = "bme280";
 
-// --- Board wiring (Heltec Wireless Stick V2) --------------------------------
-#define PIN_SDA        4
-#define PIN_SCL       15
-#define I2C_PORT       I2C_NUM_0
 #define I2C_FREQ_HZ    100000
 
 #define BME_ADDR_A     0x76
@@ -80,9 +76,10 @@ static esp_err_t attach_dev(uint8_t addr) {
     return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
 }
 
-static esp_err_t probe_and_attach(uint8_t *found_addr) {
+static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
     const uint8_t candidates[2] = { BME_ADDR_A, BME_ADDR_B };
     for (int i = 0; i < 2; i++) {
+        if (skip_addr_77 && candidates[i] == BME_ADDR_B) continue;
         if (i2c_master_probe(s_bus, candidates[i], 100) == ESP_OK) {
             esp_err_t err = attach_dev(candidates[i]);
             if (err != ESP_OK) return err;
@@ -131,29 +128,17 @@ static esp_err_t read_calibration(void) {
     return ESP_OK;
 }
 
-esp_err_t bme280_init(void) {
+esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     if (s_ready) return ESP_OK;
 
-    // Build the master bus on the Heltec V2 I2C pins. Internal pull-ups on
-    // as a belt-and-braces — the PCB already has 4.7k externals on J_I2C.
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port         = I2C_PORT,
-        .sda_io_num       = PIN_SDA,
-        .scl_io_num       = PIN_SCL,
-        .clk_source       = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2c_new_master_bus: %s", esp_err_to_name(err));
-        return err;
-    }
+    // Bus is owned by env_sensor — just record the handle for our helpers.
+    s_bus = bus;
 
     uint8_t addr = 0;
-    err = probe_and_attach(&addr);
+    esp_err_t err = probe_and_attach(&addr, skip_addr_77);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "BME280 not found on I2C (tried 0x76, 0x77)");
+        ESP_LOGW(TAG, "BME280 not found on I2C (tried %s)",
+                 skip_addr_77 ? "0x76 only" : "0x76 and 0x77");
         return err;
     }
     ESP_LOGI(TAG, "BME280 found at 0x%02X (chip ID 0x60 verified)", addr);

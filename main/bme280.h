@@ -16,13 +16,17 @@
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 
-/** @brief One-shot init: bring up I2C, probe, reset, read calibration,
- *         configure the profile, and enter normal mode.
+/** @brief One-shot init: probe the supplied I2C bus, reset, read calibration,
+ *         configure the operating profile, and enter normal mode.
+ *
+ *  @param bus          Shared I2C master bus handle (created by env_sensor_init).
+ *  @param skip_addr_77 When true, only probes 0x76 — used when a BMP390 already
+ *                      occupies 0x77 to avoid a false detection.
  *
  *  Returns ESP_OK on success. On failure, bme280_read() will keep returning
  *  ESP_FAIL — caller should log once and continue.
  */
-esp_err_t bme280_init(void);
+esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77);
 
 /** @brief True if init succeeded and the sensor is ready to read. */
 bool bme280_present(void);

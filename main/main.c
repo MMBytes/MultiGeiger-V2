@@ -13,7 +13,7 @@
 #include "nvs_flash.h"
 
 #include "applog.h"
-#include "bme280.h"
+#include "env_sensor.h"
 #include "config.h"
 #include "display.h"
 #include "http_server.h"
@@ -249,13 +249,14 @@ static void do_tx_cycle(void) {
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
-    if (bme280_present()) {
-        if (bme280_read(&bme_t, &bme_h, &bme_p) == ESP_OK) {
+    if (env_sensor_present()) {
+        if (env_sensor_read(&bme_t, &bme_h, &bme_p) == ESP_OK) {
             bme_valid = true;
-            ESP_LOGI(TAG, "BME280: T=%.2f°C  H=%.2f%%  P=%.2fhPa",
-                     bme_t, bme_h, bme_p / 100.0f);
+            ESP_LOGI(TAG, "%s: T=%.2f°C  H=%.2f%%  P=%.2fhPa",
+                     env_sensor_name(), bme_t, bme_h, bme_p / 100.0f);
+            env_sensor_heat_periodic((uint32_t)(esp_timer_get_time() / 1000), bme_h);
         } else {
-            ESP_LOGW(TAG, "BME280: read failed");
+            ESP_LOGW(TAG, "%s: read failed", env_sensor_name());
         }
     }
 
@@ -276,7 +277,7 @@ static void do_tx_cycle(void) {
 
 void app_main(void) {
     // Install vprintf hook first so the very first ESP_LOGx below (and
-    // everything after — WiFi, HTTP, BME280, TX) lands in the /log buffer.
+    // everything after — WiFi, HTTP, sensors, TX) lands in the /log buffer.
     applog_init();
 
     ESP_LOGI(TAG, "%s (IDF %s)", VERSION_STR, esp_get_idf_version());
@@ -315,13 +316,12 @@ void app_main(void) {
     ESP_LOGI(TAG, "ap_name: '%s'  wifi_hostname: '%s'",
              g_cfg.ap_name, g_cfg.wifi_hostname);
 
-    // Bring up the BME280 before WiFi — it's independent and failure is
-    // non-fatal (bme280_present() gates readings later).
-    if (bme280_init() != ESP_OK) {
-        ESP_LOGW(TAG, "BME280 init failed — continuing without THP readings");
-    }
+    // Probe for environmental sensors before WiFi — independent of network,
+    // failure is non-fatal (env_sensor_present() gates readings later).
+    // env_sensor_init() also owns the I2C bus used by the OLED below.
+    env_sensor_init();
 
-    // OLED is on the same I2C bus as the BME280 — bring it up now so the
+    // OLED shares the env_sensor I2C bus — bring it up now so the
     // boot splash is visible while WiFi/NTP/etc. come up.
     display_setup(g_cfg.show_display);
     display_boot_screen();

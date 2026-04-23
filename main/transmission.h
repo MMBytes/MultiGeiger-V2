@@ -17,9 +17,11 @@
 // Si22G calibration: µSv/h = cps / 12.2792 (empirical vs. odlinfo.bfs.de reference).
 #define SI22G_CPS_TO_USVPH (1.0f / 12.2792f)
 
-// Radmon circuit breaker — 3 consecutive all-retry failures → skip 20 cycles.
-#define RADMON_FAIL_THRESHOLD 3
-#define RADMON_SKIP_CYCLES    20
+// Circuit breaker applied to all three upload targets (Madavi, sensor.community,
+// Radmon): 3 consecutive all-retry failures trip the breaker; the target is then
+// skipped for 20 cycles (~50 min at 150 s interval) before being retried.
+#define TX_CB_FAIL_THRESHOLD 3
+#define TX_CB_SKIP_CYCLES    20
 
 typedef struct {
     bool        enabled;

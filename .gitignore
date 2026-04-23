@@ -4,6 +4,9 @@ sdkconfig.old
 dependencies.lock
 managed_components/
 
+# VS Code workspace settings (machine-local)
+.vscode/
+
 # Local-only developer helper scripts (hardcode absolute paths)
 _build.cmd
 _flash.cmd

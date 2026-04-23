@@ -1,4 +1,4 @@
-// OLED display — SSD1306 128x64 over I2C on the shared BME280 bus.
+// OLED display — SSD1306 128x64 over I2C on the shared env_sensor bus.
 // Hand-rolled SSD1306 driver (page-addressing mode) — no U8g2 dependency.
 // Layout: boot splash, then a running screen with time + nSv/h on top, big
 // CPM in the middle, status line at the bottom.
@@ -16,7 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "bme280.h"
+#include "env_sensor.h"
 #include "version.h"
 
 static const char *TAG = "display";
@@ -276,7 +276,7 @@ static void redraw_status_line(void) {
 // ------------------------------------------------------------------
 
 bool display_setup(bool show_display) {
-    i2c_master_bus_handle_t bus = bme280_get_i2c_bus();
+    i2c_master_bus_handle_t bus = env_sensor_get_i2c_bus();
     if (!bus) {
         ESP_LOGW(TAG, "no I2C bus — display disabled");
         return false;

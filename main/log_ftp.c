@@ -53,10 +53,14 @@ static const char *TAG = "ftp";
 #define FTP_WRITE_CHUNK       1024
 #define FTP_WRITE_STALL_MS    15000
 #define FTP_QUIT_TIMEOUT_MS   2000
+#define FTP_RETRY_COUNT       4         // retries after a failed first attempt
+#define FTP_RETRY_DELAY_MS    180000    // 3 min between retries (> one TX cycle)
 
-static const config_t *s_cfg           = NULL;
-static const char     *s_chip_id       = "";
+static const config_t *s_cfg            = NULL;
+static const char     *s_chip_id        = "";
 static uint32_t        s_next_upload_ms = 0;   // set in log_ftp_init from cfg
+static int             s_retry_count    = 0;   // retries remaining (0 = none pending)
+static uint32_t        s_retry_ms       = 0;   // wall-clock ms for next retry
 
 static bool wifi_up_ftp(void) {
     wifi_ap_record_t ap;
@@ -495,6 +499,14 @@ static bool do_ftp_upload(void) {
         tls_ready = true;
     }
 
+    // If WiFi power save is active, disable it for the transfer. With
+    // WIFI_PS_MIN_MODEM, TCP ACKs from the NAS are delayed by up to one DTIM
+    // interval, filling the lwIP send buffer and causing send() to block for
+    // SO_SNDTIMEO (15 s). Skipped when the user has already disabled PS.
+    // Restored to the configured setting at done:.
+    if (!s_cfg->wifi_ps_disabled)
+        esp_wifi_set_ps(WIFI_PS_NONE);
+
     int ctrl_sock = ftp_connect_host(s_cfg->ftp_host, FTP_PORT, FTP_TIMEOUT_MS);
     if (ctrl_sock < 0) { goto done; }
     io_init_plain(&ctrl, ctrl_sock);
@@ -587,6 +599,9 @@ static bool do_ftp_upload(void) {
     ftp_read_response(&ctrl, FTP_QUIT_TIMEOUT_MS, last, sizeof(last));
 
 done:
+    // Restore WiFi PS if it was disabled for the transfer.
+    if (!s_cfg->wifi_ps_disabled)
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     io_close(&data);
     io_close(&ctrl);
     if (tls_ready) tls_ctx_free(&tls);
@@ -609,7 +624,12 @@ void log_ftp_init(const char *chip_id, const config_t *cfg) {
 
 void log_ftp_loop(uint32_t now_ms) {
     if (!s_cfg || !s_cfg->ftp_enabled) return;
-    if ((int32_t)(now_ms - s_next_upload_ms) < 0) return;
+
+    bool is_scheduled = ((int32_t)(now_ms - s_next_upload_ms) >= 0);
+    bool is_retry     = (!is_scheduled && s_retry_count > 0 &&
+                         (int32_t)(now_ms - s_retry_ms) >= 0);
+
+    if (!is_scheduled && !is_retry) return;
 
     // Don't run while the TX worker is busy — FTP + TLS POSTs competing for
     // the WiFi link and heap have been observed to overlap cleanly, but a
@@ -618,11 +638,41 @@ void log_ftp_loop(uint32_t now_ms) {
     if (!tx_is_idle()) return;
 
     uint32_t interval_min = s_cfg->ftp_interval_min;
-    if (interval_min < 1) interval_min = 60;     // guard against zero
+    if (interval_min < 1) interval_min = 60;
     uint32_t interval_ms = interval_min * 60000UL;
 
-    // Regardless of success/failure, schedule next from now — a failing server
-    // shouldn't cause us to hammer it on every loop tick.
-    (void)do_ftp_upload();
-    s_next_upload_ms = now_ms + interval_ms;
+    if (is_scheduled) {
+        // Advance the regular schedule from this attempt — interval counts from
+        // first try, not from retries. Also clears any stale retry state from
+        // the previous interval (whether it eventually succeeded or not).
+        s_next_upload_ms = now_ms + interval_ms;
+        s_retry_count    = 0;
+        s_retry_ms       = 0;
+    } else {
+        ESP_LOGI(TAG, "FTP: retry %d/%d",
+                 FTP_RETRY_COUNT - s_retry_count + 1, FTP_RETRY_COUNT);
+    }
+
+    bool ok = do_ftp_upload();
+
+    if (ok) {
+        s_retry_count = 0;
+        s_retry_ms    = 0;
+    } else if (is_scheduled) {
+        // First attempt of this interval failed — arm the retry sequence.
+        s_retry_count = FTP_RETRY_COUNT;
+        s_retry_ms    = now_ms + FTP_RETRY_DELAY_MS;
+        ESP_LOGW(TAG, "FTP: upload failed — %d retries scheduled (~%d min apart)",
+                 FTP_RETRY_COUNT, FTP_RETRY_DELAY_MS / 60000);
+    } else {
+        // A retry failed.
+        s_retry_count--;
+        if (s_retry_count > 0) {
+            s_retry_ms = now_ms + FTP_RETRY_DELAY_MS;
+            ESP_LOGW(TAG, "FTP: retry failed — %d remaining", s_retry_count);
+        } else {
+            s_retry_ms = 0;
+            ESP_LOGW(TAG, "FTP: all retries exhausted");
+        }
+    }
 }

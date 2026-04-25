@@ -33,24 +33,29 @@ static volatile bool  s_restart_requested = false;
 // Logs every incoming request with its URI and client IP. Called at the top of
 // every handler, before auth checks, so unauthorised attempts are visible too.
 
-static void log_access(httpd_req_t *req, const char *what) {
-    char ipstr[48] = "?";
+static void peer_ipstr(httpd_req_t *req, char *out, size_t outsz) {
+    if (outsz == 0) return;
+    out[0] = '?';
+    out[1] = 0;
     int sockfd = httpd_req_to_sockfd(req);
-    if (sockfd >= 0) {
-        struct sockaddr_storage addr;
-        socklen_t len = sizeof(addr);
-        if (getpeername(sockfd, (struct sockaddr *)&addr, &len) == 0) {
-            if (addr.ss_family == AF_INET) {
-                inet_ntop(AF_INET,
-                          &((struct sockaddr_in *)&addr)->sin_addr,
-                          ipstr, sizeof(ipstr));
-            } else if (addr.ss_family == AF_INET6) {
-                inet_ntop(AF_INET6,
-                          &((struct sockaddr_in6 *)&addr)->sin6_addr,
-                          ipstr, sizeof(ipstr));
-            }
-        }
+    if (sockfd < 0) return;
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(sockfd, (struct sockaddr *)&addr, &len) != 0) return;
+    if (addr.ss_family == AF_INET) {
+        inet_ntop(AF_INET,
+                  &((struct sockaddr_in *)&addr)->sin_addr,
+                  out, outsz);
+    } else if (addr.ss_family == AF_INET6) {
+        inet_ntop(AF_INET6,
+                  &((struct sockaddr_in6 *)&addr)->sin6_addr,
+                  out, outsz);
     }
+}
+
+static void log_access(httpd_req_t *req, const char *what) {
+    char ipstr[48];
+    peer_ipstr(req, ipstr, sizeof(ipstr));
     ESP_LOGI(TAG, "%s from %s", what, ipstr);
 }
 
@@ -89,7 +94,9 @@ static bool check_auth(httpd_req_t *req) {
 
 unauth:
     if (header_present) {
-        ESP_LOGW(TAG, "auth FAILED for %s", req->uri);
+        char ipstr[48];
+        peer_ipstr(req, ipstr, sizeof(ipstr));
+        ESP_LOGW(TAG, "auth FAILED for %s from %s", req->uri, ipstr);
     }
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MultiGeiger\"");
@@ -329,7 +336,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "if(bg.checked){ht.checked=true;ht.disabled=true;}"
         "else{ht.disabled=false;}"
         "}syncHt20();</script>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" %s> "
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" "
+        "id=\"wifi_ps_dis\" onchange=\"syncFtpPs()\" %s> "
         "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops)</label></div>"
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
@@ -360,6 +368,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
         "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
         "<label>Upload interval (minutes)<input type=\"number\" name=\"ftp_int\" value=\"%lu\" min=\"1\" max=\"1440\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
+        "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
+        "(prevents DTIM-delayed TCP ACKs; auto-cleared if WiFi PS is already disabled above)</label></div>"
+        "<script>function syncFtpPs(){"
+        "var w=document.getElementById('wifi_ps_dis');"
+        "var f=document.getElementById('ftp_ps_dis');"
+        "if(w.checked){f.checked=false;f.disabled=true;}"
+        "else{f.disabled=false;}"
+        "}syncFtpPs();</script>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse</label></div><br>"
@@ -407,6 +424,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->ftp_tls     ? "checked" : "",
         e_fhost, e_fuser, e_fpw, e_fpath,
         (unsigned long)s_cfg->ftp_interval_min,
+        s_cfg->ftp_ps_disabled ? "checked" : "",
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
@@ -465,6 +483,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.send_sealevel_pressure = false;
     next.ftp_enabled            = false;
     next.ftp_tls                = false;
+    next.ftp_ps_disabled        = false;
     next.speaker_tick           = false;
     next.led_tick               = false;
     next.play_sound             = false;
@@ -522,6 +541,7 @@ static esp_err_t config_post(httpd_req_t *req) {
             long v = strtol(val, NULL, 10);
             if (v >= 1 && v <= 1440) next.ftp_interval_min = (uint32_t)v;
         }
+        else if (!strcmp(p, "ftp_ps_dis")) next.ftp_ps_disabled = true;
         else if (!strcmp(p, "sp_tick"))    next.speaker_tick = true;
         else if (!strcmp(p, "led_tick"))   next.led_tick     = true;
         else if (!strcmp(p, "play_sound")) next.play_sound   = true;
@@ -537,6 +557,12 @@ static esp_err_t config_post(httpd_req_t *req) {
     // even while the UI showed it ticked; enforce the invariant here so
     // the stored state matches what the user saw.
     if (next.wifi_11bg_only) next.wifi_ht20_only = true;
+
+    // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
+    // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the
+    // previously saved value rather than clobbering it to false — that way
+    // the user's preference survives a round-trip through "global PS off".
+    if (next.wifi_ps_disabled) next.ftp_ps_disabled = s_cfg->ftp_ps_disabled;
 
     *s_cfg = next;
     esp_err_t err = config_save(s_cfg);

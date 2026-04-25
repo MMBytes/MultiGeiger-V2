@@ -93,6 +93,14 @@ typedef struct {
     char     ftp_path[64];
     uint32_t ftp_interval_min;
 
+    // When true, WiFi modem sleep is forced off for the duration of each FTP
+    // transfer and restored to WIFI_PS_MIN_MODEM at the end. Workaround for
+    // boards where DTIM-delayed TCP ACKs stall FTPS uploads (observed on the
+    // older sensor with degraded WiFi RX). Default false — newer boards do
+    // not need it. Has no effect when wifi_ps_disabled is true (radio is
+    // already always-on); the /config UI greys this box out in that case.
+    bool     ftp_ps_disabled;
+
     // User-facing feedback knobs.
     //   speaker_tick: piezo click on every counted GM pulse.
     //   led_tick    : onboard LED flash on every counted GM pulse.

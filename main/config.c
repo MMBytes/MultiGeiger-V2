@@ -44,6 +44,7 @@ static const char *NS  = "geiger";
 #define DEF_FTP_PASSWORD    ""
 #define DEF_FTP_PATH        ""
 #define DEF_FTP_INTERVAL_MIN 60
+#define DEF_FTP_PS_DISABLED false
 #define DEF_SPEAKER_TICK    false
 #define DEF_LED_TICK        true
 #define DEF_PLAY_SOUND      false
@@ -81,6 +82,7 @@ void config_defaults(config_t *cfg) {
     strncpy(cfg->ftp_password, DEF_FTP_PASSWORD, sizeof(cfg->ftp_password) - 1);
     strncpy(cfg->ftp_path,     DEF_FTP_PATH,     sizeof(cfg->ftp_path) - 1);
     cfg->ftp_interval_min     = DEF_FTP_INTERVAL_MIN;
+    cfg->ftp_ps_disabled      = DEF_FTP_PS_DISABLED;
     cfg->speaker_tick         = DEF_SPEAKER_TICK;
     cfg->led_tick             = DEF_LED_TICK;
     cfg->play_sound           = DEF_PLAY_SOUND;
@@ -156,6 +158,7 @@ void config_load(config_t *cfg) {
     load_str (h, "ftp_pw",     cfg->ftp_password, sizeof(cfg->ftp_password));
     load_str (h, "ftp_path",   cfg->ftp_path,     sizeof(cfg->ftp_path));
     load_u32 (h, "ftp_int",    &cfg->ftp_interval_min);
+    load_bool(h, "ftp_ps_dis", &cfg->ftp_ps_disabled);
     load_bool(h, "sp_tick",    &cfg->speaker_tick);
     load_bool(h, "led_tick",   &cfg->led_tick);
     load_bool(h, "play_sound", &cfg->play_sound);
@@ -164,6 +167,41 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
              (unsigned long)cfg->tx_interval_ms);
+
+    // Full dump — passwords are masked so /log + FTP'd files don't leak them.
+    #define MASK(s) ((s)[0] ? "<set>" : "<empty>")
+    ESP_LOGI(TAG, "  wifi: ssid=%s pw=%s host=%s ap_name=%s",
+             cfg->wifi_ssid, MASK(cfg->wifi_password), cfg->wifi_hostname, cfg->ap_name);
+    ESP_LOGI(TAG, "  wifi: 11bg_only=%d ht20_only=%d ps_disabled=%d",
+             cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled);
+    ESP_LOGI(TAG, "  madavi:           enabled=%d https=%d",
+             cfg->send_madavi, cfg->madavi_https);
+    ESP_LOGI(TAG, "  sensor.community: enabled=%d https=%d",
+             cfg->send_sensorc, cfg->sensorc_https);
+    ESP_LOGI(TAG, "  radmon:           enabled=%d https=%d user=%s pw=%s",
+             cfg->send_radmon, cfg->radmon_https,
+             cfg->radmon_user[0] ? cfg->radmon_user : "<empty>",
+             MASK(cfg->radmon_password));
+    ESP_LOGI(TAG, "  ntp: server1=%s server2=%s server3=%s",
+             cfg->ntp_server[0]  ? cfg->ntp_server  : "<empty>",
+             cfg->ntp_server2[0] ? cfg->ntp_server2 : "<empty>",
+             cfg->ntp_server3[0] ? cfg->ntp_server3 : "<empty>");
+    ESP_LOGI(TAG, "  tz: %s", cfg->tz_posix);
+    ESP_LOGI(TAG, "  web admin pw=%s  tx_interval=%lums",
+             MASK(cfg->ap_password), (unsigned long)cfg->tx_interval_ms);
+    ESP_LOGI(TAG, "  altitude=%.1fm  send_sealevel_pressure=%d",
+             (double)cfg->station_altitude_m, cfg->send_sealevel_pressure);
+    ESP_LOGI(TAG, "  ftp: enabled=%d tls=%d host=%s user=%s pw=%s",
+             cfg->ftp_enabled, cfg->ftp_tls,
+             cfg->ftp_host[0] ? cfg->ftp_host : "<empty>",
+             cfg->ftp_user[0] ? cfg->ftp_user : "<empty>",
+             MASK(cfg->ftp_password));
+    ESP_LOGI(TAG, "  ftp: path=%s interval=%lumin ps_disabled=%d",
+             cfg->ftp_path[0] ? cfg->ftp_path : "<empty>",
+             (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled);
+    ESP_LOGI(TAG, "  ui: speaker_tick=%d led_tick=%d play_sound=%d show_display=%d",
+             cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display);
+    #undef MASK
 }
 
 esp_err_t config_save(const config_t *cfg) {
@@ -207,6 +245,7 @@ esp_err_t config_save(const config_t *cfg) {
     SET_STR("ftp_pw",     cfg->ftp_password);
     SET_STR("ftp_path",   cfg->ftp_path);
     SET_U32("ftp_int",    cfg->ftp_interval_min);
+    SET_U8 ("ftp_ps_dis", cfg->ftp_ps_disabled);
     SET_U8 ("sp_tick",    cfg->speaker_tick);
     SET_U8 ("led_tick",   cfg->led_tick);
     SET_U8 ("play_sound", cfg->play_sound);

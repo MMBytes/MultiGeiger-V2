@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -37,6 +39,55 @@ static bool is_excluded(const char *line) {
         if (strstr(line, *e)) return true;
     }
     return false;
+}
+
+// The WiFi driver bypasses ESP_LOGx and prints its own lines via raw printf
+// with a boot-relative tick (e.g. "I (82885037) wifi:Set ps type: 0...").
+// CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM_FULL only formats lines that go through
+// esp_log_writev, so those driver lines come out uglier than ours. Detect the
+// pattern after vsnprintf and rewrite the (digits) segment to wall-clock form
+// matching the rest of the log: "(YY-MM-DD HH:MM:SS.mmm)". UART echo is
+// untouched (still raw) — only the ring buffer / /log / FTP'd files benefit.
+static void rewrite_boot_ts(char *line, size_t bufsz) {
+    char level = line[0];
+    if (level != 'I' && level != 'W' && level != 'E' && level != 'D' && level != 'V') return;
+    if (line[1] != ' ' || line[2] != '(') return;
+
+    size_t i = 3;
+    while (line[i] >= '0' && line[i] <= '9') i++;
+    if (i == 3 || line[i] != ')' || line[i + 1] != ' ') return;
+
+    // Restrict to known-noisy native modules so we never clobber a legitimate
+    // numeric (...) field in someone else's message body. Add tags here as
+    // they crop up in logs.
+    if (strncmp(line + i + 2, "wifi:", 5) != 0) return;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec < 1700000000) return;  // pre-2023 — NTP not synced; leave raw
+
+    struct tm tm;
+    localtime_r(&tv.tv_sec, &tm);
+    char ts[32];
+    int ts_len = snprintf(ts, sizeof(ts),
+                          "%02d-%02d-%02d %02d:%02d:%02d.%03ld",
+                          (tm.tm_year + 1900) % 100, tm.tm_mon + 1, tm.tm_mday,
+                          tm.tm_hour, tm.tm_min, tm.tm_sec,
+                          (long)(tv.tv_usec / 1000));
+    if (ts_len <= 0) return;
+
+    size_t old_paren = (i + 1) - 2;        // length of "(<digits>)"
+    size_t new_paren = (size_t)ts_len + 2; // length of "(<ts>)"
+    size_t total     = strlen(line);
+    if (new_paren > old_paren && total + (new_paren - old_paren) >= bufsz) return;
+
+    // Shift the tail (everything after the closing paren, including the null).
+    memmove(line + 2 + new_paren,
+            line + 2 + old_paren,
+            total - (2 + old_paren) + 1);
+    line[2] = '(';
+    memcpy(line + 3, ts, ts_len);
+    line[3 + ts_len] = ')';
 }
 
 // Strip ANSI CSI escape sequences (e.g. "\033[0;32m"). ESP-IDF colorizes log
@@ -100,6 +151,7 @@ static int applog_vprintf(const char *fmt, va_list args) {
         if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
         line[n] = 0;
         strip_ansi(line);
+        rewrite_boot_ts(line, sizeof(line));
         if (!is_excluded(line)) {
             size_t len = strlen(line);
             if (len > 0) ring_append(line, len);

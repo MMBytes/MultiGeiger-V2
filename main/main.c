@@ -105,7 +105,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_AP);
         } else {
             mark_attempt();
-            ESP_LOGI(TAG, "STA_START → connect (attempt #%lu)", (unsigned long)n_attempts);
+            ESP_LOGI(TAG, "STA_START, calling connect (attempt #%lu)", (unsigned long)n_attempts);
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_CONNECTING);
             esp_wifi_connect();
         }

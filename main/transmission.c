@@ -448,7 +448,7 @@ static void tx_run(tx_context_t *c) {
             madavi_skip_remaining--;
             ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)", madavi_skip_remaining);
         } else {
-            ESP_LOGI(TAG, "→ Madavi (%s)", c->madavi.use_https ? "https" : "http");
+            ESP_LOGI(TAG, "Sending to Madavi (%s)", c->madavi.use_https ? "https" : "http");
             int rc = send_madavi(c);
             bool ok = (rc == 200);
             ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
@@ -458,7 +458,7 @@ static void tx_run(tx_context_t *c) {
                 madavi_fail_streak++;
                 if (madavi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     madavi_skip_remaining = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "Madavi: %d fails → breaker open for %d cycles",
+                    ESP_LOGW(TAG, "Madavi: %d fails, breaker open for %d cycles",
                              madavi_fail_streak, TX_CB_SKIP_CYCLES);
                     madavi_fail_streak = 0;
                 }
@@ -471,7 +471,7 @@ static void tx_run(tx_context_t *c) {
             sensorc_skip_remaining--;
             ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)", sensorc_skip_remaining);
         } else {
-            ESP_LOGI(TAG, "→ sensor.community (%s)", c->sensorc.use_https ? "https" : "http");
+            ESP_LOGI(TAG, "Sending to sensor.community (%s)", c->sensorc.use_https ? "https" : "http");
             int rc = send_sensorc(c);
             bool ok = (rc == 201);
             ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
@@ -481,7 +481,7 @@ static void tx_run(tx_context_t *c) {
                 sensorc_fail_streak++;
                 if (sensorc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     sensorc_skip_remaining = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "sensor.community: %d fails → breaker open for %d cycles",
+                    ESP_LOGW(TAG, "sensor.community: %d fails, breaker open for %d cycles",
                              sensorc_fail_streak, TX_CB_SKIP_CYCLES);
                     sensorc_fail_streak = 0;
                 }
@@ -494,7 +494,7 @@ static void tx_run(tx_context_t *c) {
             radmon_skip_remaining--;
             ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)", radmon_skip_remaining);
         } else {
-            ESP_LOGI(TAG, "→ Radmon (%s)", c->radmon.use_https ? "https" : "http");
+            ESP_LOGI(TAG, "Sending to Radmon (%s)", c->radmon.use_https ? "https" : "http");
             int rc = send_radmon(c);
             bool ok = (rc == 200);
             ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
@@ -504,7 +504,7 @@ static void tx_run(tx_context_t *c) {
                 radmon_fail_streak++;
                 if (radmon_fail_streak >= TX_CB_FAIL_THRESHOLD) {
                     radmon_skip_remaining = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "Radmon: %d fails → breaker open for %d cycles",
+                    ESP_LOGW(TAG, "Radmon: %d fails, breaker open for %d cycles",
                              radmon_fail_streak, TX_CB_SKIP_CYCLES);
                     radmon_fail_streak = 0;
                 }

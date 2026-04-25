@@ -502,9 +502,11 @@ static bool do_ftp_upload(void) {
     // If WiFi power save is active, disable it for the transfer. With
     // WIFI_PS_MIN_MODEM, TCP ACKs from the NAS are delayed by up to one DTIM
     // interval, filling the lwIP send buffer and causing send() to block for
-    // SO_SNDTIMEO (15 s). Skipped when the user has already disabled PS.
+    // SO_SNDTIMEO (15 s). Skipped when the user has already disabled PS
+    // globally, or when the per-FTP override has been unticked in /config.
     // Restored to the configured setting at done:.
-    if (!s_cfg->wifi_ps_disabled)
+    bool ps_override = !s_cfg->wifi_ps_disabled && s_cfg->ftp_ps_disabled;
+    if (ps_override)
         esp_wifi_set_ps(WIFI_PS_NONE);
 
     int ctrl_sock = ftp_connect_host(s_cfg->ftp_host, FTP_PORT, FTP_TIMEOUT_MS);
@@ -600,7 +602,7 @@ static bool do_ftp_upload(void) {
 
 done:
     // Restore WiFi PS if it was disabled for the transfer.
-    if (!s_cfg->wifi_ps_disabled)
+    if (ps_override)
         esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     io_close(&data);
     io_close(&ctrl);

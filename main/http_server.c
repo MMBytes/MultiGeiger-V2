@@ -96,7 +96,7 @@ unauth:
     if (header_present) {
         char ipstr[48];
         peer_ipstr(req, ipstr, sizeof(ipstr));
-        ESP_LOGW(TAG, "auth FAILED for %s from %s", req->uri, ipstr);
+        ESP_LOGW(TAG, "auth failed for %s from %s", req->uri, ipstr);
     }
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MultiGeiger\"");

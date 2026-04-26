@@ -7,6 +7,7 @@ idf_component_register(
         "ntp.c"
         "transmission.c"
         "bme280.c"
+        "bme688.c"
         "sht45.c"
         "bmp390.c"
         "env_sensor.c"

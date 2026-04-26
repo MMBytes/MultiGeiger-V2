@@ -23,10 +23,14 @@ static const char *TAG = "bmp390";
 // Operating profile
 //   PWR_CTRL: bits[1:0] = press_en + temp_en, bits[5:4] = forced mode (01)
 //   OSR:      osr_p = 011 (x8) at bits[2:0]; osr_t = 001 (x2) at bits[5:3]
-//   CONFIG:   iir_filter = 010 (coeff 3) at bits[3:1]
+//   CONFIG:   iir_filter = 000 (off) at bits[3:1] — at our 150 s read interval
+//             the filter time-constant is pure latency; oversampling already
+//             does the per-read averaging. Matches Bosch's "Weather monitoring"
+//             ultra-low-power preset (datasheet table 10) and the project's
+//             other env-sensor drivers.
 #define PWR_CTRL_FORCED     0x13   // press_en | temp_en | forced
 #define OSR_VAL             0x0B   // (001 << 3) | 011
-#define CONFIG_VAL          0x04   // 010 << 1
+#define CONFIG_VAL          0x00   // iir_filter off
 
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
@@ -133,7 +137,7 @@ esp_err_t bmp390_init(i2c_master_bus_handle_t bus) {
     if ((err = write_reg(REG_CONFIG, CONFIG_VAL)) != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x8, T x2, IIR coeff 3, forced mode)",
+    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x8, T x2, IIR off, forced mode)",
              BMP390_ADDR);
     return ESP_OK;
 }

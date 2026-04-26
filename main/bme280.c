@@ -28,12 +28,20 @@ static const char *TAG = "bme280";
 #define CHIP_ID_BME280 0x60
 
 // --- Oversampling / filter settings -----------------------------------------
-// ctrl_hum:  osrs_h = x2 (010)
-// ctrl_meas: osrs_t = x8 (100) | osrs_p = x4 (011) | mode = normal (11)
-// config:    t_sb = 1000 ms (101) | filter = coef 4 (011) | spi3w_en = 0
-#define CTRL_HUM_VAL   0x02
-#define CTRL_MEAS_VAL  ((0x04 << 5) | (0x03 << 2) | 0x03)
-#define CONFIG_VAL     ((0x05 << 5) | (0x03 << 2) | 0x00)
+// Forced-mode profile, matching BMP390 / BME688 driver pattern in this project.
+// Mode bits in ctrl_meas are set per-read by bme280_read() (sleep at init,
+// forced for each conversion, then auto-return to sleep).
+//   ctrl_hum:        osrs_h = x2 (010)
+//   ctrl_meas BASE:  osrs_t = x8 (100) | osrs_p = x4 (011) | mode bits = 00 sleep
+//   ctrl_meas READ:  CTRL_MEAS_BASE | 0x01 (forced — datasheet 5.4.5)
+//   config:          t_sb irrelevant in forced mode | filter = OFF (000) | spi3w_en = 0
+// IIR filter is off: at our 150 s read interval the filter time-constant becomes
+// pure latency rather than useful smoothing (oversampling already does multi-
+// sample averaging within each forced conversion). Matches Bosch's "Weather
+// monitoring" recipe (datasheet table 7) and the BMP390/BME688 drivers.
+#define CTRL_HUM_VAL    0x02
+#define CTRL_MEAS_BASE  ((0x04 << 5) | (0x03 << 2))   // mode = sleep; OR 0x01 to force
+#define CONFIG_VAL      0x00                          // filter off, spi3w off
 
 // --- State -------------------------------------------------------------------
 static i2c_master_bus_handle_t  s_bus   = NULL;
@@ -161,12 +169,13 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     }
 
     // ctrl_hum must be written BEFORE ctrl_meas (datasheet 5.4.3).
-    if ((err = write_reg(REG_CTRL_HUM,  CTRL_HUM_VAL))  != ESP_OK) return err;
-    if ((err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_VAL)) != ESP_OK) return err;
-    if ((err = write_reg(REG_CONFIG,    CONFIG_VAL))    != ESP_OK) return err;
+    // Mode bits left at 00 (sleep) here — bme280_read() flips them to forced per call.
+    if ((err = write_reg(REG_CTRL_HUM,  CTRL_HUM_VAL))   != ESP_OK) return err;
+    if ((err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE)) != ESP_OK) return err;
+    if ((err = write_reg(REG_CONFIG,    CONFIG_VAL))     != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BME280 ready (osrs T=x8 P=x4 H=x2, filter=4, t_sb=1000ms, normal mode)");
+    ESP_LOGI(TAG, "BME280 ready (osrs T=x8 P=x4 H=x2, filter off, forced mode)");
     return ESP_OK;
 }
 
@@ -224,8 +233,19 @@ static uint32_t compensate_H_int32(int32_t adc_H, int32_t t_fine) {
 esp_err_t bme280_read(float *t_out, float *h_out, float *p_out) {
     if (!s_ready) return ESP_FAIL;
 
+    // Trigger one forced-mode conversion. Writing the mode bits to ctrl_meas
+    // wakes the chip, runs T/P/H acquisition with the configured oversampling,
+    // then returns to sleep automatically.
+    esp_err_t err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE | 0x01);
+    if (err != ESP_OK) return err;
+
+    // T x8 + P x4 + H x2 worst-case measurement time per datasheet 9.1:
+    //   t_meas = 1.25 + 2.3*8 + (2.3*4 + 0.575) + (2.3*2 + 0.575) ≈ 30.6 ms
+    // Wait 35 ms for comfortable margin.
+    vTaskDelay(pdMS_TO_TICKS(35));
+
     uint8_t d[8];
-    esp_err_t err = read_regs(REG_DATA, d, sizeof(d));
+    err = read_regs(REG_DATA, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     int32_t adc_P = (int32_t)(((uint32_t)d[0] << 12) | ((uint32_t)d[1] << 4) | (d[2] >> 4));

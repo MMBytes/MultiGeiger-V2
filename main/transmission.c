@@ -158,6 +158,7 @@ static int post_with_retry(esp_http_client_handle_t client,
                  target, label, rc, i + 1, HTTP_MAX_RETRIES);
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
+    ESP_LOGW(TAG, "%s[%s]: all retries exhausted", target, label);
     return -1;
 }
 
@@ -355,7 +356,7 @@ static int send_sensorc(const tx_context_t *c) {
     esp_http_client_cleanup(client);
 
     if (c->bme_valid) {
-        ESP_LOGI(TAG, "sensor.community: geiger rc=%d, bme rc=%d", rc_g, rc_b);
+        ESP_LOGI(TAG, "sensor.community: geiger rc=%d, thp rc=%d", rc_g, rc_b);
     }
     if (!c->bme_valid) return rc_g;
     if (rc_g == 201 && rc_b == 201) return 201;

@@ -1,6 +1,9 @@
 # Custom 8 MB partition table — factory + dual OTA.
-# Spike binary at M6/M7 is ~988 KB; default 1 MB partition had 4% free.
-# 2 MB per app gives ~50% headroom for OLED/web/BME680/OTA/CA-bundle growth.
+# V2.1.17 binary is ~1085 KB; the original 1 MB default partition was outgrown
+# during the V2.0.x spike, so each app slot is sized at 2 MB. ~45 % free at
+# V2.1.17 leaves comfortable headroom for ongoing growth: env sensor drivers
+# (BME280 / BME688 / BMP390 / SHT45), OLED, HTTP server (/config + /update +
+# /log), FTPS upload, Mozilla CA bundle, OTA, future TLS/sensor/web additions.
 # Tail at 0x620000–0x800000 (1.9 MB) reserved for future spiffs/littlefs.
 #
 # Name,     Type, SubType, Offset,   Size,      Flags

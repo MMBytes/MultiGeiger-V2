@@ -38,12 +38,16 @@ static const char *TAG = "bme688";
 // --- Oversampling / filter settings -----------------------------------------
 // ctrl_hum:    osrs_h = x2 (010)
 // ctrl_meas:   osrs_t = x8 (100) | osrs_p = x4 (011) | mode bits set per read
-// config:      filter = coeff 3 (010) at bits[4:2]
+// config:      filter = OFF (000) at bits[4:2] — at our 150 s read interval
+//              the filter time-constant becomes pure latency rather than useful
+//              smoothing (oversampling already does multi-sample averaging
+//              within each forced conversion). Matches Bosch's recommended
+//              recipe for low-sample-rate apps and the BMP390/BME280 drivers.
 // ctrl_gas_0:  heat_off = 1 (heater always off — gas channel disabled)
 // ctrl_gas_1:  run_gas  = 0 (no gas conversion appended to T/P/H)
 #define CTRL_HUM_VAL    0x02
 #define CTRL_MEAS_BASE  ((0x04 << 5) | (0x03 << 2))   // mode bits OR'd in per read
-#define CONFIG_VAL      (0x02 << 2)
+#define CONFIG_VAL      0x00
 #define CTRL_GAS_0_VAL  0x08      // heat_off = 1
 #define CTRL_GAS_1_VAL  0x00      // run_gas  = 0
 
@@ -212,7 +216,7 @@ esp_err_t bme688_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     if (err != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BME68x ready (osrs T=x8 P=x4 H=x2, IIR coeff 3, gas off, forced mode)");
+    ESP_LOGI(TAG, "BME68x ready (osrs T=x8 P=x4 H=x2, IIR off, gas off, forced mode)");
     return ESP_OK;
 }
 

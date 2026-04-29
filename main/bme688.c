@@ -36,17 +36,21 @@ static const char *TAG = "bme688";
 #define MODE_FORCED    0x01
 
 // --- Oversampling / filter settings -----------------------------------------
-// ctrl_hum:    osrs_h = x2 (010)
-// ctrl_meas:   osrs_t = x8 (100) | osrs_p = x4 (011) | mode bits set per read
+// ctrl_hum:    osrs_h = x1 (001) — humidity noise is sensor-floor-limited;
+//              going higher just costs conversion time without measurable gain.
+// ctrl_meas:   osrs_t = x2 (010) | osrs_p = x16 (101) | mode bits set per read.
+//              T x2 keeps self-heating bias minimal (it propagates to H via
+//              the calibration formula); P x16 maximises pressure resolution.
+//              Matches BME680 application note BST-BME680-AN014 example
+//              configuration.
 // config:      filter = OFF (000) at bits[4:2] — at our 150 s read interval
 //              the filter time-constant becomes pure latency rather than useful
 //              smoothing (oversampling already does multi-sample averaging
-//              within each forced conversion). Matches Bosch's recommended
-//              recipe for low-sample-rate apps and the BMP390/BME280 drivers.
+//              within each forced conversion).
 // ctrl_gas_0:  heat_off = 1 (heater always off — gas channel disabled)
 // ctrl_gas_1:  run_gas  = 0 (no gas conversion appended to T/P/H)
-#define CTRL_HUM_VAL    0x02
-#define CTRL_MEAS_BASE  ((0x04 << 5) | (0x03 << 2))   // mode bits OR'd in per read
+#define CTRL_HUM_VAL    0x01
+#define CTRL_MEAS_BASE  ((0x02 << 5) | (0x05 << 2))   // mode bits OR'd in per read
 #define CONFIG_VAL      0x00
 #define CTRL_GAS_0_VAL  0x08      // heat_off = 1
 #define CTRL_GAS_1_VAL  0x00      // run_gas  = 0
@@ -216,7 +220,7 @@ esp_err_t bme688_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     if (err != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BME68x ready (osrs T=x8 P=x4 H=x2, IIR off, gas off, forced mode)");
+    ESP_LOGI(TAG, "BME68x ready (osrs T=x2 P=x16 H=x1, IIR off, gas off, forced mode)");
     return ESP_OK;
 }
 
@@ -284,10 +288,10 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
     esp_err_t err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_FORCED);
     if (err != ESP_OK) return err;
 
-    // T x8 + P x4 + H x2 worst-case TPH conversion time is ~38 ms (datasheet
-    // table 9). Wait 50 ms for comfortable margin; gas channel is off so the
-    // ~150 ms heater time does not apply.
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // T x2 + P x16 + H x1 typical conversion time (datasheet 3.5.2.4):
+    //   1.97 + (2+16+1)*1.97 = ~39 ms typ; max ~46 ms. Wait 60 ms for margin.
+    // Gas channel is off so the ~150 ms heater time does not apply.
+    vTaskDelay(pdMS_TO_TICKS(60));
 
     // Read 8 bytes: pressure(0..2 msb,lsb,xlsb) + temperature(3..5) + humidity(6..7).
     uint8_t d[8];

@@ -22,14 +22,16 @@ static const char *TAG = "bmp390";
 
 // Operating profile
 //   PWR_CTRL: bits[1:0] = press_en + temp_en, bits[5:4] = forced mode (01)
-//   OSR:      osr_p = 011 (x8) at bits[2:0]; osr_t = 001 (x2) at bits[5:3]
+//   OSR:      osr_p = 101 (x32) at bits[2:0]; osr_t = 000 (x1) at bits[5:3]
 //   CONFIG:   iir_filter = 000 (off) at bits[3:1] — at our 150 s read interval
 //             the filter time-constant is pure latency; oversampling already
-//             does the per-read averaging. Matches Bosch's "Weather monitoring"
-//             ultra-low-power preset (datasheet table 10) and the project's
-//             other env-sensor drivers.
+//             does the per-read averaging.
+// Oversampling matches Bosch's "drone" / highest-pressure-resolution preset
+// (datasheet table 10): pressure is the channel where oversampling pays off
+// (sub-Pa noise = sub-cm altitude resolution); temperature is just used to
+// linearise the pressure compensation, so x1 is sufficient.
 #define PWR_CTRL_FORCED     0x13   // press_en | temp_en | forced
-#define OSR_VAL             0x0B   // (001 << 3) | 011
+#define OSR_VAL             0x05   // (000 << 3) | 101
 #define CONFIG_VAL          0x00   // iir_filter off
 
 static i2c_master_dev_handle_t s_dev   = NULL;
@@ -137,7 +139,7 @@ esp_err_t bmp390_init(i2c_master_bus_handle_t bus) {
     if ((err = write_reg(REG_CONFIG, CONFIG_VAL)) != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x8, T x2, IIR off, forced mode)",
+    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x32, T x1, IIR off, forced mode)",
              BMP390_ADDR);
     return ESP_OK;
 }
@@ -184,8 +186,9 @@ esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
     esp_err_t err = write_reg(REG_PWR_CTRL, PWR_CTRL_FORCED);
     if (err != ESP_OK) return err;
 
-    // P x8 + T x2 worst-case measurement time is ~10.6 ms; 20 ms is safe.
-    vTaskDelay(pdMS_TO_TICKS(20));
+    // P x32 + T x1 worst-case measurement time per datasheet (234 + p*392 +
+    // t*313 µs) is ~13 ms; 30 ms gives comfortable margin.
+    vTaskDelay(pdMS_TO_TICKS(30));
 
     // 6 bytes: press[0..2] (xlsb, lsb, msb), temp[3..5] (xlsb, lsb, msb).
     uint8_t d[6];

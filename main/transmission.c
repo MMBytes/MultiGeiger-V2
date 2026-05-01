@@ -31,12 +31,6 @@ static QueueHandle_t s_tx_queue;
 #define HTTP_MAX_RETRIES    4
 #define RESP_BUF_SIZE       512
 
-// BME280 sanity — if reported temperature exceeds 60 C, treat the sensor as
-// stuck (e.g. bad I²C line) and suppress the THP branch for that cycle.
-// After 50 consecutive suppressed cycles (~2 h at 150 s interval) reboot.
-#define TEMP_SANITY_MAX          60.0f
-#define TEMP_SANITY_REBOOT_CYCLES 50
-
 // Small user-event handler that captures response body for Radmon "OK" check.
 typedef struct {
     char   *buf;
@@ -194,14 +188,10 @@ static esp_http_client_handle_t open_push_client(const char *url, bool use_insec
 }
 
 // --- Madavi -----------------------------------------------------------------
-// Two POSTs: geiger (Si22G_* + signal) and THP (BME280 T/H + pulse stats +
+// Two POSTs: geiger (Si22G_* + signal) and THP (BME280 T/H/P + pulse stats +
 // signal). Madavi routes by field-name prefix (not X-PIN); the pulse-stats
 // RRDs are written only on the THP request path, so samples / min_micro /
-// max_micro ride with the BME POST.
-//
-// BME280_pressure carries free-heap bytes (V1.16 TEMP HACK for remote memory
-// monitoring) — real pressure goes to sensor.community, not here. Skip THP
-// entirely when BME is absent.
+// max_micro ride with the BME POST. Skip THP entirely when BME is absent.
 //
 // Both POSTs share one TLS session via keep-alive (single client init/cleanup).
 
@@ -223,7 +213,6 @@ static void build_madavi_geiger_body(const tx_context_t *c, char *buf, size_t ca
 }
 
 static void build_madavi_thp_body(const tx_context_t *c, char *buf, size_t cap) {
-    uint32_t free_heap = esp_get_free_heap_size();
     bool have_pulse_stats = (c->gm_counts > 1);
     int n = snprintf(buf, cap,
         "{\n"
@@ -231,10 +220,10 @@ static void build_madavi_thp_body(const tx_context_t *c, char *buf, size_t cap) 
         " \"sensordatavalues\": [\n"
         "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
         "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"BME280_pressure\", \"value\": \"%lu\"}",
+        "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
         c->sw_version,
         c->bme_temperature_c, c->bme_humidity_pct,
-        (unsigned long)free_heap);
+        c->bme_pressure_pa);
     if (have_pulse_stats) {
         n += snprintf(buf + n, cap - n,
             ",\n"
@@ -420,29 +409,11 @@ static void tx_run(tx_context_t *c) {
     static int sensorc_skip_remaining = 0;
     static int radmon_fail_streak    = 0;
     static int radmon_skip_remaining = 0;
-    static int thp_suppressed = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "free heap before TX: %lu bytes / max_alloc=%lu bytes",
              (unsigned long)free_heap, (unsigned long)max_alloc);
-
-    // BME280 sanity — suppress THP when temperature is stuck high. Reboots
-    // after too many consecutive suppressed cycles. Geiger side unaffected.
-    if (c->bme_valid && c->bme_temperature_c > TEMP_SANITY_MAX) {
-        thp_suppressed++;
-        ESP_LOGW(TAG, "BME280 temp %.1f C > sanity limit %.0f C — skipping THP (%d/%d)",
-                 c->bme_temperature_c, TEMP_SANITY_MAX,
-                 thp_suppressed, TEMP_SANITY_REBOOT_CYCLES);
-        if (thp_suppressed >= TEMP_SANITY_REBOOT_CYCLES) {
-            ESP_LOGE(TAG, "BME280 stuck high for %d cycles, rebooting.", thp_suppressed);
-            vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
-        }
-        c->bme_valid = false;
-    } else if (c->bme_valid) {
-        thp_suppressed = 0;
-    }
 
     if (c->madavi.enabled) {
         if (madavi_skip_remaining > 0) {

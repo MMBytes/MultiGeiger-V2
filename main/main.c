@@ -3,7 +3,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "esp_chip_info.h"
 #include "esp_event.h"
+#include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -301,6 +303,34 @@ void app_main(void) {
         snprintf(g_chip_id, sizeof(g_chip_id), "esp32-%lu", (unsigned long)g_chip_num);
         ESP_LOGI(TAG, "chip_id: %s (from MAC %02x:%02x:%02x:%02x:%02x:%02x)",
                  g_chip_id, m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+
+    // Chip / module identification — distinguishes Heltec module revisions.
+    // EmbFlash YES means the silicon is a SiP (ESP32-PICO-D4 or PICO-V3-02 — used
+    // on Heltec Wireless Stick V2). EmbFlash NO means a separate SPI flash chip
+    // (ESP32-D0WDQ6 — used on Heltec Wireless Stick V1). Flash size additionally
+    // separates PICO-D4 (4 MB) from PICO-V3-02 (8 MB). chip.model == ESP32S3 means
+    // a Wireless Stick V3 — incompatible with this firmware build target.
+    {
+        esp_chip_info_t chip;
+        esp_chip_info(&chip);
+        uint32_t flash_size = 0;
+        esp_flash_get_size(NULL, &flash_size);
+        const char *model =
+            (chip.model == CHIP_ESP32)   ? "ESP32"   :
+            (chip.model == CHIP_ESP32S2) ? "ESP32-S2":
+            (chip.model == CHIP_ESP32S3) ? "ESP32-S3":
+            (chip.model == CHIP_ESP32C3) ? "ESP32-C3": "?";
+        ESP_LOGI(TAG, "chip: %s rev=v%d.%d cores=%d feat=[%s%s%s%s%s] flash=%luMB",
+                 model,
+                 chip.revision / 100, chip.revision % 100,
+                 chip.cores,
+                 (chip.features & CHIP_FEATURE_WIFI_BGN) ? "WiFi "     : "",
+                 (chip.features & CHIP_FEATURE_BLE)      ? "BLE "      : "",
+                 (chip.features & CHIP_FEATURE_BT)       ? "BT "       : "",
+                 (chip.features & CHIP_FEATURE_EMB_FLASH)? "EmbFlash " : "",
+                 (chip.features & CHIP_FEATURE_EMB_PSRAM)? "EmbPSRAM " : "",
+                 (unsigned long)(flash_size / (1024 * 1024)));
     }
 
     // Fill auto defaults for ap_name + wifi_hostname if the user hasn't

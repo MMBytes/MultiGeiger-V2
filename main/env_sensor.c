@@ -1,7 +1,10 @@
 #include "env_sensor.h"
 
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "sht45.h"
 #include "bmp390.h"
@@ -13,6 +16,7 @@ static const char *TAG = "env";
 // --- Board wiring (Heltec Wireless Stick V2) --------------------------------
 #define PIN_SDA        4
 #define PIN_SCL       15
+#define PIN_VEXT      21    // Heltec Vext power switch (active-LOW MOSFET gate)
 #define I2C_PORT       I2C_NUM_0
 #define I2C_FREQ_HZ    100000
 
@@ -21,9 +25,23 @@ static i2c_master_bus_handle_t s_bus = NULL;
 // --- Init --------------------------------------------------------------------
 
 esp_err_t env_sensor_init(void) {
+    // Heltec Vext rail (GPIO 21, active-LOW). On older Heltec module revisions
+    // Vext was tied to GND on the carrier PCB so the OLED + I²C pull-up rail
+    // was always powered. Newer Wireless Stick V2 modules (PICO-D4 / PICO-V3-02)
+    // route Vext through a P-channel MOSFET driven by GPIO 21 — without this
+    // drive the OLED, all I²C pull-ups, and any external sensor breakouts on
+    // the OLED power rail are unpowered. Symptom: every I²C probe times out
+    // and the IDF I²C driver logs the misleading "GPIO X is not usable"
+    // warning. Driving GPIO 21 LOW is harmless on the older modules where it
+    // had no effect, and required on the newer ones — so always drive it.
+    gpio_reset_pin(PIN_VEXT);
+    gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_VEXT, 0);                // 0 = Vext ON
+    vTaskDelay(pdMS_TO_TICKS(50));              // rail settle + OLED charge-pump warm-up
+
     // Create the shared I2C master bus. All sensors and the OLED SSD1306 share
     // this handle. Internal pull-ups enabled as belt-and-braces — the PCB has
-    // 4.7 k externals on J_I2C.
+    // 4.7 k externals on J_I2C (now actually powered, thanks to Vext above).
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port             = I2C_PORT,
         .sda_io_num           = PIN_SDA,

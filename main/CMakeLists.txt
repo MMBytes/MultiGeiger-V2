@@ -33,4 +33,5 @@ idf_component_register(
         lwip
         app_update
         esp_partition
+        spi_flash
 )

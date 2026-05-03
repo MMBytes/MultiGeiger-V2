@@ -9,14 +9,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "hal.h"   // PIN_SPEAKER_P, PIN_SPEAKER_N, PIN_PIN_LED_BUILTIN
 #include "tube.h"
 
 static const char *TAG = "speaker";
 
-// Heltec Wireless Stick V2 wiring.
-#define PIN_SPEAKER_P   12   // driven by LEDC (tone generator)
-#define PIN_SPEAKER_N    0   // static HIGH during tick for push-pull drive
-#define LED_BUILTIN     25   // onboard LED
+// PIN_SPEAKER_P is driven by LEDC (tone generator).
+// PIN_SPEAKER_N is held HIGH during a tick for push-pull drive against PIN_SPEAKER_P.
+// PIN_PIN_LED_BUILTIN is the onboard LED, lit during a tick if led_tick is enabled.
 
 #define LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_NUM  LEDC_TIMER_0
@@ -52,7 +52,7 @@ static void tick_start(void) {
         gpio_set_level(PIN_SPEAKER_N, 1);
     }
     if (s_led_tick) {
-        gpio_set_level(LED_BUILTIN, 1);
+        gpio_set_level(PIN_LED_BUILTIN, 1);
     }
 }
 
@@ -60,7 +60,7 @@ static void tick_end(void) {
     ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
     gpio_set_level(PIN_SPEAKER_N, 0);
-    gpio_set_level(LED_BUILTIN,   0);
+    gpio_set_level(PIN_LED_BUILTIN,   0);
 }
 
 // Runs at esp_timer task context — LEDC-safe. 1 ms period.
@@ -92,14 +92,14 @@ void speaker_set_modes(bool led_tick, bool speaker_tick) {
 void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     // LED + speaker N pin as GPIO outputs.
     gpio_config_t out_cfg = {
-        .pin_bit_mask = (1ULL << LED_BUILTIN) | (1ULL << PIN_SPEAKER_N),
+        .pin_bit_mask = (1ULL << PIN_LED_BUILTIN) | (1ULL << PIN_SPEAKER_N),
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&out_cfg));
-    gpio_set_level(LED_BUILTIN,   0);
+    gpio_set_level(PIN_LED_BUILTIN,   0);
     gpio_set_level(PIN_SPEAKER_N, 0);
 
     // LEDC timer — 10-bit resolution, base frequency just a seed (set_freq
@@ -143,6 +143,6 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     }
 
     ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
-             LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
+             PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
 }

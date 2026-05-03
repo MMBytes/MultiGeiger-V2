@@ -2,8 +2,15 @@
 // Hand-rolled SSD1306 driver (page-addressing mode) — no U8g2 dependency.
 // Layout: boot splash, then a running screen with time + nSv/h on top, big
 // CPM in the middle, status line at the bottom.
+//
+// On boards without an onboard OLED (HAL_HAS_OLED == 0), the entire driver
+// compiles down to no-op stubs at the bottom of this file; callers in main.c
+// don't need to know whether a display is fitted.
 
 #include "display.h"
+#include "hal.h"
+
+#if HAL_HAS_OLED
 
 #include <string.h>
 #include <stdio.h>
@@ -22,7 +29,7 @@
 static const char *TAG = "display";
 
 #define SSD1306_ADDR    0x3C
-#define PIN_OLED_RST    GPIO_NUM_16
+#define PIN_OLED_RST    PIN_OLED_RESET
 #define OLED_WIDTH      128
 #define OLED_HEIGHT     64
 #define OLED_PAGES      8
@@ -396,3 +403,17 @@ void display_set_status(int index, int value) {
     if (!s_dev || !s_show || s_cleared) return;
     redraw_status_line();
 }
+
+#else  // HAL_HAS_OLED
+
+// No-op stubs for boards without an onboard OLED. Same prototypes as above
+// so callers compile unchanged; display_setup() returning false signals that
+// no panel is fitted.
+bool display_setup(bool show_display) { (void)show_display; return false; }
+void display_boot_screen(void) {}
+void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
+    (void)time_sec; (void)rad_nsvph; (void)cpm; (void)use_display;
+}
+void display_set_status(int index, int value) { (void)index; (void)value; }
+
+#endif  // HAL_HAS_OLED

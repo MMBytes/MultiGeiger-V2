@@ -1,4 +1,5 @@
 #include "applog.h"
+#include "hal.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,16 +10,29 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#if HAL_HAS_PSRAM
+#include "esp_heap_caps.h"
+#endif
 
-// 60 KB rolling log buffer. The ESP-IDF vprintf hook captures every ESP_LOGx
-// line (our code + WiFi + HTTP + bme280 + ...) without touching call sites.
-// The hook runs on whichever task emitted the line, so the ring and its
+// Rolling log buffer. The ESP-IDF vprintf hook captures every ESP_LOGx line
+// (our code + WiFi + HTTP + bme280 + ...) without touching call sites. The
+// hook runs on whichever task emitted the line, so the ring and its
 // bookkeeping are protected by a FreeRTOS mutex.
+//
+// Buffer size depends on board: PSRAM-equipped boards get 1 MB so the ring
+// holds many hours of context; SRAM-only boards stay at 60 KB.
 
+#if HAL_HAS_PSRAM
+#define LOG_RING_SIZE   (1 * 1024 * 1024)
+#else
 #define LOG_RING_SIZE   (60 * 1024)
+#endif
 #define LOG_LINE_MAX    1024
 
-static char              s_ring[LOG_RING_SIZE];
+// Heap-allocated rather than static so the PSRAM path can request the
+// allocation come from external SPIRAM. Allocated once in applog_init();
+// applog_vprintf only runs after init succeeds.
+static char             *s_ring        = NULL;
 static size_t            s_pos         = 0;     // next write offset
 static bool              s_wrapped     = false; // has the ring wrapped at least once
 static size_t            s_valid_end   = 0;     // high-water when not wrapped; == size when wrapped
@@ -164,8 +178,19 @@ static int applog_vprintf(const char *fmt, va_list args) {
 
 void applog_init(void) {
     if (s_initialized) return;
+#if HAL_HAS_PSRAM
+    // Pull from external SPIRAM so the 1 MB ring doesn't eat internal DRAM.
+    s_ring = heap_caps_malloc(LOG_RING_SIZE, MALLOC_CAP_SPIRAM);
+#else
+    s_ring = malloc(LOG_RING_SIZE);
+#endif
+    if (!s_ring) return;  // caller continues; hook just won't install
     s_mtx = xSemaphoreCreateMutex();
-    if (!s_mtx) return;  // caller continues; hook just won't install
+    if (!s_mtx) {
+        free(s_ring);
+        s_ring = NULL;
+        return;
+    }
     s_prev_hook   = esp_log_set_vprintf(applog_vprintf);
     s_initialized = true;
 }

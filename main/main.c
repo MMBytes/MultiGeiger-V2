@@ -305,12 +305,11 @@ void app_main(void) {
                  g_chip_id, m[0], m[1], m[2], m[3], m[4], m[5]);
     }
 
-    // Chip / module identification — distinguishes Heltec module revisions.
-    // EmbFlash YES means the silicon is a SiP (ESP32-PICO-D4 or PICO-V3-02 — used
-    // on Heltec Wireless Stick V2). EmbFlash NO means a separate SPI flash chip
-    // (ESP32-D0WDQ6 — used on Heltec Wireless Stick V1). Flash size additionally
-    // separates PICO-D4 (4 MB) from PICO-V3-02 (8 MB). chip.model == ESP32S3 means
-    // a Wireless Stick V3 — incompatible with this firmware build target.
+    // Chip / module identification — distinguishes silicon between board variants.
+    // For Heltec WiFi Kit 32 V2: chip.model == ESP32, EmbFlash NO, 8 MB flash
+    // (D0WDQ6 + separate flash chip). For UM FeatherS3-D: chip.model == ESP32-S3,
+    // EmbFlash YES, EmbPSRAM YES, 16 MB flash. Other combinations indicate either
+    // a wrong-board flash or an unknown variant — log loudly and continue.
     {
         esp_chip_info_t chip;
         esp_chip_info(&chip);

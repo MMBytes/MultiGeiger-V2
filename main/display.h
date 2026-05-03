@@ -3,8 +3,10 @@
 /** @file
  *  @brief OLED display driver — SSD1306 128x64 over I2C.
  *
- *  On the Heltec Wireless Stick V2 the panel shares the I2C bus with the
+ *  On the Heltec WiFi Kit 32 V2 the panel shares the I2C bus with the
  *  BME280 (SDA=GPIO4, SCL=GPIO15). The dedicated reset line is GPIO16.
+ *  On boards without an onboard OLED (HAL_HAS_OLED == 0) the entire driver
+ *  collapses to no-op stubs so callers in main.c don't change shape.
  *
  *  Layout: a boot splash, then a running screen with a relative-time stamp
  *  and nSv/h on top, a large CPM readout in the middle, and a five-character

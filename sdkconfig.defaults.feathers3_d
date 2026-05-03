@@ -1,0 +1,27 @@
+# ============================================================================
+# Unexpected Maker FeatherS3-D overlay — ESP32-S3, 16 MB flash, 8 MB QSPI
+# PSRAM, native USB-C (no CP2102).
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash on FeatherS3-D.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# QSPI PSRAM at 80 MHz. Quad mode per the product page; flip to
+# CONFIG_SPIRAM_MODE_OCTAL=y if a future revision uses octal-mode silicon.
+# Verified once chip-info boot line reports the package on first boot.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=40960
+
+# Console / flashing path: USB-Serial-JTAG (S3 built-in, no TinyUSB needed).
+# `printf` and `ESP_LOGx` go to USB-C; `idf.py flash` uses the same port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# UART0 still routed but secondary — leave RX/TX (IO44/IO43) free for
+# external probing; firmware does not use them as a console.

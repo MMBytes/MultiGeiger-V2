@@ -3,7 +3,7 @@
 /** @file
  *  @brief Geiger-Müller tube driver — HV generation and pulse counting.
  *
- *  Runs two interrupt-driven paths on Heltec Wireless Stick V2:
+ *  Runs two interrupt-driven paths (pin map per `hal.h`):
  *    - A 100 µs gptimer drives the HV charge-pump state machine (pulse the
  *      FET until the cap-full comparator fires, then idle until next charge).
  *    - A GPIO edge ISR on PIN_GMC_COUNT_INPUT tallies tube pulses, rejecting
@@ -16,10 +16,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Heltec Wireless Stick V2 pin map.
-#define PIN_HV_FET_OUTPUT     23
-#define PIN_HV_CAP_FULL_INPUT 22
-#define PIN_GMC_COUNT_INPUT    2
+#include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT
 
 // Si22G dead time (µs). Rejects rising-edge noise on the count input.
 #define GMC_DEAD_TIME_US 190

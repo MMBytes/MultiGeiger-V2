@@ -1,16 +1,12 @@
-# Target: Heltec Wireless Stick V2 (ESP32 rev1)
-CONFIG_IDF_TARGET="esp32"
+# ============================================================================
+# SHARED defaults — applied to every board build.
+# Per-board overlays live in sdkconfig.defaults.<board>; CMake selects which
+# one to chain after this file based on the BOARD variable.
+# ============================================================================
 
-# Auto-detect XTAL — Heltec V2 modules may be 26 MHz (arduino-esp32 default is AUTO).
-# Hardcoding 40 MHz here produced garbled UART (~177 kbaud actual at 115200 nominal).
-CONFIG_XTAL_FREQ_AUTO=y
-
-# 8 MB flash on Heltec V2
-CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
-
-# Custom partition table (factory + dual OTA, 2 MB each). See partitions.csv.
-# Default singleapp 1 MB was at 4% free with only M1/M6/M7 integrated.
+# Custom partition table (factory + dual OTA, 2 MB each). Both boards use
+# this layout; if a board needs different OTA slot sizes, override
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME in its overlay.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # CONFIG_PARTITION_TABLE_SINGLE_APP is not set

@@ -2,7 +2,7 @@
 
 /** @file
  *  @brief Native ESP-IDF driver for the Bosch BME280 temperature/humidity/
- *         pressure sensor on the Heltec Wireless Stick V2.
+ *         pressure sensor on the shared env-sensor I2C bus.
  *
  *  Owns I2C bus 0 on SDA=GPIO4 / SCL=GPIO15 at 100 kHz. Auto-probes addresses
  *  0x76 then 0x77. Operating profile: oversampling T x8 / P x4 / H x2,

@@ -40,6 +40,13 @@ typedef struct {
     // the upstream MultiGeiger behaviour and reducing power draw slightly.
     bool     wifi_ps_disabled;
 
+    // When true, route the WiFi RF chain to the u.FL external-antenna
+    // connector (FeatherS3-D and similar boards with an onboard SPDT RF
+    // switch). When false (default), the onboard PCB antenna is used.
+    // No effect on boards without HAL_HAS_ANTENNA_SWITCH; the /config UI
+    // greys the checkbox out in that case.
+    bool     use_external_antenna;
+
     // Upload targets — per-target enable plus HTTPS toggle.
     bool     send_madavi;
     bool     madavi_https;

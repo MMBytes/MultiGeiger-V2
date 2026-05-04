@@ -20,6 +20,7 @@
 
 #include "version.h"
 #include "applog.h"
+#include "hal.h"
 
 static const char *TAG = "http";
 
@@ -339,6 +340,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" "
         "id=\"wifi_ps_dis\" onchange=\"syncFtpPs()\" %s> "
         "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops)</label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ext_a\" "
+        "id=\"wifi_ext_a\" %s %s> Use External Antenna Port"
+        "%s</label></div>"
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
         "<h3>Transmission targets</h3>"
@@ -410,6 +414,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->wifi_11bg_only   ? "checked" : "",
         s_cfg->wifi_ht20_only   ? "checked" : "",
         s_cfg->wifi_ps_disabled ? "checked" : "",
+#if HAL_HAS_ANTENNA_SWITCH
+        "",                                                  // not disabled on this board
+        s_cfg->use_external_antenna ? "checked" : "",        // current state
+        "",                                                  // no trailing note
+#else
+        "disabled",                                          // greyed out
+        "",                                                  // never checked on this board
+        " <small>(not available on this board)</small>",
+#endif
         e_chip, s_mac_str,
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
@@ -491,6 +504,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.wifi_11bg_only         = false;
     next.wifi_ht20_only         = false;
     next.wifi_ps_disabled       = false;
+    next.use_external_antenna   = false;
 
     char *p = buf;
     while (*p) {
@@ -509,6 +523,7 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "wifi_11bg"))  next.wifi_11bg_only   = true;
         else if (!strcmp(p, "wifi_ht20"))  next.wifi_ht20_only   = true;
         else if (!strcmp(p, "wifi_ps_dis")) next.wifi_ps_disabled = true;
+        else if (!strcmp(p, "wifi_ext_a"))  next.use_external_antenna = true;
         else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
         else if (!strcmp(p, "mad_https")) next.madavi_https  = true;
         else if (!strcmp(p, "send_sc"))   next.send_sensorc  = true;
@@ -557,6 +572,13 @@ static esp_err_t config_post(httpd_req_t *req) {
     // even while the UI showed it ticked; enforce the invariant here so
     // the stored state matches what the user saw.
     if (next.wifi_11bg_only) next.wifi_ht20_only = true;
+
+    // External-antenna switch: silently force-disable on boards without the
+    // hardware. Defence-in-depth — the UI already greys the checkbox, but a
+    // hand-crafted POST could still set it.
+#if !HAL_HAS_ANTENNA_SWITCH
+    next.use_external_antenna = false;
+#endif
 
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
     // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the

@@ -1,5 +1,7 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.2.0 introduces dual-board scaffolding (Heltec WiFi Kit 32 V2 + UM FeatherS3-D).
-// Major-minor bump marks the new HW family; patch number resumes at 0.
-#define VERSION_STR "V2.2.0"
+// V2.2.1 — FeatherS3-D bring-up prep:
+//   - Pin remap to Feather A0..A5 (left-edge) for cross-Feather portability
+//   - External-antenna toggle in /config (FeatherS3-D u.FL on IO41 = HIGH)
+// Heltec V2 build is byte-for-byte equivalent to V2.2.0 in observed behaviour.
+#define VERSION_STR "V2.2.1"

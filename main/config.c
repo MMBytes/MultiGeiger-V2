@@ -52,6 +52,7 @@ static const char *NS  = "geiger";
 #define DEF_WIFI_11BG_ONLY  false
 #define DEF_WIFI_HT20_ONLY  false
 #define DEF_WIFI_PS_DISABLED false
+#define DEF_USE_EXT_ANTENNA  false
 
 void config_defaults(config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -90,6 +91,7 @@ void config_defaults(config_t *cfg) {
     cfg->wifi_11bg_only       = DEF_WIFI_11BG_ONLY;
     cfg->wifi_ht20_only       = DEF_WIFI_HT20_ONLY;
     cfg->wifi_ps_disabled     = DEF_WIFI_PS_DISABLED;
+    cfg->use_external_antenna = DEF_USE_EXT_ANTENNA;
 }
 
 static void load_str(nvs_handle_t h, const char *key, char *buf, size_t bufsz) {
@@ -135,6 +137,7 @@ void config_load(config_t *cfg) {
     load_bool(h, "wifi_11bg",  &cfg->wifi_11bg_only);
     load_bool(h, "wifi_ht20",  &cfg->wifi_ht20_only);
     load_bool(h, "wifi_ps_dis",&cfg->wifi_ps_disabled);
+    load_bool(h, "wifi_ext_a", &cfg->use_external_antenna);
     load_bool(h, "send_mad",   &cfg->send_madavi);
     load_bool(h, "mad_https",  &cfg->madavi_https);
     load_bool(h, "send_sc",    &cfg->send_sensorc);
@@ -172,8 +175,9 @@ void config_load(config_t *cfg) {
     #define MASK(s) ((s)[0] ? "<set>" : "<empty>")
     ESP_LOGI(TAG, "  wifi:             ssid=%s pw=%s host=%s ap_name=%s",
              cfg->wifi_ssid, MASK(cfg->wifi_password), cfg->wifi_hostname, cfg->ap_name);
-    ESP_LOGI(TAG, "  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d",
-             cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled);
+    ESP_LOGI(TAG, "  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d",
+             cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled,
+             cfg->use_external_antenna);
     ESP_LOGI(TAG, "  madavi:           enabled=%d https=%d",
              cfg->send_madavi, cfg->madavi_https);
     ESP_LOGI(TAG, "  sensor.community: enabled=%d https=%d",
@@ -222,6 +226,7 @@ esp_err_t config_save(const config_t *cfg) {
     SET_U8 ("wifi_11bg",  cfg->wifi_11bg_only);
     SET_U8 ("wifi_ht20",  cfg->wifi_ht20_only);
     SET_U8 ("wifi_ps_dis",cfg->wifi_ps_disabled);
+    SET_U8 ("wifi_ext_a", cfg->use_external_antenna);
     SET_U8 ("send_mad",   cfg->send_madavi);
     SET_U8 ("mad_https",  cfg->madavi_https);
     SET_U8 ("send_sc",    cfg->send_sensorc);

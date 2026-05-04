@@ -13,8 +13,10 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
 
 #include "applog.h"
+#include "hal.h"
 #include "env_sensor.h"
 #include "config.h"
 #include "display.h"
@@ -96,6 +98,35 @@ static void apply_radio_limits_sta(void) {
         ESP_LOGI(TAG, "STA bandwidth = %s (ht20_only=%d)",
                  (bw == WIFI_BW20) ? "20MHz" : "40MHz", g_cfg.wifi_ht20_only);
     }
+}
+
+// Drive the onboard SPDT RF switch to route the WiFi front-end to either the
+// PCB chip antenna (default) or the u.FL external connector. Called once at
+// boot, before esp_wifi_init(); the switch is a passive analog routing
+// element, so changing it after WiFi has associated would drop the link.
+//
+// On boards without HAL_HAS_ANTENNA_SWITCH (e.g. Heltec WiFi Kit 32 V2) this
+// function is a no-op — the config flag is force-cleared at the http_server
+// level and the UI greys out the checkbox.
+static void apply_antenna_routing(void) {
+#if HAL_HAS_ANTENNA_SWITCH
+    bool external = g_cfg.use_external_antenna;
+  #if HAL_ANTENNA_SELECT_VERIFIED
+    int level = (external == ANTENNA_SELECT_HIGH_IS_EXTERNAL) ? 1 : 0;
+    gpio_reset_pin(PIN_ANTENNA_SELECT);
+    gpio_set_direction(PIN_ANTENNA_SELECT, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_ANTENNA_SELECT, level);
+    ESP_LOGI(TAG, "antenna routing: %s (gpio %d = %d)",
+             external ? "EXTERNAL u.FL" : "internal PCB",
+             PIN_ANTENNA_SELECT, level);
+  #else
+    // Pin / polarity not yet verified against board schematic — skip the
+    // gpio write so we don't drive an unrelated line. Still log intent so
+    // the user can verify the config field is being read correctly.
+    ESP_LOGW(TAG, "antenna routing: %s requested, but HAL_ANTENNA_SELECT_VERIFIED=0 — gpio write SKIPPED",
+             external ? "EXTERNAL u.FL" : "internal PCB");
+  #endif
+#endif
 }
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
@@ -371,6 +402,11 @@ void app_main(void) {
     s_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_ip_event, NULL));
+
+    // Route the WiFi front-end to the desired antenna BEFORE bringing the
+    // radio up. The SPDT switch is a passive RF element — flipping it after
+    // the link is associated would drop the connection.
+    apply_antenna_routing();
 
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wcfg));

@@ -10,6 +10,7 @@ idf_component_register(
         "bme688.c"
         "sht45.c"
         "bmp390.c"
+        "bmp581.c"
         "env_sensor.c"
         "pm_sensor.c"
         "sps30.c"

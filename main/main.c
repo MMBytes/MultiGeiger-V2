@@ -341,6 +341,25 @@ static void do_tx_cycle(void) {
         } else {
             ESP_LOGW(TAG, "%s: read failed", pm_sensor_name());
         }
+
+        // Refresh device-status bits — fan / laser self-diagnosis. ESP_LOGE
+        // for hard faults (fan or laser failed) so they jump out in /log;
+        // ESP_LOGW for the soft "fan speed drift" warning. Cleanly-OK
+        // status is silent (avoid spamming logs every cycle when fine).
+        pm_sensor_status_t st;
+        if (pm_sensor_read_status(&st) == ESP_OK) {
+            if (st.fan_fail || st.laser_fail) {
+                ESP_LOGE(TAG,
+                         "%s STATUS FAULT: fan_fail=%d laser_fail=%d "
+                         "fan_speed_warn=%d (raw=0x%08lx)",
+                         pm_sensor_name(),
+                         st.fan_fail, st.laser_fail, st.fan_speed_warn,
+                         (unsigned long)st.raw);
+            } else if (st.fan_speed_warn) {
+                ESP_LOGW(TAG, "%s fan speed warning (raw=0x%08lx)",
+                         pm_sensor_name(), (unsigned long)st.raw);
+            }
+        }
     }
 
     if (!wifi_up()) {

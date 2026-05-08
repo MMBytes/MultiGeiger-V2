@@ -76,5 +76,43 @@ const char *pm_sensor_name(void);
  *  data-ready is essentially always true at our 150 s cycle cadence.
  *
  *  Returns ESP_OK on success, ESP_FAIL on no PM sensor / read error.
+ *  On success the sample is also cached for pm_sensor_get_last_sample().
  */
 esp_err_t pm_sensor_read(pm_sample_t *out);
+
+/** @brief PM sensor self-diagnosis flags.
+ *
+ *  Sensor-agnostic shape so a future second PM driver can populate the same
+ *  struct. SPS30 maps directly: fan_fail = status bit 4, laser_fail = bit 5,
+ *  fan_speed_warn = bit 21. raw = the full 32-bit status word for diagnostics.
+ */
+typedef struct {
+    bool     fan_fail;        // fan RPM out of target for >10 s, or blocked
+    bool     laser_fail;      // laser current out of regulation
+    bool     fan_speed_warn;  // fan drifting from target (not yet failed)
+    uint32_t raw;             // raw status register (driver-specific encoding)
+} pm_sensor_status_t;
+
+/** @brief Read and refresh the PM sensor's self-diagnosis status.
+ *
+ *  Issues an I²C transaction — call from the cycle thread, NOT from HTTP
+ *  handlers (which run on a different task and would race). On success the
+ *  result is also cached for pm_sensor_get_last_status().
+ *
+ *  Returns ESP_OK on success, ESP_FAIL on no PM sensor / I²C error.
+ */
+esp_err_t pm_sensor_read_status(pm_sensor_status_t *out);
+
+/** @brief Return the most recent successful pm_sensor_read() result.
+ *
+ *  Safe to call from any task. Returns ESP_FAIL if no successful read has
+ *  happened yet (typically during the first cycle after boot).
+ */
+esp_err_t pm_sensor_get_last_sample(pm_sample_t *out);
+
+/** @brief Return the most recent pm_sensor_read_status() result.
+ *
+ *  Safe to call from any task. Returns ESP_FAIL if no status read has
+ *  happened yet (typically during the first cycle after boot).
+ */
+esp_err_t pm_sensor_get_last_status(pm_sensor_status_t *out);

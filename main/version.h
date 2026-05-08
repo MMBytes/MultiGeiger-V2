@@ -1,15 +1,13 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.3.3 — openSenseMap + aqi.eco upload targets:
-//   - openSenseMap: HTTPS POST to ingress.opensensemap.org/boxes/<BOX>/data
-//     ?luftdaten=1, single combined Luftdaten body covering Si22G_* +
-//     BME280_* + SPS30_* fields. Box ID configured per-device on
-//     opensensemap.org and entered in /config.
-//   - aqi.eco: HTTPS POST to api.aqi.eco/update/<TOKEN>, same Luftdaten
-//     body wrapped with an esp8266id field at the top. Token comes from
-//     the user's aqi.eco account.
-//   - Both targets share the new build_luftdaten_body builder; each gets
-//     its own circuit breaker + retry counters in tx_run.
-//   - /config form gets two new rows under "Transmission targets" with
-//     the box ID / token text fields.
-#define VERSION_STR "V2.3.3"
+// V2.3.4 — SPS30 device status surface:
+//   - sps30_read_device_status() decodes the 32-bit status register
+//     (CMD 0xD206): fan_fail (bit 4), laser_fail (bit 5), fan_speed_warn
+//     (bit 21).
+//   - Read once per cycle from the worker; ESP_LOGE on hard fault
+//     (fan/laser), ESP_LOGW on soft warning (speed drift).
+//   - pm_sensor facade caches last sample + last status under a mutex
+//     so HTTP handlers can read without touching the I²C bus.
+//   - / status page exposes a PM sensor block with colour-coded fan/
+//     laser/speed badges and the latest PM readings.
+#define VERSION_STR "V2.3.4"

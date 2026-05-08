@@ -18,6 +18,7 @@ static const char *TAG = "sps30";
 #define CMD_STOP_MEASUREMENT    0x0104
 #define CMD_READ_DATA_READY     0x0202
 #define CMD_READ_MEASURED       0x0300
+#define CMD_READ_DEVICE_STATUS  0xD206
 #define CMD_START_FAN_CLEAN     0x5607
 #define CMD_RESET               0xD304
 
@@ -182,4 +183,27 @@ esp_err_t sps30_read(pm_sample_t *out) {
 esp_err_t sps30_start_fan_cleaning(void) {
     if (!s_ready) return ESP_FAIL;
     return send_cmd(CMD_START_FAN_CLEAN);
+}
+
+esp_err_t sps30_read_device_status(uint32_t *status_out) {
+    if (!s_ready || !s_dev) return ESP_FAIL;
+    if (!status_out) return ESP_ERR_INVALID_ARG;
+
+    if (send_cmd(CMD_READ_DEVICE_STATUS) != ESP_OK) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // 4-byte status word as 2 words × (2 data bytes + 1 CRC) = 6 bytes.
+    uint8_t buf[6];
+    if (recv(buf, sizeof(buf)) != ESP_OK) return ESP_FAIL;
+    if (crc8(buf + 0, 2) != buf[2]) {
+        ESP_LOGW(TAG, "SPS30 status CRC fail (word 0)");
+        return ESP_FAIL;
+    }
+    if (crc8(buf + 3, 2) != buf[5]) {
+        ESP_LOGW(TAG, "SPS30 status CRC fail (word 1)");
+        return ESP_FAIL;
+    }
+    *status_out = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                  ((uint32_t)buf[3] << 8)  |  (uint32_t)buf[4];
+    return ESP_OK;
 }

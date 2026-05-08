@@ -56,3 +56,16 @@ esp_err_t sps30_read(pm_sample_t *out);
  *  are unreliable.
  */
 esp_err_t sps30_start_fan_cleaning(void);
+
+/** @brief Read the SPS30 device-status register (CMD 0xD206).
+ *
+ *  Returns the raw 32-bit status word in *status_out. Caller decodes the
+ *  bit fields:
+ *    bit 4  — fan failure (RPM out of target for >10 s, fan blocked)
+ *    bit 5  — laser current out of regulation
+ *    bit 21 — fan speed warning (drift, not yet failed)
+ *  Other bits are reserved by Sensirion.
+ *
+ *  Returns ESP_OK on success, ESP_FAIL on I²C / CRC error.
+ */
+esp_err_t sps30_read_device_status(uint32_t *status_out);

@@ -21,6 +21,7 @@
 #include "version.h"
 #include "applog.h"
 #include "hal.h"
+#include "pm_sensor.h"
 
 static const char *TAG = "http";
 
@@ -229,9 +230,58 @@ static esp_err_t favicon_get(httpd_req_t *req) {
     return httpd_resp_send(req, s_favicon_svg, HTTPD_RESP_USE_STRLEN);
 }
 
+// PM sensor status block. Emits a self-contained <div class="info"> if a PM
+// sensor is connected, otherwise an empty string (caller drops it cleanly into
+// the page). Reads only from the cache populated by the cycle thread — never
+// touches I²C from this HTTP-handler context.
+static void format_pm_info(char *out, size_t sz) {
+    if (!pm_sensor_present()) {
+        out[0] = 0;
+        return;
+    }
+    pm_sensor_status_t st;
+    bool have_status = (pm_sensor_get_last_status(&st) == ESP_OK);
+    pm_sample_t pm;
+    bool have_sample = (pm_sensor_get_last_sample(&pm) == ESP_OK);
+
+    // Pretty status badges with colour. Red for hard faults so they jump out;
+    // orange for the soft "fan speed warning"; green for OK. CSS is inline
+    // because the parent page only carries minimal styling.
+    const char *fan_html =
+        !have_status            ? "<span style='color:#888'>unknown</span>" :
+        st.fan_fail             ? "<span style='color:#c00;font-weight:bold'>FAULT</span>" :
+        st.fan_speed_warn       ? "<span style='color:#c80;font-weight:bold'>SPEED WARN</span>" :
+                                  "<span style='color:#080'>OK</span>";
+    const char *laser_html =
+        !have_status            ? "<span style='color:#888'>unknown</span>" :
+        st.laser_fail           ? "<span style='color:#c00;font-weight:bold'>FAULT</span>" :
+                                  "<span style='color:#080'>OK</span>";
+
+    int n = snprintf(out, sz,
+        "<div class=\"info\">"
+        "<b>PM sensor:</b> %s<br>"
+        "<b>Fan:</b> %s<br>"
+        "<b>Laser:</b> %s<br>"
+        "<b>Status raw:</b> <code>0x%08lx</code><br>",
+        pm_sensor_name(), fan_html, laser_html,
+        have_status ? (unsigned long)st.raw : 0UL);
+
+    if (have_sample) {
+        n += snprintf(out + n, sz - n,
+            "<b>PM1.0 / PM2.5 / PM4.0 / PM10:</b> "
+            "%.1f / %.1f / %.1f / %.1f µg/m³<br>"
+            "<b>Typical particle size:</b> %.2f µm<br>",
+            pm.pm1_0, pm.pm2_5, pm.pm4_0, pm.pm10, pm.typ_size_um);
+    } else {
+        n += snprintf(out + n, sz - n,
+            "<b>PM readings:</b> awaiting first cycle...<br>");
+    }
+    snprintf(out + n, sz - n, "</div>");
+}
+
 static esp_err_t status_get(httpd_req_t *req) {
     log_access(req, "GET /");
-    char body[1700];
+    char body[2400];
     unsigned long uptime_s = (unsigned long)(esp_timer_get_time() / 1000000);
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -239,6 +289,8 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_uptime(uptime_s, uptime_buf, sizeof(uptime_buf));
     char net_info[400];
     format_net_info(net_info, sizeof(net_info));
+    char pm_info[600];
+    format_pm_info(pm_info, sizeof(pm_info));
 
     int n = snprintf(body, sizeof(body),
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -258,6 +310,7 @@ static esp_err_t status_get(httpd_req_t *req) {
         "<b>Max allocation:</b> %lu bytes<br>"
         "<b>Uptime:</b> %s"
         "</div>"
+        "%s"
         "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
         "<p><a href=\"/update\">&#11014; Firmware Update (OTA)</a> (requires password)</p>"
         "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>"
@@ -269,7 +322,8 @@ static esp_err_t status_get(httpd_req_t *req) {
         s_cfg->ap_name,
         (unsigned long)free_heap,
         (unsigned long)max_alloc,
-        uptime_buf);
+        uptime_buf,
+        pm_info);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, body, n > 0 ? n : 0);
 }

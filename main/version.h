@@ -1,10 +1,11 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.3.0 — Tube optional:
-//   - New tube_enabled config flag (default true). When false the Geiger
-//     subsystem is fully disabled — no HV/ISR/gptimer setup, tube_read
-//     returns zeros, and Madavi/sensor.community/Radmon skip the radiation
-//     payload paths (Madavi sends THP only; sensor.community sends X-PIN 11
-//     only; Radmon is skipped entirely). Lets the codebase run as a non-
-//     Geiger air-quality node when paired with PM/THP sensors.
-#define VERSION_STR "V2.3.0"
+// V2.3.1 — Sensirion SPS30 driver:
+//   - Hand-rolled pure-IDF I²C driver (no Sensirion library dependency).
+//   - Auto-detect probe at 0x69 on the env_sensor-owned I²C bus.
+//   - Continuous-measurement mode (fan on, 7-day auto-clean automatic).
+//   - All 10 channels read (PM1.0 / PM2.5 / PM4.0 / PM10 + 5×NC + typ size)
+//     with CRC8 verification on every word.
+//   - Logged but NOT yet transmitted (Madavi/SC integration in V2.3.2,
+//     openSenseMap + aqi.eco in V2.3.3).
+#define VERSION_STR "V2.3.1"

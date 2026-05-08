@@ -18,6 +18,7 @@
 #include "applog.h"
 #include "hal.h"
 #include "env_sensor.h"
+#include "pm_sensor.h"
 #include "config.h"
 #include "display.h"
 #include "http_server.h"
@@ -309,6 +310,25 @@ static void do_tx_cycle(void) {
         }
     }
 
+    // Particulate-matter sample. Logged but not yet uploaded — TX integration
+    // lands in V2.3.2. Driver's data-ready poll keeps this safe even if the
+    // sensor missed an internal 1 Hz tick (drops to ESP_FAIL after ~1 s).
+    if (pm_sensor_present()) {
+        pm_sample_t pm;
+        if (pm_sensor_read(&pm) == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "%s: PM1.0=%.1f PM2.5=%.1f PM4.0=%.1f PM10=%.1f µg/m³  "
+                     "NC0.5=%.1f NC1=%.1f NC2.5=%.1f NC4=%.1f NC10=%.1f /cm³  "
+                     "typ_size=%.2fµm",
+                     pm_sensor_name(),
+                     pm.pm1_0, pm.pm2_5, pm.pm4_0, pm.pm10,
+                     pm.nc0_5, pm.nc1_0, pm.nc2_5, pm.nc4_0, pm.nc10,
+                     pm.typ_size_um);
+        } else {
+            ESP_LOGW(TAG, "%s: read failed", pm_sensor_name());
+        }
+    }
+
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
         return;
@@ -396,6 +416,12 @@ void app_main(void) {
     // failure is non-fatal (env_sensor_present() gates readings later).
     // env_sensor_init() also owns the I2C bus used by the OLED below.
     env_sensor_init();
+
+    // Probe for PM (particulate-matter) sensors on the same bus owned by
+    // env_sensor. Currently only the Sensirion SPS30 is supported. Init
+    // also starts continuous-measurement mode so the fan is running by
+    // the time the first TX cycle reads from it.
+    pm_sensor_init(env_sensor_get_i2c_bus());
 
     // OLED shares the env_sensor I2C bus — bring it up now so the
     // boot splash is visible while WiFi/NTP/etc. come up.

@@ -18,6 +18,10 @@ _build.cmd
 _flash.cmd
 _erase_flash.cmd
 _merge.cmd
+_serial_log.py
+
+# Per-release staging dirs holding board-suffixed binaries for `gh release upload`.
+release_stage_*/
 
 # Build/flash logs
 *.log

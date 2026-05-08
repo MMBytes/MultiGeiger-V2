@@ -11,6 +11,8 @@ idf_component_register(
         "sht45.c"
         "bmp390.c"
         "env_sensor.c"
+        "pm_sensor.c"
+        "sps30.c"
         "applog.c"
         "log_ftp.c"
         "speaker.c"

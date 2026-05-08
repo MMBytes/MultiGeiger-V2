@@ -256,6 +256,17 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
             c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
             c->pm.typ_size_um);
     }
+    if (c->noise_valid) {
+        // DNMS_noise_* prefix is the canonical airrohr / dusty naming —
+        // Madavi's prefix-based routing requires it; sensor.community uses
+        // the same naming on its dedicated X-PIN 15 POST.
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
+            c->noise.laeq, c->noise.la_min, c->noise.la_max);
+    }
     if (have_pulse_stats) {
         COMMA();
         n += snprintf(buf + n, cap - n,
@@ -275,7 +286,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
 }
 
 static int send_madavi(const tx_context_t *c) {
-    bool have_env = c->bme_valid || c->pm_valid;
+    bool have_env = c->bme_valid || c->pm_valid || c->noise_valid;
     if (!c->tube_enabled && !have_env) return 0;
 
     const char *url = c->madavi.use_https ? c->madavi.url_https : c->madavi.url_http;
@@ -348,6 +359,23 @@ static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t c
         (unsigned long)c->gm_counts, (unsigned long)c->dt_ms, msi);
 }
 
+// X-PIN 15 body for hbitter DNMS noise sensor. Canonical airrohr value
+// (DNMS_API_PIN 15 from airrohr-firmware/defines.h) — keep DNMS_noise_*
+// prefixed names identical between SC and Madavi (unlike Si22G/BME which
+// use unprefixed names on SC, prefixed on Madavi).
+static void build_sensorc_noise_body(const tx_context_t *c, char *buf, size_t cap) {
+    snprintf(buf, cap,
+        "{\n"
+        " \"software_version\": \"%s\",\n"
+        " \"sensordatavalues\": [\n"
+        "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}\n"
+        " ]\n}",
+        c->sw_version,
+        c->noise.laeq, c->noise.la_min, c->noise.la_max);
+}
+
 // X-PIN 12 body for Sensirion SPS30. SPS30_* prefix is what newer airrohr-
 // firmware emits and what Madavi expects too — keeps the wire payload identical
 // to the Madavi env body's SPS30 portion. typ_size_um carries 3 decimals because
@@ -406,7 +434,7 @@ static inline bool prior_ok(int rc) {
 }
 
 static int send_sensorc(const tx_context_t *c) {
-    if (!c->tube_enabled && !c->bme_valid && !c->pm_valid) return 0;
+    if (!c->tube_enabled && !c->bme_valid && !c->pm_valid && !c->noise_valid) return 0;
 
     const char *url = c->sensorc.use_https ? c->sensorc.url_https : c->sensorc.url_http;
     esp_http_client_handle_t client =
@@ -436,19 +464,27 @@ static int send_sensorc(const tx_context_t *c) {
         rc_p = post_with_retry(client, "sensor.community", "pm",  "12", body);
     }
 
+    int rc_n = 0;
+    if (c->noise_valid && prior_ok(rc_g) && prior_ok(rc_b) && prior_ok(rc_p)) {
+        build_sensorc_noise_body(c, body, sizeof(body));
+        rc_n = post_with_retry(client, "sensor.community", "noise", "15", body);
+    }
+
     esp_http_client_cleanup(client);
 
-    ESP_LOGI(TAG, "sensor.community: geiger rc=%d, bme rc=%d, pm rc=%d "
-             "(ran g=%d b=%d p=%d)",
-             rc_g, rc_b, rc_p,
-             c->tube_enabled, c->bme_valid, c->pm_valid);
+    ESP_LOGI(TAG, "sensor.community: geiger rc=%d, bme rc=%d, pm rc=%d, noise rc=%d "
+             "(ran g=%d b=%d p=%d n=%d)",
+             rc_g, rc_b, rc_p, rc_n,
+             c->tube_enabled, c->bme_valid, c->pm_valid, c->noise_valid);
 
     // Aggregate: the first ran-but-not-201 wins; if everything that ran was
     // 201, return 201. If nothing ran, return 0 (handled at top).
     int worst = 201;
-    if (c->tube_enabled && rc_g != 201)                                  worst = rc_g;
-    else if (c->bme_valid && prior_ok(rc_g) && rc_b != 201)              worst = rc_b;
+    if (c->tube_enabled && rc_g != 201)                                       worst = rc_g;
+    else if (c->bme_valid && prior_ok(rc_g) && rc_b != 201)                   worst = rc_b;
     else if (c->pm_valid  && prior_ok(rc_g) && prior_ok(rc_b) && rc_p != 201) worst = rc_p;
+    else if (c->noise_valid && prior_ok(rc_g) && prior_ok(rc_b) &&
+             prior_ok(rc_p) && rc_n != 201)                                   worst = rc_n;
     return worst;
 }
 
@@ -566,6 +602,17 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
             c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
             c->pm.typ_size_um);
     }
+    if (c->noise_valid) {
+        // DNMS_noise_* prefix matches Madavi's prefix-routing convention and
+        // sensor.community's X-PIN 15 body — keeps the field naming consistent
+        // across all four upload targets.
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
+            c->noise.laeq, c->noise.la_min, c->noise.la_max);
+    }
     COMMA();
     n += snprintf(buf + n, cap - n,
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
@@ -589,7 +636,7 @@ static int send_osm(const tx_context_t *c) {
              "https://ingress.opensensemap.org/boxes/%s/data?luftdaten=1",
              c->osm_box_id);
 
-    char body[1400];
+    char body[1600];
     build_luftdaten_body(c, body, sizeof(body), false);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
@@ -621,7 +668,7 @@ static int send_aqi(const tx_context_t *c) {
     char url[160];
     snprintf(url, sizeof(url), "https://api.aqi.eco/update/%s", c->aqi_token);
 
-    char body[1500];   // slightly larger than OSM body — extra esp8266id field
+    char body[1700];   // slightly larger than OSM body — extra esp8266id field
     build_luftdaten_body(c, body, sizeof(body), true);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
@@ -674,10 +721,10 @@ static void tx_run(tx_context_t *c) {
     ESP_LOGI(TAG, "free heap before TX: %lu bytes / max_alloc=%lu bytes",
              (unsigned long)free_heap, (unsigned long)max_alloc);
 
-    // Madavi and sensor.community accept a mix of radiation + env (THP) + PM
-    // payloads, so they're called whenever ANY source is live. Radmon is
+    // Madavi and sensor.community accept a mix of radiation + env (THP) + PM +
+    // noise payloads, so they're called whenever ANY source is live. Radmon is
     // radiation-only, so it's gated strictly on tube_enabled.
-    bool any_payload = c->tube_enabled || c->bme_valid || c->pm_valid;
+    bool any_payload = c->tube_enabled || c->bme_valid || c->pm_valid || c->noise_valid;
 
     if (c->madavi.enabled && any_payload) {
         if (madavi_skip_remaining > 0) {

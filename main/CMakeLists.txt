@@ -14,6 +14,8 @@ idf_component_register(
         "env_sensor.c"
         "pm_sensor.c"
         "sps30.c"
+        "noise_sensor.c"
+        "dnms.c"
         "applog.c"
         "log_ftp.c"
         "speaker.c"

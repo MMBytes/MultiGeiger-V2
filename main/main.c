@@ -19,6 +19,7 @@
 #include "hal.h"
 #include "env_sensor.h"
 #include "pm_sensor.h"
+#include "noise_sensor.h"
 #include "config.h"
 #include "display.h"
 #include "http_server.h"
@@ -209,7 +210,8 @@ static void build_tx_context(tx_context_t *ctx,
                              uint32_t dt_ms, uint32_t counts, uint32_t hv_pulses,
                              uint32_t min_us, uint32_t max_us,
                              bool bme_valid, float bme_t, float bme_h, float bme_p,
-                             bool pm_valid, const pm_sample_t *pm) {
+                             bool pm_valid, const pm_sample_t *pm,
+                             bool noise_valid, const noise_sample_t *noise) {
     memset(ctx, 0, sizeof(*ctx));
     uint32_t cpm = 0;
     if (dt_ms > 0) {
@@ -226,6 +228,8 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->tube_enabled = g_cfg.tube_enabled;
     ctx->pm_valid     = pm_valid;
     if (pm_valid && pm) ctx->pm = *pm;
+    ctx->noise_valid  = noise_valid;
+    if (noise_valid && noise) ctx->noise = *noise;
 
     wifi_ap_record_t ap_rec = { 0 };
     ctx->rssi = (esp_wifi_sta_get_ap_info(&ap_rec) == ESP_OK) ? ap_rec.rssi : -127;
@@ -362,20 +366,53 @@ static void do_tx_cycle(void) {
         }
     }
 
+    // Noise sample — DNMS LAeq window finalised at the end of the PREVIOUS
+    // cycle by noise_sensor_trigger() (or, on first boot, by the trigger in
+    // noise_sensor_init). Read here, then re-trigger below to start the next
+    // window. Window length ≈ TX cycle interval (~150 s) — a meaningful LAeq
+    // for the upload period, not just for the in-cycle work time.
+    noise_sample_t noise = { 0 };
+    bool noise_valid = false;
+    if (noise_sensor_present()) {
+        if (noise_sensor_read(&noise) == ESP_OK) {
+            noise_valid = true;
+            ESP_LOGI(TAG, "%s: LAeq=%.1fdB(A)  min=%.1fdB(A)  max=%.1fdB(A)",
+                     noise_sensor_name(), noise.laeq, noise.la_min, noise.la_max);
+        } else {
+            ESP_LOGW(TAG, "%s: read failed (or first cycle still integrating)",
+                     noise_sensor_name());
+        }
+    }
+
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
+        // Still trigger the next DNMS window so we don't lose the cycle's
+        // worth of integration time waiting for WiFi.
+        if (noise_sensor_present()) noise_sensor_trigger();
         return;
     }
     if (!ntp_time_valid()) {
         ESP_LOGW(TAG, "skipping TX: time not valid (no NTP sync yet)");
+        if (noise_sensor_present()) noise_sensor_trigger();
         return;
     }
 
     tx_context_t ctx;
     build_tx_context(&ctx, dt_ms, counts, hv_pulses, min_us, max_us,
                      bme_valid, bme_t, bme_h, bme_p,
-                     pm_valid, &pm);
+                     pm_valid, &pm,
+                     noise_valid, &noise);
     tx_transmit(&ctx);
+
+    // Start the next LAeq window so the next cycle's read covers the full
+    // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —
+    // it just enqueues the snapshot) so we don't add the I²C round-trip to
+    // the user-facing TX latency.
+    if (noise_sensor_present()) {
+        if (noise_sensor_trigger() != ESP_OK) {
+            ESP_LOGW(TAG, "%s: trigger for next window failed", noise_sensor_name());
+        }
+    }
 }
 
 void app_main(void) {
@@ -456,6 +493,11 @@ void app_main(void) {
     // also starts continuous-measurement mode so the fan is running by
     // the time the first TX cycle reads from it.
     pm_sensor_init(env_sensor_get_i2c_bus());
+
+    // Probe for a noise sensor (currently DNMS at 0x55) on the same shared
+    // bus. Init also issues the first CALCULATE_LEQ trigger, so the LAeq
+    // window is integrating by the time the first TX cycle reads it.
+    noise_sensor_init(env_sensor_get_i2c_bus());
 
     // OLED shares the env_sensor I2C bus — bring it up now so the
     // boot splash is visible while WiFi/NTP/etc. come up.

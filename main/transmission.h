@@ -14,7 +14,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "pm_sensor.h"   // pm_sample_t
+#include "pm_sensor.h"      // pm_sample_t
+#include "noise_sensor.h"   // noise_sample_t
 
 // Si22G calibration: µSv/h = cps / 12.2792 (empirical vs. odlinfo.bfs.de reference).
 #define SI22G_CPS_TO_USVPH (1.0f / 12.2792f)
@@ -63,6 +64,14 @@ typedef struct {
     // POST.
     bool        pm_valid;
     pm_sample_t pm;
+
+    // hbitter DNMS noise sensor readings. noise_valid = false means either no
+    // DNMS is attached or the integration window failed — skip all DNMS_noise_*
+    // fields in the payloads. Madavi picks them up in the env body alongside
+    // BME280_* / SPS30_*; sensor.community gets them as a separate X-PIN 15
+    // POST (canonical airrohr DNMS_API_PIN).
+    bool             noise_valid;
+    noise_sample_t   noise;
 
     // Station altitude (m above sea level) and flag for emitting
     // pressure-at-sealevel to sensor.community. When the flag is false the

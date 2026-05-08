@@ -208,7 +208,8 @@ static bool wifi_up(void) {
 static void build_tx_context(tx_context_t *ctx,
                              uint32_t dt_ms, uint32_t counts, uint32_t hv_pulses,
                              uint32_t min_us, uint32_t max_us,
-                             bool bme_valid, float bme_t, float bme_h, float bme_p) {
+                             bool bme_valid, float bme_t, float bme_h, float bme_p,
+                             bool pm_valid, const pm_sample_t *pm) {
     memset(ctx, 0, sizeof(*ctx));
     uint32_t cpm = 0;
     if (dt_ms > 0) {
@@ -223,6 +224,8 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->sw_version   = VERSION_STR;
     ctx->chip_id      = g_chip_id;
     ctx->tube_enabled = g_cfg.tube_enabled;
+    ctx->pm_valid     = pm_valid;
+    if (pm_valid && pm) ctx->pm = *pm;
 
     wifi_ap_record_t ap_rec = { 0 };
     ctx->rssi = (esp_wifi_sta_get_ap_info(&ap_rec) == ESP_OK) ? ap_rec.rssi : -127;
@@ -310,12 +313,15 @@ static void do_tx_cycle(void) {
         }
     }
 
-    // Particulate-matter sample. Logged but not yet uploaded — TX integration
-    // lands in V2.3.2. Driver's data-ready poll keeps this safe even if the
-    // sensor missed an internal 1 Hz tick (drops to ESP_FAIL after ~1 s).
+    // Particulate-matter sample — uploaded to Madavi (combined env body) and
+    // sensor.community (X-PIN 12 POST) when pm_valid. Driver's data-ready
+    // poll keeps this safe even if the sensor missed an internal 1 Hz tick
+    // (drops to ESP_FAIL after ~1 s).
+    pm_sample_t pm = { 0 };
+    bool pm_valid = false;
     if (pm_sensor_present()) {
-        pm_sample_t pm;
         if (pm_sensor_read(&pm) == ESP_OK) {
+            pm_valid = true;
             ESP_LOGI(TAG,
                      "%s: PM1.0=%.1f PM2.5=%.1f PM4.0=%.1f PM10=%.1f µg/m³  "
                      "NC0.5=%.1f NC1=%.1f NC2.5=%.1f NC4=%.1f NC10=%.1f /cm³  "
@@ -340,7 +346,8 @@ static void do_tx_cycle(void) {
 
     tx_context_t ctx;
     build_tx_context(&ctx, dt_ms, counts, hv_pulses, min_us, max_us,
-                     bme_valid, bme_t, bme_h, bme_p);
+                     bme_valid, bme_t, bme_h, bme_p,
+                     pm_valid, &pm);
     tx_transmit(&ctx);
 }
 

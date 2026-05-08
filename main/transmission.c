@@ -188,12 +188,14 @@ static esp_http_client_handle_t open_push_client(const char *url, bool use_insec
 }
 
 // --- Madavi -----------------------------------------------------------------
-// Two POSTs: geiger (Si22G_* + signal) and THP (BME280 T/H/P + pulse stats +
-// signal). Madavi routes by field-name prefix (not X-PIN); the pulse-stats
-// RRDs are written only on the THP request path, so samples / min_micro /
-// max_micro ride with the BME POST. Skip THP entirely when BME is absent.
-//
-// Both POSTs share one TLS session via keep-alive (single client init/cleanup).
+// Up to two POSTs over one keep-alive TLS session:
+//   1. Geiger body (Si22G_* + signal) — only when tube_enabled.
+//   2. Environmental body — only when env or PM sensor data is available.
+//      Combines BME280_* (T/H/P), SPS30_* (PM mass + number conc + size),
+//      and the Geiger pulse stats (samples / min_micro / max_micro) on the
+//      back of which the Madavi side writes the pulse-stats RRDs.
+// Madavi routes by field-name prefix (not X-PIN), so combining BME + PM in
+// one body is the canonical form (matches dusty-code's approach).
 
 static void build_madavi_geiger_body(const tx_context_t *c, char *buf, size_t cap) {
     snprintf(buf, cap,
@@ -212,21 +214,51 @@ static void build_madavi_geiger_body(const tx_context_t *c, char *buf, size_t ca
         (int)c->rssi);
 }
 
-static void build_madavi_thp_body(const tx_context_t *c, char *buf, size_t cap) {
-    bool have_pulse_stats = (c->gm_counts > 1);
+// Build the Madavi "environmental" body (renamed from thp). Combines every
+// non-radiation source into one POST, plus pulse-stats and signal at the end.
+// Caller must ensure at least one of bme_valid / pm_valid / pulse-stats is
+// present; an empty body is harmless but wastes a POST.
+static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) {
+    bool have_pulse_stats = c->tube_enabled && (c->gm_counts > 1);
     int n = snprintf(buf, cap,
         "{\n"
         " \"software_version\": \"%s\",\n"
-        " \"sensordatavalues\": [\n"
-        "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
-        c->sw_version,
-        c->bme_temperature_c, c->bme_humidity_pct,
-        c->bme_pressure_pa);
-    if (have_pulse_stats) {
+        " \"sensordatavalues\": [\n",
+        c->sw_version);
+
+    bool first = true;
+    #define COMMA() do { if (!first) n += snprintf(buf + n, cap - n, ",\n"); first = false; } while (0)
+
+    if (c->bme_valid) {
+        COMMA();
         n += snprintf(buf + n, cap - n,
-            ",\n"
+            "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
+            c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+    }
+    if (c->pm_valid) {
+        // SPS30_* prefix matches Madavi's field-prefix routing convention
+        // — keeps the PM RRDs separate from BME280_* in the back-end.
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N05\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
+            c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
+            c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
+            c->pm.typ_size_um);
+    }
+    if (have_pulse_stats) {
+        COMMA();
+        n += snprintf(buf + n, cap - n,
             "  {\"value_type\": \"samples\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"min_micro\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"max_micro\", \"value\": \"%lu\"}",
@@ -234,17 +266,17 @@ static void build_madavi_thp_body(const tx_context_t *c, char *buf, size_t cap) 
             (unsigned long)c->min_micro,
             (unsigned long)c->max_micro);
     }
+    COMMA();
     n += snprintf(buf + n, cap - n,
-        ",\n"
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
         " ]\n}",
         (int)c->rssi);
+    #undef COMMA
 }
 
 static int send_madavi(const tx_context_t *c) {
-    // Caller (tx_run) already pre-gates on (tube_enabled || bme_valid), but
-    // keep the defensive check so the function is safe to call directly.
-    if (!c->tube_enabled && !c->bme_valid) return 0;
+    bool have_env = c->bme_valid || c->pm_valid;
+    if (!c->tube_enabled && !have_env) return 0;
 
     const char *url = c->madavi.use_https ? c->madavi.url_https : c->madavi.url_http;
     esp_http_client_handle_t client =
@@ -254,52 +286,50 @@ static int send_madavi(const tx_context_t *c) {
         return -1;
     }
 
-    char body[700];
+    // Body buffer sized for the worst case: BME (3 fields) + SPS30 (10 fields)
+    // + pulse stats (3 fields) + signal + boilerplate. ~1200 bytes is generous.
+    char body[1280];
 
-    // Geiger POST — skipped entirely when tube is disabled.
     int rc_g = 0;
     if (c->tube_enabled) {
         build_madavi_geiger_body(c, body, sizeof(body));
         rc_g = post_with_retry(client, "Madavi", "geiger", NULL, body);
     }
 
-    // THP POST — skipped when no env sensor is present, or when the geiger
-    // POST already failed at transport level (no point doubling up an
-    // already-broken TLS session). When tube is disabled the geiger gate
-    // doesn't apply.
-    int rc_t = 0;
-    if (c->bme_valid && (!c->tube_enabled || rc_g > 0)) {
-        build_madavi_thp_body(c, body, sizeof(body));
-        rc_t = post_with_retry(client, "Madavi", "thp", NULL, body);
+    // Environmental POST — runs whenever any non-radiation source is live.
+    // Skipped when the geiger POST failed at transport level so we don't pile
+    // a second POST onto an already-broken TLS session.
+    int rc_e = 0;
+    if (have_env && (!c->tube_enabled || rc_g > 0)) {
+        build_madavi_env_body(c, body, sizeof(body));
+        rc_e = post_with_retry(client, "Madavi", "env", NULL, body);
     }
 
     esp_http_client_cleanup(client);
 
-    // Aggregate result. Each branch reflects which POST(s) actually ran.
-    if (c->tube_enabled && c->bme_valid) {
-        ESP_LOGI(TAG, "Madavi: geiger rc=%d, thp rc=%d", rc_g, rc_t);
-        if (rc_g == 200 && rc_t == 200) return 200;
-        return (rc_g != 200) ? rc_g : rc_t;
+    if (c->tube_enabled && have_env) {
+        ESP_LOGI(TAG, "Madavi: geiger rc=%d, env rc=%d", rc_g, rc_e);
+        if (rc_g == 200 && rc_e == 200) return 200;
+        return (rc_g != 200) ? rc_g : rc_e;
     }
     if (c->tube_enabled) {
         ESP_LOGI(TAG, "Madavi: geiger rc=%d (tube only)", rc_g);
         return rc_g;
     }
-    // tube disabled: only THP ran
-    ESP_LOGI(TAG, "Madavi: thp rc=%d (tube disabled)", rc_t);
-    return rc_t;
+    ESP_LOGI(TAG, "Madavi: env rc=%d (tube disabled)", rc_e);
+    return rc_e;
 }
 
 // --- sensor.community -------------------------------------------------------
-// Two separate POSTs: X-PIN 19 for radiation, X-PIN 11 for BME280. The API
-// routes by pin header; mixing fields in one POST returns 400. BME POST uses
-// lowercase field names (temperature/humidity/pressure) and pressure in hPa
-// (= Pa / 100). Altitude and sealevel values are gated on the checkbox.
-//
-// Both POSTs share ONE TLS session: we create the client once, perform twice
-// (swapping X-PIN + body between calls), then cleanup. No `Connection: close`
-// header so the underlying socket stays alive across perform()s — the second
-// POST avoids its own TCP+TLS handshake (~3–5 s on this hardware).
+// Up to three separate POSTs over one keep-alive TLS session — sensor.community
+// routes by X-PIN header, so each sensor class needs its own POST:
+//   X-PIN 19 — radiation (Si22G; lowercase Luftdaten field names)
+//   X-PIN 11 — BME280 (lowercase temperature/humidity/pressure; pressure in hPa)
+//   X-PIN 12 — Sensirion SPS30 (SPS30_* prefixed Luftdaten field names; canonical
+//              SPS30 PIN per airrohr-firmware convention)
+// Mixing fields across PIN classes in one POST returns 400 from the SC API.
+// All three POSTs share ONE underlying TCP+TLS connection thanks to keep-alive
+// — we set the X-PIN header per-perform but never close the socket.
 
 static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t cap) {
     float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;  // mSv/h
@@ -316,6 +346,33 @@ static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t c
         c->sw_version,
         (unsigned long)c->cpm, (unsigned long)c->hv_pulses,
         (unsigned long)c->gm_counts, (unsigned long)c->dt_ms, msi);
+}
+
+// X-PIN 12 body for Sensirion SPS30. SPS30_* prefix is what newer airrohr-
+// firmware emits and what Madavi expects too — keeps the wire payload identical
+// to the Madavi env body's SPS30 portion. typ_size_um carries 3 decimals because
+// the value range (~0.3..1.0 µm typical) needs the precision; mass and number
+// concentrations are fine at 2 decimals.
+static void build_sensorc_pm_body(const tx_context_t *c, char *buf, size_t cap) {
+    snprintf(buf, cap,
+        "{\n"
+        " \"software_version\": \"%s\",\n"
+        " \"sensordatavalues\": [\n"
+        "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_P1\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_N05\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}\n"
+        " ]\n}",
+        c->sw_version,
+        c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
+        c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
+        c->pm.typ_size_um);
 }
 
 static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap) {
@@ -341,8 +398,15 @@ static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap)
     snprintf(buf + n, cap - n, "\n ]\n}");
 }
 
+// True if a previously-attempted POST in the same TLS session failed at
+// transport level (rc <= 0). When that happens later POSTs in the same
+// session usually fail too, so we skip them rather than waste retries.
+static inline bool prior_ok(int rc) {
+    return rc == 0 /* not attempted */ || rc > 0 /* attempted, got a status */;
+}
+
 static int send_sensorc(const tx_context_t *c) {
-    if (!c->tube_enabled && !c->bme_valid) return 0;
+    if (!c->tube_enabled && !c->bme_valid && !c->pm_valid) return 0;
 
     const char *url = c->sensorc.use_https ? c->sensorc.url_https : c->sensorc.url_http;
     esp_http_client_handle_t client =
@@ -354,35 +418,38 @@ static int send_sensorc(const tx_context_t *c) {
 
     char body[600];
 
-    // X-PIN 19 (radiation) — skipped when tube is disabled.
     int rc_g = 0;
     if (c->tube_enabled) {
         build_sensorc_geiger_body(c, body, sizeof(body));
         rc_g = post_with_retry(client, "sensor.community", "geiger", "19", body);
     }
 
-    // X-PIN 11 (BME) — skipped when no env sensor is present, or when the
-    // X-PIN 19 POST failed at transport level. When tube is disabled the
-    // geiger gate doesn't apply.
     int rc_b = 0;
-    if (c->bme_valid && (!c->tube_enabled || rc_g > 0)) {
+    if (c->bme_valid && prior_ok(rc_g)) {
         build_sensorc_bme_body(c, body, sizeof(body));
         rc_b = post_with_retry(client, "sensor.community", "bme", "11", body);
     }
 
+    int rc_p = 0;
+    if (c->pm_valid && prior_ok(rc_g) && prior_ok(rc_b)) {
+        build_sensorc_pm_body(c, body, sizeof(body));
+        rc_p = post_with_retry(client, "sensor.community", "pm",  "12", body);
+    }
+
     esp_http_client_cleanup(client);
 
-    if (c->tube_enabled && c->bme_valid) {
-        ESP_LOGI(TAG, "sensor.community: geiger rc=%d, thp rc=%d", rc_g, rc_b);
-        if (rc_g == 201 && rc_b == 201) return 201;
-        return (rc_g != 201) ? rc_g : rc_b;
-    }
-    if (c->tube_enabled) {
-        ESP_LOGI(TAG, "sensor.community: geiger rc=%d (tube only)", rc_g);
-        return rc_g;
-    }
-    ESP_LOGI(TAG, "sensor.community: thp rc=%d (tube disabled)", rc_b);
-    return rc_b;
+    ESP_LOGI(TAG, "sensor.community: geiger rc=%d, bme rc=%d, pm rc=%d "
+             "(ran g=%d b=%d p=%d)",
+             rc_g, rc_b, rc_p,
+             c->tube_enabled, c->bme_valid, c->pm_valid);
+
+    // Aggregate: the first ran-but-not-201 wins; if everything that ran was
+    // 201, return 201. If nothing ran, return 0 (handled at top).
+    int worst = 201;
+    if (c->tube_enabled && rc_g != 201)                                  worst = rc_g;
+    else if (c->bme_valid && prior_ok(rc_g) && rc_b != 201)              worst = rc_b;
+    else if (c->pm_valid  && prior_ok(rc_g) && prior_ok(rc_b) && rc_p != 201) worst = rc_p;
+    return worst;
 }
 
 // --- Radmon -----------------------------------------------------------------
@@ -448,10 +515,10 @@ static void tx_run(tx_context_t *c) {
     ESP_LOGI(TAG, "free heap before TX: %lu bytes / max_alloc=%lu bytes",
              (unsigned long)free_heap, (unsigned long)max_alloc);
 
-    // Madavi and sensor.community accept a mix of radiation + THP payloads,
-    // so they're called whenever EITHER source is live. Radmon is radiation-
-    // only, so it's gated strictly on tube_enabled.
-    bool any_payload = c->tube_enabled || c->bme_valid;
+    // Madavi and sensor.community accept a mix of radiation + env (THP) + PM
+    // payloads, so they're called whenever ANY source is live. Radmon is
+    // radiation-only, so it's gated strictly on tube_enabled.
+    bool any_payload = c->tube_enabled || c->bme_valid || c->pm_valid;
 
     if (c->madavi.enabled && any_payload) {
         if (madavi_skip_remaining > 0) {
@@ -475,7 +542,7 @@ static void tx_run(tx_context_t *c) {
             }
         }
     } else if (c->madavi.enabled) {
-        ESP_LOGI(TAG, "Madavi: skipping (no payload — tube disabled and no env sensor)");
+        ESP_LOGI(TAG, "Madavi: skipping (no payload — tube disabled and no env/PM sensor)");
     }
 
     if (c->sensorc.enabled && any_payload) {
@@ -500,7 +567,7 @@ static void tx_run(tx_context_t *c) {
             }
         }
     } else if (c->sensorc.enabled) {
-        ESP_LOGI(TAG, "sensor.community: skipping (no payload — tube disabled and no env sensor)");
+        ESP_LOGI(TAG, "sensor.community: skipping (no payload — tube disabled and no env/PM sensor)");
     }
 
     if (c->radmon.enabled && c->tube_enabled) {

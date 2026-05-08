@@ -276,7 +276,10 @@ static esp_err_t status_get(httpd_req_t *req) {
 
 // --- GET /config (auth'd form) -----------------------------------------------
 
-#define CFG_FORM_BUF_SIZE 6144
+// Bumped from 6144 in V2.3.3 — adding the openSenseMap + aqi.eco rows pushed
+// the worst-case formatted length past the old ceiling. 8192 has ~1.5 kB
+// headroom for future fields.
+#define CFG_FORM_BUF_SIZE 8192
 
 static esp_err_t config_get(httpd_req_t *req) {
     log_access(req, "GET /config");
@@ -294,6 +297,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     char e_tz[160];
     char e_apn[96], e_host[96];
     char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
+    char e_osm[80], e_aqi[160];
     html_esc(s_cfg->wifi_ssid,     e_ssid, sizeof(e_ssid));
     html_esc(s_cfg->wifi_password, e_pw,   sizeof(e_pw));
     html_esc(s_chip_id,            e_chip, sizeof(e_chip));  // read-only display
@@ -310,6 +314,8 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->ftp_user,      e_fuser, sizeof(e_fuser));
     html_esc(s_cfg->ftp_password,  e_fpw,   sizeof(e_fpw));
     html_esc(s_cfg->ftp_path,      e_fpath, sizeof(e_fpath));
+    html_esc(s_cfg->osm_box_id,    e_osm,   sizeof(e_osm));
+    html_esc(s_cfg->aqi_token,     e_aqi,   sizeof(e_aqi));
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -360,6 +366,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
         "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
         "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
+        "openSenseMap (HTTPS only) — Box ID configured per-device on opensensemap.org</label></div>"
+        "<label>openSenseMap Box ID (24-char MongoDB ObjectId)"
+        "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
+        "aqi.eco (HTTPS only) — token from your aqi.eco account</label></div>"
+        "<label>aqi.eco token"
+        "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label>"
         "<h3>BME280 (environmental)</h3>"
         "<label>Station altitude (m above sea level) "
         "<input type=\"number\" step=\"0.1\" name=\"alt_m\" value=\"%.1f\"></label>"
@@ -438,6 +452,10 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->send_radmon  ? "checked" : "",
         s_cfg->radmon_https ? "checked" : "",
         e_ru, e_rp,
+        s_cfg->send_osm ? "checked" : "",
+        e_osm,
+        s_cfg->send_aqi ? "checked" : "",
+        e_aqi,
         (double)s_cfg->station_altitude_m,
         s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->ftp_enabled ? "checked" : "",
@@ -513,6 +531,8 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.wifi_ps_disabled       = false;
     next.use_external_antenna   = false;
     next.tube_enabled           = false;
+    next.send_osm               = false;
+    next.send_aqi               = false;
 
     char *p = buf;
     while (*p) {
@@ -533,6 +553,10 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "wifi_ps_dis")) next.wifi_ps_disabled = true;
         else if (!strcmp(p, "wifi_ext_a"))  next.use_external_antenna = true;
         else if (!strcmp(p, "tube_en"))   next.tube_enabled  = true;
+        else if (!strcmp(p, "send_osm"))  next.send_osm      = true;
+        else if (!strcmp(p, "osm_box"))   assign_str(next.osm_box_id, sizeof(next.osm_box_id), val);
+        else if (!strcmp(p, "send_aqi"))  next.send_aqi      = true;
+        else if (!strcmp(p, "aqi_tok"))   assign_str(next.aqi_token,  sizeof(next.aqi_token),  val);
         else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
         else if (!strcmp(p, "mad_https")) next.madavi_https  = true;
         else if (!strcmp(p, "send_sc"))   next.send_sensorc  = true;

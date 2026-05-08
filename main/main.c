@@ -260,6 +260,14 @@ static void build_tx_context(tx_context_t *ctx,
     };
     ctx->radmon_user     = g_cfg.radmon_user;
     ctx->radmon_password = g_cfg.radmon_password;
+
+    ctx->send_osm         = g_cfg.send_osm;
+    ctx->osm_use_insecure = false;
+    ctx->osm_box_id       = g_cfg.osm_box_id;
+
+    ctx->send_aqi         = g_cfg.send_aqi;
+    ctx->aqi_use_insecure = false;
+    ctx->aqi_token        = g_cfg.aqi_token;
 }
 
 static void do_tx_cycle(void) {

@@ -486,6 +486,161 @@ static int send_radmon(const tx_context_t *c) {
     return -1;
 }
 
+// --- Combined Luftdaten body (used by openSenseMap + aqi.eco) ---------------
+// Both targets accept the full sensor bundle in a single POST — Si22G_* (radiation),
+// BME280_* (T/H/P), SPS30_* (PM), pulse stats, signal. The fields ride together
+// as `sensordatavalues` array entries. openSenseMap needs the URL query
+// `?luftdaten=1` to switch its parser into Luftdaten compatibility mode; aqi.eco
+// expects the body wrapped with an `esp8266id` field at the top so we emit a
+// slightly different body for that target via `prefix_aqi_id`.
+static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
+                                 bool prefix_aqi_id) {
+    int n = 0;
+    if (prefix_aqi_id) {
+        // aqi.eco: `esp8266id` is the legacy field name from the airrohr fork
+        // — keep it for compatibility, the value is our esp32-N chip ID.
+        n += snprintf(buf + n, cap - n,
+            "{\n"
+            " \"esp8266id\": \"%s\",\n"
+            " \"software_version\": \"%s\",\n"
+            " \"sensordatavalues\": [\n",
+            c->chip_id, c->sw_version);
+    } else {
+        n += snprintf(buf + n, cap - n,
+            "{\n"
+            " \"software_version\": \"%s\",\n"
+            " \"sensordatavalues\": [\n",
+            c->sw_version);
+    }
+
+    bool first = true;
+    #define COMMA() do { if (!first) n += snprintf(buf + n, cap - n, ",\n"); first = false; } while (0)
+
+    if (c->tube_enabled) {
+        // Si22G_* prefix used here too (rather than the lowercase canonical
+        // names sensor.community uses) so the field-name routing on Madavi
+        // and downstream Luftdaten consumers stays consistent.
+        float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"Si22G_counts_per_minute\", \"value\": \"%lu\"},\n"
+            "  {\"value_type\": \"Si22G_hv_pulses\", \"value\": \"%lu\"},\n"
+            "  {\"value_type\": \"Si22G_counts\", \"value\": \"%lu\"},\n"
+            "  {\"value_type\": \"Si22G_sample_time_ms\", \"value\": \"%lu\"},\n"
+            "  {\"value_type\": \"Si22G_radiation_msi\", \"value\": \"%.6f\"}",
+            (unsigned long)c->cpm, (unsigned long)c->hv_pulses,
+            (unsigned long)c->gm_counts, (unsigned long)c->dt_ms, msi);
+        if (c->gm_counts > 1) {
+            n += snprintf(buf + n, cap - n,
+                ",\n"
+                "  {\"value_type\": \"samples\", \"value\": \"%lu\"},\n"
+                "  {\"value_type\": \"min_micro\", \"value\": \"%lu\"},\n"
+                "  {\"value_type\": \"max_micro\", \"value\": \"%lu\"}",
+                (unsigned long)c->gm_counts,
+                (unsigned long)c->min_micro,
+                (unsigned long)c->max_micro);
+        }
+    }
+    if (c->bme_valid) {
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
+            c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+    }
+    if (c->pm_valid) {
+        COMMA();
+        n += snprintf(buf + n, cap - n,
+            "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N05\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
+            c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
+            c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
+            c->pm.typ_size_um);
+    }
+    COMMA();
+    n += snprintf(buf + n, cap - n,
+        "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
+        " ]\n}",
+        (int)c->rssi);
+    #undef COMMA
+}
+
+// --- openSenseMap -----------------------------------------------------------
+// Single HTTPS POST per cycle to ingress.opensensemap.org. The path
+// /boxes/<BOX_ID>/data?luftdaten=1 routes the Luftdaten body into the box's
+// existing channels (mapping is configured per-box in the openSenseMap UI).
+// Success = HTTP 201; any other status counts as a soft failure.
+static int send_osm(const tx_context_t *c) {
+    if (!c->osm_box_id || c->osm_box_id[0] == 0) {
+        ESP_LOGW(TAG, "openSenseMap: box_id empty, skipping");
+        return -3;
+    }
+    char url[160];
+    snprintf(url, sizeof(url),
+             "https://ingress.opensensemap.org/boxes/%s/data?luftdaten=1",
+             c->osm_box_id);
+
+    char body[1400];
+    build_luftdaten_body(c, body, sizeof(body), false);
+
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
+        if (!wifi_up()) return -2;
+        int rc = do_request(url, HTTP_METHOD_POST,
+                            "application/json; charset=UTF-8",
+                            c->chip_id, NULL, body, NULL, c->osm_use_insecure);
+        if (rc == 201 || rc == 200) return rc;
+        if (rc > 0 && rc != 408 && rc < 500) {
+            ESP_LOGW(TAG, "openSenseMap rc=%d (4xx) — not retrying", rc);
+            return rc;
+        }
+        ESP_LOGW(TAG, "openSenseMap rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ESP_LOGW(TAG, "openSenseMap: all retries exhausted");
+    return -1;
+}
+
+// --- aqi.eco ----------------------------------------------------------------
+// Single HTTPS POST per cycle to api.aqi.eco/update/<TOKEN>. Body is the
+// Luftdaten bundle wrapped with an `esp8266id` field — server uses this to
+// match the device against the user's account. Success = HTTP 200.
+static int send_aqi(const tx_context_t *c) {
+    if (!c->aqi_token || c->aqi_token[0] == 0) {
+        ESP_LOGW(TAG, "aqi.eco: token empty, skipping");
+        return -3;
+    }
+    char url[160];
+    snprintf(url, sizeof(url), "https://api.aqi.eco/update/%s", c->aqi_token);
+
+    char body[1500];   // slightly larger than OSM body — extra esp8266id field
+    build_luftdaten_body(c, body, sizeof(body), true);
+
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
+        if (!wifi_up()) return -2;
+        int rc = do_request(url, HTTP_METHOD_POST,
+                            "application/json; charset=UTF-8",
+                            c->chip_id, NULL, body, NULL, c->aqi_use_insecure);
+        if (rc == 200 || rc == 201) return rc;
+        if (rc > 0 && rc != 408 && rc < 500) {
+            ESP_LOGW(TAG, "aqi.eco rc=%d (4xx) — not retrying", rc);
+            return rc;
+        }
+        ESP_LOGW(TAG, "aqi.eco rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    ESP_LOGW(TAG, "aqi.eco: all retries exhausted");
+    return -1;
+}
+
 // --- Orchestrator -----------------------------------------------------------
 
 bool tx_is_idle(void) {
@@ -509,6 +664,10 @@ static void tx_run(tx_context_t *c) {
     static int sensorc_skip_remaining = 0;
     static int radmon_fail_streak    = 0;
     static int radmon_skip_remaining = 0;
+    static int osm_fail_streak       = 0;
+    static int osm_skip_remaining    = 0;
+    static int aqi_fail_streak       = 0;
+    static int aqi_skip_remaining    = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -593,5 +752,55 @@ static void tx_run(tx_context_t *c) {
         }
     } else if (c->radmon.enabled) {
         ESP_LOGI(TAG, "Radmon: skipping (tube disabled — Radmon is radiation-only)");
+    }
+
+    if (c->send_osm && any_payload) {
+        if (osm_skip_remaining > 0) {
+            osm_skip_remaining--;
+            ESP_LOGI(TAG, "openSenseMap: breaker open (%d cycles left)", osm_skip_remaining);
+        } else {
+            ESP_LOGI(TAG, "Sending to openSenseMap (https)");
+            int rc = send_osm(c);
+            bool ok = (rc == 201 || rc == 200);
+            ESP_LOGI(TAG, "openSenseMap: %s (rc=%d)", ok ? "ok" : "error", rc);
+            if (ok) {
+                osm_fail_streak = 0;
+            } else if (rc == -1) {
+                osm_fail_streak++;
+                if (osm_fail_streak >= TX_CB_FAIL_THRESHOLD) {
+                    osm_skip_remaining = TX_CB_SKIP_CYCLES;
+                    ESP_LOGW(TAG, "openSenseMap: %d fails, breaker open for %d cycles",
+                             osm_fail_streak, TX_CB_SKIP_CYCLES);
+                    osm_fail_streak = 0;
+                }
+            }
+        }
+    } else if (c->send_osm) {
+        ESP_LOGI(TAG, "openSenseMap: skipping (no payload)");
+    }
+
+    if (c->send_aqi && any_payload) {
+        if (aqi_skip_remaining > 0) {
+            aqi_skip_remaining--;
+            ESP_LOGI(TAG, "aqi.eco: breaker open (%d cycles left)", aqi_skip_remaining);
+        } else {
+            ESP_LOGI(TAG, "Sending to aqi.eco (https)");
+            int rc = send_aqi(c);
+            bool ok = (rc == 200 || rc == 201);
+            ESP_LOGI(TAG, "aqi.eco: %s (rc=%d)", ok ? "ok" : "error", rc);
+            if (ok) {
+                aqi_fail_streak = 0;
+            } else if (rc == -1) {
+                aqi_fail_streak++;
+                if (aqi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
+                    aqi_skip_remaining = TX_CB_SKIP_CYCLES;
+                    ESP_LOGW(TAG, "aqi.eco: %d fails, breaker open for %d cycles",
+                             aqi_fail_streak, TX_CB_SKIP_CYCLES);
+                    aqi_fail_streak = 0;
+                }
+            }
+        }
+    } else if (c->send_aqi) {
+        ESP_LOGI(TAG, "aqi.eco: skipping (no payload)");
     }
 }

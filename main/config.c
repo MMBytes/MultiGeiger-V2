@@ -54,6 +54,10 @@ static const char *NS  = "geiger";
 #define DEF_WIFI_PS_DISABLED false
 #define DEF_USE_EXT_ANTENNA  false
 #define DEF_TUBE_ENABLED     true
+#define DEF_SEND_OSM         false
+#define DEF_OSM_BOX_ID       ""
+#define DEF_SEND_AQI         false
+#define DEF_AQI_TOKEN        ""
 
 void config_defaults(config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -94,6 +98,10 @@ void config_defaults(config_t *cfg) {
     cfg->wifi_ps_disabled     = DEF_WIFI_PS_DISABLED;
     cfg->use_external_antenna = DEF_USE_EXT_ANTENNA;
     cfg->tube_enabled         = DEF_TUBE_ENABLED;
+    cfg->send_osm             = DEF_SEND_OSM;
+    strncpy(cfg->osm_box_id, DEF_OSM_BOX_ID, sizeof(cfg->osm_box_id) - 1);
+    cfg->send_aqi             = DEF_SEND_AQI;
+    strncpy(cfg->aqi_token,  DEF_AQI_TOKEN,  sizeof(cfg->aqi_token)  - 1);
 }
 
 static void load_str(nvs_handle_t h, const char *key, char *buf, size_t bufsz) {
@@ -169,6 +177,10 @@ void config_load(config_t *cfg) {
     load_bool(h, "play_sound", &cfg->play_sound);
     load_bool(h, "show_disp",  &cfg->show_display);
     load_bool(h, "tube_en",    &cfg->tube_enabled);
+    load_bool(h, "send_osm",   &cfg->send_osm);
+    load_str (h, "osm_box",    cfg->osm_box_id, sizeof(cfg->osm_box_id));
+    load_bool(h, "send_aqi",   &cfg->send_aqi);
+    load_str (h, "aqi_tok",    cfg->aqi_token,  sizeof(cfg->aqi_token));
     nvs_close(h);
     ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
@@ -209,6 +221,10 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d",
              cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display);
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
+    ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
+             cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
+    ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
+             cfg->send_aqi, MASK(cfg->aqi_token));
     #undef MASK
 }
 
@@ -260,6 +276,10 @@ esp_err_t config_save(const config_t *cfg) {
     SET_U8 ("play_sound", cfg->play_sound);
     SET_U8 ("show_disp",  cfg->show_display);
     SET_U8 ("tube_en",    cfg->tube_enabled);
+    SET_U8 ("send_osm",   cfg->send_osm);
+    SET_STR("osm_box",    cfg->osm_box_id);
+    SET_U8 ("send_aqi",   cfg->send_aqi);
+    SET_STR("aqi_tok",    cfg->aqi_token);
     err = nvs_commit(h);
     #undef SET_STR
     #undef SET_U8

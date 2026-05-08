@@ -83,6 +83,20 @@ typedef struct {
     tx_target_t radmon;
     const char *radmon_user;
     const char *radmon_password;
+
+    // openSenseMap — single HTTPS POST per cycle to ingress.opensensemap.org
+    // /boxes/<box_id>/data?luftdaten=1. Body is the standard combined
+    // Luftdaten payload (Si22G_* + BME280_* + SPS30_* fields).
+    bool        send_osm;
+    bool        osm_use_insecure;
+    const char *osm_box_id;
+
+    // aqi.eco — single HTTPS POST per cycle to api.aqi.eco/update/<token>.
+    // Body is the standard Luftdaten payload prefixed with an esp8266id
+    // field (legacy field name, accepts our esp32-N chip ID format).
+    bool        send_aqi;
+    bool        aqi_use_insecure;
+    const char *aqi_token;
 } tx_context_t;
 
 /** @brief Create the worker task and queue. Call once at boot. */

@@ -213,14 +213,15 @@ static void build_tx_context(tx_context_t *ctx,
     if (dt_ms > 0) {
         cpm = (uint32_t)(((uint64_t)counts * 60000ULL) / dt_ms);
     }
-    ctx->dt_ms      = dt_ms;
-    ctx->gm_counts  = counts;
-    ctx->cpm        = cpm;
-    ctx->hv_pulses  = hv_pulses;
-    ctx->min_micro  = (min_us == UINT32_MAX) ? 0 : min_us;
-    ctx->max_micro  = max_us;
-    ctx->sw_version = VERSION_STR;
-    ctx->chip_id    = g_chip_id;
+    ctx->dt_ms        = dt_ms;
+    ctx->gm_counts    = counts;
+    ctx->cpm          = cpm;
+    ctx->hv_pulses    = hv_pulses;
+    ctx->min_micro    = (min_us == UINT32_MAX) ? 0 : min_us;
+    ctx->max_micro    = max_us;
+    ctx->sw_version   = VERSION_STR;
+    ctx->chip_id      = g_chip_id;
+    ctx->tube_enabled = g_cfg.tube_enabled;
 
     wifi_ap_record_t ap_rec = { 0 };
     ctx->rssi = (esp_wifi_sta_get_ap_info(&ap_rec) == ESP_OK) ? ap_rec.rssi : -127;
@@ -267,18 +268,33 @@ static void do_tx_cycle(void) {
     uint32_t cpm = (dt_ms > 0) ? (uint32_t)(((uint64_t)counts * 60000ULL) / dt_ms) : 0;
     wifi_ap_record_t ap_rec = { 0 };
     int rssi = (esp_wifi_sta_get_ap_info(&ap_rec) == ESP_OK) ? ap_rec.rssi : -127;
-    ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
-             "hv_pulses=%lu hv_err=%d min_us=%lu max_us=%lu rssi=%ddBm",
-             (unsigned long)++tx_cycles, (unsigned long)dt_ms,
-             (unsigned long)counts, (unsigned long)cpm, usvph,
-             (unsigned long)hv_pulses, hv_error,
-             (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
-             (unsigned long)max_us, rssi);
 
-    display_set_status(DSP_STATUS_HV, hv_error ? DSP_HV_ERROR : DSP_HV_OK);
+    // Two CYCLE log line shapes — the long one (Geiger active) carries radiation
+    // metrics, the short one (tube disabled) keeps just dt + rssi so logs stay
+    // readable on PM-only deployments.
+    if (g_cfg.tube_enabled) {
+        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
+                 "hv_pulses=%lu hv_err=%d min_us=%lu max_us=%lu rssi=%ddBm",
+                 (unsigned long)++tx_cycles, (unsigned long)dt_ms,
+                 (unsigned long)counts, (unsigned long)cpm, usvph,
+                 (unsigned long)hv_pulses, hv_error,
+                 (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
+                 (unsigned long)max_us, rssi);
+    } else {
+        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm",
+                 (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi);
+    }
+
+    // Display: when the tube is disabled the radiation/CPM areas show zero
+    // (placeholder — the OLED driver still draws layout). HV status is forced
+    // OK because the HV pump isn't running, so there's nothing to fail.
+    display_set_status(DSP_STATUS_HV,
+                       (!g_cfg.tube_enabled) ? DSP_HV_OK :
+                       (hv_error ? DSP_HV_ERROR : DSP_HV_OK));
     int time_sec   = (int)(esp_timer_get_time() / 1000000LL);
-    int rad_nsvph  = (int)(usvph * 1000.0f);
-    display_running(time_sec, rad_nsvph, (int)cpm, g_cfg.show_display);
+    int rad_nsvph  = g_cfg.tube_enabled ? (int)(usvph * 1000.0f) : 0;
+    int cpm_disp   = g_cfg.tube_enabled ? (int)cpm : 0;
+    display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
@@ -439,7 +455,10 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_set_ps(g_cfg.wifi_ps_disabled ? WIFI_PS_NONE : WIFI_PS_MIN_MODEM));
 
     // Tube runs from boot regardless of WiFi state — counts accumulate in ISR.
-    tube_setup();
+    // When tube_enabled is false the call still configures HV_FET as a static
+    // LOW output but skips ISR install + HV gptimer; speaker pulse callback
+    // can still be registered (it just never fires without ISR pulses).
+    tube_setup(g_cfg.tube_enabled);
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
     tx_setup();
     http_server_start(&g_cfg, g_chip_id);

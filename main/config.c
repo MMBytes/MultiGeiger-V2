@@ -53,6 +53,7 @@ static const char *NS  = "geiger";
 #define DEF_WIFI_HT20_ONLY  false
 #define DEF_WIFI_PS_DISABLED false
 #define DEF_USE_EXT_ANTENNA  false
+#define DEF_TUBE_ENABLED     true
 
 void config_defaults(config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -92,6 +93,7 @@ void config_defaults(config_t *cfg) {
     cfg->wifi_ht20_only       = DEF_WIFI_HT20_ONLY;
     cfg->wifi_ps_disabled     = DEF_WIFI_PS_DISABLED;
     cfg->use_external_antenna = DEF_USE_EXT_ANTENNA;
+    cfg->tube_enabled         = DEF_TUBE_ENABLED;
 }
 
 static void load_str(nvs_handle_t h, const char *key, char *buf, size_t bufsz) {
@@ -166,6 +168,7 @@ void config_load(config_t *cfg) {
     load_bool(h, "led_tick",   &cfg->led_tick);
     load_bool(h, "play_sound", &cfg->play_sound);
     load_bool(h, "show_disp",  &cfg->show_display);
+    load_bool(h, "tube_en",    &cfg->tube_enabled);
     nvs_close(h);
     ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
@@ -205,6 +208,7 @@ void config_load(config_t *cfg) {
              (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled);
     ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d",
              cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display);
+    ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     #undef MASK
 }
 
@@ -255,6 +259,7 @@ esp_err_t config_save(const config_t *cfg) {
     SET_U8 ("led_tick",   cfg->led_tick);
     SET_U8 ("play_sound", cfg->play_sound);
     SET_U8 ("show_disp",  cfg->show_display);
+    SET_U8 ("tube_en",    cfg->tube_enabled);
     err = nvs_commit(h);
     #undef SET_STR
     #undef SET_U8

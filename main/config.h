@@ -117,6 +117,19 @@ typedef struct {
     bool     led_tick;
     bool     play_sound;
     bool     show_display;
+
+    // When false, the Geiger subsystem is fully disabled at boot:
+    //   - tube_setup() skips ISR install, HV gptimer and HV charge-pump GPIOs
+    //     (HV_FET is driven LOW so the boost MOSFET stays off, but no
+    //     recharge cycles run and no edge interrupts fire).
+    //   - tube_read() returns zero counts / dt_ms / hv_pulses.
+    //   - Radiation upload paths are skipped (Madavi geiger POST, sensor.community
+    //     X-PIN 19 POST, and Radmon entirely). Madavi/SC THP paths still run if
+    //     an env sensor is present.
+    // Default true — preserves the original Geiger-counter behaviour when
+    // upgrading from V2.2.x. Toggle requires reboot (config_post sets the
+    // restart flag automatically).
+    bool     tube_enabled;
 } config_t;
 
 /** @brief Fill cfg with compile-time defaults. Always safe to call. */

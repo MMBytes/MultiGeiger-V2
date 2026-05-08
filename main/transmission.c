@@ -242,6 +242,10 @@ static void build_madavi_thp_body(const tx_context_t *c, char *buf, size_t cap) 
 }
 
 static int send_madavi(const tx_context_t *c) {
+    // Caller (tx_run) already pre-gates on (tube_enabled || bme_valid), but
+    // keep the defensive check so the function is safe to call directly.
+    if (!c->tube_enabled && !c->bme_valid) return 0;
+
     const char *url = c->madavi.use_https ? c->madavi.url_https : c->madavi.url_http;
     esp_http_client_handle_t client =
         open_push_client(url, c->madavi.use_insecure, c->chip_id);
@@ -252,23 +256,38 @@ static int send_madavi(const tx_context_t *c) {
 
     char body[700];
 
-    build_madavi_geiger_body(c, body, sizeof(body));
-    int rc_g = post_with_retry(client, "Madavi", "geiger", NULL, body);
+    // Geiger POST — skipped entirely when tube is disabled.
+    int rc_g = 0;
+    if (c->tube_enabled) {
+        build_madavi_geiger_body(c, body, sizeof(body));
+        rc_g = post_with_retry(client, "Madavi", "geiger", NULL, body);
+    }
 
-    int rc_t = rc_g;
-    if (c->bme_valid && rc_g > 0) {
+    // THP POST — skipped when no env sensor is present, or when the geiger
+    // POST already failed at transport level (no point doubling up an
+    // already-broken TLS session). When tube is disabled the geiger gate
+    // doesn't apply.
+    int rc_t = 0;
+    if (c->bme_valid && (!c->tube_enabled || rc_g > 0)) {
         build_madavi_thp_body(c, body, sizeof(body));
         rc_t = post_with_retry(client, "Madavi", "thp", NULL, body);
     }
 
     esp_http_client_cleanup(client);
 
-    if (c->bme_valid) {
+    // Aggregate result. Each branch reflects which POST(s) actually ran.
+    if (c->tube_enabled && c->bme_valid) {
         ESP_LOGI(TAG, "Madavi: geiger rc=%d, thp rc=%d", rc_g, rc_t);
+        if (rc_g == 200 && rc_t == 200) return 200;
+        return (rc_g != 200) ? rc_g : rc_t;
     }
-    if (!c->bme_valid) return rc_g;
-    if (rc_g == 200 && rc_t == 200) return 200;
-    return (rc_g != 200) ? rc_g : rc_t;
+    if (c->tube_enabled) {
+        ESP_LOGI(TAG, "Madavi: geiger rc=%d (tube only)", rc_g);
+        return rc_g;
+    }
+    // tube disabled: only THP ran
+    ESP_LOGI(TAG, "Madavi: thp rc=%d (tube disabled)", rc_t);
+    return rc_t;
 }
 
 // --- sensor.community -------------------------------------------------------
@@ -323,6 +342,8 @@ static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap)
 }
 
 static int send_sensorc(const tx_context_t *c) {
+    if (!c->tube_enabled && !c->bme_valid) return 0;
+
     const char *url = c->sensorc.use_https ? c->sensorc.url_https : c->sensorc.url_http;
     esp_http_client_handle_t client =
         open_push_client(url, c->sensorc.use_insecure, c->chip_id);
@@ -333,23 +354,35 @@ static int send_sensorc(const tx_context_t *c) {
 
     char body[600];
 
-    build_sensorc_geiger_body(c, body, sizeof(body));
-    int rc_g = post_with_retry(client, "sensor.community", "geiger", "19", body);
+    // X-PIN 19 (radiation) — skipped when tube is disabled.
+    int rc_g = 0;
+    if (c->tube_enabled) {
+        build_sensorc_geiger_body(c, body, sizeof(body));
+        rc_g = post_with_retry(client, "sensor.community", "geiger", "19", body);
+    }
 
-    int rc_b = rc_g;
-    if (c->bme_valid && rc_g > 0) {
+    // X-PIN 11 (BME) — skipped when no env sensor is present, or when the
+    // X-PIN 19 POST failed at transport level. When tube is disabled the
+    // geiger gate doesn't apply.
+    int rc_b = 0;
+    if (c->bme_valid && (!c->tube_enabled || rc_g > 0)) {
         build_sensorc_bme_body(c, body, sizeof(body));
         rc_b = post_with_retry(client, "sensor.community", "bme", "11", body);
     }
 
     esp_http_client_cleanup(client);
 
-    if (c->bme_valid) {
+    if (c->tube_enabled && c->bme_valid) {
         ESP_LOGI(TAG, "sensor.community: geiger rc=%d, thp rc=%d", rc_g, rc_b);
+        if (rc_g == 201 && rc_b == 201) return 201;
+        return (rc_g != 201) ? rc_g : rc_b;
     }
-    if (!c->bme_valid) return rc_g;
-    if (rc_g == 201 && rc_b == 201) return 201;
-    return (rc_g != 201) ? rc_g : rc_b;
+    if (c->tube_enabled) {
+        ESP_LOGI(TAG, "sensor.community: geiger rc=%d (tube only)", rc_g);
+        return rc_g;
+    }
+    ESP_LOGI(TAG, "sensor.community: thp rc=%d (tube disabled)", rc_b);
+    return rc_b;
 }
 
 // --- Radmon -----------------------------------------------------------------
@@ -415,7 +448,12 @@ static void tx_run(tx_context_t *c) {
     ESP_LOGI(TAG, "free heap before TX: %lu bytes / max_alloc=%lu bytes",
              (unsigned long)free_heap, (unsigned long)max_alloc);
 
-    if (c->madavi.enabled) {
+    // Madavi and sensor.community accept a mix of radiation + THP payloads,
+    // so they're called whenever EITHER source is live. Radmon is radiation-
+    // only, so it's gated strictly on tube_enabled.
+    bool any_payload = c->tube_enabled || c->bme_valid;
+
+    if (c->madavi.enabled && any_payload) {
         if (madavi_skip_remaining > 0) {
             madavi_skip_remaining--;
             ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)", madavi_skip_remaining);
@@ -436,9 +474,11 @@ static void tx_run(tx_context_t *c) {
                 }
             }
         }
+    } else if (c->madavi.enabled) {
+        ESP_LOGI(TAG, "Madavi: skipping (no payload — tube disabled and no env sensor)");
     }
 
-    if (c->sensorc.enabled) {
+    if (c->sensorc.enabled && any_payload) {
         if (sensorc_skip_remaining > 0) {
             sensorc_skip_remaining--;
             ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)", sensorc_skip_remaining);
@@ -459,9 +499,11 @@ static void tx_run(tx_context_t *c) {
                 }
             }
         }
+    } else if (c->sensorc.enabled) {
+        ESP_LOGI(TAG, "sensor.community: skipping (no payload — tube disabled and no env sensor)");
     }
 
-    if (c->radmon.enabled) {
+    if (c->radmon.enabled && c->tube_enabled) {
         if (radmon_skip_remaining > 0) {
             radmon_skip_remaining--;
             ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)", radmon_skip_remaining);
@@ -482,5 +524,7 @@ static void tx_run(tx_context_t *c) {
                 }
             }
         }
+    } else if (c->radmon.enabled) {
+        ESP_LOGI(TAG, "Radmon: skipping (tube disabled — Radmon is radiation-only)");
     }
 }

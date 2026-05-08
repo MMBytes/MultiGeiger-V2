@@ -345,6 +345,12 @@ static esp_err_t config_get(httpd_req_t *req) {
         "%s</label></div>"
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
+        "<h3>Hardware</h3>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" %s> "
+        "Enable Geiger tube (HV pump, pulse counter, radiation uploads). "
+        "Uncheck for non-Geiger deployments — disables HV/ISR/gptimer at boot "
+        "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
+        "Reboot required.</label></div>"
         "<h3>Transmission targets</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
@@ -424,6 +430,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         " <small>(not available on this board)</small>",
 #endif
         e_chip, s_mac_str,
+        s_cfg->tube_enabled ? "checked" : "",
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",
@@ -505,6 +512,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.wifi_ht20_only         = false;
     next.wifi_ps_disabled       = false;
     next.use_external_antenna   = false;
+    next.tube_enabled           = false;
 
     char *p = buf;
     while (*p) {
@@ -524,6 +532,7 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "wifi_ht20"))  next.wifi_ht20_only   = true;
         else if (!strcmp(p, "wifi_ps_dis")) next.wifi_ps_disabled = true;
         else if (!strcmp(p, "wifi_ext_a"))  next.use_external_antenna = true;
+        else if (!strcmp(p, "tube_en"))   next.tube_enabled  = true;
         else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
         else if (!strcmp(p, "mad_https")) next.madavi_https  = true;
         else if (!strcmp(p, "send_sc"))   next.send_sensorc  = true;

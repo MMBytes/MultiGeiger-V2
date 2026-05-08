@@ -12,6 +12,12 @@
 
 static const char *TAG = "tube";
 
+// Runtime enable flag. Set once at boot from tube_setup(enabled). When false,
+// no GPIO interrupts or recharge gptimer are installed, and tube_read() short-
+// circuits to zeros. We intentionally store this here rather than threading
+// it through every caller so the disabled state is invisible to consumers.
+static bool s_enabled = false;
+
 // --- Pulse counter state ---
 static volatile uint32_t isr_gmc_counts     = 0;
 static volatile uint64_t isr_last_pulse_us  = 0;
@@ -146,8 +152,13 @@ static void IRAM_ATTR cap_full_isr(void *arg) {
     portEXIT_CRITICAL_ISR(&mux_cap);
 }
 
-void tube_setup(void) {
-    // HV output
+void tube_setup(bool enabled) {
+    s_enabled = enabled;
+
+    // Always configure HV_FET as a static LOW output, even when disabled.
+    // The boost MOSFET gate must be held at a known potential — leaving it
+    // floating risks parasitic switching from coupled noise. With the FET
+    // gate forced LOW the inductor doesn't cycle and HV stays at 0 V.
     gpio_config_t out_cfg = {
         .pin_bit_mask = 1ULL << PIN_HV_FET_OUTPUT,
         .mode = GPIO_MODE_OUTPUT,
@@ -157,6 +168,13 @@ void tube_setup(void) {
     };
     ESP_ERROR_CHECK(gpio_config(&out_cfg));
     gpio_set_level(PIN_HV_FET_OUTPUT, 0);
+
+    if (!enabled) {
+        last_read_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "tube setup: DISABLED — HV_FET=%d held LOW, ISRs and HV gptimer skipped",
+                 PIN_HV_FET_OUTPUT);
+        return;
+    }
 
     // Cap-full: RISING edge
     gpio_config_t cap_cfg = {
@@ -212,6 +230,17 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
     *dt_ms = (uint32_t)((now - last_read_us) / 1000);
     last_read_us = now;
 
+    if (!s_enabled) {
+        // Window timer (dt_ms) still advances so other sensors can rate-divide
+        // against a known interval. Everything radiation-related is zeroed.
+        *counts_delta = 0;
+        *min_us       = 0;
+        *max_us       = 0;
+        *hv_pulses    = 0;
+        *hv_error     = false;
+        return;
+    }
+
     portENTER_CRITICAL(&mux_gmc);
     *counts_delta = isr_gmc_counts;
     *min_us       = isr_min_us_between;
@@ -225,4 +254,8 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
     *hv_pulses = isr_hv_pulses;
     *hv_error  = isr_hv_error;
     portEXIT_CRITICAL(&mux_hv);
+}
+
+bool tube_is_enabled(void) {
+    return s_enabled;
 }

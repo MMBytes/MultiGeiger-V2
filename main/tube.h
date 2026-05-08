@@ -21,8 +21,15 @@
 // Si22G dead time (µs). Rejects rising-edge noise on the count input.
 #define GMC_DEAD_TIME_US 190
 
-/** @brief Configure GPIOs, install ISRs, and start the recharge timer. */
-void tube_setup(void);
+/** @brief Configure GPIOs, install ISRs, and start the recharge timer.
+ *
+ *  @param enabled  When false, configures HV_FET as a static LOW output
+ *                  (keeps the boost MOSFET off) and skips ISR install +
+ *                  gptimer setup entirely. tube_read() then returns zeros.
+ *                  Lets the firmware run as a non-Geiger node without the
+ *                  HV charge pump cycling.
+ */
+void tube_setup(bool enabled);
 
 /** @brief Snapshot and reset the accumulators.
  *  @param counts_delta  Out: new pulses since the last call.
@@ -32,10 +39,17 @@ void tube_setup(void);
  *  @param hv_pulses     Out: cumulative HV charge pulses since boot.
  *  @param hv_error      Out: true if the last charge cycle hit MAX_CHARGE_PULSES
  *                       (indicates tube vacuum failure or HV fault).
+ *
+ *  When the tube is disabled (tube_setup(false)), all outputs are zeroed
+ *  except dt_ms, which still tracks the wall-clock window so callers can
+ *  compute rates from other sensors against a known interval.
  */
 void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
                uint32_t *min_us, uint32_t *max_us,
                uint32_t *hv_pulses, bool *hv_error);
+
+/** @brief True if tube_setup(true) was called at boot. */
+bool tube_is_enabled(void);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

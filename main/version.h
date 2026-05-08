@@ -1,7 +1,10 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.2.1 — FeatherS3-D bring-up prep:
-//   - Pin remap to Feather A0..A5 (left-edge) for cross-Feather portability
-//   - External-antenna toggle in /config (FeatherS3-D u.FL on IO41 = HIGH)
-// Heltec V2 build is byte-for-byte equivalent to V2.2.0 in observed behaviour.
-#define VERSION_STR "V2.2.1"
+// V2.3.0 — Tube optional:
+//   - New tube_enabled config flag (default true). When false the Geiger
+//     subsystem is fully disabled — no HV/ISR/gptimer setup, tube_read
+//     returns zeros, and Madavi/sensor.community/Radmon skip the radiation
+//     payload paths (Madavi sends THP only; sensor.community sends X-PIN 11
+//     only; Radmon is skipped entirely). Lets the codebase run as a non-
+//     Geiger air-quality node when paired with PM/THP sensors.
+#define VERSION_STR "V2.3.0"

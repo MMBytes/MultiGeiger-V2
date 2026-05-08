@@ -40,6 +40,13 @@ typedef struct {
     uint32_t min_micro;
     uint32_t max_micro;
 
+    // When false, the entire radiation payload (CPM, dose, HV, pulse stats)
+    // is suppressed. Madavi sends only the THP body, sensor.community sends
+    // only the X-PIN 11 POST, and Radmon (radiation-only) is skipped.
+    // Mirrors config_t.tube_enabled — copied into the context at snapshot
+    // time so the worker task sees a stable value across the cycle.
+    bool tube_enabled;
+
     // BME280 environmental readings. bme_valid = false means the sensor is
     // absent or the last read failed — skip the T/H/P fields in the payloads.
     bool  bme_valid;

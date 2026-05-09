@@ -7,6 +7,8 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_chip_info.h"     // V2.3.13: chip-model lookup for OTA target validation
+#include "esp_app_format.h"    // V2.3.13: ESP_CHIP_ID_* constants for OTA validation
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -815,6 +817,110 @@ static esp_err_t update_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
+
+    // V2.3.13: validate the just-written app's chip_id and project_name BEFORE
+    // committing the boot partition. The bootloader does its own chip-ID check
+    // on the next boot and rolls back automatically on mismatch — but that's
+    // an ugly recovery (one wasted OTA cycle, confusing reboot). Catching it
+    // here gives the user a clean HTTP 400 with explanation while leaving the
+    // current firmware untouched. Doesn't catch same-chip-different-board
+    // mistakes (e.g. WiFi LoRa 32 V2 vs WiFi Kit 32 V2 — both ESP32) but
+    // covers the common cross-family case (heltec_v2 ↔ feathers3_d).
+    //
+    // Two reads are needed because the chip_id and project_name live in
+    // different structures within the binary:
+    //   - chip_id lives in esp_image_header_t at partition offset 0
+    //     (NOT in esp_app_desc_t, which is what tripped the V2.3.13 first
+    //     build attempt). Read via esp_partition_read directly.
+    //   - project_name + version + date live in esp_app_desc_t, accessible
+    //     via esp_ota_get_partition_description.
+    esp_image_header_t img_hdr = {0};
+    err = esp_partition_read(target, 0, &img_hdr, sizeof(img_hdr));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_partition_read(image header) failed: %s",
+                 esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Could not read uploaded image header");
+        return ESP_OK;
+    }
+
+    esp_app_desc_t new_desc = {0};
+    err = esp_ota_get_partition_description(target, &new_desc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_get_partition_description failed: %s",
+                 esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Could not read uploaded image descriptor");
+        return ESP_OK;
+    }
+
+    // Project-name check first: catches "user uploaded a totally unrelated
+    // ESP-IDF firmware by mistake". CMakeLists.txt sets project(geiger_v2)
+    // so every legitimate build's app descriptor carries that name.
+    if (strcmp(new_desc.project_name, "geiger_v2") != 0) {
+        ESP_LOGE(TAG, "OTA refused: project_name='%.32s' (expected 'geiger_v2')",
+                 new_desc.project_name);
+        // 256-byte buffer is comfortable: max payload is the 32-char
+        // project_name field plus ~130 chars of static text + NUL.
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "OTA refused: uploaded binary's project_name is '%.32s', "
+                 "expected 'geiger_v2'. This does not look like a "
+                 "MultiGeiger-V2 firmware build.",
+                 new_desc.project_name);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    // Chip-ID check: catches heltec_v2 (ESP32) vs feathers3_d (ESP32-S3)
+    // cross-family mistakes. Map the running chip's esp_chip_model_t value
+    // into the image header's ESP_CHIP_ID_* enum for direct comparison.
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    esp_chip_id_t expected_chip_id;
+    const char  *expected_board;
+    switch (chip.model) {
+        case CHIP_ESP32:
+            expected_chip_id = ESP_CHIP_ID_ESP32;
+            expected_board   = "heltec_v2 (ESP32)";
+            break;
+        case CHIP_ESP32S3:
+            expected_chip_id = ESP_CHIP_ID_ESP32S3;
+            expected_board   = "feathers3_d (ESP32-S3)";
+            break;
+        default:
+            // Future-proofing: if someone ports the firmware to ESP32-C3/C6/H2
+            // without updating this switch, fall through and trust the
+            // bootloader as the safety net.
+            expected_chip_id = ESP_CHIP_ID_INVALID;
+            expected_board   = "(unrecognised chip family)";
+            break;
+    }
+
+    if (expected_chip_id != ESP_CHIP_ID_INVALID &&
+        img_hdr.chip_id != expected_chip_id) {
+        ESP_LOGE(TAG, "OTA refused: binary chip_id=0x%04x (version=%.32s), "
+                 "device chip_id=0x%04x (expected=%s)",
+                 (unsigned)img_hdr.chip_id, new_desc.version,
+                 (unsigned)expected_chip_id, expected_board);
+        // 384-byte buffer accommodates the longest expected_board (~24 chars),
+        // 32-char version field, 4-char hex chip_id, and ~230 chars of static
+        // text + NUL with comfortable margin.
+        char msg[384];
+        snprintf(msg, sizeof(msg),
+                 "OTA refused: this device is %s but the uploaded binary "
+                 "(version %.32s) is for chip_id 0x%04x. Check that you "
+                 "uploaded the correct geiger_v2_<board>.bin file from the "
+                 "GitHub release for THIS board family.",
+                 expected_board, new_desc.version, (unsigned)img_hdr.chip_id);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "OTA verified: project=%.32s version=%.32s built=%.16s "
+             "chip_id=0x%04x — committing", new_desc.project_name,
+             new_desc.version, new_desc.date, (unsigned)img_hdr.chip_id);
+
     err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));

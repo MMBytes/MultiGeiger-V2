@@ -1,30 +1,28 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.3.8 — Madavi SPS30 visibility hack (SDS_P1 / SDS_P2 alias).
-//   - Madavi's data.php is a 2017-vintage backend that only recognises
-//     PPD42NS / SDS011 / PMS / HPM / DHT / BMP / BMP280 / BME280 / HTU21D /
-//     DS18B20 / GPS / signal field-name prefixes. SPS30_*, Si22G_*,
-//     DNMS_noise_* are silently dropped (no matching $has_* checks → no RRD
-//     update → no Grafana graph). Confirmed by reading data.php directly
-//     (https://github.com/opendata-stuttgart/madavi-api/blob/master/data.php).
-//   - Mirror of the existing BME280_* relabel hack for SHT45+BMP581: the
-//     Madavi env body now ALSO emits SDS_P1 = SPS30 PM10 and SDS_P2 = SPS30
-//     PM2.5. Madavi's $has_sds011 fires, an SDS011-typed RRD is created per
-//     device, and our SPS30 PM10/PM2.5 values become visible on Madavi's
-//     Grafana dashboards. The full SPS30_* set is still sent alongside —
-//     it's harmless on Madavi (silently dropped) and useful diagnostic in
-//     the raw POST log.
-//   - Strictly Madavi-only: sensor.community continues to receive the proper
-//     SPS30 X-PIN 12 POST with SPS30_* fields; openSenseMap and aqi.eco
-//     continue to receive the Luftdaten body with SPS30_* only (their
-//     parsers handle the prefix natively, and box-config / account routing
-//     decides which channels are visible). The Luftdaten body is unchanged.
-//   - Field naming follows dusty-code's SDS011 driver convention
-//     (src/sensors/sds011/sds011.cpp:524-526) and matches Madavi's
-//     data.php:49 detection: `isset($values["SDS_P1"]) && isset($values["SDS_P2"])`.
-//   - PM10 maps to SDS_P1 and PM2.5 maps to SDS_P2 — that's the airrohr
-//     SDS011 convention, NOT the SPS30 convention (where SPS30_P1 is PM10
-//     and SPS30_P2 is PM2.5). Same final values, different field naming.
-//   - +~120 bytes per Madavi env POST. Body buffer (1280 B) has plenty of
-//     headroom (~300 B free at worst case).
-#define VERSION_STR "V2.3.8"
+// V2.3.9 — sensor.community SPS30 X-PIN fix: 12 → 1.
+//   - V2.3.2 introduced the SPS30 sensor.community POST on X-PIN 12. That was
+//     wrong. The authoritative SENSOR_TYPES dict in
+//     devices.sensor.community/webapp/default_settings.py lists SPS30 (sensor
+//     type ID 37) as PIN 1, NOT PIN 12. Cross-checked against
+//     airrohr-firmware/ext_def.h which also defines `SPS30_API_PIN 1`. The
+//     PIN 12 value never appeared in any authoritative source — it was a
+//     research mistake from the V2.3.2 work that I propagated into the
+//     reference_pm_aq_upload_targets memory note as "canonical".
+//   - PIN 1 is the SHARED "particulate matter" PIN used by every PM sensor
+//     in the sensor.community registry: SDS011 (ID 14), PMS3003/1003/7003/
+//     5003/6003 (ID 16, 21-24), HPM (25), SPS30 (37), HM3301 (38),
+//     IPS-7100 (41), NextPM (42). The receiving server disambiguates between
+//     them by the field-name prefix in the JSON body — that's why we send
+//     `SPS30_*` prefixed field names: it tells SC which PM sensor type the
+//     PIN 1 POST is from. Sending on PIN 12 with the same prefix would have
+//     been silently ignored or 400'd by the API.
+//   - No actual data was misrouted: the only live device (Heltec at
+//     10.11.12.52) is still on V2.3.5 which predates the SPS30 TX path, and
+//     no SPS30 hardware has been wired anyway. So the bug was caught before
+//     any cycle posted to a wrong PIN.
+//   - The other three SC X-PIN values are confirmed correct: 19 for Si22G,
+//     11 for BME280-relabeled SHT45+BMP581 fusion, 15 for DNMS noise.
+//   - 1-character fix in transmission.c::send_sensorc, plus comment refresh
+//     citing the authoritative source. No size change.
+#define VERSION_STR "V2.3.9"

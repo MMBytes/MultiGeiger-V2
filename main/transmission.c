@@ -351,15 +351,21 @@ static int send_madavi(const tx_context_t *c) {
 }
 
 // --- sensor.community -------------------------------------------------------
-// Up to three separate POSTs over one keep-alive TLS session — sensor.community
-// routes by X-PIN header, so each sensor class needs its own POST:
-//   X-PIN 19 — radiation (Si22G; lowercase Luftdaten field names)
-//   X-PIN 11 — BME280 (lowercase temperature/humidity/pressure; pressure in hPa)
-//   X-PIN 12 — Sensirion SPS30 (SPS30_* prefixed Luftdaten field names; canonical
-//              SPS30 PIN per airrohr-firmware convention)
+// Up to four separate POSTs over one keep-alive TLS session — sensor.community
+// routes by X-PIN header, so each sensor class needs its own POST. PIN values
+// verified against the authoritative SENSOR_TYPES dict in
+// devices.sensor.community/webapp/default_settings.py AND airrohr-firmware/ext_def.h:
+//   X-PIN 19 — radiation (Si22G;  lowercase Luftdaten field names)
+//   X-PIN 11 — BME280    (lowercase temperature/humidity/pressure; pressure in hPa)
+//   X-PIN  1 — SPS30     (SPS30_* prefixed Luftdaten field names — PIN 1 is the
+//                         shared "particulate matter" pin used by every PM sensor:
+//                         SDS011, PMS-series, HPM, NPM, IPS-7100, HM3301, SPS30.
+//                         The receiving server disambiguates by the SPS30_* prefix
+//                         within the body.)
+//   X-PIN 15 — DNMS      (DNMS_noise_* prefixed; canonical DNMS_API_PIN)
 // Mixing fields across PIN classes in one POST returns 400 from the SC API.
-// All three POSTs share ONE underlying TCP+TLS connection thanks to keep-alive
-// — we set the X-PIN header per-perform but never close the socket.
+// All POSTs share ONE underlying TCP+TLS connection thanks to keep-alive — we
+// set the X-PIN header per-perform but never close the socket.
 
 static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t cap) {
     float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;  // mSv/h
@@ -395,11 +401,15 @@ static void build_sensorc_noise_body(const tx_context_t *c, char *buf, size_t ca
         c->noise.laeq, c->noise.la_min, c->noise.la_max);
 }
 
-// X-PIN 12 body for Sensirion SPS30. SPS30_* prefix is what newer airrohr-
-// firmware emits and what Madavi expects too — keeps the wire payload identical
-// to the Madavi env body's SPS30 portion. typ_size_um carries 3 decimals because
-// the value range (~0.3..1.0 µm typical) needs the precision; mass and number
-// concentrations are fine at 2 decimals.
+// X-PIN 1 body for Sensirion SPS30. PIN 1 is the SHARED "particulate matter"
+// pin used by every PM sensor in sensor.community's registry (SDS011, PMS-series,
+// HPM, NPM, IPS-7100, HM3301, SPS30 — verified against
+// devices.sensor.community/webapp/default_settings.py SENSOR_TYPES and against
+// airrohr-firmware/ext_def.h's SPS30_API_PIN). The receiving server distinguishes
+// SPS30 from the other PM sensors by the SPS30_* field prefix within the body —
+// so the prefix is not optional, it's how routing works on PIN 1.
+// typ_size_um carries 3 decimals because the value range (~0.3..1.0 µm typical)
+// needs the precision; mass and number concentrations are fine at 2 decimals.
 static void build_sensorc_pm_body(const tx_context_t *c, char *buf, size_t cap) {
     snprintf(buf, cap,
         "{\n"
@@ -480,7 +490,7 @@ static int send_sensorc(const tx_context_t *c) {
     int rc_p = 0;
     if (c->pm_valid && prior_ok(rc_g) && prior_ok(rc_b)) {
         build_sensorc_pm_body(c, body, sizeof(body));
-        rc_p = post_with_retry(client, "sensor.community", "pm",  "12", body);
+        rc_p = post_with_retry(client, "sensor.community", "pm",  "1", body);
     }
 
     int rc_n = 0;

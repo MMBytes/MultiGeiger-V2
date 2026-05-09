@@ -155,6 +155,21 @@ static bool tls_ctx_init(ftp_tls_ctx_t *t) {
     // No cert verification: most LAN FTP servers use self-signed certs, and
     // the user opted into this by ticking "certificate NOT verified".
     mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_NONE);
+
+    // Cap FTPS at TLS 1.2 even though mbedTLS 4.x supports 1.3 (V2.3.5
+    // sdkconfig change). Many embedded / router-hosted FTPS daemons (vsftpd
+    // ≤3.0.x without 1.3 patches, older proftpd, pure-ftpd) advertise
+    // willingness to handshake at 1.3 but mishandle the post-handshake
+    // protocol — the symptom is "handshake OK, USER send OK, immediate recv
+    // returns -1" because the server sends close-notify or just closes.
+    // V2.3.5 → V2.3.9 broke FTPS upload to a local NAS this way; V2.3.10
+    // restores it by pinning to 1.2. FTPS gets no benefit from 1.3 anyway:
+    // one local-LAN handshake per hour, the 1-RTT saving is sub-millisecond.
+    // HTTPS targets (Madavi / sensor.community / Radmon / OSM / aqi.eco) keep
+    // 1.3 because they go through esp_tls (separate config path) and their
+    // cloud TLS terminators (nginx / Cloudflare / aws-elb) implement 1.3
+    // correctly.
+    mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
     return true;
 }
 
@@ -196,12 +211,26 @@ static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
         }
     }
 
+    // Surface what was actually negotiated. Useful when a future FTPS server
+    // misbehaves at the handshake or post-handshake stage — without this it's
+    // a guessing game whether the issue is version mismatch, cipher mismatch,
+    // session resumption, or something else. mbedtls_ssl_get_version() and
+    // _ciphersuite() return strings owned by mbedTLS; do not free.
+    const char *ver  = mbedtls_ssl_get_version(&io->ssl);
+    const char *ciph = mbedtls_ssl_get_ciphersuite(&io->ssl);
+    ESP_LOGI(TAG, "TLS %s on %s channel: cipher=%s",
+             ver ? ver : "?", is_data ? "data" : "ctrl", ciph ? ciph : "?");
+
     io->tls = true;
     return true;
 }
 
 // Blocking 1-byte read. Returns 1 on success, 0 on timeout (SO_RCVTIMEO fired),
-// -1 on error/close.
+// -1 on error/close. Logs the precise mbedTLS error code on failure so future
+// FTPS-over-TLS issues can be diagnosed without a packet capture (V2.3.10
+// added this — without it, "USER reject: -1" left no breadcrumb to identify
+// whether the server sent close-notify, dropped the socket, or returned
+// malformed application data).
 static int io_recv1(ftp_io_t *io, char *out) {
     if (io->tls) {
         for (;;) {
@@ -209,12 +238,15 @@ static int io_recv1(ftp_io_t *io, char *out) {
             if (r == 1) return 1;
             if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
             if (r == MBEDTLS_ERR_SSL_TIMEOUT) return 0;
+            char eb[80]; mbedtls_strerror(r, eb, sizeof(eb));
+            ESP_LOGW(TAG, "ssl_read: -0x%04x %s", -r, eb);
             return -1;
         }
     }
     int r = recv(io->sock, out, 1, 0);
     if (r == 1) return 1;
     if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+    if (r < 0) ESP_LOGW(TAG, "recv: errno=%d (%s)", errno, strerror(errno));
     return -1;
 }
 
@@ -243,8 +275,17 @@ static bool io_send_all(ftp_io_t *io, const void *buf, size_t len) {
             n = send(io->sock, p + sent, len - sent, 0);
         }
         if (n <= 0) {
-            ESP_LOGW(TAG, "io_send_all: err at %u/%u (n=%d errno=%d)",
-                     (unsigned)sent, (unsigned)len, n, errno);
+            // For TLS path n is a negative MBEDTLS_ERR_* code; for plain it's
+            // -1 with errno set. Log both shapes so the cause is visible
+            // without cross-referencing.
+            if (io->tls && n < 0) {
+                char eb[80]; mbedtls_strerror(n, eb, sizeof(eb));
+                ESP_LOGW(TAG, "io_send_all: TLS err at %u/%u: -0x%04x %s",
+                         (unsigned)sent, (unsigned)len, -n, eb);
+            } else {
+                ESP_LOGW(TAG, "io_send_all: err at %u/%u (n=%d errno=%d)",
+                         (unsigned)sent, (unsigned)len, n, errno);
+            }
             return false;
         }
         sent += (size_t)n;

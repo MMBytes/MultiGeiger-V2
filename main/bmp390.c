@@ -139,8 +139,28 @@ esp_err_t bmp390_init(i2c_master_bus_handle_t bus) {
     if ((err = write_reg(REG_CONFIG, CONFIG_VAL)) != ESP_OK) return err;
 
     s_ready = true;
-    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x32, T x1, IIR off, forced mode)",
-             BMP390_ADDR);
+
+    // Prime the oversampling chain with 10 throwaway samples before the first
+    // real read. Bosch's BMP3xx KB confirms the first ~N samples after begin()
+    // are unsettled even with IIR disabled — the OSR=32x averaging chain needs
+    // actual measurement cycles to flush, a wall-clock delay alone won't do
+    // it. Without priming the first reading post-init is consistently ~40 hPa
+    // low (verified empirically in dusty-code's mh12 fix, 2026-05-08,
+    // src/sensors/bmp3xx/bmp3xx.cpp). At OSR_p=32x / OSR_t=1x each forced read
+    // is ~30 ms, so this costs ~300 ms once at boot — trivial inside
+    // env_sensor_init which runs before WiFi/HTTP/TX.
+    //
+    // s_ready was set true above (Option A) so bmp390_read() doesn't refuse
+    // these calls. Practically safe because nothing else runs during this
+    // ~300 ms window — env_sensor_init is sequential, the first user-facing
+    // read is 150 s away in cycle #1.
+    for (int i = 0; i < 10; i++) {
+        float t, p;
+        (void)bmp390_read(&t, &p);
+    }
+
+    ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x32, T x1, IIR off, forced mode, "
+             "primed 10 samples)", BMP390_ADDR);
     return ESP_OK;
 }
 

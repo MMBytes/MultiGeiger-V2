@@ -162,7 +162,27 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
 
     s_addr  = addr;
     s_ready = true;
-    ESP_LOGI(TAG, "BMP581 ready at 0x%02X (P x16, T x1, IIR off, forced mode)", addr);
+
+    // Prime the oversampling chain with 10 throwaway samples before the first
+    // real read. Bosch's BMP5xx KB confirms the first ~N samples after begin()
+    // are unsettled even with IIR disabled — the OSR averaging chain needs
+    // actual measurement cycles to flush, a wall-clock delay alone won't do
+    // it. Mirror of dusty-code's mh12 fix (2026-05-08,
+    // src/sensors/bmp5xx/bmp5xx.cpp). At OSR_p=16x / OSR_t=1x each forced
+    // read is ~12 ms, so this costs ~120 ms once at boot — trivial inside
+    // env_sensor_init which runs before WiFi/HTTP/TX.
+    //
+    // s_ready was set true above (Option A) so bmp581_read() doesn't refuse
+    // these calls. Practically safe because nothing else runs during this
+    // ~120 ms window — env_sensor_init is sequential, the first user-facing
+    // read is 150 s away in cycle #1.
+    for (int i = 0; i < 10; i++) {
+        float t, p;
+        (void)bmp581_read(&t, &p);
+    }
+
+    ESP_LOGI(TAG, "BMP581 ready at 0x%02X (P x16, T x1, IIR off, forced mode, "
+             "primed 10 samples)", addr);
     return ESP_OK;
 }
 

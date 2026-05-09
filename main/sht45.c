@@ -36,35 +36,100 @@ static esp_err_t send_cmd(uint8_t cmd) {
     return i2c_master_transmit(s_dev, &cmd, 1, 50);
 }
 
+// Try one full init pass: soft-reset + verification measurement. Logs every
+// step's error code so future bring-up issues don't collapse to a single
+// opaque "probe read failed". Returns ESP_OK on success, the underlying
+// esp_err_t on failure. Caller decides whether to retry. Added in V2.3.11
+// after the FeatherS3-D bench's Adafruit 6174 SHT45 ACK'd at 0x44 but failed
+// the verification read, with no detail of which step caused the failure.
+static esp_err_t try_init_pass(uint32_t reset_wait_ms, const char *label) {
+    esp_err_t err = send_cmd(CMD_SOFT_RESET);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "[%s] soft_reset write: %s", label, esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(reset_wait_ms));
+
+    // Inline the measurement+read so we can log each step. Mirrors
+    // sht45_read but with verbose error reporting.
+    err = send_cmd(CMD_MEASURE_HIGH);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "[%s] measure_high write: %s", label, esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));   // 8.2 ms typical, 9.4 ms max
+
+    uint8_t buf[6];
+    err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "[%s] post-measure read: %s", label, esp_err_to_name(err));
+        return err;
+    }
+
+    if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
+        ESP_LOGW(TAG, "[%s] CRC mismatch — bytes=%02x %02x %02x %02x %02x %02x",
+                 label, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+        return ESP_FAIL;
+    }
+
+    // Sanity-check the values are in plausible range (e.g. -45..125 °C, 0..100 %RH)
+    // — protects against a chip that ACKs but returns garbage.
+    uint16_t raw_t = ((uint16_t)buf[0] << 8) | buf[1];
+    uint16_t raw_h = ((uint16_t)buf[3] << 8) | buf[4];
+    float t = -45.0f + 175.0f * ((float)raw_t / 65535.0f);
+    float h = -6.0f  + 125.0f * ((float)raw_h / 65535.0f);
+    ESP_LOGI(TAG, "[%s] read OK: T=%.2f°C H=%.2f%% (raw_t=0x%04x raw_h=0x%04x)",
+             label, t, h, raw_t, raw_h);
+    return ESP_OK;
+}
+
 esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
 
     // Quick probe before adding the device — avoids a lingering handle if
     // the sensor is absent.
-    if (i2c_master_probe(bus, SHT45_ADDR, 50) != ESP_OK) {
-        ESP_LOGW(TAG, "SHT45 not found at 0x%02X", SHT45_ADDR);
+    esp_err_t err = i2c_master_probe(bus, SHT45_ADDR, 50);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SHT45 not found at 0x%02X (probe: %s)",
+                 SHT45_ADDR, esp_err_to_name(err));
         return ESP_ERR_NOT_FOUND;
     }
+    ESP_LOGI(TAG, "SHT45 ACK'd at 0x%02X — verifying with measurement read", SHT45_ADDR);
 
     i2c_device_config_t devcfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = SHT45_ADDR,
         .scl_speed_hz    = 100000,
     };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
-    if (err != ESP_OK) return err;
-
-    // Soft-reset clears any incomplete measurement state. The datasheet
-    // requires a 1 ms guard before the first command after reset.
-    send_cmd(CMD_SOFT_RESET);
-    vTaskDelay(pdMS_TO_TICKS(2));
-
-    // Verify the sensor responds to a measurement command before declaring
-    // it ready — guards against a stray ACK from another device at 0x44.
-    float t, h;
-    err = sht45_read(&t, &h);
+    err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SHT45 probe read failed");
+        ESP_LOGW(TAG, "i2c_master_bus_add_device: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // First attempt: 10 ms post-soft-reset wait. Sensirion datasheet says
+    // the soft reset takes max 1 ms, but the Adafruit 6174 (SHT45-AD1F-R2,
+    // PTFE-filter variant) empirically NACKs the measurement command for
+    // several ms after soft reset — V2.3.11 diagnostic captured the original
+    // 2 ms wait failing as `measure_high write: ESP_ERR_INVALID_RESPONSE`
+    // every boot. 10 ms gives ~10× the datasheet spec and ~2× the empirical
+    // requirement, with margin for future SHT4x variants.
+    //
+    // Retry kept as a safety net: if attempt 1 still fails (some chip
+    // revision needs even longer, or an actual hardware fault) we wait 50 ms
+    // and try again with a 50 ms post-soft-reset wait. Both attempts log the
+    // precise step + esp_err so failure mode is immediately diagnosable.
+    err = try_init_pass(10, "attempt 1");
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "first attempt failed (%s), retrying with longer wait",
+                 esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(50));
+        err = try_init_pass(50, "attempt 2");
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SHT45 probe read failed — both attempts unsuccessful "
+                 "(last error: %s). Removing device handle.", esp_err_to_name(err));
         i2c_master_bus_rm_device(s_dev);
         s_dev = NULL;
         return ESP_FAIL;

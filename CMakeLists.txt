@@ -41,5 +41,15 @@ file(READ "${CMAKE_CURRENT_LIST_DIR}/main/version.h" _version_h)
 string(REGEX MATCH "VERSION_STR[ \t]+\"([^\"]+)\"" _ "${_version_h}")
 set(PROJECT_VER "${CMAKE_MATCH_1}")
 
+# Tell CMake to re-run configure whenever version.h changes, so PROJECT_VER
+# (and therefore the IDF app descriptor visible in the boot log as
+# "App version:") always matches the current VERSION_STR. Without this,
+# `file(READ)` only fires at configure time and incremental builds keep the
+# stale PROJECT_VER from the last full configure — symptom is "App version:"
+# showing a previous release while v2_main's runtime log shows the new one.
+# Caught 2026-05-09 during V2.3.10 work; fix landed in V2.3.11.
+set_property(DIRECTORY APPEND PROPERTY
+    CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/main/version.h")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(geiger_v2)

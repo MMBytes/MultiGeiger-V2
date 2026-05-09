@@ -716,6 +716,18 @@ static esp_err_t reboot_post(httpd_req_t *req) {
 // Uses XHR to POST the raw .bin as the request body (Content-Type:
 // application/octet-stream). Avoids multipart parsing on the device.
 
+// V2.3.14: board-specific upload-form prompt. CMakeLists.txt defines exactly
+// one of BOARD_HELTEC_V2 / BOARD_FEATHERS3_D per build, so the literal-string
+// concatenation here resolves at compile time to the correct board name.
+// Bold red styling is inline so we don't have to add a CSS rule for one element.
+#if BOARD_HELTEC_V2
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32</b>"
+#elif BOARD_FEATHERS3_D
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
+#else
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
+#endif
+
 static esp_err_t update_get(httpd_req_t *req) {
     log_access(req, "GET /update");
     if (!check_auth(req)) return ESP_OK;
@@ -726,7 +738,7 @@ static esp_err_t update_get(httpd_req_t *req) {
         "progress{width:100%;height:1.4em;margin-top:1em}"
         "#msg{margin-top:1em;white-space:pre-wrap}</style>"
         "</head><body><h1>Firmware update</h1>"
-        "<p>Select a firmware .bin (from firmware_releases/ or build/geiger_v2.bin).</p>"
+        "<p>Select a firmware .bin for " UPLOAD_PROMPT_BOARD ".</p>"
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"
         "<progress id=\"p\" value=\"0\" max=\"1\"></progress>"

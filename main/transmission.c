@@ -255,6 +255,25 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
             c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
             c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
             c->pm.typ_size_um);
+
+        // HACK (Madavi-only): also emit SDS_P1 / SDS_P2 with the same PM10 /
+        // PM2.5 values. Madavi's data.php is a 2017-vintage backend that
+        // recognises SDS011 (and BME280) only — there is no $has_sps30 check,
+        // so all the SPS30_* fields above are silently dropped from the RRDs
+        // and graphs. Mapping our PM10 → SDS_P1 and PM2.5 → SDS_P2 makes
+        // Madavi's $has_sds011 fire, which creates an SDS011-typed RRD per
+        // device with the right values plotted. Field-name convention follows
+        // dusty-code's SDS011 driver (sds011.cpp:524-526) and matches Madavi's
+        // data.php:49 detection: `isset($values["SDS_P1"]) && isset($values["SDS_P2"])`.
+        // This is a Madavi-specific workaround — sensor.community gets the
+        // proper SPS30 fields on X-PIN 12; openSenseMap and aqi.eco continue
+        // to receive SPS30_* only (their parsers handle the prefix natively).
+        // Mirror of the existing BME280_* relabel hack for SHT45+BMP581 data.
+        n += snprintf(buf + n, cap - n,
+            ",\n"
+            "  {\"value_type\": \"SDS_P1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SDS_P2\", \"value\": \"%.2f\"}",
+            c->pm.pm10, c->pm.pm2_5);
     }
     if (c->noise_valid) {
         // DNMS_noise_* prefix is the canonical airrohr / dusty naming —

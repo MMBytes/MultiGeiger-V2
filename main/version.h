@@ -1,32 +1,30 @@
 #pragma once
 // Bump before build; commit after successful flash.
-// V2.3.7 — DNMS noise sensor support added.
-//   - New `main/dnms.[ch]` (~200 LOC) — pure-IDF I²C driver for hbitter's
-//     Digital Noise Measuring Sensor. Auto-detects at 0x55. Sensirion-style
-//     framing (16-bit BE commands, word + CRC8 reads, poly 0x31 init 0xFF —
-//     same CRC routine pattern as SPS30 / SHT45). Five commands:
-//     RESET (0x0001), READ_VERSION (0x0002), CALCULATE_LEQ (0x0003),
-//     READ_DATA_READY (0x0004), READ_LEQ (0x0005). READ_LEQ returns 3 floats
-//     (LAeq, LAmin, LAmax in dB(A)) over 18 wire bytes. Verifies the version
-//     string starts with "DNMS" to catch wrong-part populates at 0x55
-//     (some Adafruit STEMMA breakouts share that address).
-//   - New `main/noise_sensor.[ch]` — facade parallel to pm_sensor / env_sensor.
-//     Mutex-protected last-sample cache so HTTP handlers can read without
-//     racing the worker on the I²C bus. Trigger / poll-then-read split lets
-//     each TX cycle's read return the LAeq for the FULL ~150 s cycle interval
-//     (trigger at end of cycle N, read at start of cycle N+1) — same window-
-//     spanning pattern as canonical airrohr-firmware.
-//   - Hardware: Nettigo NAM DNMS Kit ships with a pre-flashed Teensy 4.0 + I²S
-//     MEMS microphone (ICS-43434 or IM72D128). We don't touch the Teensy
-//     firmware — same arrangement as SPS30. The Nettigo Teensy is NOT 5 V
-//     tolerant, so the DNMS only goes on a 3.3 V I²C bus (our Heltec J_I2C
-//     and FeatherS3-D Qwiic both qualify).
-//   - Upload paths: 4th sensor.community POST on X-PIN 15 (canonical
-//     `DNMS_API_PIN` from airrohr-firmware/defines.h), DNMS_noise_LAeq /
-//     _LA_min / _LA_max field naming. Same prefixed names appended to the
-//     Madavi env body and to the openSenseMap + aqi.eco Luftdaten body.
-//     OSM/aqi body buffers grew 1400→1600 / 1500→1700 to fit the extra fields.
-//   - Reference: `reference_dnms.md` memory captures the full protocol notes,
-//     X-PIN derivation, and ESPHome cross-check (no DNMS component exists in
-//     ESPHome — airrohr-firmware/dnms_i2c.h is the canonical host implementation).
-#define VERSION_STR "V2.3.7"
+// V2.3.8 — Madavi SPS30 visibility hack (SDS_P1 / SDS_P2 alias).
+//   - Madavi's data.php is a 2017-vintage backend that only recognises
+//     PPD42NS / SDS011 / PMS / HPM / DHT / BMP / BMP280 / BME280 / HTU21D /
+//     DS18B20 / GPS / signal field-name prefixes. SPS30_*, Si22G_*,
+//     DNMS_noise_* are silently dropped (no matching $has_* checks → no RRD
+//     update → no Grafana graph). Confirmed by reading data.php directly
+//     (https://github.com/opendata-stuttgart/madavi-api/blob/master/data.php).
+//   - Mirror of the existing BME280_* relabel hack for SHT45+BMP581: the
+//     Madavi env body now ALSO emits SDS_P1 = SPS30 PM10 and SDS_P2 = SPS30
+//     PM2.5. Madavi's $has_sds011 fires, an SDS011-typed RRD is created per
+//     device, and our SPS30 PM10/PM2.5 values become visible on Madavi's
+//     Grafana dashboards. The full SPS30_* set is still sent alongside —
+//     it's harmless on Madavi (silently dropped) and useful diagnostic in
+//     the raw POST log.
+//   - Strictly Madavi-only: sensor.community continues to receive the proper
+//     SPS30 X-PIN 12 POST with SPS30_* fields; openSenseMap and aqi.eco
+//     continue to receive the Luftdaten body with SPS30_* only (their
+//     parsers handle the prefix natively, and box-config / account routing
+//     decides which channels are visible). The Luftdaten body is unchanged.
+//   - Field naming follows dusty-code's SDS011 driver convention
+//     (src/sensors/sds011/sds011.cpp:524-526) and matches Madavi's
+//     data.php:49 detection: `isset($values["SDS_P1"]) && isset($values["SDS_P2"])`.
+//   - PM10 maps to SDS_P1 and PM2.5 maps to SDS_P2 — that's the airrohr
+//     SDS011 convention, NOT the SPS30 convention (where SPS30_P1 is PM10
+//     and SPS30_P2 is PM2.5). Same final values, different field naming.
+//   - +~120 bytes per Madavi env POST. Body buffer (1280 B) has plenty of
+//     headroom (~300 B free at worst case).
+#define VERSION_STR "V2.3.8"

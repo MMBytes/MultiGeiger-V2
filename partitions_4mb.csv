@@ -1,0 +1,18 @@
+# Custom 4 MB partition table for Heltec V2 KNOCK-OFFs that ship with 4 MB
+# Winbond flash instead of the genuine 8 MB. Same factory + OTA pattern as
+# partitions.csv but ONE OTA slot instead of two, slot size shrunk to fit.
+# V2.3.15 binary is ~1.18 MB; 1.875 MB per slot leaves ~37 % headroom — same
+# percentage as the 8 MB layout's 2 MB slots, just smaller.
+# Tail at 0x3E0000-0x400000 (128 KB) reserved (could be used for spiffs/littlefs
+# if a future feature wants on-device persistent storage).
+#
+# Genuine boards must continue to use partitions.csv (8 MB layout, 2 OTA slots).
+# Selection is driven by sdkconfig.defaults.heltec_v2_4mb (overrides
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME) when BOARD=heltec_v2_4mb.
+#
+# Name,     Type, SubType, Offset,   Size,      Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+factory,    app,  factory, 0x20000,  0x1E0000,
+ota_0,      app,  ota_0,   0x200000, 0x1E0000,

@@ -405,9 +405,28 @@ static void build_sensorc_noise_body(const tx_context_t *c, char *buf, size_t ca
 // pin used by every PM sensor in sensor.community's registry (SDS011, PMS-series,
 // HPM, NPM, IPS-7100, HM3301, SPS30 — verified against
 // devices.sensor.community/webapp/default_settings.py SENSOR_TYPES and against
-// airrohr-firmware/ext_def.h's SPS30_API_PIN). The receiving server distinguishes
-// SPS30 from the other PM sensors by the SPS30_* field prefix within the body —
-// so the prefix is not optional, it's how routing works on PIN 1.
+// airrohr-firmware/ext_def.h's SPS30_API_PIN).
+//
+// IMPORTANT: on PIN 1 the body uses CANONICAL UNPREFIXED Luftdaten field names
+// (P0/P2/P4/P1 for mass, N05/N1/N25/N4/N10 for number concentration, TS for
+// typical particle size) regardless of which physical PM sensor produced the
+// data. The server tracks WHICH device sent the values via the X-Sensor header
+// (the chip ID) — NOT via field-name prefix. Verified by reading airrohr-
+// firmware: every PM sensor (SDS011, PMS, HPM, SPS30) stores values internally
+// as <SENSOR>_<FIELD> (e.g. SPS30_P0) but strips that prefix before posting:
+//   sendSensorCommunity(result, SPS30_API_PIN, SENSORS_SPS30, "SPS30_");
+//                                                              ^^^^^^^
+//                                                       prefix to strip
+// V2.3.2 → V2.3.15-pre1 wrongly sent SPS30_-prefixed names on PIN 1 → server
+// returned HTTP 400 on every PM POST because it didn't recognise the fields.
+// Surfaced in the wild on the dust node 10.11.12.72 once SPS30 was actually
+// wired and pm_valid started being true. V2.3.15-pre2 strips the prefix here.
+//
+// Note Madavi / OSM / aqi.eco use DIFFERENT routing (field-name prefix matters
+// for THOSE targets) — see build_madavi_env_body and build_luftdaten_body —
+// and so they correctly keep the SPS30_ prefix. Only sensor.community on PIN 1
+// uses the unprefixed schema.
+//
 // typ_size_um carries 3 decimals because the value range (~0.3..1.0 µm typical)
 // needs the precision; mass and number concentrations are fine at 2 decimals.
 static void build_sensorc_pm_body(const tx_context_t *c, char *buf, size_t cap) {
@@ -415,16 +434,16 @@ static void build_sensorc_pm_body(const tx_context_t *c, char *buf, size_t cap) 
         "{\n"
         " \"software_version\": \"%s\",\n"
         " \"sensordatavalues\": [\n"
-        "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_P1\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_N05\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}\n"
+        "  {\"value_type\": \"P0\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"P2\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"P4\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"P1\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"N05\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"N1\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"N25\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"N4\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"N10\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"TS\", \"value\": \"%.3f\"}\n"
         " ]\n}",
         c->sw_version,
         c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,

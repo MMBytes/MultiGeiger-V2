@@ -78,10 +78,40 @@ CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE is not set
 
+# PSA crypto key-slot pool (V2.3.15). mbedTLS 4.x routes legacy crypto
+# (mbedtls_aes_*, mbedtls_md_*, ECDHE key derivation, AES-GCM init) through
+# PSA. Each TLS handshake allocates ~5–10 PSA slots transiently; AES-GCM
+# encryption holds another ~2 per active connection. Our per-cycle load is
+# 5 HTTPS targets (Madavi / SC / Radmon / OSM / aqi.eco) × ~5 slots each
+# + FTPS ctrl + FTPS data ≈ 30+ active slot ops. Default 32 slots sits
+# right at the edge; under transient peaks (concurrent FTPS + HTTPS, slow
+# release between handshakes), exhaustion shows up as
+# PSA_ERROR_INSUFFICIENT_MEMORY (-141 = -0x008D), which leaks out of
+# mbedtls_ssl_setup / mbedtls_ssl_handshake as a bare error code that
+# mbedtls_strerror cannot decode (PSA codes are a separate namespace).
+# Bump to 128: cost ≈ +9 KB DRAM (96 extra slots × ~88 B each), gives 4×
+# headroom against future feature growth (BMP581, DNMS, more upload targets).
+CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT=128
+
 # OTA stability tweaks (lesson from V1.18.60): yield to TCPIP task during flash
 # erase so the browser's upload XHR doesn't stall and drop with status 0.
 CONFIG_SPI_FLASH_YIELD_DURING_ERASE=y
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# V2.3.15: bump TCP send buffer from default 5744 (4*MSS, MSS=1460) to 16384
+# (~11*MSS). The default fills after ~5 KB of unacknowledged data on the
+# data socket during FTPS body upload — observed exactly at 5120 bytes
+# (5 × FTP_WRITE_CHUNK at the V2.3.15-pre 1024 setting). When WiFi is
+# transiently slow draining ACKs at that moment, our 15 s write deadline
+# fires and we abandon the upload mid-stream. The abandoned-write tear-
+# down then leaks PSA crypto state in mbedTLS 4.x (mbedtls_ssl_free from a
+# WANT_WRITE-then-abandon path doesn't fully release the in-flight AES-GCM
+# key handle), so subsequent retries fail with PSA_ERROR_INSUFFICIENT_MEMORY
+# at the data-channel handshake. A bigger send buffer ≈ lower stall
+# probability ≈ fewer leaks ≈ stable uploads even on near-full 60 KB rings.
+# Cost: ~10 KB extra DRAM per active TCP socket (we have one FTPS upload
+# at a time, so this is bounded).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 
 # Bigger sys_evt stack (default 2304). Headroom for occasional verbose driver
 # logs through the applog vprintf hook (1 KB line buffer) plus deeper event

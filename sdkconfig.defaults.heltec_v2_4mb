@@ -1,0 +1,25 @@
+# ============================================================================
+# Heltec WiFi Kit 32 V2 KNOCK-OFF overlay — same hardware as genuine, but 4 MB
+# flash (Winbond) instead of 8 MB. Otherwise identical: same ESP32-D0WDQ6, same
+# CP2102, same SSD1306 OLED, same Vext gate, same pinout. The only deltas vs
+# the genuine `heltec_v2` overlay are the flash-size symbol and the partition-
+# table filename — `hal.h` still selects via BOARD_HELTEC_V2 (set in
+# CMakeLists.txt). Identified 2026-05-10 on a clone with MAC fc:b4:67:02:b1:30:
+# the genuine 8 MB build aborted at boot with
+#   `Detected size(4096k) smaller than the size in the binary image header(8192k)`
+# because ESP-IDF's bootloader checks header-vs-physical and refuses to run the
+# app if the header overstates flash size.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32"
+
+# Auto-detect XTAL (same as genuine Heltec V2 — modules vary 26 MHz / 40 MHz).
+CONFIG_XTAL_FREQ_AUTO=y
+
+# 4 MB flash (vs genuine's 8 MB).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Override the shared partitions.csv with the 4 MB layout (factory + 1 OTA,
+# 1.875 MB each). Defined in partitions_4mb.csv at repo root.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"

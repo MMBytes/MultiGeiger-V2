@@ -45,6 +45,20 @@ static const char *NS  = "geiger";
 #define DEF_FTP_PATH        ""
 #define DEF_FTP_INTERVAL_MIN 60
 #define DEF_FTP_PS_DISABLED false
+// FTPS TLS-version cap. Default true = capped at TLS 1.2.
+//
+// V2.3.15 bench testing on the project's LAN FTPS server (192.168.123.1)
+// confirmed: TLS 1.3 + this server = STOR fails with "426 Data Connection:
+// Connection reset by peer" on the data channel. Verified independent of
+// session reuse (with PSK or without — same 426). Most likely the server
+// either doesn't fully implement TLS 1.3 on the data channel, or its
+// require_ssl_reuse=YES policy needs the modern TLS 1.3 PSK-extension
+// resumption that mbedtls_ssl_set_session() doesn't provide. TLS 1.2 +
+// session reuse works flawlessly. See reference_ftps_tls13_investigation.md
+// memory for full investigation. Defaulting to TLS 1.2 keeps FTPS working
+// out of the box; users with TLS-1.3-capable FTPS servers can untick the
+// /config "Limit FTPS to TLS 1.2" checkbox to opt back into 1.3.
+#define DEF_FTP_TLS12_ONLY  true
 #define DEF_SPEAKER_TICK    false
 #define DEF_LED_TICK        true
 #define DEF_PLAY_SOUND      false
@@ -89,6 +103,7 @@ void config_defaults(config_t *cfg) {
     strncpy(cfg->ftp_path,     DEF_FTP_PATH,     sizeof(cfg->ftp_path) - 1);
     cfg->ftp_interval_min     = DEF_FTP_INTERVAL_MIN;
     cfg->ftp_ps_disabled      = DEF_FTP_PS_DISABLED;
+    cfg->ftp_tls12_only       = DEF_FTP_TLS12_ONLY;
     cfg->speaker_tick         = DEF_SPEAKER_TICK;
     cfg->led_tick             = DEF_LED_TICK;
     cfg->play_sound           = DEF_PLAY_SOUND;
@@ -172,6 +187,7 @@ void config_load(config_t *cfg) {
     load_str (h, "ftp_path",   cfg->ftp_path,     sizeof(cfg->ftp_path));
     load_u32 (h, "ftp_int",    &cfg->ftp_interval_min);
     load_bool(h, "ftp_ps_dis", &cfg->ftp_ps_disabled);
+    load_bool(h, "ftp_t12only",&cfg->ftp_tls12_only);
     load_bool(h, "sp_tick",    &cfg->speaker_tick);
     load_bool(h, "led_tick",   &cfg->led_tick);
     load_bool(h, "play_sound", &cfg->play_sound);
@@ -215,9 +231,10 @@ void config_load(config_t *cfg) {
              cfg->ftp_host[0] ? cfg->ftp_host : "<empty>",
              cfg->ftp_user[0] ? cfg->ftp_user : "<empty>",
              MASK(cfg->ftp_password));
-    ESP_LOGI(TAG, "  ftp:              path=%s interval=%lumin ps_disabled=%d",
+    ESP_LOGI(TAG, "  ftp:              path=%s interval=%lumin ps_disabled=%d tls12_only=%d",
              cfg->ftp_path[0] ? cfg->ftp_path : "<empty>",
-             (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled);
+             (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled,
+             cfg->ftp_tls12_only);
     ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d",
              cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display);
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
@@ -271,6 +288,7 @@ esp_err_t config_save(const config_t *cfg) {
     SET_STR("ftp_path",   cfg->ftp_path);
     SET_U32("ftp_int",    cfg->ftp_interval_min);
     SET_U8 ("ftp_ps_dis", cfg->ftp_ps_disabled);
+    SET_U8 ("ftp_t12only",cfg->ftp_tls12_only);
     SET_U8 ("sp_tick",    cfg->speaker_tick);
     SET_U8 ("led_tick",   cfg->led_tick);
     SET_U8 ("play_sound", cfg->play_sound);

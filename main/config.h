@@ -126,6 +126,18 @@ typedef struct {
     // already always-on); the /config UI greys this box out in that case.
     bool     ftp_ps_disabled;
 
+    // When true (default in V2.3.15), FTPS handshakes are capped at TLS 1.2
+    // (mbedtls_ssl_conf_max_tls_version). V2.3.15 bench testing confirmed
+    // TLS 1.3 fails with "426 Connection reset by peer" on the data channel
+    // against the project's LAN FTPS server — independent of session reuse.
+    // TLS 1.2 + ctrl-session reuse on data is the known-working combination.
+    // Untick the /config checkbox to allow TLS 1.3 (works against modern
+    // cloud TLS terminators; YMMV on older / embedded FTPS daemons). HTTPS
+    // targets (Madavi / SC / Radmon / OSM / aqi.eco) are unaffected — they
+    // always negotiate 1.3 freely via esp_tls (separate code path). See
+    // reference_ftps_tls13_investigation.md memory for full background.
+    bool     ftp_tls12_only;
+
     // User-facing feedback knobs.
     //   speaker_tick: piezo click on every counted GM pulse.
     //   led_tick    : onboard LED flash on every counted GM pulse.

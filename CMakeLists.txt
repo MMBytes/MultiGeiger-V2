@@ -3,28 +3,34 @@ cmake_minimum_required(VERSION 3.16)
 # ----------------------------------------------------------------------------
 # Board selector — one codebase, multiple binaries.
 #
-# Pick a board by passing -DBOARD=heltec_v2 (default) or -DBOARD=feathers3_d
-# to idf.py:
-#     idf.py -DBOARD=heltec_v2   build
-#     idf.py -DBOARD=feathers3_d build
+# Pick a board by passing -DBOARD=<name> to idf.py:
+#     idf.py -DBOARD=heltec_v2      build   (genuine Heltec WiFi Kit 32 V2, 8 MB)
+#     idf.py -DBOARD=heltec_v2_4mb  build   (knock-off variant with 4 MB flash)
+#     idf.py -DBOARD=feathers3_d    build   (UM FeatherS3-D, ESP32-S3 + PSRAM)
 #
 # Each board pins its own IDF chip target and pulls a board-specific
 # sdkconfig.defaults overlay on top of the shared base.
+# heltec_v2 and heltec_v2_4mb share the same hardware definitions in hal.h
+# (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | feathers3_d)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
     set(IDF_TARGET "esp32" CACHE STRING "")
     add_compile_definitions(BOARD_HELTEC_V2=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heltec_v2")
+elseif(BOARD STREQUAL "heltec_v2_4mb")
+    set(IDF_TARGET "esp32" CACHE STRING "")
+    add_compile_definitions(BOARD_HELTEC_V2=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heltec_v2_4mb")
 elseif(BOARD STREQUAL "feathers3_d")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_FEATHERS3_D=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.feathers3_d")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | feathers3_d")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

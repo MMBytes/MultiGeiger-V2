@@ -457,6 +457,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "if(w.checked){f.checked=false;f.disabled=true;}"
         "else{f.disabled=false;}"
         "}syncFtpPs();</script>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
+        "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse</label></div><br>"
@@ -519,6 +521,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_fhost, e_fuser, e_fpw, e_fpath,
         (unsigned long)s_cfg->ftp_interval_min,
         s_cfg->ftp_ps_disabled ? "checked" : "",
+        s_cfg->ftp_tls12_only  ? "checked" : "",
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
@@ -578,6 +581,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     next.ftp_enabled            = false;
     next.ftp_tls                = false;
     next.ftp_ps_disabled        = false;
+    next.ftp_tls12_only         = false;
     next.speaker_tick           = false;
     next.led_tick               = false;
     next.play_sound             = false;
@@ -646,6 +650,7 @@ static esp_err_t config_post(httpd_req_t *req) {
             if (v >= 1 && v <= 1440) next.ftp_interval_min = (uint32_t)v;
         }
         else if (!strcmp(p, "ftp_ps_dis")) next.ftp_ps_disabled = true;
+        else if (!strcmp(p, "ftp_t12only")) next.ftp_tls12_only  = true;
         else if (!strcmp(p, "sp_tick"))    next.speaker_tick = true;
         else if (!strcmp(p, "led_tick"))   next.led_tick     = true;
         else if (!strcmp(p, "play_sound")) next.play_sound   = true;

@@ -32,14 +32,22 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_heap_caps.h"   // V2.3.15: per-upload heap drift diagnostic
+#include "esp_system.h"      // V2.3.15: esp_get_free_heap_size, _minimum_free_heap_size
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
+#include "psa/crypto.h"
 // ESP-IDF 6.0 ships mbedtls 4.x which removes entropy/ctr_drbg setup from user
 // code — PSA crypto is auto-initialised at system startup and the RNG is pulled
 // from PSA internally; mbedtls_ssl_conf_rng() has been removed. See
 // mbedtls/docs/4.0-migration-guide.md.
+//
+// V2.3.15: psa/crypto.h pulled in for PSA_ERROR_INSUFFICIENT_MEMORY (the -141
+// = -0x008D code that mbedtls_strerror cannot decode — PSA error namespace is
+// separate from mbedTLS), plus mbedtls_psa_crypto_free() / psa_crypto_init()
+// for the nuclear-reset path when slot exhaustion persists.
 
 #include "applog.h"
 #include "ntp.h"
@@ -50,11 +58,40 @@ static const char *TAG = "ftp";
 #define FTP_PORT              21
 #define FTP_TIMEOUT_MS        10000      // 10 s per control response
 #define FTP_CONFIRM_MS        15000      // 15 s for 226 — router may flush to USB
-#define FTP_WRITE_CHUNK       1024
+// V2.3.15: 1024 → 4096. Each TLS record carries ~29 B overhead (5 B header +
+// 8 B explicit IV + 16 B AES-GCM tag); larger records mean a higher payload-
+// to-overhead ratio (4 KB / 29 B ≈ 99 % vs 1 KB / 29 B ≈ 97 %), better TCP
+// segment efficiency (one TLS record now spans ~3 MSS), and 4× fewer
+// mbedtls_ssl_write calls per upload. Each ssl_write is a potential PSA
+// pressure point because mbedTLS hands off AES-GCM record encryption to PSA
+// — fewer of them means less per-cycle PSA churn. The new 16 KB lwIP TCP
+// send buffer (sdkconfig.defaults) comfortably absorbs 4 KB chunks.
+#define FTP_WRITE_CHUNK       4096
 #define FTP_WRITE_STALL_MS    15000
 #define FTP_QUIT_TIMEOUT_MS   2000
 #define FTP_RETRY_COUNT       4         // retries after a failed first attempt
 #define FTP_RETRY_DELAY_MS    180000    // 3 min between retries (> one TX cycle)
+
+// V2.3.15: when this many consecutive uploads see -141 (PSA OOM), tear down
+// and re-initialise the PSA crypto subsystem to clear leaked slots. Threshold
+// chosen so a single transient peak doesn't trigger; 5 attempts × 3 min = 15
+// min of sustained failure means there's a real slot leak we need to break.
+#define FTP_PSA_OOM_RESET_THRESHOLD  5
+static int  s_consecutive_psa_oom = 0;
+// Set by log_tls_err whenever it observes -141, cleared at the start of every
+// upload. Lets us catch PSA OOM at any point in the upload (handshake, setup,
+// ssl_read, ssl_write) without each call site needing to know about the
+// per-context tls.psa_oom flag.
+static bool s_upload_psa_oom      = false;
+
+// V2.3.15: set by ftp_write_buf when io_send_all returns false due to the
+// 15 s wall-clock deadline (TCP-level stall, not a TLS error). Triggers
+// preemptive PSA reset in the done block — empirically, mbedtls_ssl_free
+// from a WANT_WRITE-then-abandon path leaks PSA crypto state in mbedTLS
+// 4.x, and waiting for 5 consecutive subsequent retries to fail with
+// -141 wastes 12 minutes (4 retries × 3 min apart). Resetting on the
+// stall itself recovers next attempt instead of next-after-next.
+static bool s_stall_observed      = false;
 
 static const config_t *s_cfg            = NULL;
 static const char     *s_chip_id        = "";
@@ -88,7 +125,31 @@ typedef struct {
     mbedtls_ssl_config       conf;
     mbedtls_ssl_session      ctrl_session;   // saved from control for data reuse
     bool                     have_session;
+    bool                     psa_oom;        // V2.3.15: -141 seen during this upload
 } ftp_tls_ctx_t;
+
+// V2.3.15: PSA error codes are a separate namespace from mbedTLS's own — when a
+// PSA call fails inside mbedtls_ssl_setup / mbedtls_ssl_handshake (because PSA
+// runs ECDHE / HKDF / AES-GCM under the hood in mbedtls 4.x), the PSA status
+// leaks back through the mbedTLS API as a bare negative integer that
+// mbedtls_strerror cannot decode (it tries high=ret&0xFF80 and low=ret&0x7F,
+// neither matches a known mbedTLS module so both surface as "UNKNOWN ERROR
+// CODE"). PSA_ERROR_INSUFFICIENT_MEMORY = -141 = -0x008D is the slot-pool
+// exhaustion code; recognising it lets us emit a clear log line ("PSA out of
+// memory") instead of a useless "UNKNOWN ERROR CODE".
+static inline bool is_psa_oom(int r) {
+    return r == (int)PSA_ERROR_INSUFFICIENT_MEMORY;
+}
+
+static void log_tls_err(const char *where, int r) {
+    if (is_psa_oom(r)) {
+        ESP_LOGE(TAG, "%s: PSA out of memory (PSA_ERROR_INSUFFICIENT_MEMORY = -141)", where);
+        s_upload_psa_oom = true;
+    } else {
+        char eb[80]; mbedtls_strerror(r, eb, sizeof(eb));
+        ESP_LOGW(TAG, "%s: -0x%04x %s", where, -r, eb);
+    }
+}
 
 static void io_init_plain(ftp_io_t *io, int sock) {
     io->sock = sock;
@@ -110,6 +171,12 @@ static void io_set_snd_timeout(const ftp_io_t *io, uint32_t ms) {
 static void io_close(ftp_io_t *io) {
     if (io->tls) {
         mbedtls_ssl_close_notify(&io->ssl);
+        // V2.3.15: belt-and-braces release of any PSA references the session
+        // is still holding. mbedtls_ssl_free does this internally on a fully-
+        // initialised context, but session_reset is the documented hook for
+        // forcing PSA-backend resource release in mbedtls 4.x and is cheap
+        // enough to call unconditionally.
+        mbedtls_ssl_session_reset(&io->ssl);
         mbedtls_ssl_free(&io->ssl);
         io->tls = false;
     }
@@ -145,31 +212,61 @@ static bool tls_ctx_init(ftp_tls_ctx_t *t) {
     mbedtls_ssl_config_init(&t->conf);
     mbedtls_ssl_session_init(&t->ctrl_session);
     t->have_session = false;
+    t->psa_oom      = false;
 
     int r = mbedtls_ssl_config_defaults(&t->conf,
                                         MBEDTLS_SSL_IS_CLIENT,
                                         MBEDTLS_SSL_TRANSPORT_STREAM,
                                         MBEDTLS_SSL_PRESET_DEFAULT);
-    if (r != 0) { ESP_LOGW(TAG, "ssl conf defaults: -0x%04x", -r); return false; }
+    if (r != 0) {
+        log_tls_err("ssl_conf_defaults", r);
+        if (is_psa_oom(r)) t->psa_oom = true;
+        return false;
+    }
 
     // No cert verification: most LAN FTP servers use self-signed certs, and
     // the user opted into this by ticking "certificate NOT verified".
     mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_NONE);
 
-    // Cap FTPS at TLS 1.2 even though mbedTLS 4.x supports 1.3 (V2.3.5
-    // sdkconfig change). Many embedded / router-hosted FTPS daemons (vsftpd
-    // ≤3.0.x without 1.3 patches, older proftpd, pure-ftpd) advertise
-    // willingness to handshake at 1.3 but mishandle the post-handshake
-    // protocol — the symptom is "handshake OK, USER send OK, immediate recv
-    // returns -1" because the server sends close-notify or just closes.
-    // V2.3.5 → V2.3.9 broke FTPS upload to a local NAS this way; V2.3.10
-    // restores it by pinning to 1.2. FTPS gets no benefit from 1.3 anyway:
-    // one local-LAN handshake per hour, the 1-RTT saving is sub-millisecond.
-    // HTTPS targets (Madavi / sensor.community / Radmon / OSM / aqi.eco) keep
-    // 1.3 because they go through esp_tls (separate config path) and their
-    // cloud TLS terminators (nginx / Cloudflare / aws-elb) implement 1.3
-    // correctly.
-    mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+    // TLS 1.2 cap. V2.3.5 enabled TLS 1.3 in the build, after which FTPS
+    // uploads started failing with "USER reject: -1". V2.3.10 worked around
+    // this by hard-pinning FTPS at TLS 1.2 — and at the time the symptom was
+    // attributed (incorrectly) to old vsftpd/proftpd/pure-ftpd builds
+    // mishandling the TLS 1.3 post-handshake protocol.
+    //
+    // V2.3.15 found the V2.3.5–V2.3.9 "USER reject: -1" was actually one bug
+    // and the post-V2.3.15 TLS-1.3-attempt failure is a SEPARATE second bug:
+    //
+    // BUG 1 (FIXED): -0x7B00 = MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
+    //   is a control-flow signal mbedTLS 4.x raises from ssl_read when a
+    //   TLS 1.3 server sends a post-handshake NewSessionTicket. Our io_recv1
+    //   didn't recognise the signal, returned -1, surfaced as "USER reject:
+    //   -1". V2.3.15's io_recv1 now handles -0x7B00 like WANT_READ.
+    //
+    // BUG 2 (PARKED): Even with bug 1 fixed, TLS 1.3 against THIS specific
+    //   FTPS server (project LAN, 192.168.123.1) fails with "426 Data
+    //   Connection: Connection reset by peer" on the data channel after
+    //   STOR. Verified independent of session reuse (with PSK or without —
+    //   same 426). Most likely the server doesn't fully implement TLS 1.3
+    //   on the data channel, or its require_ssl_reuse=YES policy needs the
+    //   modern TLS 1.3 PSK-extension resumption that mbedtls_ssl_set_session
+    //   doesn't provide (TLS 1.2-era API). TLS 1.2 + session reuse works
+    //   flawlessly. See reference_ftps_tls13_investigation.md memory for
+    //   full failure matrix and Options A-D for future investigation.
+    //
+    // The PSA-slot exhaustion paths this release also addresses (slot bump
+    // 32→128, nuclear reset on stall/threshold) is a THIRD independent
+    // phenomenon — triggered by write stalls leaking PSA crypto state on
+    // the WANT_WRITE-then-abandon tear-down path. Three bugs in total.
+    //
+    // V2.3.15 ships with TLS 1.2 cap DEFAULT-ON via the /config "Limit FTPS
+    // to TLS 1.2" checkbox (NVS key ftp_t12only, defaults to true). Users
+    // with TLS 1.3-capable FTPS servers can untick to opt back in. HTTPS
+    // targets (Madavi / SC / Radmon / OSM / aqi.eco) are unaffected — they
+    // always negotiate 1.3 freely via esp_tls (separate code path).
+    if (s_cfg && s_cfg->ftp_tls12_only) {
+        mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
+    }
     return true;
 }
 
@@ -184,7 +281,12 @@ static void tls_ctx_free(ftp_tls_ctx_t *t) {
 static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
     mbedtls_ssl_init(&io->ssl);
     int r = mbedtls_ssl_setup(&io->ssl, &t->conf);
-    if (r != 0) { ESP_LOGW(TAG, "ssl_setup: -0x%04x", -r); mbedtls_ssl_free(&io->ssl); return false; }
+    if (r != 0) {
+        log_tls_err("ssl_setup", r);
+        if (is_psa_oom(r)) t->psa_oom = true;
+        mbedtls_ssl_free(&io->ssl);
+        return false;
+    }
 
     io->net.fd = io->sock;
     mbedtls_ssl_set_bio(&io->ssl, &io->net, io_tls_send, io_tls_recv, NULL);
@@ -197,8 +299,12 @@ static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
 
     while ((r = mbedtls_ssl_handshake(&io->ssl)) != 0) {
         if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
-            char eb[80]; mbedtls_strerror(r, eb, sizeof(eb));
-            ESP_LOGW(TAG, "TLS handshake: -0x%04x %s", -r, eb);
+            log_tls_err(is_data ? "data TLS handshake" : "ctrl TLS handshake", r);
+            if (is_psa_oom(r)) t->psa_oom = true;
+            // V2.3.15: session_reset before free — same belt-and-braces as
+            // io_close. Releases any PSA refs the partial-handshake state
+            // is holding before we drop the context.
+            mbedtls_ssl_session_reset(&io->ssl);
             mbedtls_ssl_free(&io->ssl);
             return false;
         }
@@ -237,9 +343,27 @@ static int io_recv1(ftp_io_t *io, char *out) {
             int r = mbedtls_ssl_read(&io->ssl, (unsigned char *)out, 1);
             if (r == 1) return 1;
             if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            // V2.3.15 (second-pass diagnostic discovery): MBEDTLS_ERR_SSL_RECEIVED_
+            // NEW_SESSION_TICKET (-0x7B00) is NOT an error — it's a control-flow
+            // signal mbedTLS 4.x raises from ssl_read when a TLS 1.3 server sends
+            // a post-handshake NewSessionTicket. The application is invited to
+            // optionally call mbedtls_ssl_get_session() to save the ticket for
+            // future resumption, then call ssl_read again to receive actual
+            // application data. We don't save it (yet — V2.3.16 session-resumption
+            // work will be the natural place to harvest it); just continue the
+            // read loop. This is the actual root cause of the V2.3.5–V2.3.9
+            // "USER reject: -1" symptom that we incorrectly attributed to PSA
+            // exhaustion — at that time io_recv1 didn't decode mbedTLS errors
+            // (V2.3.10 added that diagnostic) so -0x7B00 surfaced as a bare -1.
+            if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+                ESP_LOGI(TAG, "TLS 1.3 NewSessionTicket received (ignored — V2.3.16 will save)");
+                continue;
+            }
             if (r == MBEDTLS_ERR_SSL_TIMEOUT) return 0;
-            char eb[80]; mbedtls_strerror(r, eb, sizeof(eb));
-            ESP_LOGW(TAG, "ssl_read: -0x%04x %s", -r, eb);
+            // log_tls_err recognises -141 (PSA_ERROR_INSUFFICIENT_MEMORY) — the
+            // separate "ssl_read fails because PSA slot pool is exhausted" path,
+            // distinct from the NewSessionTicket signal handled above.
+            log_tls_err("ssl_read", r);
             return -1;
         }
     }
@@ -271,17 +395,27 @@ static bool io_send_all(ftp_io_t *io, const void *buf, size_t len) {
                 }
                 continue;
             }
+            // V2.3.15 (defensive): in mbedTLS 4.x, NewSessionTicket arrives via
+            // server→client reads, so this should never appear from ssl_write.
+            // Handle it like WANT_READ anyway — if mbedTLS ever surfaces it on
+            // the write path (e.g. internal poll for inbound records before
+            // sending), continuing keeps the symmetry with io_recv1.
+            if (n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
         } else {
             n = send(io->sock, p + sent, len - sent, 0);
         }
         if (n <= 0) {
-            // For TLS path n is a negative MBEDTLS_ERR_* code; for plain it's
-            // -1 with errno set. Log both shapes so the cause is visible
-            // without cross-referencing.
+            // For TLS path n is a negative MBEDTLS_ERR_* (or PSA) code; for
+            // plain it's -1 with errno set. Log both shapes so the cause is
+            // visible without cross-referencing. V2.3.15: route TLS errors
+            // through log_tls_err so PSA OOM (-141) is decoded explicitly
+            // instead of "UNKNOWN ERROR CODE".
             if (io->tls && n < 0) {
-                char eb[80]; mbedtls_strerror(n, eb, sizeof(eb));
-                ESP_LOGW(TAG, "io_send_all: TLS err at %u/%u: -0x%04x %s",
-                         (unsigned)sent, (unsigned)len, -n, eb);
+                char where[48];
+                snprintf(where, sizeof(where),
+                         "io_send_all at %u/%u",
+                         (unsigned)sent, (unsigned)len);
+                log_tls_err(where, n);
             } else {
                 ESP_LOGW(TAG, "io_send_all: err at %u/%u (n=%d errno=%d)",
                          (unsigned)sent, (unsigned)len, n, errno);
@@ -468,6 +602,9 @@ static bool ftp_write_buf(ftp_io_t *io, const char *buf, size_t len) {
         if (!io_send_all(io, buf + written, chunk)) {
             ESP_LOGW(TAG, "write stalled after %u/%u bytes",
                      (unsigned)written, (unsigned)len);
+            // V2.3.15: arm preemptive PSA reset in done block (stall path
+            // leaks crypto state in mbedTLS 4.x).
+            s_stall_observed = true;
             return false;
         }
         written += chunk;
@@ -485,6 +622,23 @@ static bool do_ftp_upload(void) {
         ESP_LOGW(TAG, "skip: NTP not synced (would give 1970 filename)");
         return false;
     }
+
+    // V2.3.15: arm the per-upload diagnostic flags. log_tls_err sets
+    // s_upload_psa_oom on -141; ftp_write_buf sets s_stall_observed on a
+    // 15 s wall-clock stall.
+    s_upload_psa_oom = false;
+    s_stall_observed = false;
+
+    // V2.3.15: heap drift diagnostic — log free heap, lifetime min, and the
+    // largest contiguous block before each upload. PSA in mbedTLS 4.x stores
+    // key material on the heap (hybrid keystore — the slot table is static
+    // but the keys themselves are malloc'd), so a slow PSA leak shows up as
+    // monotonically decreasing min_free over hours. Pair with the post-
+    // upload line in done: to spot per-upload deltas as well.
+    ESP_LOGI(TAG, "FTPS pre-upload heap: free=%u min_free=%u largest=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // Build remote filename: geiger_<chip>_YYYY-MM-DDTHHMMSS.log.
     // NOTE: the "FTP: uploading" log line below must come BEFORE applog_snapshot()
@@ -620,6 +774,19 @@ static bool do_ftp_upload(void) {
         // expects a TLS handshake on the data socket, reusing the control
         // session (required by vsftpd's default require_ssl_reuse=YES).
         if (!io_upgrade_tls(&data, &tls, /*is_data=*/true)) goto done;
+
+        // V2.3.15: data-channel handshake done; release the saved ctrl session
+        // blob now to free the PSA key references it's still holding. The data
+        // path has already extracted what it needs (mbedtls_ssl_set_session
+        // copied the relevant state into the data SSL context). Holding the
+        // blob until tls_ctx_free at the end of upload extends PSA-slot lifetime
+        // by the ~30 s body-write duration for no benefit. Re-init so
+        // tls_ctx_free's session_free is a safe no-op.
+        if (tls.have_session) {
+            mbedtls_ssl_session_free(&tls.ctrl_session);
+            mbedtls_ssl_session_init(&tls.ctrl_session);
+            tls.have_session = false;
+        }
     }
 
     write_ok = ftp_write_buf(&data, body, body_len);
@@ -647,12 +814,78 @@ done:
         esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     io_close(&data);
     io_close(&ctrl);
+    // V2.3.15: snapshot the PSA-OOM flag BEFORE tls_ctx_free zeros it out.
+    // OR in s_upload_psa_oom so OOM events from io_recv1 / io_send_all
+    // (post-handshake reads/writes — the V2.3.5–V2.3.9 NewSessionTicket path)
+    // also feed the consecutive-OOM counter, not just handshake-time events.
+    bool psa_oom_observed = (tls_ready && tls.psa_oom) || s_upload_psa_oom;
     if (tls_ready) tls_ctx_free(&tls);
     free(body);
     if (ok) ESP_LOGI(TAG, "FTP%s upload OK (%u bytes)",
                      s_cfg->ftp_tls ? "S" : "", (unsigned)body_len);
     else    ESP_LOGW(TAG, "FTP%s upload failed",
                      s_cfg->ftp_tls ? "S" : "");
+
+    // V2.3.15: PSA recovery decision.
+    //
+    // Two trigger paths feed the same nuclear reset:
+    //   (a) Slot OOM threshold: counted across consecutive uploads. Default
+    //       threshold 5 (≈15 min sustained failure). Catches gradual leaks.
+    //   (b) Write-stall preemptive: fires on the SAME upload that stalled,
+    //       skipping the wait. Empirically the WANT_WRITE-then-abandon path
+    //       leaks PSA crypto state in mbedTLS 4.x — without this preemptive
+    //       trigger, the next 4 retries (3 min apart) all fail with -141 at
+    //       the data-channel handshake, wasting 12 min before the (a) path
+    //       finally fires.
+    //
+    // Both gated on tx_is_idle() — calling mbedtls_psa_crypto_free while
+    // the HTTPS worker is mid-handshake on CPU1 would corrupt its state.
+    // Sub-microsecond race window accepted (worst case: one HTTPS retry).
+    bool        should_reset = false;
+    const char *reset_reason = NULL;
+
+    if (psa_oom_observed) {
+        s_consecutive_psa_oom++;
+        ESP_LOGE(TAG, "PSA OOM observed; consecutive count = %d/%d",
+                 s_consecutive_psa_oom, FTP_PSA_OOM_RESET_THRESHOLD);
+        if (s_consecutive_psa_oom >= FTP_PSA_OOM_RESET_THRESHOLD) {
+            should_reset = true;
+            reset_reason = "consecutive PSA OOM threshold reached";
+        }
+    } else if (ok) {
+        // Healthy upload — clear the counter so a transient peak doesn't
+        // accumulate over hours.
+        s_consecutive_psa_oom = 0;
+    }
+
+    if (s_stall_observed && !should_reset) {
+        should_reset = true;
+        reset_reason = "preemptive (write stall leaks PSA state in mbedTLS 4.x)";
+    }
+
+    if (should_reset && tx_is_idle()) {
+        ESP_LOGW(TAG, "PSA crypto subsystem reset: %s", reset_reason);
+        mbedtls_psa_crypto_free();
+        psa_status_t ps = psa_crypto_init();
+        if (ps == PSA_SUCCESS) {
+            ESP_LOGI(TAG, "psa_crypto_init: ok — slot pool reset to empty");
+            s_consecutive_psa_oom = 0;
+        } else {
+            ESP_LOGE(TAG, "psa_crypto_init failed: %d (PSA in unknown state)",
+                     (int)ps);
+        }
+    } else if (should_reset) {
+        ESP_LOGW(TAG, "PSA reset deferred (worker busy): %s", reset_reason);
+    }
+
+    // V2.3.15: post-upload heap snapshot. Compare against the pre-upload
+    // line to spot per-upload deltas; watch min_free over hours/days for
+    // slow PSA-backed leaks.
+    ESP_LOGI(TAG, "FTPS post-upload heap: free=%u min_free=%u largest=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     return ok;
 }
 

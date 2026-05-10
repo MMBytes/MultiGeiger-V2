@@ -10,9 +10,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
-#if HAL_HAS_PSRAM
-#include "esp_heap_caps.h"
-#endif
+#include "esp_heap_caps.h"   // V2.3.15: also used for boot-time ring-region log
+
+static const char *TAG = "applog";
 
 // Rolling log buffer. The ESP-IDF vprintf hook captures every ESP_LOGx line
 // (our code + WiFi + HTTP + bme280 + ...) without touching call sites. The
@@ -193,6 +193,21 @@ void applog_init(void) {
     }
     s_prev_hook   = esp_log_set_vprintf(applog_vprintf);
     s_initialized = true;
+
+    // V2.3.15: one-shot diagnostic so the boot log explicitly says where the
+    // ring landed and how much headroom remains in that region. Lets future-me
+    // confirm at a glance (per board) that PSRAM detection worked on FeatherS3-D
+    // (or didn't, in which case we'd have silently fallen back to the 60 KB
+    // SRAM path with no clue why /log only holds an hour of context).
+#if HAL_HAS_PSRAM
+    ESP_LOGI(TAG, "ring %u B in PSRAM (free SPIRAM after alloc: %u B)",
+             (unsigned)LOG_RING_SIZE,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#else
+    ESP_LOGI(TAG, "ring %u B in internal DRAM (free heap after alloc: %u B)",
+             (unsigned)LOG_RING_SIZE,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
 }
 
 char *applog_snapshot(size_t *out_len) {

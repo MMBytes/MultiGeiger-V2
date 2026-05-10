@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -16,6 +17,38 @@
 #include "freertos/task.h"
 
 static const char *TAG = "tx";
+
+// Per-target stats surfaced on /. Updated only from the TX worker task; read
+// lock-free from the HTTP server task. See transmission.h for field semantics.
+static tx_target_stats_t s_stats[TX_TARGET_COUNT] = {0};
+static const char *s_target_names[TX_TARGET_COUNT] = {
+    "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco"
+};
+
+const char *tx_target_name(tx_target_id_t id) {
+    if (id < 0 || id >= TX_TARGET_COUNT) return "?";
+    return s_target_names[id];
+}
+
+void tx_get_stats(tx_target_id_t id, tx_target_stats_t *out) {
+    if (!out || id < 0 || id >= TX_TARGET_COUNT) {
+        if (out) memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = s_stats[id];   // Single-task writer + scalar fields → torn-tolerant
+}
+
+// Helper used from the orchestrator: record one attempt outcome. ok_codes is
+// a 0-terminated list of HTTP status values that count as success for this
+// target (e.g. {201, 200, 0} for OSM which accepts both).
+static void record_attempt(tx_target_id_t id, int rc) {
+    s_stats[id].attempted++;
+    s_stats[id].last_rc   = rc;
+    s_stats[id].last_at   = (int64_t)time(NULL);
+}
+static void record_success(tx_target_id_t id) {
+    s_stats[id].succeeded++;
+}
 
 // TX runs on its own CPU1-pinned task so mbedTLS handshakes don't starve
 // the CPU0 idle task (which feeds the task watchdog).
@@ -807,16 +840,14 @@ void tx_transmit(const tx_context_t *c) {
 }
 
 static void tx_run(tx_context_t *c) {
-    static int madavi_fail_streak    = 0;
-    static int madavi_skip_remaining = 0;
-    static int sensorc_fail_streak    = 0;
-    static int sensorc_skip_remaining = 0;
-    static int radmon_fail_streak    = 0;
-    static int radmon_skip_remaining = 0;
-    static int osm_fail_streak       = 0;
-    static int osm_skip_remaining    = 0;
-    static int aqi_fail_streak       = 0;
-    static int aqi_skip_remaining    = 0;
+    // Per-target consecutive-fail streak — internal only. The "skip remaining"
+    // counters were promoted to s_stats[i].breaker_open_cycles so the status
+    // page can show them; updates here keep them in sync (single-writer).
+    static int madavi_fail_streak  = 0;
+    static int sensorc_fail_streak = 0;
+    static int radmon_fail_streak  = 0;
+    static int osm_fail_streak     = 0;
+    static int aqi_fail_streak     = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t min_free  = esp_get_minimum_free_heap_size();
@@ -834,20 +865,23 @@ static void tx_run(tx_context_t *c) {
     bool any_payload = c->tube_enabled || c->bme_valid || c->pm_valid || c->noise_valid;
 
     if (c->madavi.enabled && any_payload) {
-        if (madavi_skip_remaining > 0) {
-            madavi_skip_remaining--;
-            ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)", madavi_skip_remaining);
+        if (s_stats[TX_TARGET_MADAVI].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_MADAVI].breaker_open_cycles--;
+            ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_MADAVI].breaker_open_cycles);
         } else {
             ESP_LOGI(TAG, "Sending to Madavi (%s)", c->madavi.use_https ? "https" : "http");
             int rc = send_madavi(c);
             bool ok = (rc == 200);
+            record_attempt(TX_TARGET_MADAVI, rc);
+            if (ok) record_success(TX_TARGET_MADAVI);
             ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 madavi_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
                 madavi_fail_streak++;
                 if (madavi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    madavi_skip_remaining = TX_CB_SKIP_CYCLES;
+                    s_stats[TX_TARGET_MADAVI].breaker_open_cycles = TX_CB_SKIP_CYCLES;
                     ESP_LOGW(TAG, "Madavi: %d fails, breaker open for %d cycles",
                              madavi_fail_streak, TX_CB_SKIP_CYCLES);
                     madavi_fail_streak = 0;
@@ -859,20 +893,23 @@ static void tx_run(tx_context_t *c) {
     }
 
     if (c->sensorc.enabled && any_payload) {
-        if (sensorc_skip_remaining > 0) {
-            sensorc_skip_remaining--;
-            ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)", sensorc_skip_remaining);
+        if (s_stats[TX_TARGET_SENSORC].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_SENSORC].breaker_open_cycles--;
+            ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_SENSORC].breaker_open_cycles);
         } else {
             ESP_LOGI(TAG, "Sending to sensor.community (%s)", c->sensorc.use_https ? "https" : "http");
             int rc = send_sensorc(c);
             bool ok = (rc == 201);
+            record_attempt(TX_TARGET_SENSORC, rc);
+            if (ok) record_success(TX_TARGET_SENSORC);
             ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 sensorc_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
                 sensorc_fail_streak++;
                 if (sensorc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    sensorc_skip_remaining = TX_CB_SKIP_CYCLES;
+                    s_stats[TX_TARGET_SENSORC].breaker_open_cycles = TX_CB_SKIP_CYCLES;
                     ESP_LOGW(TAG, "sensor.community: %d fails, breaker open for %d cycles",
                              sensorc_fail_streak, TX_CB_SKIP_CYCLES);
                     sensorc_fail_streak = 0;
@@ -884,20 +921,23 @@ static void tx_run(tx_context_t *c) {
     }
 
     if (c->radmon.enabled && c->tube_enabled) {
-        if (radmon_skip_remaining > 0) {
-            radmon_skip_remaining--;
-            ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)", radmon_skip_remaining);
+        if (s_stats[TX_TARGET_RADMON].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_RADMON].breaker_open_cycles--;
+            ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_RADMON].breaker_open_cycles);
         } else {
             ESP_LOGI(TAG, "Sending to Radmon (%s)", c->radmon.use_https ? "https" : "http");
             int rc = send_radmon(c);
             bool ok = (rc == 200);
+            record_attempt(TX_TARGET_RADMON, rc);
+            if (ok) record_success(TX_TARGET_RADMON);
             ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 radmon_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
                 radmon_fail_streak++;
                 if (radmon_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    radmon_skip_remaining = TX_CB_SKIP_CYCLES;
+                    s_stats[TX_TARGET_RADMON].breaker_open_cycles = TX_CB_SKIP_CYCLES;
                     ESP_LOGW(TAG, "Radmon: %d fails, breaker open for %d cycles",
                              radmon_fail_streak, TX_CB_SKIP_CYCLES);
                     radmon_fail_streak = 0;
@@ -909,20 +949,23 @@ static void tx_run(tx_context_t *c) {
     }
 
     if (c->send_osm && any_payload) {
-        if (osm_skip_remaining > 0) {
-            osm_skip_remaining--;
-            ESP_LOGI(TAG, "openSenseMap: breaker open (%d cycles left)", osm_skip_remaining);
+        if (s_stats[TX_TARGET_OSM].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_OSM].breaker_open_cycles--;
+            ESP_LOGI(TAG, "openSenseMap: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_OSM].breaker_open_cycles);
         } else {
             ESP_LOGI(TAG, "Sending to openSenseMap (https)");
             int rc = send_osm(c);
             bool ok = (rc == 201 || rc == 200);
+            record_attempt(TX_TARGET_OSM, rc);
+            if (ok) record_success(TX_TARGET_OSM);
             ESP_LOGI(TAG, "openSenseMap: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 osm_fail_streak = 0;
             } else if (rc == -1) {
                 osm_fail_streak++;
                 if (osm_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    osm_skip_remaining = TX_CB_SKIP_CYCLES;
+                    s_stats[TX_TARGET_OSM].breaker_open_cycles = TX_CB_SKIP_CYCLES;
                     ESP_LOGW(TAG, "openSenseMap: %d fails, breaker open for %d cycles",
                              osm_fail_streak, TX_CB_SKIP_CYCLES);
                     osm_fail_streak = 0;
@@ -934,20 +977,23 @@ static void tx_run(tx_context_t *c) {
     }
 
     if (c->send_aqi && any_payload) {
-        if (aqi_skip_remaining > 0) {
-            aqi_skip_remaining--;
-            ESP_LOGI(TAG, "aqi.eco: breaker open (%d cycles left)", aqi_skip_remaining);
+        if (s_stats[TX_TARGET_AQI].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_AQI].breaker_open_cycles--;
+            ESP_LOGI(TAG, "aqi.eco: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_AQI].breaker_open_cycles);
         } else {
             ESP_LOGI(TAG, "Sending to aqi.eco (https)");
             int rc = send_aqi(c);
             bool ok = (rc == 200 || rc == 201);
+            record_attempt(TX_TARGET_AQI, rc);
+            if (ok) record_success(TX_TARGET_AQI);
             ESP_LOGI(TAG, "aqi.eco: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 aqi_fail_streak = 0;
             } else if (rc == -1) {
                 aqi_fail_streak++;
                 if (aqi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    aqi_skip_remaining = TX_CB_SKIP_CYCLES;
+                    s_stats[TX_TARGET_AQI].breaker_open_cycles = TX_CB_SKIP_CYCLES;
                     ESP_LOGW(TAG, "aqi.eco: %d fails, breaker open for %d cycles",
                              aqi_fail_streak, TX_CB_SKIP_CYCLES);
                     aqi_fail_streak = 0;

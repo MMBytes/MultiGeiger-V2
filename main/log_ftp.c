@@ -99,6 +99,22 @@ static uint32_t        s_next_upload_ms = 0;   // set in log_ftp_init from cfg
 static int             s_retry_count    = 0;   // retries remaining (0 = none pending)
 static uint32_t        s_retry_ms       = 0;   // wall-clock ms for next retry
 
+// Public stats — populated at end of each upload attempt; read lock-free
+// by the HTTP server task via log_ftp_get_stats().
+static bool     s_have_last  = false;
+static bool     s_last_ok    = false;
+static int64_t  s_last_at    = 0;
+static uint32_t s_last_bytes = 0;
+
+void log_ftp_get_stats(log_ftp_stats_t *out) {
+    if (!out) return;
+    out->have_last   = s_have_last;
+    out->last_ok     = s_last_ok;
+    out->last_at     = s_last_at;
+    out->last_bytes  = s_last_bytes;
+    out->next_due_ms = s_next_upload_ms;
+}
+
 static bool wifi_up_ftp(void) {
     wifi_ap_record_t ap;
     return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
@@ -635,13 +651,13 @@ static bool do_ftp_upload(void) {
     // but the keys themselves are malloc'd), so a slow PSA leak shows up as
     // monotonically decreasing min_free over hours. Pair with the post-
     // upload line in done: to spot per-upload deltas as well.
-    ESP_LOGI(TAG, "FTPS pre-upload heap: free=%u min_free=%u largest=%u",
+    ESP_LOGI(TAG, "Pre-upload heap: free=%u min_free=%u largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // Build remote filename: geiger_<chip>_YYYY-MM-DDTHHMMSS.log.
-    // NOTE: the "FTP: uploading" log line below must come BEFORE applog_snapshot()
+    // NOTE: the "FTP uploading" log line below must come BEFORE applog_snapshot()
     // so that line is included in this batch — if we logged after, we'd drop it
     // whenever the ring wrapped.
     time_t t = time(NULL);
@@ -686,7 +702,7 @@ static bool do_ftp_upload(void) {
         }
     }
 
-    ESP_LOGI(TAG, "FTP%s: uploading %s to %s:%d as '%s'",
+    ESP_LOGI(TAG, "FTP%s uploading %s to %s:%d as '%s'",
              s_cfg->ftp_tls ? "S" : "",
              path, host_buf, ftp_port_use,
              s_cfg->ftp_user[0] ? s_cfg->ftp_user : "anonymous");
@@ -863,6 +879,13 @@ done:
     else    ESP_LOGW(TAG, "FTP%s upload failed",
                      s_cfg->ftp_tls ? "S" : "");
 
+    // Publish to stats. last_bytes only updated on success so a failed retry
+    // doesn't blank the previous-good byte count visible on /.
+    s_have_last = true;
+    s_last_ok   = ok;
+    s_last_at   = (int64_t)time(NULL);
+    if (ok) s_last_bytes = (uint32_t)body_len;
+
     // V2.3.15: PSA recovery decision.
     //
     // Two trigger paths feed the same nuclear reset:
@@ -918,7 +941,7 @@ done:
     // V2.3.15: post-upload heap snapshot. Compare against the pre-upload
     // line to spot per-upload deltas; watch min_free over hours/days for
     // slow PSA-backed leaks.
-    ESP_LOGI(TAG, "FTPS post-upload heap: free=%u min_free=%u largest=%u",
+    ESP_LOGI(TAG, "Post-upload heap: free=%u min_free=%u largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));

@@ -127,3 +127,38 @@ void tx_transmit(const tx_context_t *ctx);
  *  an active TX cycle.
  */
 bool tx_is_idle(void);
+
+/** @brief Per-target upload statistics, surfaced on the status page.
+ *
+ *  Counters cover the lifetime of the boot. `attempted` counts every cycle
+ *  the target was actually called (skipped-because-breaker-open cycles do
+ *  NOT increment attempted — they're suppressed before send). `last_rc` is
+ *  the HTTP status from the last send (or -1 on transport error). `last_at`
+ *  is the unix-epoch timestamp of the last send attempt (0 = never sent).
+ *  `breaker_open_cycles` is the number of TX cycles remaining until the
+ *  circuit breaker re-closes (0 = closed / normal).
+ */
+typedef struct {
+    uint32_t attempted;
+    uint32_t succeeded;
+    int      last_rc;
+    int64_t  last_at;
+    int      breaker_open_cycles;
+} tx_target_stats_t;
+
+typedef enum {
+    TX_TARGET_MADAVI = 0,
+    TX_TARGET_SENSORC,
+    TX_TARGET_RADMON,
+    TX_TARGET_OSM,
+    TX_TARGET_AQI,
+    TX_TARGET_COUNT
+} tx_target_id_t;
+
+/** @brief Short human-readable target name (never NULL). */
+const char *tx_target_name(tx_target_id_t id);
+
+/** @brief Read the per-target stats snapshot. Safe from any task —
+ *         fields are 32-bit/64-bit aligned; reads are torn-tolerant.
+ */
+void tx_get_stats(tx_target_id_t id, tx_target_stats_t *out);

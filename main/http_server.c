@@ -3,18 +3,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_chip_info.h"     // V2.3.13: chip-model lookup for OTA target validation
 #include "esp_app_format.h"    // V2.3.13: ESP_CHIP_ID_* constants for OTA validation
+#include "esp_app_desc.h"
+#include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
@@ -24,6 +29,28 @@
 #include "applog.h"
 #include "hal.h"
 #include "pm_sensor.h"
+#include "env_sensor.h"
+#include "noise_sensor.h"
+#include "tube.h"
+#include "transmission.h"
+#include "log_ftp.h"
+
+// Cached snapshot accessors implemented in main.c. All are single-writer
+// (main task) / multi-reader (HTTP task) on word-aligned scalars, so no lock
+// needed. See the g_last_* declarations + comment block at the top of main.c.
+extern uint32_t main_status_cycles(void);
+extern uint32_t main_status_last_dt_ms(void);
+extern uint32_t main_status_last_cpm(void);
+extern float    main_status_last_usvph(void);
+extern uint32_t main_status_last_hv_pulses(void);
+extern bool     main_status_last_hv_error(void);
+extern bool     main_status_have_env(void);
+extern float    main_status_env_t(void);
+extern float    main_status_env_h(void);
+extern float    main_status_env_p(void);
+extern int64_t  main_status_last_cycle_at(void);
+extern uint32_t main_status_last_cycle_ms(void);
+extern uint32_t main_status_reconnects(void);
 
 static const char *TAG = "http";
 
@@ -171,6 +198,40 @@ static void format_uptime(unsigned long s, char *out, size_t sz) {
     }
 }
 
+// Decode wifi_auth_mode_t to a short label. Names match what most APs use in
+// their admin UI (the IDF enum names like AUTH_WPA2_PSK are too jargon-y).
+static const char *wifi_auth_str(wifi_auth_mode_t m) {
+    switch (m) {
+        case WIFI_AUTH_OPEN:            return "Open";
+        case WIFI_AUTH_WEP:             return "WEP";
+        case WIFI_AUTH_WPA_PSK:         return "WPA-PSK";
+        case WIFI_AUTH_WPA2_PSK:        return "WPA2-PSK";
+        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2-PSK";
+        case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-Enterprise";
+        case WIFI_AUTH_WPA3_PSK:        return "WPA3-PSK";
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3-PSK";
+        default:                        return "?";
+    }
+}
+
+// Compact phy-mode summary like "bgn" or "ax". Each capability bit becomes a
+// letter; absent radios just drop out (no padding). IDF 6.0 exposes 11a/ac/ax
+// flags too — prepended with their own letters where relevant.
+static void wifi_phy_str(const wifi_ap_record_t *ap, char *out, size_t sz) {
+    char buf[16];
+    int n = 0;
+    if (ap->phy_11b)  buf[n++] = 'b';
+    if (ap->phy_11g)  buf[n++] = 'g';
+    if (ap->phy_11n)  buf[n++] = 'n';
+    if (ap->phy_11a)  buf[n++] = 'a';
+    if (ap->phy_11ac) { buf[n++] = 'a'; buf[n++] = 'c'; }
+    if (ap->phy_11ax) { buf[n++] = 'a'; buf[n++] = 'x'; }
+    if (ap->phy_lr)   buf[n++] = 'L';      // ESP-NOW long-range, rare
+    buf[n] = 0;
+    if (n == 0) snprintf(out, sz, "?");
+    else        snprintf(out, sz, "%s", buf);
+}
+
 static void format_net_info(char *out, size_t sz) {
     wifi_mode_t mode = WIFI_MODE_NULL;
     esp_wifi_get_mode(&mode);
@@ -193,15 +254,40 @@ static void format_net_info(char *out, size_t sz) {
         esp_ip4addr_ntoa(&d2.ip.u_addr.ip4, d2_s, sizeof(d2_s));
         bool has_d2 = (d2.ip.u_addr.ip4.addr != 0) &&
                       (d2.ip.u_addr.ip4.addr != d1.ip.u_addr.ip4.addr);
+        char ssid_esc[66];
+        // SSID is up to 32 bytes plus null; escape into 65 + slack.
+        char ssid_raw[33] = {0};
+        memcpy(ssid_raw, ap.ssid, sizeof(ap.ssid));
+        ssid_raw[32] = 0;
+        html_esc(ssid_raw, ssid_esc, sizeof(ssid_esc));
+        char phy[8];
+        wifi_phy_str(&ap, phy, sizeof(phy));
+        const char *bw = (ap.second == WIFI_SECOND_CHAN_NONE) ? "BW20" : "BW40";
+        // AID lives in a separate API in IDF 6.0 (was a wifi_ap_record_t
+        // member in 5.x). 0 = not associated / unknown.
+        uint16_t aid = 0;
+        esp_wifi_sta_get_aid(&aid);
         snprintf(out, sz,
+                 "<div class=\"info\"><h3>Network</h3>"
+                 "<b>SSID:</b> %s<br>"
+                 "<b>Security:</b> %s &middot; PHY %s &middot; %s &middot; channel %d<br>"
+                 "<b>BSSID:</b> %02x:%02x:%02x:%02x:%02x:%02x &nbsp; AID %u<br>"
+                 "<b>RSSI:</b> %d dBm<br>"
                  "<b>IP:</b> %s<br>"
                  "<b>Gateway:</b> %s<br>"
                  "<b>Network Mask:</b> %s<br>"
                  "<b>DNS:</b> %s%s%s<br>"
-                 "<b>WiFi Strength:</b> %d dBm<br>",
+                 "<b>Reconnects:</b> %lu since boot"
+                 "</div>",
+                 ssid_esc,
+                 wifi_auth_str(ap.authmode), phy, bw, (int)ap.primary,
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                 ap.bssid[3], ap.bssid[4], ap.bssid[5],
+                 (unsigned)aid,
+                 (int)ap.rssi,
                  ip_s, gw_s, nm_s,
                  d1_s, has_d2 ? ", " : "", has_d2 ? d2_s : "",
-                 (int)ap.rssi);
+                 (unsigned long)main_status_reconnects());
         return;
     }
 
@@ -211,11 +297,376 @@ static void format_net_info(char *out, size_t sz) {
         if (apn) esp_netif_get_ip_info(apn, &ip);
         char ip_s[16];
         esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
-        snprintf(out, sz, "<b>IP:</b> %s (AP mode)<br>", ip_s);
+        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>IP:</b> %s (AP mode)</div>", ip_s);
         return;
     }
 
-    snprintf(out, sz, "<b>Network:</b> No connection<br>");
+    snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>Network:</b> No connection</div>");
+}
+
+// --- Device identity block ---------------------------------------------------
+// All format_* helpers emit a complete self-wrapping <div class="info"> block
+// so status_get can stream them sequentially via httpd_resp_send_chunk without
+// needing a top-level body buffer. Empty output (e.g. tube disabled, no env
+// sensor) is a single null terminator — the caller's strlen() sees 0, the
+// chunk is skipped.
+static void format_device(char *out, size_t sz) {
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
+    const char *model =
+        (chip.model == CHIP_ESP32)   ? "ESP32"   :
+        (chip.model == CHIP_ESP32S2) ? "ESP32-S2":
+        (chip.model == CHIP_ESP32S3) ? "ESP32-S3":
+        (chip.model == CHIP_ESP32C3) ? "ESP32-C3": "?";
+    char feat[32]; feat[0] = 0;
+    if (chip.features & CHIP_FEATURE_WIFI_BGN) strncat(feat, "WiFi ", sizeof(feat)-strlen(feat)-1);
+    if (chip.features & CHIP_FEATURE_BLE)      strncat(feat, "BLE ",  sizeof(feat)-strlen(feat)-1);
+    if (chip.features & CHIP_FEATURE_BT)       strncat(feat, "BT ",   sizeof(feat)-strlen(feat)-1);
+    bool emb_flash = (chip.features & CHIP_FEATURE_EMB_FLASH) != 0;
+    bool emb_psram = (chip.features & CHIP_FEATURE_EMB_PSRAM) != 0;
+    if (emb_flash) strncat(feat, "EmbFlash ", sizeof(feat)-strlen(feat)-1);
+    if (emb_psram) strncat(feat, "EmbPSRAM ", sizeof(feat)-strlen(feat)-1);
+    // Strip trailing space.
+    size_t fl = strlen(feat); if (fl && feat[fl-1] == ' ') feat[fl-1] = 0;
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    const char *fw_date = app ? app->date : __DATE__;
+    const char *fw_time = app ? app->time : __TIME__;
+
+#if HAL_HAS_ANTENNA_SWITCH
+    const char *antenna = s_cfg->use_external_antenna ? "EXTERNAL u.FL" : "internal PCB";
+#else
+    const char *antenna = "(N/A — internal only)";
+#endif
+
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Device</h3>"
+        "<b>Chip ID:</b> %s<br>"
+        "<b>MAC:</b> %s<br>"
+        "<b>Board:</b> %s<br>"
+        "<b>Chip:</b> %s rev v%d.%d &middot; %d cores &middot; %s<br>"
+        "<b>Memory:</b> %lu MB flash%s<br>"
+        "<b>Firmware:</b> %s &nbsp; (built %s %s)<br>"
+        "<b>Antenna:</b> %s"
+        "</div>",
+        s_chip_id,
+        s_mac_str,
+        BOARD_NAME,
+        model, chip.revision / 100, chip.revision % 100, chip.cores, feat[0] ? feat : "?",
+        (unsigned long)(flash_size / (1024 * 1024)),
+#if HAL_HAS_PSRAM
+        " &middot; 8 MB PSRAM",
+#else
+        "",
+#endif
+        VERSION_STR, fw_date, fw_time,
+        antenna);
+}
+
+// --- System block ------------------------------------------------------------
+// Uptime, reset reason, heap, NTP last-sync.
+static const char *reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "POWER_ON";
+        case ESP_RST_EXT:       return "EXT_PIN";
+        case ESP_RST_SW:        return "SOFT (esp_restart)";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "OTHER_WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEP_SLEEP_WAKE";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+
+static void format_ago(int64_t now_unix, int64_t past_unix, char *out, size_t sz) {
+    if (past_unix <= 0 || now_unix < past_unix) { snprintf(out, sz, "never"); return; }
+    long s = (long)(now_unix - past_unix);
+    if (s < 60)        snprintf(out, sz, "%lds ago", s);
+    else if (s < 3600) snprintf(out, sz, "%ldm %lds ago", s / 60, s % 60);
+    else if (s < 86400)snprintf(out, sz, "%ldh %ldm ago", s / 3600, (s / 60) % 60);
+    else               snprintf(out, sz, "%ldd %ldh ago", s / 86400, (s / 3600) % 24);
+}
+
+static void format_wallclock(int64_t unix_t, char *out, size_t sz) {
+    if (unix_t <= 0) { snprintf(out, sz, "—"); return; }
+    time_t t = (time_t)unix_t;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(out, sz, "%Y-%m-%d %H:%M:%S", &tm);
+}
+
+static void format_system(char *out, size_t sz, unsigned long uptime_s) {
+    uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t min_free  = esp_get_minimum_free_heap_size();
+    uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    char uptime_buf[32];
+    format_uptime(uptime_s, uptime_buf, sizeof(uptime_buf));
+
+    // NTP last-sync. sntp_get_sync_status() returns COMPLETED briefly after
+    // each callback then resets to RESET — which is misleading on a page that
+    // refreshes infrequently. Better: just check whether the wall clock looks
+    // sane (same predicate ntp_time_valid uses) and show the most recent
+    // localtime sample.
+    time_t now = time(NULL);
+    char ntp_line[96];
+    if (now > 1735689600) {     // > 2025-01-01
+        char ts[24];
+        format_wallclock((int64_t)now, ts, sizeof(ts));
+        snprintf(ntp_line, sizeof(ntp_line), "synced &middot; now %s", ts);
+    } else {
+        snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");
+    }
+
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>System</h3>"
+        "<b>Uptime:</b> %s<br>"
+        "<b>Reset reason:</b> %s<br>"
+        "<b>Free heap:</b> %lu bytes<br>"
+        "<b>Min free heap:</b> %lu bytes<br>"
+        "<b>Max allocation:</b> %lu bytes<br>"
+        "<b>NTP:</b> %s<br>"
+        "<b>AP SSID:</b> %s"
+        "</div>",
+        uptime_buf,
+        reset_reason_str(esp_reset_reason()),
+        (unsigned long)free_heap,
+        (unsigned long)min_free,
+        (unsigned long)max_alloc,
+        ntp_line,
+        s_cfg->ap_name);
+}
+
+// --- Cycle block -------------------------------------------------------------
+static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
+    uint32_t cycles  = main_status_cycles();
+    uint32_t last_dt = main_status_last_dt_ms();
+    int64_t  last_at = main_status_last_cycle_at();
+    uint32_t last_ms = main_status_last_cycle_ms();
+
+    char wall[32], ago[24];
+    format_wallclock(last_at, wall, sizeof(wall));
+    format_ago((int64_t)time(NULL), last_at, ago, sizeof(ago));
+
+    // Next cycle = last + tx_interval. If we haven't run yet, "—".
+    char next_line[64];
+    if (last_ms == 0) {
+        snprintf(next_line, sizeof(next_line), "—");
+    } else {
+        long remaining_ms = (long)(last_ms + s_cfg->tx_interval_ms) - (long)uptime_ms;
+        if (remaining_ms < 0) remaining_ms = 0;
+        snprintf(next_line, sizeof(next_line), "in %lds", remaining_ms / 1000);
+    }
+
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Cycle</h3>"
+        "<b>Cycle #:</b> %lu<br>"
+        "<b>Last dt:</b> %lu ms<br>"
+        "<b>Interval:</b> %lu ms<br>"
+        "<b>Last cycle:</b> %s &nbsp; (%s)<br>"
+        "<b>Next cycle:</b> %s"
+        "</div>",
+        (unsigned long)cycles,
+        (unsigned long)last_dt,
+        (unsigned long)s_cfg->tx_interval_ms,
+        wall, ago,
+        next_line);
+}
+
+// --- Radiation block (only when tube is enabled) -----------------------------
+static void format_radiation(char *out, size_t sz) {
+    if (!tube_is_enabled()) { out[0] = 0; return; }
+
+    uint32_t cpm        = main_status_last_cpm();
+    float    usvph      = main_status_last_usvph();
+    uint32_t hv_pulses  = main_status_last_hv_pulses();
+    bool     hv_error   = main_status_last_hv_error();
+    uint32_t dt_ms      = main_status_last_dt_ms();
+
+    // HV pulses per minute over the last cycle window. dt_ms == 0 means no
+    // cycle has run yet; show a dash so we don't divide by zero.
+    char hv_line[64];
+    if (dt_ms > 0) {
+        float hv_per_min = (float)hv_pulses * 60000.0f / (float)dt_ms;
+        snprintf(hv_line, sizeof(hv_line), "%.1f / min  (cumulative %lu)",
+                 hv_per_min, (unsigned long)hv_pulses);
+    } else {
+        snprintf(hv_line, sizeof(hv_line), "—  (cumulative %lu)",
+                 (unsigned long)hv_pulses);
+    }
+
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Radiation</h3>"
+        "<b>Tube:</b> enabled%s<br>"
+        "<b>CPM:</b> %lu<br>"
+        "<b>Dose rate:</b> %.3f µSv/h<br>"
+        "<b>HV pulses:</b> %s"
+        "</div>",
+        hv_error ? " &middot; <span style='color:#c00;font-weight:bold'>HV ERROR</span>" : "",
+        (unsigned long)cpm, usvph,
+        hv_line);
+}
+
+// --- Environment block -------------------------------------------------------
+static void format_environment(char *out, size_t sz) {
+    if (!env_sensor_present()) { out[0] = 0; return; }
+    if (!main_status_have_env()) {
+        snprintf(out, sz,
+            "<div class=\"info\"><h3>Environment</h3>"
+            "<b>Sensor:</b> %s<br>"
+            "awaiting first cycle..."
+            "</div>", env_sensor_name());
+        return;
+    }
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Environment</h3>"
+        "<b>Sensor:</b> %s<br>"
+        "<b>Temperature:</b> %.2f °C<br>"
+        "<b>Humidity:</b> %.2f %%<br>"
+        "<b>Pressure:</b> %.2f hPa"
+        "</div>",
+        env_sensor_name(),
+        main_status_env_t(),
+        main_status_env_h(),
+        main_status_env_p() / 100.0f);
+}
+
+// --- Noise block -------------------------------------------------------------
+static void format_noise(char *out, size_t sz) {
+    if (!noise_sensor_present()) { out[0] = 0; return; }
+    noise_sample_t n;
+    if (noise_sensor_get_last_sample(&n) != ESP_OK) {
+        snprintf(out, sz,
+            "<div class=\"info\"><h3>Noise</h3>"
+            "<b>Sensor:</b> %s<br>"
+            "first window still integrating..."
+            "</div>", noise_sensor_name());
+        return;
+    }
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Noise</h3>"
+        "<b>Sensor:</b> %s (%s)<br>"
+        "<b>LAeq:</b> %.1f dB(A)<br>"
+        "<b>LA min / max:</b> %.1f / %.1f dB(A)"
+        "</div>",
+        noise_sensor_name(), noise_sensor_version(),
+        n.laeq, n.la_min, n.la_max);
+}
+
+// --- Uploads block -----------------------------------------------------------
+//
+// Per-target succeeded/attempted + last_rc + breaker state, plus FTPS line.
+// Targets that aren't enabled in config are omitted (keeps the block tight).
+static bool target_enabled(tx_target_id_t id) {
+    switch (id) {
+        case TX_TARGET_MADAVI:  return s_cfg->send_madavi;
+        case TX_TARGET_SENSORC: return s_cfg->send_sensorc;
+        case TX_TARGET_RADMON:  return s_cfg->send_radmon;
+        case TX_TARGET_OSM:     return s_cfg->send_osm;
+        case TX_TARGET_AQI:     return s_cfg->send_aqi;
+        default:                return false;
+    }
+}
+
+// Defensive helper: snprintf into a buffer at offset n with bounds check.
+// Returns updated n. Stops growing once the buffer is full (further calls
+// no-op). Prevents the `sz - n` underflow if a caller miscounted.
+static int append_safe(char *out, size_t sz, int n, const char *fmt, ...) {
+    if (n < 0 || (size_t)n >= sz) return (int)sz;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(out + n, sz - n, fmt, ap);
+    va_end(ap);
+    if (w < 0) return n;
+    n += w;
+    if ((size_t)n > sz) n = (int)sz;
+    return n;
+}
+
+static void format_uploads(char *out, size_t sz) {
+    int n = append_safe(out, sz, 0,
+        "<div class=\"info\"><h3>Uploads</h3>"
+        "<table style=\"border-collapse:collapse;font-size:0.95em\">"
+        "<tr><th align=left>Target</th>"
+        "<th align=right style=\"padding-left:10px\">OK / Attempted</th>"
+        "<th align=right style=\"padding-left:10px\">Last rc</th>"
+        "<th align=right style=\"padding-left:10px\">Breaker</th></tr>");
+
+    for (int i = 0; i < TX_TARGET_COUNT; i++) {
+        if (!target_enabled(i)) continue;
+        tx_target_stats_t s;
+        tx_get_stats(i, &s);
+        const char *breaker_html =
+            (s.breaker_open_cycles == 0) ? "<span style='color:#080'>closed</span>" : NULL;
+        char breaker_buf[80];
+        if (!breaker_html) {
+            snprintf(breaker_buf, sizeof(breaker_buf),
+                     "<span style='color:#c80;font-weight:bold'>open (%d cyc)</span>",
+                     s.breaker_open_cycles);
+            breaker_html = breaker_buf;
+        }
+        const char *rc_color =
+            (s.attempted == 0)                            ? "#888" :
+            (s.last_rc >= 200 && s.last_rc < 300)         ? "#080" :
+            (s.last_rc == -1)                             ? "#c00" :
+                                                            "#c80";
+        char rc_buf[16];
+        if (s.attempted == 0) snprintf(rc_buf, sizeof(rc_buf), "—");
+        else                  snprintf(rc_buf, sizeof(rc_buf), "%d", s.last_rc);
+
+        n = append_safe(out, sz, n,
+            "<tr><td>%s</td>"
+            "<td align=right style=\"padding-left:10px\">%lu / %lu</td>"
+            "<td align=right style=\"padding-left:10px;color:%s\">%s</td>"
+            "<td align=right style=\"padding-left:10px\">%s</td></tr>",
+            tx_target_name(i),
+            (unsigned long)s.succeeded, (unsigned long)s.attempted,
+            rc_color, rc_buf,
+            breaker_html);
+    }
+    n = append_safe(out, sz, n, "</table>");
+
+    // FTPS line — separate from the table because it has its own cadence.
+    if (s_cfg->ftp_enabled) {
+        log_ftp_stats_t f;
+        log_ftp_get_stats(&f);
+        char wall[32], ago[24], next_buf[32];
+        if (f.have_last) {
+            format_wallclock(f.last_at, wall, sizeof(wall));
+            format_ago((int64_t)time(NULL), f.last_at, ago, sizeof(ago));
+        } else {
+            snprintf(wall, sizeof(wall), "never");
+            ago[0] = 0;
+        }
+        // next_due_ms is monotonic uptime ms. Convert to "in N seconds".
+        unsigned long uptime_ms = (unsigned long)(esp_timer_get_time() / 1000LL);
+        long remaining_ms = (long)(f.next_due_ms - uptime_ms);
+        if (remaining_ms < 0) remaining_ms = 0;
+        snprintf(next_buf, sizeof(next_buf), "in %lds", remaining_ms / 1000);
+
+        const char *result_html;
+        if (!f.have_last)         result_html = "—";
+        else if (f.last_ok)       result_html = "<span style='color:#080'>OK</span>";
+        else                      result_html = "<span style='color:#c00'>FAIL</span>";
+
+        n = append_safe(out, sz, n,
+            "<br><b>FTP%s:</b> last %s%s%s &middot; %lu bytes &middot; result %s &middot; next %s",
+            s_cfg->ftp_tls ? "S" : "",
+            wall,
+            f.have_last ? " (" : "",
+            f.have_last ? ago  : "",
+            (unsigned long)f.last_bytes,
+            result_html,
+            next_buf);
+        if (f.have_last) {
+            n = append_safe(out, sz, n, ")");
+        }
+    }
+    append_safe(out, sz, n, "</div>");
 }
 
 // Favicon — radiation trefoil ☢ (U+2622) on yellow, served as SVG.
@@ -260,8 +711,8 @@ static void format_pm_info(char *out, size_t sz) {
                                   "<span style='color:#080'>OK</span>";
 
     int n = snprintf(out, sz,
-        "<div class=\"info\">"
-        "<b>PM sensor:</b> %s<br>"
+        "<div class=\"info\"><h3>Particulate matter</h3>"
+        "<b>Sensor:</b> %s<br>"
         "<b>Fan:</b> %s<br>"
         "<b>Laser:</b> %s<br>"
         "<b>Status raw:</b> <code>0x%08lx</code><br>",
@@ -281,53 +732,68 @@ static void format_pm_info(char *out, size_t sz) {
     snprintf(out + n, sz - n, "</div>");
 }
 
+// Static page chrome — wrapper HTML that doesn't change between requests.
+// Sent as string literals via httpd_resp_send_chunk → no per-request copy.
+static const char STATUS_HEAD[] =
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.ico\">"
+    "<title>MultiGeiger</title>"
+    "<style>body{font-family:sans-serif;max-width:680px;margin:20px auto;padding:0 10px}"
+    "h1{color:#333}h3{margin:0 0 6px 0;color:#444}a{color:#0066cc}"
+    ".info{background:#f5f5f5;border:1px solid #ddd;padding:10px;border-radius:4px;margin:10px 0}"
+    "</style></head><body>";
+static const char STATUS_LINKS[] =
+    "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
+    "<p><a href=\"/update\">&#11014; Firmware Update (OTA)</a> (requires password)</p>"
+    "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>"
+    "</body></html>";
+
+// Streaming-friendly send: skip if format function emitted nothing (the
+// "block hidden" case for radiation/env/noise/PM). Returns false on
+// transport error — caller bails immediately.
+static bool send_block(httpd_req_t *req, const char *buf) {
+    size_t len = strlen(buf);
+    if (len == 0) return true;
+    return httpd_resp_send_chunk(req, buf, len) == ESP_OK;
+}
+
 static esp_err_t status_get(httpd_req_t *req) {
     log_access(req, "GET /");
-    char body[2400];
-    unsigned long uptime_s = (unsigned long)(esp_timer_get_time() / 1000000);
-    uint32_t free_heap = esp_get_free_heap_size();
-    uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    char uptime_buf[32];
-    format_uptime(uptime_s, uptime_buf, sizeof(uptime_buf));
-    char net_info[400];
-    format_net_info(net_info, sizeof(net_info));
-    char pm_info[600];
-    format_pm_info(pm_info, sizeof(pm_info));
+    // Single shared scratch buffer reused across all blocks. Sized for the
+    // worst-case block (uploads with 5 enabled targets ≈ 1.4 KB). Stream each
+    // chunk via httpd chunked transfer-encoding — same pattern V2.3.17 used
+    // for /log to avoid heap-pressure transient peaks. Total stack footprint
+    // for this handler is buf + a few small locals (≈1.6 KB).
+    char buf[1600];
+    int64_t       now_us    = esp_timer_get_time();
+    unsigned long uptime_s  = (unsigned long)(now_us / 1000000LL);
+    unsigned long uptime_ms = (unsigned long)(now_us / 1000LL);
 
-    int n = snprintf(body, sizeof(body),
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.ico\">"
-        "<title>MultiGeiger</title>"
-        "<style>body{font-family:sans-serif;max-width:600px;margin:20px auto;padding:0 10px}"
-        "h1{color:#333}a{color:#0066cc}"
-        ".info{background:#f5f5f5;border:1px solid #ddd;padding:10px;border-radius:4px;margin:10px 0}"
-        "</style></head><body>"
-        "<h1>MultiGeiger %s</h1>"
-        "<div class=\"info\">"
-        "<b>Chip ID:</b> %s<br>"
-        "<b>MAC:</b> %s<br>"
-        "%s"
-        "<b>AP SSID:</b> %s<br>"
-        "<b>Free heap:</b> %lu bytes<br>"
-        "<b>Max allocation:</b> %lu bytes<br>"
-        "<b>Uptime:</b> %s"
-        "</div>"
-        "%s"
-        "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
-        "<p><a href=\"/update\">&#11014; Firmware Update (OTA)</a> (requires password)</p>"
-        "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>"
-        "</body></html>",
-        VERSION_STR,
-        s_chip_id,
-        s_mac_str,
-        net_info,
-        s_cfg->ap_name,
-        (unsigned long)free_heap,
-        (unsigned long)max_alloc,
-        uptime_buf,
-        pm_info);
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, body, n > 0 ? n : 0);
+
+    if (httpd_resp_send_chunk(req, STATUS_HEAD, sizeof(STATUS_HEAD) - 1) != ESP_OK) goto fail;
+
+    // Title — small, dynamic, fits trivially.
+    int n = snprintf(buf, sizeof(buf), "<h1>&#9762; MultiGeiger %s</h1>", VERSION_STR);
+    if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) goto fail;
+
+    format_device     (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_net_info   (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_system     (buf, sizeof(buf), uptime_s);  if (!send_block(req, buf)) goto fail;
+    format_cycle      (buf, sizeof(buf), uptime_ms); if (!send_block(req, buf)) goto fail;
+    format_radiation  (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_environment(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+
+    if (httpd_resp_send_chunk(req, STATUS_LINKS, sizeof(STATUS_LINKS) - 1) != ESP_OK) goto fail;
+    httpd_resp_send_chunk(req, NULL, 0);   // end-of-stream sentinel
+    return ESP_OK;
+fail:
+    // Best-effort terminate the chunked stream so the socket isn't half-open.
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_FAIL;
 }
 
 // --- GET /config (auth'd form) -----------------------------------------------

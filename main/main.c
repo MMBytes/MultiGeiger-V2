@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -59,6 +60,42 @@ static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 // --- NTP/TX state ---
 static bool     ntp_started = false;
 static uint32_t tx_cycles   = 0;
+
+// --- Cached last-cycle snapshot (for the status page) ---
+//
+// All fields written ONLY by the main task in do_tx_cycle() (single writer);
+// read lock-free by the HTTP server task. Field types are 32-bit/64-bit
+// scalars so word-aligned loads/stores are torn-tolerant on Xtensa. A
+// momentary inconsistency between cpm/usvph and bme_t/h/p is acceptable
+// — they're for at-a-glance status, not for accounting.
+static uint32_t g_last_dt_ms      = 0;
+static uint32_t g_last_counts     = 0;
+static uint32_t g_last_cpm        = 0;
+static float    g_last_usvph      = 0.0f;
+static uint32_t g_last_hv_pulses  = 0;
+static bool     g_last_hv_error   = false;
+static bool     g_last_bme_valid  = false;
+static float    g_last_bme_t      = 0.0f;
+static float    g_last_bme_h      = 0.0f;
+static float    g_last_bme_p      = 0.0f;
+static int64_t  g_last_cycle_at   = 0;     // wall-clock unix epoch (0 = never)
+static uint32_t g_last_cycle_ms   = 0;     // monotonic uptime ms (0 = never)
+
+// Public accessors — declared inline in http_server.c via extern, see comment
+// at top of that file. These reads do NOT take a lock (see invariant above).
+uint32_t main_status_cycles(void)        { return tx_cycles; }
+uint32_t main_status_last_dt_ms(void)    { return g_last_dt_ms; }
+uint32_t main_status_last_cpm(void)      { return g_last_cpm; }
+float    main_status_last_usvph(void)    { return g_last_usvph; }
+uint32_t main_status_last_hv_pulses(void){ return g_last_hv_pulses; }
+bool     main_status_last_hv_error(void) { return g_last_hv_error; }
+bool     main_status_have_env(void)      { return g_last_bme_valid; }
+float    main_status_env_t(void)         { return g_last_bme_t; }
+float    main_status_env_h(void)         { return g_last_bme_h; }
+float    main_status_env_p(void)         { return g_last_bme_p; }
+int64_t  main_status_last_cycle_at(void) { return g_last_cycle_at; }
+uint32_t main_status_last_cycle_ms(void) { return g_last_cycle_ms; }
+uint32_t main_status_reconnects(void)    { return n_disconnects; }
 
 // --- Strict single-mode WiFi:
 //   boot .. AP_WINDOW_US:     AP only (STA not started — radio unshared)
@@ -302,6 +339,16 @@ static void do_tx_cycle(void) {
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi);
     }
 
+    // Cache for /status — see g_last_* declarations + accessors above.
+    g_last_dt_ms     = dt_ms;
+    g_last_counts    = counts;
+    g_last_cpm       = cpm;
+    g_last_usvph     = usvph;
+    g_last_hv_pulses = hv_pulses;
+    g_last_hv_error  = hv_error;
+    g_last_cycle_at  = (int64_t)time(NULL);
+    g_last_cycle_ms  = (uint32_t)(esp_timer_get_time() / 1000LL);
+
     // Display: when the tube is disabled the radiation/CPM areas show zero
     // (placeholder — the OLED driver still draws layout). HV status is forced
     // OK because the HV pump isn't running, so there's nothing to fail.
@@ -324,6 +371,15 @@ static void do_tx_cycle(void) {
         } else {
             ESP_LOGW(TAG, "%s: read failed", env_sensor_name());
         }
+    }
+
+    // Cache for /status. valid mirrors the local — false suppresses the env
+    // block on the page until we have at least one good sample.
+    g_last_bme_valid = bme_valid;
+    if (bme_valid) {
+        g_last_bme_t = bme_t;
+        g_last_bme_h = bme_h;
+        g_last_bme_p = bme_p;
     }
 
     // Particulate-matter sample — uploaded to Madavi (combined env body) and

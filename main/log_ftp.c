@@ -186,7 +186,39 @@ static void io_set_snd_timeout(const ftp_io_t *io, uint32_t ms) {
 
 static void io_close(ftp_io_t *io) {
     if (io->tls) {
-        mbedtls_ssl_close_notify(&io->ssl);
+        // V2.3.19: properly flush close_notify before tearing down the
+        // socket. mbedtls_ssl_close_notify() is non-blocking and frequently
+        // returns MBEDTLS_ERR_SSL_WANT_WRITE right after a large body
+        // upload while the lwIP TCP send buffer drains. Pre-V2.3.19 we
+        // ignored the return value and immediately closed the TCP socket,
+        // so the close_notify alert never made it onto the wire.
+        //
+        // RFC 8446 §6.1: TLS 1.3 servers MUST treat TCP close without
+        // close_notify as a possible truncation attack. The project's
+        // LAN FTPS server reacted with "426 Connection reset by peer"
+        // on the data channel — the V2.3.15-deferred bug. TLS 1.2
+        // servers are lenient about this for backwards compatibility
+        // with old broken clients, so the bug only manifested once we
+        // re-enabled TLS 1.3 in V2.3.5.
+        //
+        // 2 s deadline keeps us from blocking forever on a genuinely
+        // stalled socket; in normal operation this loop fires once or
+        // twice and exits in <50 ms.
+        int64_t deadline_us = esp_timer_get_time() + 2 * 1000 * 1000;
+        for (;;) {
+            int rc = mbedtls_ssl_close_notify(&io->ssl);
+            if (rc == 0) break;
+            if (rc != MBEDTLS_ERR_SSL_WANT_READ &&
+                rc != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                log_tls_err("close_notify", rc);
+                break;
+            }
+            if (esp_timer_get_time() > deadline_us) {
+                ESP_LOGW(TAG, "close_notify timeout — proceeding to close");
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
         // V2.3.15: belt-and-braces release of any PSA references the session
         // is still holding. mbedtls_ssl_free does this internally on a fully-
         // initialised context, but session_reset is the documented hook for

@@ -1,87 +1,47 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
-// V2.3.18 — feature release. Status page expansion, FeatherS3-D log ring
-// growth, FTP log-line polish.
+// V2.3.19 — bug fix release. The V2.3.15-deferred FTPS+TLS 1.3 "426
+// Connection reset by peer" failure on the data channel is fixed by
+// properly flushing the TLS close_notify alert before tearing down
+// the socket.
 //
-//   1. **Status page (`/`) substantially expanded.** Previously: chip ID,
-//      MAC, network, AP SSID, heap, uptime + PM block. Now organised into
-//      labelled blocks: Device, Network, System, Cycle, Radiation,
-//      Environment, Noise, Particulate matter, Uploads.
+// Root cause: `mbedtls_ssl_close_notify()` is non-blocking and frequently
+// returns `MBEDTLS_ERR_SSL_WANT_WRITE` right after a large body upload
+// while the lwIP TCP send buffer drains. Pre-V2.3.19 `io_close()` ignored
+// the return value and immediately closed the TCP socket, so the
+// close_notify alert never made it onto the wire.
 //
-//      - **Device**: chip model + revision + cores + features (WiFi/BLE/
-//        EmbFlash/EmbPSRAM), flash + PSRAM size, board name (heltec_v2 /
-//        heltec_v2_4mb / feathers3_d), firmware version + build date,
-//        antenna routing (PCB / u.FL on FeatherS3-D, N/A elsewhere).
-//      - **Network**: SSID, security mode, PHY (b/g/n), bandwidth (BW20/40),
-//        channel, BSSID, AID, RSSI, IP/Gateway/Netmask/DNS, reconnects
-//        since boot. STA-mode only — AP mode shows just IP.
-//      - **System**: uptime, decoded reset reason (POWER_ON / TASK_WDT /
-//        BROWNOUT / etc.), free / min free / max alloc heap, NTP synced
-//        + current wall-clock, AP SSID.
-//      - **Cycle**: cycle counter, last dt_ms, configured interval, last
-//        cycle wall-clock + "X seconds ago", time until next cycle.
-//      - **Radiation** (only when tube_enabled): CPM, dose rate µSv/h,
-//        HV pulses/min + cumulative, HV-error badge if set.
-//      - **Environment** (only when env sensor present): sensor name
-//        (SHT45+BMP581 / SHT45+BMP390 / BME688 / etc.), T/H/P readings.
-//      - **Noise** (only when DNMS present): sensor name + version, LAeq,
-//        LA min/max.
-//      - **Particulate matter**: existing block, now with consistent
-//        <h3>Particulate matter</h3> header.
-//      - **Uploads**: HTML table — one row per *enabled* target with
-//        succeeded/attempted, last response code (colour-coded), breaker
-//        state (closed/open with cycles remaining). FTP/FTPS line below
-//        with last upload timestamp + age, bytes, OK/FAIL badge, next-in.
+// RFC 8446 §6.1: TLS 1.3 servers MUST treat TCP close without close_notify
+// as a possible truncation attack. The project's LAN FTPS server reacted
+// with "426 Connection reset by peer" on the data channel after the body
+// otherwise transferred cleanly. TLS 1.2 servers are lenient about this
+// for backwards compatibility with old broken clients, so the bug only
+// manifested once we re-enabled TLS 1.3 in V2.3.5.
 //
-//      Implementation: streamed via `httpd_resp_send_chunk` with a single
-//      shared 1600-byte stack scratch buffer (same V2.3.17 /log pattern).
-//      Zero per-request heap allocation. Stack bounded ~2.7 KB / 8 KB.
-//      All sensor data read from caches populated by the worker — no I²C
-//      from the HTTP context.
+// Diagnosis came from comparing FileZilla (which loops close_notify until
+// the alert is actually flushed — standard mature-TLS-client behaviour)
+// against our fire-and-forget call. The cipher (AES-128-GCM) and key
+// exchange (ECDHE-secp384r1-RSA-PSS-RSAE-SHA256) FileZilla negotiated
+// against the same server were both well within mbedTLS's defaults, ruling
+// out crypto-suite mismatch.
 //
-//   2. **PSRAM log ring 1 MB → 4 MB on FeatherS3-D.** PSRAM was almost
-//      entirely idle (~7 MB free of 8 MB at steady state). Streaming
-//      FTPS + /log post-V2.3.16/17 means ring size no longer creates
-//      transient internal-DRAM peaks, so growing the ring is essentially
-//      free. 4 MB gives ~40 hours of history at typical log volume,
-//      while leaving 4 MB PSRAM headroom for any future feature.
-//      Single line change in `applog.c` (`#if HAL_HAS_PSRAM` branch).
-//      Heltec stays at 60 KB.
+// Fix in `log_ftp.c::io_close`: deadline-bounded retry loop using the
+// same WANT_READ / WANT_WRITE continuation pattern we already use in
+// `io_send_all` / `io_recv1`. 2 s deadline keeps us from blocking
+// forever on a genuinely stalled socket; in normal operation the loop
+// fires once or twice and exits in <50 ms. ~15 LOC.
 //
-//   3. **FTP/FTPS log line cleanup.** Three small wording changes in
-//      `log_ftp.c` so the heap-snapshot lines are SSL-agnostic and the
-//      upload line reads naturally:
-//      - `FTPS pre-upload heap:` → `Pre-upload heap:`
-//      - `FTPS post-upload heap:` → `Post-upload heap:`
-//      - `FTP%s: uploading` → `FTP%s uploading` (no colon between
-//        protocol + verb)
+// HTTPS targets (Madavi / SC / Radmon / OSM / aqi.eco) own their own
+// close path inside esp_http_client; this fix doesn't touch them. They
+// have not exhibited analogous issues — the cloud terminators are more
+// permissive than the LAN FTPS server about truncation.
 //
-//   4. **min_free on status page.** New "Min free heap" line in the
-//      System block, mirroring the V2.3.17 addition to the per-cycle
-//      tx_run log line. Same `esp_get_minimum_free_heap_size()` source.
+// Now that the fix is in place, the V2.3.15 `ftp_tls12_only` checkbox
+// (default ON) can be unticked to use TLS 1.3 against the LAN FTPS
+// server. Default stays ON for one release as a safety net; if V2.3.19
+// soaks cleanly we can flip the default to OFF in V2.3.20.
 //
-//   5. **TX stats accumulators (per upload target).** New module-level
-//      `s_stats[5]` array in `transmission.c` exposed via `tx_get_stats()`
-//      / `tx_target_name()`. Tracks per-target attempted, succeeded,
-//      last_rc, last_at, breaker_open_cycles. The breaker counter was
-//      previously a per-target static local in `tx_run`; promoted into
-//      the stats array so the status page reads the same value the
-//      orchestrator writes (single-writer, lock-free, torn-tolerant).
-//
-//   6. **FTP stats accumulator.** New `log_ftp_get_stats()` in
-//      `log_ftp.c`. Tracks have_last, last_ok, last_at, last_bytes,
-//      next_due_ms. Populated at the end of `do_ftp_upload`. last_bytes
-//      only updated on success so a failed retry doesn't blank the
-//      previous-good count.
-//
-//   7. **Cycle/cache state lifted to file scope in `main.c`.** Cached
-//      cpm, usvph, dt_ms, hv_pulses, hv_error, env T/H/P, last cycle
-//      wall-clock + monotonic-ms. 14 small `main_status_*()` accessors
-//      let `http_server.c` render the page without reaching into private
-//      module state. Single-writer (main task), multi-reader (HTTP task)
-//      lock-free pattern on word-aligned scalars.
-//
-// OTA-safe from V2.3.17 (no partition layout changes). 15 release
-// artefacts (5 × 3 boards). No new sdkconfig flags.
-#define VERSION_STR "V2.3.18"
+// OTA-safe from V2.3.18 (no partition layout changes, no sdkconfig
+// changes). 15 release artefacts (5 × 3 boards).
+#define VERSION_STR "V2.3.19"

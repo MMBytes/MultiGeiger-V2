@@ -968,30 +968,49 @@ static esp_err_t update_post(httpd_req_t *req) {
 
 #define LOG_CHUNK 2048
 
+// V2.3.17: streams directly from the ring via applog_stream_begin/end — no
+// 60 KB malloc. Pre-V2.3.17 used applog_snapshot which mallocs the entire
+// ring as one contiguous buffer (Content-Length-friendly response). Found
+// 2026-05-10 via FTP_Investigation log analysis: every browser hit on /log
+// caused a 60 KB transient peak; combined with concurrent Radmon retry
+// storms or other heap-heavy events, peak demand stacked to ~95 KB and
+// momentarily dropped free heap to single-digit-KB territory (min_free=316
+// observed). Streaming via chunked Transfer-Encoding eliminates the body
+// malloc entirely. Browser doesn't care about missing Content-Length —
+// chunked is HTTP/1.1 standard. Memory cost: ~0 KB (just the existing
+// 2 KB chunk-sized stack copy in httpd_resp_send_chunk).
 static esp_err_t log_get(httpd_req_t *req) {
     log_access(req, "GET /log");
     if (!check_auth(req)) return ESP_OK;
 
-    size_t len = 0;
-    char *snap = applog_snapshot(&len);
-    if (!snap) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+    applog_stream_t s;
+    if (!applog_stream_begin(&s)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "applog uninit");
         return ESP_OK;
     }
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    size_t sent = 0;
-    while (sent < len) {
-        size_t n = len - sent;
-        if (n > LOG_CHUNK) n = LOG_CHUNK;
-        if (httpd_resp_send_chunk(req, snap + sent, n) != ESP_OK) {
-            free(snap);
-            return ESP_FAIL;
+
+    // Send each segment in LOG_CHUNK-sized pieces. seg_a is the older half
+    // post-wrap (NULL/0 if the ring hasn't wrapped); seg_b is the newer
+    // pre-wrap half. httpd_resp_send_chunk handles the chunked-encoding
+    // framing per HTTP/1.1.
+    const char *segs[2]  = { s.seg_a, s.seg_b };
+    size_t      sizes[2] = { s.len_a, s.len_b };
+    for (int i = 0; i < 2; i++) {
+        size_t sent = 0;
+        while (sent < sizes[i]) {
+            size_t n = sizes[i] - sent;
+            if (n > LOG_CHUNK) n = LOG_CHUNK;
+            if (httpd_resp_send_chunk(req, segs[i] + sent, n) != ESP_OK) {
+                applog_stream_end();
+                return ESP_FAIL;
+            }
+            sent += n;
         }
-        sent += n;
     }
     httpd_resp_send_chunk(req, NULL, 0);  // terminate
-    free(snap);
+    applog_stream_end();
     return ESP_OK;
 }
 

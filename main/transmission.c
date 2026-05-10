@@ -819,9 +819,14 @@ static void tx_run(tx_context_t *c) {
     static int aqi_skip_remaining    = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t min_free  = esp_get_minimum_free_heap_size();
     uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "free heap before TX: %lu bytes / max_alloc=%lu bytes",
-             (unsigned long)free_heap, (unsigned long)max_alloc);
+    // V2.3.17: include min_free so the per-cycle log captures the lifetime
+    // watermark too. Lets us correlate transient-peak events with what was
+    // happening across the codebase, not just FTPS-specific moments
+    // (which the FTPS pre/post heap log already covers).
+    ESP_LOGI(TAG, "free heap before TX: %lu bytes / min_free=%lu / max_alloc=%lu bytes",
+             (unsigned long)free_heap, (unsigned long)min_free, (unsigned long)max_alloc);
 
     // Madavi and sensor.community accept a mix of radiation + env (THP) + PM +
     // noise payloads, so they're called whenever ANY source is live. Radmon is

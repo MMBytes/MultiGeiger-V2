@@ -78,7 +78,16 @@ static esp_err_t load_calibration(void) {
     int8_t   nvm_P11 = (int8_t)d[20];
 
     // Scale factors from datasheet table 10 (pow(2, N) equivalents).
-    par_T1  = (double)nvm_T1  / 2.52e-2;      // * 2^8   = / 2^-8
+    // V2.3.16: par_T1 divisor was 2.52e-2 — a typo from when this driver was
+    // written for V2.3.6. Should be 2^-8 = 0.00390625, equivalent to multiplying
+    // by 256. Symptom: par_T1 came out ~6.5× too small → t_lin wildly off
+    // (~120 °C instead of ~18 °C at room temp) → pressure compensation
+    // produced ~+25 % offset → reported pressure 1287 hPa when actual was
+    // 1024 hPa. Surfaced 2026-05-10 on the dust node FeatherS3 first time
+    // BMP390 was actually wired in production. Bosch SDK and Adafruit
+    // BMP3xx library both use pow(2, -8) here. Cross-checked every other
+    // constant in this block — only par_T1 had the typo.
+    par_T1  = (double)nvm_T1  * 256.0;        // / 2^-8 = * 2^8 = * 256
     par_T2  = (double)nvm_T2  / 1.07374182e9; // / 2^30
     par_T3  = (double)nvm_T3  / 2.81474977e14;// / 2^48
 

@@ -70,6 +70,10 @@ static const char *NS  = "geiger";
 #define DEF_TUBE_ENABLED     true
 #define DEF_SEND_OSM         false
 #define DEF_OSM_BOX_ID       ""
+// V2.3.16: openSenseMap access token. Empty default = unauthenticated upload
+// (the historical Luftdaten path). Set via /config when the box-side
+// authentication toggle is enabled on the OSM dashboard.
+#define DEF_OSM_ACCESS_TOKEN ""
 #define DEF_SEND_AQI         false
 #define DEF_AQI_TOKEN        ""
 
@@ -114,7 +118,8 @@ void config_defaults(config_t *cfg) {
     cfg->use_external_antenna = DEF_USE_EXT_ANTENNA;
     cfg->tube_enabled         = DEF_TUBE_ENABLED;
     cfg->send_osm             = DEF_SEND_OSM;
-    strncpy(cfg->osm_box_id, DEF_OSM_BOX_ID, sizeof(cfg->osm_box_id) - 1);
+    strncpy(cfg->osm_box_id,       DEF_OSM_BOX_ID,       sizeof(cfg->osm_box_id) - 1);
+    strncpy(cfg->osm_access_token, DEF_OSM_ACCESS_TOKEN, sizeof(cfg->osm_access_token) - 1);
     cfg->send_aqi             = DEF_SEND_AQI;
     strncpy(cfg->aqi_token,  DEF_AQI_TOKEN,  sizeof(cfg->aqi_token)  - 1);
 }
@@ -194,7 +199,8 @@ void config_load(config_t *cfg) {
     load_bool(h, "show_disp",  &cfg->show_display);
     load_bool(h, "tube_en",    &cfg->tube_enabled);
     load_bool(h, "send_osm",   &cfg->send_osm);
-    load_str (h, "osm_box",    cfg->osm_box_id, sizeof(cfg->osm_box_id));
+    load_str (h, "osm_box",    cfg->osm_box_id,       sizeof(cfg->osm_box_id));
+    load_str (h, "osm_tok",    cfg->osm_access_token, sizeof(cfg->osm_access_token));
     load_bool(h, "send_aqi",   &cfg->send_aqi);
     load_str (h, "aqi_tok",    cfg->aqi_token,  sizeof(cfg->aqi_token));
     nvs_close(h);
@@ -240,6 +246,8 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
+    ESP_LOGI(TAG, "  openSenseMap:     access_token=%s",
+             MASK(cfg->osm_access_token));
     ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
              cfg->send_aqi, MASK(cfg->aqi_token));
     #undef MASK
@@ -296,6 +304,7 @@ esp_err_t config_save(const config_t *cfg) {
     SET_U8 ("tube_en",    cfg->tube_enabled);
     SET_U8 ("send_osm",   cfg->send_osm);
     SET_STR("osm_box",    cfg->osm_box_id);
+    SET_STR("osm_tok",    cfg->osm_access_token);
     SET_U8 ("send_aqi",   cfg->send_aqi);
     SET_STR("aqi_tok",    cfg->aqi_token);
     err = nvs_commit(h);

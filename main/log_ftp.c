@@ -663,17 +663,44 @@ static bool do_ftp_upload(void) {
         snprintf(path, sizeof(path), "%s", name);
     }
 
+    // V2.3.16: parse optional :port suffix from ftp_host (default FTP_PORT
+    // = 21 if absent or malformed). Uses strchr (rightmost colon would matter
+    // only for IPv6; we're IPv4-only via getaddrinfo's AF_INET hint, so a
+    // single colon is unambiguously host:port). Hostname/IP goes into a local
+    // buffer; the original config string isn't modified.
+    char host_buf[64];
+    int  ftp_port_use = FTP_PORT;
+    {
+        const char *colon = strchr(s_cfg->ftp_host, ':');
+        if (colon) {
+            size_t host_len = (size_t)(colon - s_cfg->ftp_host);
+            if (host_len >= sizeof(host_buf)) host_len = sizeof(host_buf) - 1;
+            memcpy(host_buf, s_cfg->ftp_host, host_len);
+            host_buf[host_len] = 0;
+            long p = strtol(colon + 1, NULL, 10);
+            if (p >= 1 && p <= 65535) ftp_port_use = (int)p;
+            // Else: malformed port → fall back silently to default 21.
+        } else {
+            strncpy(host_buf, s_cfg->ftp_host, sizeof(host_buf) - 1);
+            host_buf[sizeof(host_buf) - 1] = 0;
+        }
+    }
+
     ESP_LOGI(TAG, "FTP%s: uploading %s to %s:%d as '%s'",
              s_cfg->ftp_tls ? "S" : "",
-             path, s_cfg->ftp_host, FTP_PORT,
+             path, host_buf, ftp_port_use,
              s_cfg->ftp_user[0] ? s_cfg->ftp_user : "anonymous");
 
-    size_t body_len = 0;
-    char *body = applog_snapshot(&body_len);
-    if (!body) {
-        ESP_LOGE(TAG, "applog_snapshot oom");
+    // V2.3.16: zero-copy streaming snapshot. Captures segment pointers into the
+    // ring memory; no body buffer is allocated. Saves the equivalent of
+    // ring-size DRAM during the upload window — ~60 KB on Heltec (huge given
+    // the V2.3.15 min_free pressure), ~1 MB PSRAM on FeatherS3-D.
+    applog_stream_t stream;
+    if (!applog_stream_begin(&stream)) {
+        ESP_LOGE(TAG, "applog_stream_begin failed (applog not initialised?)");
         return false;
     }
+    size_t body_len = stream.len_a + stream.len_b;
 
     ftp_io_t      ctrl = { .sock = -1 };
     ftp_io_t      data = { .sock = -1 };
@@ -688,7 +715,7 @@ static bool do_ftp_upload(void) {
     if (s_cfg->ftp_tls) {
         if (!tls_ctx_init(&tls)) {
             ESP_LOGW(TAG, "tls_ctx_init failed");
-            free(body);
+            applog_stream_end();
             return false;
         }
         tls_ready = true;
@@ -704,7 +731,7 @@ static bool do_ftp_upload(void) {
     if (ps_override)
         esp_wifi_set_ps(WIFI_PS_NONE);
 
-    int ctrl_sock = ftp_connect_host(s_cfg->ftp_host, FTP_PORT, FTP_TIMEOUT_MS);
+    int ctrl_sock = ftp_connect_host(host_buf, ftp_port_use, FTP_TIMEOUT_MS);
     if (ctrl_sock < 0) { goto done; }
     io_init_plain(&ctrl, ctrl_sock);
 
@@ -789,7 +816,17 @@ static bool do_ftp_upload(void) {
         }
     }
 
-    write_ok = ftp_write_buf(&data, body, body_len);
+    // V2.3.16: send segments directly from the ring (no body buffer alloc).
+    // Two calls when the ring has wrapped (seg_a is the older half post-wrap,
+    // seg_b is the newer pre-wrap half); single call when not wrapped (seg_b
+    // is NULL/0). ftp_write_buf is unchanged — it just sees a smaller len.
+    write_ok = true;
+    if (stream.len_a > 0) {
+        write_ok = ftp_write_buf(&data, stream.seg_a, stream.len_a);
+    }
+    if (write_ok && stream.len_b > 0) {
+        write_ok = ftp_write_buf(&data, stream.seg_b, stream.len_b);
+    }
     io_close(&data);
 
     if (!write_ok) {
@@ -820,7 +857,7 @@ done:
     // also feed the consecutive-OOM counter, not just handshake-time events.
     bool psa_oom_observed = (tls_ready && tls.psa_oom) || s_upload_psa_oom;
     if (tls_ready) tls_ctx_free(&tls);
-    free(body);
+    applog_stream_end();
     if (ok) ESP_LOGI(TAG, "FTP%s upload OK (%u bytes)",
                      s_cfg->ftp_tls ? "S" : "", (unsigned)body_len);
     else    ESP_LOGW(TAG, "FTP%s upload failed",

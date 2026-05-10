@@ -23,7 +23,10 @@ if(BOARD STREQUAL "heltec_v2")
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heltec_v2")
 elseif(BOARD STREQUAL "heltec_v2_4mb")
     set(IDF_TARGET "esp32" CACHE STRING "")
-    add_compile_definitions(BOARD_HELTEC_V2=1)
+    # Same hardware macro as heltec_v2 (same pins, same OLED, same Vext) — hal.h
+    # treats both identically. The _4MB variant adds an extra macro for code
+    # that needs to distinguish flash variants (OTA upload form, boot log).
+    add_compile_definitions(BOARD_HELTEC_V2=1 BOARD_HELTEC_V2_4MB=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heltec_v2_4mb")
 elseif(BOARD STREQUAL "feathers3_d")
     set(IDF_TARGET "esp32s3" CACHE STRING "")

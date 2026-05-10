@@ -353,7 +353,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     char e_tz[160];
     char e_apn[96], e_host[96];
     char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
-    char e_osm[80], e_aqi[160];
+    char e_osm[80], e_osm_tok[160], e_aqi[160];
     html_esc(s_cfg->wifi_ssid,     e_ssid, sizeof(e_ssid));
     html_esc(s_cfg->wifi_password, e_pw,   sizeof(e_pw));
     html_esc(s_chip_id,            e_chip, sizeof(e_chip));  // read-only display
@@ -370,8 +370,9 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->ftp_user,      e_fuser, sizeof(e_fuser));
     html_esc(s_cfg->ftp_password,  e_fpw,   sizeof(e_fpw));
     html_esc(s_cfg->ftp_path,      e_fpath, sizeof(e_fpath));
-    html_esc(s_cfg->osm_box_id,    e_osm,   sizeof(e_osm));
-    html_esc(s_cfg->aqi_token,     e_aqi,   sizeof(e_aqi));
+    html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
+    html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
+    html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -426,6 +427,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "openSenseMap (HTTPS only) — Box ID configured per-device on opensensemap.org</label></div>"
         "<label>openSenseMap Box ID (24-char MongoDB ObjectId)"
         "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
+        "<label>openSenseMap Access Token (optional &mdash; only needed if your box has authentication enabled)"
+        "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
         "aqi.eco (HTTPS only) — token from your aqi.eco account</label></div>"
         "<label>aqi.eco token"
@@ -443,7 +446,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Enable FTP log upload</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_tls\" %s> "
         "Use explicit TLS (AUTH TLS on port 21) &mdash; certificate NOT verified</label></div>"
-        "<label>FTP host<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
+        "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
         "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
         "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
         "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
@@ -512,6 +515,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_ru, e_rp,
         s_cfg->send_osm ? "checked" : "",
         e_osm,
+        e_osm_tok,
         s_cfg->send_aqi ? "checked" : "",
         e_aqi,
         (double)s_cfg->station_altitude_m,
@@ -614,7 +618,8 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "wifi_ext_a"))  next.use_external_antenna = true;
         else if (!strcmp(p, "tube_en"))   next.tube_enabled  = true;
         else if (!strcmp(p, "send_osm"))  next.send_osm      = true;
-        else if (!strcmp(p, "osm_box"))   assign_str(next.osm_box_id, sizeof(next.osm_box_id), val);
+        else if (!strcmp(p, "osm_box"))   assign_str(next.osm_box_id,       sizeof(next.osm_box_id),       val);
+        else if (!strcmp(p, "osm_tok"))   assign_str(next.osm_access_token, sizeof(next.osm_access_token), val);
         else if (!strcmp(p, "send_aqi"))  next.send_aqi      = true;
         else if (!strcmp(p, "aqi_tok"))   assign_str(next.aqi_token,  sizeof(next.aqi_token),  val);
         else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
@@ -721,12 +726,18 @@ static esp_err_t reboot_post(httpd_req_t *req) {
 // Uses XHR to POST the raw .bin as the request body (Content-Type:
 // application/octet-stream). Avoids multipart parsing on the device.
 
-// V2.3.14: board-specific upload-form prompt. CMakeLists.txt defines exactly
-// one of BOARD_HELTEC_V2 / BOARD_FEATHERS3_D per build, so the literal-string
-// concatenation here resolves at compile time to the correct board name.
-// Bold red styling is inline so we don't have to add a CSS rule for one element.
-#if BOARD_HELTEC_V2
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32</b>"
+// V2.3.14: board-specific upload-form prompt. V2.3.16-pre2: distinguish 4 MB
+// (knock-off) vs 8 MB (genuine) Heltec since the binaries are NOT inter-
+// changeable (4 MB image asserts at boot on 8 MB hardware and vice versa).
+// CMakeLists.txt defines BOARD_HELTEC_V2_4MB IN ADDITION TO BOARD_HELTEC_V2
+// for the 4 MB variant — order the #if chain so the more-specific 4MB check
+// fires first. Literal-string concatenation resolves at compile time, zero
+// runtime cost. Bold red styling inline so we don't add a CSS rule for one
+// element.
+#if BOARD_HELTEC_V2_4MB
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (4MB)</b>"
+#elif BOARD_HELTEC_V2
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (8MB)</b>"
 #elif BOARD_FEATHERS3_D
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
 #else

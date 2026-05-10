@@ -99,6 +99,11 @@ typedef struct {
     bool        send_osm;
     bool        osm_use_insecure;
     const char *osm_box_id;
+    // V2.3.16: optional OSM access token. Empty string = unauthenticated upload
+    // (the historical Luftdaten path). When set, send_osm adds an
+    // `Authorization: Bearer <token>` header — needed if the box has the
+    // server-side authentication toggle enabled on opensensemap.org.
+    const char *osm_access_token;
 
     // aqi.eco — single HTTPS POST per cycle to api.aqi.eco/update/<token>.
     // Body is the standard Luftdaten payload prefixed with an esp8266id

@@ -1,18 +1,37 @@
 # Custom 4 MB partition table for Heltec V2 KNOCK-OFFs that ship with 4 MB
-# Winbond flash instead of the genuine 8 MB. Same factory + OTA pattern as
-# partitions.csv but ONE OTA slot instead of two, slot size shrunk to fit.
-# V2.3.15 binary is ~1.18 MB; 1.875 MB per slot leaves ~37 % headroom — same
-# percentage as the 8 MB layout's 2 MB slots, just smaller.
-# Tail at 0x3E0000-0x400000 (128 KB) reserved (could be used for spiffs/littlefs
-# if a future feature wants on-device persistent storage).
+# Winbond flash instead of the genuine 8 MB. Layout uses TWO OTA slots
+# (no factory) so OTA can cycle indefinitely between ota_0 and ota_1.
 #
-# Genuine boards must continue to use partitions.csv (8 MB layout, 2 OTA slots).
-# Selection is driven by sdkconfig.defaults.heltec_v2_4mb (overrides
-# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME) when BOARD=heltec_v2_4mb.
+# V2.3.16-pre3 change: dropped the factory partition. Pre-V2.3.16 layout had
+# factory + ota_0 only (1.875 MB each). That worked for the FIRST OTA
+# (factory → ota_0) but failed on the SECOND OTA: now running from ota_0,
+# no other OTA slot to write to → ESP_ERR_OTA_PARTITION_CONFLICT.
+# (esp_ota_get_next_update_partition returns the only OTA partition, which
+# is the running one; esp_ota_begin then refuses with the conflict error.)
+# Solution: replace factory + ota_0 with ota_0 + ota_1, same physical layout
+# (1.875 MB each, app slots span 0x20000..0x3E0000 of the 4 MB chip), but
+# now esp_ota cycles ota_0 ↔ ota_1 forever like the genuine 8 MB layout.
+#
+# Boot sequence with no factory:
+#   - Bootloader checks otadata partition.
+#   - On first cable-flash, otadata is blank (all 0xFF) — bootloader treats
+#     this as "no OTA selected" and defaults to ota_0 (first OTA partition).
+#   - After first OTA: otadata points at ota_1 (or whichever was just
+#     written), bootloader picks that on subsequent boots.
+#
+# Trade-off vs the 8 MB layout: no factory recovery image. If both ota_0
+# AND ota_1 get corrupted (extremely rare — would take simultaneous power
+# loss during two consecutive OTAs), the device is bricked until cable
+# reflash. Acceptable risk for a sensor.
+#
+# UPGRADE NOTE: changing the partition table requires a CABLE REFLASH
+# (esp_ota only updates the app, not the partition table itself). Devices
+# running pre-V2.3.16-pre3 4 MB layout cannot OTA into this layout — they
+# must be erased + cable-flashed with the merged image.
 #
 # Name,     Type, SubType, Offset,   Size,      Flags
 nvs,        data, nvs,     0x9000,   0x6000,
 otadata,    data, ota,     0xf000,   0x2000,
 phy_init,   data, phy,     0x11000,  0x1000,
-factory,    app,  factory, 0x20000,  0x1E0000,
-ota_0,      app,  ota_0,   0x200000, 0x1E0000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

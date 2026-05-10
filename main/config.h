@@ -67,6 +67,18 @@ typedef struct {
     bool     send_osm;
     char     osm_box_id[26];
 
+    // openSenseMap access token (V2.3.16). Optional — when empty, uploads go
+    // unauthenticated as they did pre-V2.3.16 (the Luftdaten compatibility
+    // path historically accepted unauthenticated POSTs to a known box ID).
+    // openSenseMap recently added an opt-in "require authentication" toggle
+    // per-box on their dashboard — when enabled, unauthenticated POSTs are
+    // rejected. Setting this token (generated under "Edit Box" → "Access
+    // Token") and leaving the box's auth toggle on lets uploads continue
+    // without disabling the box-side toggle. send_osm passes the token as
+    // `Authorization: Bearer <token>` when non-empty. Token is a 64-char hex
+    // string per OSM convention; field sized for 64 + null.
+    char     osm_access_token[65];
+
     // aqi.eco (https://aqi.eco). POST to api.aqi.eco/update/<TOKEN> carrying
     // the same Luftdaten body wrapped with an esp8266id field at the top
     // (field name is legacy from the original airrohr fork — accepted for
@@ -107,6 +119,9 @@ typedef struct {
     // FTP log upload — periodically ships the in-memory log ring to a LAN
     // FTP server (e.g. router USB share). Passive mode.
     //   ftp_user/ftp_password empty = anonymous.
+    //   ftp_host  : hostname or IPv4 address. Optional :port suffix (V2.3.16+)
+    //               — if absent or malformed, defaults to FTP port 21.
+    //               Example: "192.168.1.1" or "192.168.1.1:2121".
     //   ftp_path: remote directory; filename auto-generated as geiger_<chip>_<ts>.log.
     //   ftp_tls : explicit TLS (AUTH TLS on port 21). Certificate NOT verified
     //             (most LAN FTP servers use self-signed certs).

@@ -254,3 +254,51 @@ char *applog_snapshot(size_t *out_len) {
     if (out_len) *out_len = total;
     return out;
 }
+
+// V2.3.16: zero-copy streaming snapshot. Captures segment pointers into the
+// ring memory under the log mutex (briefly), then releases the mutex. Caller
+// reads directly from those pointers and sends/processes the bytes itself —
+// no body buffer is malloc'd. The wrap-handling logic is identical to
+// applog_snapshot's.
+//
+// In-flight inconsistency: between begin() and end() the writer may continue
+// to advance the ring, potentially overwriting a few bytes near the segment
+// tail. Acceptable trade-off — see header comment. If this ever bites
+// (corrupted upload tails), add a `s_snapshot_active` flag here that
+// applog_vprintf checks to drop writes during the snapshot window.
+bool applog_stream_begin(applog_stream_t *out) {
+    out->seg_a = NULL;
+    out->len_a = 0;
+    out->seg_b = NULL;
+    out->len_b = 0;
+
+    if (!s_mtx) return false;
+
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+
+    if (s_wrapped) {
+        // Same wrap-handling as applog_snapshot: skip to first newline after
+        // s_pos so segment_a starts on a clean line boundary.
+        size_t tail_len = LOG_RING_SIZE - s_pos;
+        const char *tail = s_ring + s_pos;
+        size_t skip = 0;
+        while (skip < tail_len && tail[skip] != '\n') skip++;
+        if (skip < tail_len) skip++;  // consume the newline itself
+        out->seg_a = tail + skip;
+        out->len_a = tail_len - skip;
+        out->seg_b = s_ring;
+        out->len_b = s_pos;
+    } else {
+        out->seg_a = s_ring;
+        out->len_a = s_valid_end;
+        // out->seg_b / len_b stay NULL/0
+    }
+
+    xSemaphoreGive(s_mtx);
+    return true;
+}
+
+void applog_stream_end(void) {
+    // V2.3.16: currently no-op. Reserved for future write-pause coordination
+    // if the in-flight ring-mutation inconsistency becomes a problem.
+}

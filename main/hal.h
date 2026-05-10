@@ -15,7 +15,15 @@
 
 #if defined(BOARD_HELTEC_V2)
 
-    #define BOARD_NAME              "heltec_v2"
+    // V2.3.16-pre2: BOARD_NAME reports the build variant for the boot log.
+    // BOARD_HELTEC_V2_4MB is set additionally on the 4 MB knock-off build via
+    // CMakeLists.txt so the same hal.h branch (same hardware) emits two
+    // different name strings depending on flash variant.
+    #if BOARD_HELTEC_V2_4MB
+        #define BOARD_NAME          "heltec_v2_4mb"
+    #else
+        #define BOARD_NAME          "heltec_v2"
+    #endif
     #define HAL_HAS_OLED            1   // SSD1306 on shared I2C bus
     #define HAL_HAS_PSRAM           0
     #define HAL_HAS_NATIVE_USB      0   // Console via CP2102 UART0

@@ -52,6 +52,18 @@ static esp_err_t http_event_cb(esp_http_client_event_t *e) {
 }
 
 // Returns HTTP status code, or -1 on transport error.
+//
+// V2.3.16 history: temporarily replaced with a cached_client pattern in pre2
+// (long-lived handles per target with save_client_session=true). Bench-tested
+// 2026-05-10 — the approach didn't pay off in practice because cloud servers
+// close idle keep-alive connections faster than our 150 s cycle interval, and
+// esp_http_client doesn't actually use the saved TLS session ticket on the
+// reconnect (cert validation fires on every retry, indicating a fresh ECDHE
+// handshake). Net effect was 2.8× slower cycles (10 s → 28 s) and identical
+// PSA pressure. Reverted before V2.3.16 ship; per-cycle init+cleanup is the
+// stable baseline. PSA leak mitigation continues via V2.3.15's defensive
+// infrastructure (slot bump, nuclear PSA reset on consecutive OOMs and on
+// FTPS write stalls).
 static int do_request(const char *url, esp_http_client_method_t method,
                       const char *content_type, const char *x_sensor,
                       const char *x_pin, const char *body,
@@ -159,7 +171,11 @@ static int post_with_retry(esp_http_client_handle_t client,
 // Open a keep-alive HTTP(S) client for a sensor-push target. Content-Type
 // and X-Sensor are set here; per-POST headers (X-PIN) are set by caller
 // between perform() calls. No "Connection: close" — keeping the socket alive
-// lets a second POST reuse the TLS session (~3–5 s handshake savings).
+// lets a second POST reuse the TLS session within ONE CYCLE (~3-5 s saving
+// for the second/third/fourth POST; first POST always pays handshake cost).
+//
+// V2.3.16 history: was briefly replaced by a long-lived cached client across
+// cycles. Reverted — see do_request() comment for the bench-test analysis.
 static esp_http_client_handle_t open_push_client(const char *url, bool use_insecure,
                                                  const char *chip_id) {
     esp_http_client_config_t cfg = {
@@ -687,11 +703,49 @@ static int send_osm(const tx_context_t *c) {
     char body[1600];
     build_luftdaten_body(c, body, sizeof(body), false);
 
+    // V2.3.16: optional Bearer-token auth. The OSM Luftdaten path
+    // historically accepted unauthenticated POSTs; their dashboard now lets
+    // box owners opt-in to require an Authorization header per box. Build a
+    // small client wrapper here so we can attach the header on the per-cycle
+    // client (do_request's fixed signature doesn't take an auth header). When
+    // the token is empty the Authorization header is never sent — keeps
+    // backward compat with unauthenticated boxes.
+    bool have_token = c->osm_access_token && c->osm_access_token[0];
+    char authz[80];
+    if (have_token) snprintf(authz, sizeof(authz), "Bearer %s", c->osm_access_token);
+
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
-        int rc = do_request(url, HTTP_METHOD_POST,
-                            "application/json; charset=UTF-8",
-                            c->chip_id, NULL, body, NULL, c->osm_use_insecure);
+        // Inline init+perform+cleanup so we can attach the optional auth
+        // header. Mirrors do_request() but with one extra set_header call.
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .timeout_ms = HTTP_TIMEOUT_MS,
+            .method = HTTP_METHOD_POST,
+            .event_handler = http_event_cb,
+            .buffer_size = 1024,
+            .buffer_size_tx = 1024,
+            .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        };
+        if (!c->osm_use_insecure) cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        else                       cfg.skip_cert_common_name_check = true;
+
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) {
+            ESP_LOGE(TAG, "openSenseMap: http_client_init failed");
+            return -1;
+        }
+        esp_http_client_set_header(client, "Content-Type", "application/json; charset=UTF-8");
+        esp_http_client_set_header(client, "X-Sensor", c->chip_id);
+        if (have_token) esp_http_client_set_header(client, "Authorization", authz);
+        esp_http_client_set_header(client, "Connection", "close");
+        esp_http_client_set_post_field(client, body, strlen(body));
+
+        esp_err_t err = esp_http_client_perform(client);
+        int rc = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
+        if (err != ESP_OK) ESP_LOGW(TAG, "openSenseMap perform error: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+
         if (rc == 201 || rc == 200) return rc;
         if (rc > 0 && rc != 408 && rc < 500) {
             ESP_LOGW(TAG, "openSenseMap rc=%d (4xx) — not retrying", rc);

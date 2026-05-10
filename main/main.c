@@ -268,6 +268,7 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->send_osm         = g_cfg.send_osm;
     ctx->osm_use_insecure = false;
     ctx->osm_box_id       = g_cfg.osm_box_id;
+    ctx->osm_access_token = g_cfg.osm_access_token;
 
     ctx->send_aqi         = g_cfg.send_aqi;
     ctx->aqi_use_insecure = false;
@@ -421,6 +422,11 @@ void app_main(void) {
     applog_init();
 
     ESP_LOGI(TAG, "%s (IDF %s)", VERSION_STR, esp_get_idf_version());
+    // V2.3.16-pre2: explicit board variant in serial log so the variant is
+    // unambiguous from the very first line without having to grep cipher/
+    // partition lines further down. BOARD_NAME comes from hal.h
+    // (one of "heltec_v2", "heltec_v2_4mb", "feathers3_d").
+    ESP_LOGI(TAG, "BOARD: %s", BOARD_NAME);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

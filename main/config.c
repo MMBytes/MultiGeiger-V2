@@ -52,13 +52,15 @@ static const char *NS  = "geiger";
 // Connection reset by peer" on the data channel. Verified independent of
 // session reuse (with PSK or without — same 426). Most likely the server
 // either doesn't fully implement TLS 1.3 on the data channel, or its
-// require_ssl_reuse=YES policy needs the modern TLS 1.3 PSK-extension
-// resumption that mbedtls_ssl_set_session() doesn't provide. TLS 1.2 +
-// session reuse works flawlessly. See reference_ftps_tls13_investigation.md
-// memory for full investigation. Defaulting to TLS 1.2 keeps FTPS working
-// out of the box; users with TLS-1.3-capable FTPS servers can untick the
-// /config "Limit FTPS to TLS 1.2" checkbox to opt back into 1.3.
-#define DEF_FTP_TLS12_ONLY  true
+// V2.3.23: default flipped to false now that V2.3.22's bidirectional close
+// fix is production-validated against the project's LAN FTPS server. The
+// /config "Limit FTPS to TLS 1.2" checkbox stays for any future server we
+// haven't yet handled. Existing devices upgrading from V2.3.22 keep their
+// saved value via NVS — only fresh / NVS-erased devices get the new default.
+// Pre-V2.3.22 the default was true because TLS 1.3 against this server got
+// "426 Connection reset" (now fixed by draining server's NewSessionTickets
+// before TCP close). See reference_ftps_tls13_investigation.md.
+#define DEF_FTP_TLS12_ONLY  false
 #define DEF_SPEAKER_TICK    false
 #define DEF_LED_TICK        true
 #define DEF_PLAY_SOUND      false

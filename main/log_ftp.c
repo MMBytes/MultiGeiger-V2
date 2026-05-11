@@ -204,6 +204,8 @@ static void io_close(ftp_io_t *io) {
         // 2 s deadline keeps us from blocking forever on a genuinely
         // stalled socket; in normal operation this loop fires once or
         // twice and exits in <50 ms.
+        // V2.3.19: send our close_notify, retrying on WANT_WRITE (lwIP TCP
+        // send buffer drains slowly right after a body upload). 2 s deadline.
         int64_t deadline_us = esp_timer_get_time() + 2 * 1000 * 1000;
         for (;;) {
             int rc = mbedtls_ssl_close_notify(&io->ssl);
@@ -219,6 +221,48 @@ static void io_close(ftp_io_t *io) {
             }
             vTaskDelay(pdMS_TO_TICKS(10));
         }
+
+        // V2.3.22: bidirectional close — drain the server's close_notify
+        // response (and any trailing TLS 1.3 NewSessionTicket post-handshake
+        // messages) before tearing down TCP. V2.3.19 made our close_notify
+        // reach the wire, but the server still saw "Connection reset by peer"
+        // because lwIP sends TCP RST instead of FIN whenever there's unread
+        // data in the receive buffer at close() time. TLS 1.3 piles up more
+        // post-handshake messages than 1.2 (NewSessionTickets, server's own
+        // close_notify) — diagnosed via V2.3.22-pre3 iteration trace which
+        // showed the server sending 2× NewSessionTicket on the data channel
+        // before its close_notify; pre-V2.3.22 we'd close on top of those
+        // and the kernel would emit RST.
+        //
+        // Standard mature-TLS-client pattern (OpenSSL's SSL_shutdown does
+        // this internally): keep reading until peer's close_notify or a
+        // benign error, then close the TCP socket cleanly. 1 s deadline is
+        // plenty — well-behaved peers respond within ms.
+        int64_t drain_deadline_us = esp_timer_get_time() + 1 * 1000 * 1000;
+        unsigned char drain_buf[64];
+        int drain_iters = 0;
+        int drain_tickets = 0;
+        bool drain_clean = false;
+        for (;;) {
+            int rc = mbedtls_ssl_read(&io->ssl, drain_buf, sizeof(drain_buf));
+            drain_iters++;
+            if (rc == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { drain_clean = true; break; }
+            if (rc == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
+                drain_tickets++;
+                continue;
+            }
+            if (rc <= 0 && rc != MBEDTLS_ERR_SSL_WANT_READ &&
+                           rc != MBEDTLS_ERR_SSL_WANT_WRITE) break;  // benign error / EOF
+            if (esp_timer_get_time() > drain_deadline_us) break;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        // One concise summary line — visible at INFO so it lands in /log
+        // without being noisy. Useful if FTPS ever regresses: a "drain not
+        // clean" line points at the close-sequence path immediately.
+        ESP_LOGI(TAG, "TLS shutdown: drain iters=%d tickets=%d %s",
+                 drain_iters, drain_tickets,
+                 drain_clean ? "clean (PEER_CLOSE_NOTIFY)" : "no PEER_CLOSE_NOTIFY");
+
         // V2.3.15: belt-and-braces release of any PSA references the session
         // is still holding. mbedtls_ssl_free does this internally on a fully-
         // initialised context, but session_reset is the documented hook for
@@ -229,6 +273,14 @@ static void io_close(ftp_io_t *io) {
         io->tls = false;
     }
     if (io->sock >= 0) {
+        // V2.3.22: explicit half-close (FIN, not RST) before the actual
+        // close(). Belt-and-braces against the same kernel-RST-on-unread-
+        // data behaviour the bidirectional drain above mitigates: even if
+        // the drain loop missed something, shutdown(SHUT_WR) tells lwIP
+        // "queue FIN now and send any remaining data, then close" — which
+        // is what the server expects to see. Failure here is non-fatal;
+        // close() below is the actual cleanup.
+        shutdown(io->sock, SHUT_WR);
         close(io->sock);
         io->sock = -1;
     }
@@ -315,12 +367,22 @@ static bool tls_ctx_init(ftp_tls_ctx_t *t) {
     if (s_cfg && s_cfg->ftp_tls12_only) {
         mbedtls_ssl_conf_max_tls_version(&t->conf, MBEDTLS_SSL_VERSION_TLS1_2);
     }
+
+    // V2.3.22-pre3: mbedTLS protocol-level debug callback removed entirely.
+    // pre1 enabled it globally (crashed on HTTPS volume); pre2 scoped it to
+    // FTPS only (still crashed during the FTPS handshake itself). Our
+    // [pre1] iteration logs in io_close are the actionable diagnostic for
+    // the close-sequence question — protocol-level mbedTLS logging would
+    // only add nice-to-have detail at huge stack/volume cost.
+
     return true;
 }
 
 static void tls_ctx_free(ftp_tls_ctx_t *t) {
     mbedtls_ssl_session_free(&t->ctrl_session);
     mbedtls_ssl_config_free(&t->conf);
+    // V2.3.22-pre3: mbedtls_debug_set_threshold(0) call removed — pre1/pre2
+    // diagnostic logging dropped entirely (see tls_ctx_init for context).
 }
 
 // Wrap an already-connected socket in TLS. For the data connection, reuse

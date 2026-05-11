@@ -36,11 +36,14 @@ CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM_FULL=y
 # Bigger TCPIP task stack — we flagged 2560 as too small
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
 
-# Bump main task stack 3584 -> 8192. V2.0.24 hit a "task main" stack overflow
-# after ~60 min with display code + router-restart reconnect storms; display's
-# clear helpers now use static buffers, and this extra headroom is insurance
-# against deeper event-driven call chains on the main task.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# V2.3.22: bump main task stack 8192 -> 16384. FTPS upload runs on the
+# main task (called from log_ftp_loop in wifi_loop), and the TLS 1.3
+# handshake + bidirectional close path is meaningfully deeper than the
+# TLS 1.2 path it replaced. Diagnosed during pre1/pre2/pre3 — main task
+# rebooted at FTPS time on both Heltec and FeatherS3-D before the bump.
+# Original V2.0.24 history: bumped 3584 -> 8192 to fix display + reconnect
+# storm overflow; that fix stays as the floor for backwards compatibility.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # TX worker blocks on TLS for seconds at a time; that legitimately starves IDLE
 # on its CPU. Stop the task watchdog from monitoring both IDLE tasks — the wdt
@@ -117,3 +120,9 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 # logs through the applog vprintf hook (1 KB line buffer) plus deeper event
 # call chains. Costs ~4 KB DRAM.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
+
+# mbedTLS protocol debug intentionally disabled. Saves ~30 KB flash and
+# avoids the high-volume callback chain. If diagnosis ever needs it back:
+# add CONFIG_MBEDTLS_DEBUG=y here, mbedtls_ssl_conf_dbg + threshold(3) in
+# log_ftp.c::tls_ctx_init, and bump main task stack accordingly.
+# CONFIG_MBEDTLS_DEBUG is not set

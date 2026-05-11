@@ -58,7 +58,7 @@ static void record_success(tx_target_id_t id) {
 
 // TX runs on its own CPU1-pinned task so mbedTLS handshakes don't starve
 // the CPU0 idle task (which feeds the task watchdog).
-#define TX_TASK_STACK_BYTES  10240
+#define TX_TASK_STACK_BYTES  16384   // V2.3.22: bumped from 10240. Safety margin for TLS 1.3 handshake stack usage (mbedTLS 4.x cert parsing + key derivation are deeper than 1.2 was).
 #define TX_TASK_PRIO         (tskIDLE_PRIORITY + 1)
 #define TX_QUEUE_DEPTH       1
 

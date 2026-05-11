@@ -1,56 +1,76 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
-// V2.3.21 — V1 parity release: boot melody + OLED TX-status wiring.
-// Two small features that bring the V2 firmware in line with what the
-// original V1 firmware (`Git_Repository_Geiger`) shipped from day one but
-// that V2 had quietly dropped during the native-IDF rewrite.
+// V2.3.22 — bug fix release. Closes out the V2.3.5-introduced FTPS+TLS 1.3
+// "426 Connection reset by peer" regression for good. V2.3.19 fixed the
+// first half (close_notify wasn't being flushed); V2.3.22 fixes the second
+// half (server's NewSessionTickets weren't being drained, causing kernel
+// to send TCP RST instead of FIN at close).
 //
-//   1. **V1 boot melody when `play_sound=true`.** Replaces V2's "two quick
-//      clicks" boot chirp with the original ~3.5 s tune
-//      (D-E-F#-G | D-E-D | B-C-B). Replicated note-for-note from
-//      `Git_Repository_Geiger/multigeiger/speaker.cpp` — same frequencies
-//      (× 0.75 scaling baked in to put the notes in the piezo's sweet
-//      spot), same durations (× 85 ms unit per V1's TONE() macro). Final
-//      "B" uses single-ended drive (PIN_N held LOW, "volume=0" in V1) for
-//      a quieter fade.
+// Diagnosis path (V2.3.22-pre1 → pre3): added per-iteration logging to
+// `io_close()` after pre2 confirmed the V2.3.19 close_notify was sending
+// successfully but the server STILL saw "Connection reset". The pre3
+// iteration trace showed the smoking gun:
 //
-//      New API in `speaker.h`: `melody_step_t` struct (freq_mhz, volume,
-//      duration_ms) and `speaker_play_melody(seq)`. The melody-playback
-//      path takes priority over ticks while playing; tick requests during
-//      a melody are silently dropped (audio interleave sounds bad and the
-//      ear can't distinguish them from the music anyway).
+//   drain iter=1 rc=WANT_READ
+//   drain iter=2 rc=NEW_SESSION_TICKET   ← server sent ticket #1
+//   drain iter=3 rc=WANT_READ
+//   drain iter=4 rc=NEW_SESSION_TICKET   ← server sent ticket #2
+//   drain iter=5 rc=PEER_CLOSE_NOTIFY    ← clean bidirectional close
+//   shutdown(SHUT_WR) rc=0
+//   close() rc=0
+//   FTPS upload OK
 //
-//      ~80 LOC in speaker.c. No-op stub for HAL_HAS_SPEAKER=0 (QT Py).
-//      Audible on Heltec genuine, Heltec 4 MB knock-off, and FeatherS3-D
-//      builds (the latter only if a piezo is wired to A3/A4).
+// Pre-V2.3.22 we'd close the TCP socket immediately after our close_notify
+// went out — leaving the two NewSessionTickets unread in the kernel
+// receive buffer. Linux/lwIP TCP semantics: close() with unread data sends
+// RST instead of FIN. The server saw RST, reported "Connection reset by
+// peer" → 426. TLS 1.2 doesn't send post-handshake NewSessionTickets like
+// 1.3 does, so 1.2 worked all along.
 //
-//   2. **OLED TX status slots wired (V1 parity).** V2 had scaffolded the
-//      sensor.community / Madavi / Radmon status slots in `display.h`
-//      since V2.0 but `transmission.c::tx_run` never actually called
-//      `display_set_status()` for them — they sat at `.` (off) for the
-//      lifetime of the firmware. V1 mirrors what we now do here: set
-//      SENDING before each `send_xxx()` call, IDLE/ERROR after based on
-//      rc, ERROR on breaker-open, IDLE when the target is enabled but
-//      skipped due to no-payload / tube-disabled, OFF when disabled in
-//      config.
+// Three changes in `main/log_ftp.c::io_close`:
 //
-//      The status line (page 7 of the OLED) now flickers through the
-//      send sequence on every TX cycle — visible feedback that uploads
-//      are happening, and immediate indication when one starts failing.
-//      Decode chart for the lowercase/uppercase/digit convention: see
-//      `display.c::STATUS_CHARS[]`.
+//   1. **Bidirectional close drain loop** — after our close_notify is
+//      flushed, loop on `mbedtls_ssl_read()` until we get either
+//      MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY (clean), benign error, or 1 s
+//      deadline. Continues on MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
+//      (the V2.3.15 control-flow signal). Same pattern OpenSSL's
+//      SSL_shutdown() uses internally — what FileZilla and every mature
+//      TLS client does.
 //
-//      OSM and aqi.eco intentionally don't get OLED slots — only 5 slots
-//      total (WiFi/SC/Madavi/Radmon/HV) and they're all taken. Status of
-//      OSM/aqi.eco is fully visible on `/` (V2.3.18 status page) which
-//      is the better debugging surface anyway.
+//   2. **Explicit shutdown(SHUT_WR) before close()** — belt-and-braces.
+//      Tells lwIP "send FIN, queue remaining data, then close" — kernel
+//      cannot send RST when SHUT_WR is requested. Standard TCP half-close
+//      pattern.
 //
-//      ~25 LOC in transmission.c, plus a one-line `#include "display.h"`.
-//      Affects only Heltec genuine + Heltec 4 MB knock-off (the only
-//      boards with HAL_HAS_OLED=1). FeatherS3-D and QT Py: display.c
-//      stubs out, so calls compile to no-ops.
+//   3. **One concise summary log line** per close: `TLS shutdown: drain
+//      iters=N tickets=M clean (PEER_CLOSE_NOTIFY)` or `no
+//      PEER_CLOSE_NOTIFY` if the drain timed out. Replaces the verbose
+//      pre1/pre2/pre3 per-iteration logging — keeps observability without
+//      cluttering /log.
 //
-// OTA-safe from V2.3.20 (no partition layout changes, no sdkconfig
-// changes). 20 release artefacts (5 × 4 boards).
-#define VERSION_STR "V2.3.21"
+// Plus: **main task stack 8 KB → 16 KB** (sdkconfig.defaults). FTPS runs
+// on the main task; the TLS 1.3 handshake + post-handshake state is
+// deeper than TLS 1.2 was. The original 8 KB was sized for the V1-era
+// stack profile and proved insufficient under the pre1/pre2 debug-callback
+// load. Even with mbedTLS protocol debug removed in V2.3.22, the bigger
+// stack is good insurance against future feature growth on the main task.
+//
+// Plus: **TX worker stack 10 KB → 16 KB** (`transmission.c`). HTTPS uses
+// the worker task; same TLS-1.3-deeper rationale. Cost: +6 KB DRAM per
+// task, irrelevant against the dozens of free KB on Heltec genuine and
+// the megabytes on PSRAM boards.
+//
+// `ftp_tls12_only` checkbox stays as the safety net (default ON for
+// existing devices upgrading from V2.3.21, where it was on). After
+// V2.3.22 soaks cleanly with the checkbox unticked, V2.3.23 can flip the
+// default to OFF and finally close out the V2.3.5 TLS 1.3 regression arc.
+//
+// HTTPS targets unaffected — esp_http_client owns its own close path,
+// which has presumably been doing bidirectional close all along (no
+// reports of HTTPS truncation issues across the same TLS 1.3 timeline).
+//
+// OTA-safe from V2.3.21 (no partition layout changes). 20 release
+// artefacts (5 × 4 boards). Heltec genuine + 4 MB knock-off + FeatherS3-D
+// + QT Py all share the FTPS code path, all benefit from the fix.
+#define VERSION_STR "V2.3.22"

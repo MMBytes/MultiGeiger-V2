@@ -43,6 +43,15 @@ static volatile bool s_led_tick     = false;
 static volatile uint32_t s_pending_ticks = 0;
 static uint32_t s_tick_remaining_ms = 0;   // audio-timer private
 
+// Melody playback state (V2.3.21+). Single writer (speaker_play_melody from
+// the main task at boot) → single reader (audio_timer_cb on the esp_timer
+// task). volatile pointer write is the publishing barrier — when the cb
+// observes s_melody_seq != NULL, the index/remaining state is already
+// initialised.
+static volatile const melody_step_t *s_melody_seq = NULL;
+static uint32_t s_melody_idx = 0;
+static uint32_t s_melody_step_remaining_ms = 0;
+
 static esp_timer_handle_t s_audio_timer = NULL;
 
 // Called from tube.c GM ISR. Keep it trivial — just latch a pending tick.
@@ -71,8 +80,51 @@ static void tick_end(void) {
     gpio_set_level(PIN_LED_BUILTIN,   0);
 }
 
+// Apply one step of a melody sequence — drives LEDC freq + duty + the N-pin
+// push-pull level. Called only from audio_timer_cb (esp_timer task) so LEDC
+// API is safe.
+static void melody_apply_step(const melody_step_t *step) {
+    if (step->freq_mhz > 0) {
+        ledc_set_freq(LEDC_SPEED_MODE, LEDC_TIMER_NUM, step->freq_mhz / 1000);
+        ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, LEDC_DUTY_HALF);
+        ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
+        gpio_set_level(PIN_SPEAKER_N, step->volume >= 1 ? 1 : 0);
+    } else {
+        ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
+        ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
+        gpio_set_level(PIN_SPEAKER_N, 0);
+    }
+}
+
 // Runs at esp_timer task context — LEDC-safe. 1 ms period.
 static void audio_timer_cb(void *arg) {
+    // Melody takes priority over ticks. The boot melody runs for ~3.5 s
+    // before WiFi/HTTP comes up, so dropping any tick during that window
+    // costs nothing (the tube ISR only fires after tube_setup() runs in
+    // app_main, well before the first cycle's CPM accumulates anyway).
+    if (s_melody_seq) {
+        if (s_melody_step_remaining_ms == 0) {
+            // Time to advance to the next step.
+            const melody_step_t *step = (const melody_step_t *)&s_melody_seq[s_melody_idx];
+            if (step->duration_ms == 0) {
+                // End-of-sequence marker. Silence everything and clear state.
+                ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
+                ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
+                gpio_set_level(PIN_SPEAKER_N, 0);
+                s_melody_seq = NULL;
+                s_melody_idx = 0;
+                s_pending_ticks = 0;   // discard any tick queued during melody
+                return;
+            }
+            melody_apply_step(step);
+            s_melody_step_remaining_ms = step->duration_ms;
+            s_melody_idx++;
+            return;
+        }
+        s_melody_step_remaining_ms--;
+        return;
+    }
+
     if (s_tick_remaining_ms > 0) {
         if (--s_tick_remaining_ms == 0) {
             tick_end();
@@ -85,6 +137,43 @@ static void audio_timer_cb(void *arg) {
         s_tick_remaining_ms = TICK_LEN_MS;
     }
 }
+
+void speaker_play_melody(const melody_step_t *seq) {
+    if (!seq) return;
+    // Order matters: index + remaining first, then sequence pointer last.
+    // audio_timer_cb gates on s_melody_seq != NULL, so when it observes the
+    // pointer, the rest of the state is already valid.
+    s_melody_idx               = 0;
+    s_melody_step_remaining_ms = 0;
+    s_melody_seq               = seq;
+}
+
+// V1 boot melody — replicated note-for-note from the original firmware
+// (Git_Repository_Geiger/multigeiger/speaker.cpp). V1 used a TONE() macro
+// that scaled frequency × 0.75 and duration × 85 ms; we bake those values
+// into the literals directly. ~3.5 s total, pattern D-E-F#-G | D-E-D | B-C-B.
+//
+// volume=1 = push-pull (PIN_N driven HIGH during tone) for max audible level;
+// the next-to-last "B" note uses volume=0 = single-ended drive for a quieter
+// fade, matching the V1 tone_volume parameter.
+static const melody_step_t s_v1_boot_melody[] = {
+    {  880994, 1, 170 },   // D
+    {       0, 0, 170 },   // rest
+    {  988882, 1, 170 },   // E
+    {       0, 0, 170 },   // rest
+    { 1109983, 1, 170 },   // F# (Fis)
+    {       0, 0, 170 },   // rest
+    { 1175986, 1, 340 },   // G
+    {  880994, 1, 170 },   // D
+    {  988882, 1, 170 },   // E
+    {  880994, 1, 340 },   // D
+    {  740825, 1, 170 },   // B (H in German notation)
+    {  784876, 1, 170 },   // C
+    {  740825, 1, 340 },   // B
+    {  740825, 0, 340 },   // B (single-ended — quieter fade, matches V1 vol=0)
+    {       0, 0, 170 },   // rest
+    {       0, 0,   0 },   // END marker (duration_ms == 0)
+};
 
 void speaker_set_modes(bool led_tick, bool speaker_tick) {
     s_led_tick     = led_tick;
@@ -143,11 +232,12 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     speaker_set_modes(led_tick, speaker_tick);
     tube_set_pulse_callback(on_gm_pulse);
 
-    // Short boot chirp — two quick clicks — only when play_sound is enabled.
+    // V2.3.21: full V1 boot melody when play_sound is enabled (~3.5 s).
+    // Replaces the prior two-click chirp. The melody-playback path in
+    // audio_timer_cb walks s_v1_boot_melody at 1 ms resolution; ticks are
+    // suppressed for the duration of playback.
     if (play_sound) {
-        s_pending_ticks = 1;
-        vTaskDelay(pdMS_TO_TICKS(100));
-        s_pending_ticks = 1;
+        speaker_play_melody(s_v1_boot_melody);
     }
 
     ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
@@ -162,6 +252,9 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
 }
 void speaker_set_modes(bool led_tick, bool speaker_tick) {
     (void)led_tick; (void)speaker_tick;
+}
+void speaker_play_melody(const melody_step_t *seq) {
+    (void)seq;
 }
 
 #endif  // HAL_HAS_SPEAKER

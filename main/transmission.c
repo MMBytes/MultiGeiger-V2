@@ -16,6 +16,12 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+// V2.3.21: drive the OLED status-line slots for sensor.community, Madavi
+// and Radmon (V1 parity — see reference V1 transmission.cpp). OSM and
+// aqi.eco intentionally don't get OLED slots; their status is fully
+// visible on the / status page from V2.3.18.
+#include "display.h"
+
 static const char *TAG = "tx";
 
 // Per-target stats surfaced on /. Updated only from the TX worker task; read
@@ -869,13 +875,16 @@ static void tx_run(tx_context_t *c) {
             s_stats[TX_TARGET_MADAVI].breaker_open_cycles--;
             ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)",
                      s_stats[TX_TARGET_MADAVI].breaker_open_cycles);
+            display_set_status(DSP_STATUS_MADAVI, DSP_SRV_ERROR);
         } else {
             ESP_LOGI(TAG, "Sending to Madavi (%s)", c->madavi.use_https ? "https" : "http");
+            display_set_status(DSP_STATUS_MADAVI, DSP_SRV_SENDING);
             int rc = send_madavi(c);
             bool ok = (rc == 200);
             record_attempt(TX_TARGET_MADAVI, rc);
             if (ok) record_success(TX_TARGET_MADAVI);
             ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
+            display_set_status(DSP_STATUS_MADAVI, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
                 madavi_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
@@ -890,6 +899,9 @@ static void tx_run(tx_context_t *c) {
         }
     } else if (c->madavi.enabled) {
         ESP_LOGI(TAG, "Madavi: skipping (no payload — tube disabled and no env/PM sensor)");
+        display_set_status(DSP_STATUS_MADAVI, DSP_SRV_IDLE);
+    } else {
+        display_set_status(DSP_STATUS_MADAVI, DSP_SRV_OFF);
     }
 
     if (c->sensorc.enabled && any_payload) {
@@ -897,13 +909,16 @@ static void tx_run(tx_context_t *c) {
             s_stats[TX_TARGET_SENSORC].breaker_open_cycles--;
             ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)",
                      s_stats[TX_TARGET_SENSORC].breaker_open_cycles);
+            display_set_status(DSP_STATUS_SCOMM, DSP_SRV_ERROR);
         } else {
             ESP_LOGI(TAG, "Sending to sensor.community (%s)", c->sensorc.use_https ? "https" : "http");
+            display_set_status(DSP_STATUS_SCOMM, DSP_SRV_SENDING);
             int rc = send_sensorc(c);
             bool ok = (rc == 201);
             record_attempt(TX_TARGET_SENSORC, rc);
             if (ok) record_success(TX_TARGET_SENSORC);
             ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
+            display_set_status(DSP_STATUS_SCOMM, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
                 sensorc_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
@@ -918,6 +933,9 @@ static void tx_run(tx_context_t *c) {
         }
     } else if (c->sensorc.enabled) {
         ESP_LOGI(TAG, "sensor.community: skipping (no payload — tube disabled and no env/PM sensor)");
+        display_set_status(DSP_STATUS_SCOMM, DSP_SRV_IDLE);
+    } else {
+        display_set_status(DSP_STATUS_SCOMM, DSP_SRV_OFF);
     }
 
     if (c->radmon.enabled && c->tube_enabled) {
@@ -925,13 +943,16 @@ static void tx_run(tx_context_t *c) {
             s_stats[TX_TARGET_RADMON].breaker_open_cycles--;
             ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)",
                      s_stats[TX_TARGET_RADMON].breaker_open_cycles);
+            display_set_status(DSP_STATUS_RADMON, DSP_SRV_ERROR);
         } else {
             ESP_LOGI(TAG, "Sending to Radmon (%s)", c->radmon.use_https ? "https" : "http");
+            display_set_status(DSP_STATUS_RADMON, DSP_SRV_SENDING);
             int rc = send_radmon(c);
             bool ok = (rc == 200);
             record_attempt(TX_TARGET_RADMON, rc);
             if (ok) record_success(TX_TARGET_RADMON);
             ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
+            display_set_status(DSP_STATUS_RADMON, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
                 radmon_fail_streak = 0;
             } else if (rc == -1) {  // only full retry exhaustion counts
@@ -946,6 +967,9 @@ static void tx_run(tx_context_t *c) {
         }
     } else if (c->radmon.enabled) {
         ESP_LOGI(TAG, "Radmon: skipping (tube disabled — Radmon is radiation-only)");
+        display_set_status(DSP_STATUS_RADMON, DSP_SRV_IDLE);
+    } else {
+        display_set_status(DSP_STATUS_RADMON, DSP_SRV_OFF);
     }
 
     if (c->send_osm && any_payload) {

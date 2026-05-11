@@ -1,69 +1,56 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
-// V2.3.20 — feature release. Adds 4th board target + NeoPixel driver +
-// HAL refactor for board-conditional log ring sizing.
+// V2.3.21 — V1 parity release: boot melody + OLED TX-status wiring.
+// Two small features that bring the V2 firmware in line with what the
+// original V1 firmware (`Git_Repository_Geiger`) shipped from day one but
+// that V2 had quietly dropped during the native-IDF rewrite.
 //
-//   1. **New board: Adafruit QT Py ESP32-PICO (PID 5395).** Original ESP32
-//      LX6 SiP — *not* S3, despite the modern USB-C form factor. ESP32-
-//      PICO-V3-02 with in-package 8 MB flash + 2 MB PSRAM. 11 castellated
-//      GPIO pads + STEMMA QT connector + onboard NeoPixel.
+//   1. **V1 boot melody when `play_sound=true`.** Replaces V2's "two quick
+//      clicks" boot chirp with the original ~3.5 s tune
+//      (D-E-F#-G | D-E-D | B-C-B). Replicated note-for-note from
+//      `Git_Repository_Geiger/multigeiger/speaker.cpp` — same frequencies
+//      (× 0.75 scaling baked in to put the notes in the piezo's sweet
+//      spot), same durations (× 85 ms unit per V1's TONE() macro). Final
+//      "B" uses single-ended drive (PIN_N held LOW, "volume=0" in V1) for
+//      a quieter fade.
 //
-//      Pin budget on the QT Py is much tighter than the Feather form
-//      factor, so this board configuration drops the OLED (already gone
-//      on PSRAM-class boards) AND the piezo speaker. Geiger uses 3 pads:
-//      A0=IO26 (HV_CAP_FUL), A1=IO25 (GMC_COUNT), A2=IO27 (HV_FET).
-//      Same function-per-A-position as feathers3_d so a Feather-style
-//      wiring harness drops onto the QT Py with only the GPIO numbers
-//      changing in hal.h. Env sensor plugs into the STEMMA QT connector
-//      (IO22 SDA / IO19 SCL — the secondary I²C bus, no GPIO pad cost).
+//      New API in `speaker.h`: `melody_step_t` struct (freq_mhz, volume,
+//      duration_ms) and `speaker_play_melody(seq)`. The melody-playback
+//      path takes priority over ticks while playing; tick requests during
+//      a melody are silently dropped (audio interleave sounds bad and the
+//      ear can't distinguish them from the music anyway).
 //
-//      Strapping pin hazards on the QT Py — documented in hal.h:
-//        - IO12 (MTDI / MISO pad): driving HIGH at boot bricks flash boot
-//          until power-cycle. Avoid for outputs that go HIGH.
-//        - IO15 (MTDO / A3 pad): driving LOW at boot silences the boot
-//          log. Annoying but recoverable.
-//        - IO5 (NeoPixel data) and IO0 (BOOT button): also strap pins,
-//          handled by Adafruit and our boot sequence respectively.
+//      ~80 LOC in speaker.c. No-op stub for HAL_HAS_SPEAKER=0 (QT Py).
+//      Audible on Heltec genuine, Heltec 4 MB knock-off, and FeatherS3-D
+//      builds (the latter only if a piezo is wired to A3/A4).
 //
-//   2. **NeoPixel driver — `neopixel.[ch]` (~150 LOC).** Hand-rolled
-//      WS2812 driver using ESP-IDF's RMT TX channel + bytes_encoder.
-//      No external led_strip component needed.
+//   2. **OLED TX status slots wired (V1 parity).** V2 had scaffolded the
+//      sensor.community / Madavi / Radmon status slots in `display.h`
+//      since V2.0 but `transmission.c::tx_run` never actually called
+//      `display_set_status()` for them — they sat at `.` (off) for the
+//      lifetime of the firmware. V1 mirrors what we now do here: set
+//      SENDING before each `send_xxx()` call, IDLE/ERROR after based on
+//      rc, ERROR on breaker-open, IDLE when the target is enabled but
+//      skipped due to no-payload / tube-disabled, OFF when disabled in
+//      config.
 //
-//      Concurrency model: tube-pulse ISR notifies a small dedicated
-//      FreeRTOS task via task notification; task wakes, drives pixel
-//      red briefly (~40 ms), then black, then blocks again. ISR-side
-//      cost is one xTaskNotifyGiveFromISR. Multiple coincident pulses
-//      collapse to one visible flash (eye couldn't distinguish anyway).
-//      Brightness intentionally low (R=20/255) to avoid being annoying
-//      in dark rooms while still visible at arm's length.
+//      The status line (page 7 of the OLED) now flickers through the
+//      send sequence on every TX cycle — visible feedback that uploads
+//      are happening, and immediate indication when one starts failing.
+//      Decode chart for the lowercase/uppercase/digit convention: see
+//      `display.c::STATUS_CHARS[]`.
 //
-//      Wired only when `HAL_HAS_NEOPIXEL=1` (currently QT Py only).
-//      All other boards get no-op stubs — calls in main.c stay
-//      unconditional, no `#if HAL_HAS_NEOPIXEL` guards needed at the
-//      call sites.
+//      OSM and aqi.eco intentionally don't get OLED slots — only 5 slots
+//      total (WiFi/SC/Madavi/Radmon/HV) and they're all taken. Status of
+//      OSM/aqi.eco is fully visible on `/` (V2.3.18 status page) which
+//      is the better debugging surface anyway.
 //
-//   3. **HAL refactor — `HAL_HAS_SPEAKER`, `HAL_HAS_NEOPIXEL`,
-//      `HAL_LOG_RING_BYTES`.** Three new flags that every board branch
-//      must define. Replaces the old `#if HAL_HAS_PSRAM` cascade in
-//      `applog.c` (now consults `HAL_LOG_RING_BYTES` directly) and
-//      gates the entire `speaker.c` body so boards without a piezo
-//      compile to no-op stubs (mirror of `display.c`'s `HAL_HAS_OLED`
-//      pattern). `HAL_LOG_RING_BYTES` per board: 60 KB on Heltec
-//      (internal SRAM), 4 MB on FeatherS3-D (8 MB PSRAM), 1 MB on QT Py
-//      (2 MB PSRAM — 50 % headroom).
+//      ~25 LOC in transmission.c, plus a one-line `#include "display.h"`.
+//      Affects only Heltec genuine + Heltec 4 MB knock-off (the only
+//      boards with HAL_HAS_OLED=1). FeatherS3-D and QT Py: display.c
+//      stubs out, so calls compile to no-ops.
 //
-//   4. **OTA upload form recognises the new board.** `http_server.c`
-//      adds a 4th `BOARD_ADAFRUIT_QTPY_ESP32_PICO` branch in the
-//      board-specific upload prompt — pairs with V2.3.13's chip-ID
-//      validation to steer users to the right binary before upload.
-//
-// Heltec 8 MB / Heltec 4 MB / FeatherS3-D builds: byte-for-byte
-// equivalent in observed behaviour to V2.3.19 — the new flags default
-// to their previous values for those boards (HAS_SPEAKER=1,
-// HAS_NEOPIXEL=0, LOG_RING_BYTES same as before).
-//
-// OTA-safe from V2.3.19 (no partition layout changes for existing
-// boards, no sdkconfig changes for them). 20 release artefacts
-// (5 × 4 boards).
-#define VERSION_STR "V2.3.20"
+// OTA-safe from V2.3.20 (no partition layout changes, no sdkconfig
+// changes). 20 release artefacts (5 × 4 boards).
+#define VERSION_STR "V2.3.21"

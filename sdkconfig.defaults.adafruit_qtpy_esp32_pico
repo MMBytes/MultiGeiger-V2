@@ -1,0 +1,36 @@
+# ============================================================================
+# Adafruit QT Py ESP32-PICO (PID 5395) overlay — ESP32-PICO-V3-02 SiP
+# (original ESP32 LX6 dual-core), in-package 8 MB flash + 2 MB SiP PSRAM,
+# USB-C via CH9102F or CP2102N UART bridge (NOT native USB).
+#
+# This is the original ESP32 chip (not S3) — same build path as Heltec V2,
+# different memory profile (PSRAM enabled). Pin map and feature flags live
+# in main/hal.h under BOARD_ADAFRUIT_QTPY_ESP32_PICO.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32"
+
+# 8 MB SiP flash. Standard partitions.csv (factory + ota_0 + ota_1, 2 MB each)
+# fits trivially — no override needed.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Auto-detect XTAL — PICO modules may report 26 or 40 MHz crystal.
+CONFIG_XTAL_FREQ_AUTO=y
+
+# In-package PSRAM. Per ESP32-PICO-V3-02 datasheet, the 2 MB PSRAM is wired
+# internally via SDIO (not external QSPI). Use the 32 Mbit type and standard
+# clock. CONFIG_SPIRAM_USE_MALLOC joins it to the global heap; small allocs
+# (≤16 KB) stay internal first, big allocs (e.g. our log ring) spill into
+# PSRAM. RESERVE_INTERNAL keeps DRAM headroom for IRAM-required allocations.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_TYPE_ESPPSRAM32=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=40960
+
+# Console / flashing path: UART0 via the CH9102F or CP2102N USB bridge.
+# (Original ESP32 has no built-in USB peripheral — USB-C on the QT Py is the
+# UART bridge's USB.)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

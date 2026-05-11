@@ -1206,6 +1206,8 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (8MB)</b>"
 #elif BOARD_FEATHERS3_D
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
+#elif BOARD_ADAFRUIT_QTPY_ESP32_PICO
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit QT Py ESP32-PICO</b>"
 #else
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
 #endif

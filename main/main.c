@@ -25,6 +25,7 @@
 #include "display.h"
 #include "http_server.h"
 #include "log_ftp.h"
+#include "neopixel.h"
 #include "ntp.h"
 #include "speaker.h"
 #include "transmission.h"
@@ -624,6 +625,16 @@ void app_main(void) {
     // can still be registered (it just never fires without ISR pulses).
     tube_setup(g_cfg.tube_enabled);
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
+
+    // NeoPixel (boards with HAL_HAS_NEOPIXEL only — stubs out elsewhere).
+    // Init the pixel after the tube ISR is wired so the pulse-tick callback
+    // registration in neopixel_register_pulse_tick() finds a live tube.
+    // Both calls are unconditional — neopixel.c handles the no-NeoPixel case
+    // with no-op stubs, so no #if HAL_HAS_NEOPIXEL guard needed here.
+    neopixel_init();
+    if (g_cfg.tube_enabled) {
+        neopixel_register_pulse_tick();
+    }
     tx_setup();
     http_server_start(&g_cfg, g_chip_id);
     log_ftp_init(g_chip_id, &g_cfg);

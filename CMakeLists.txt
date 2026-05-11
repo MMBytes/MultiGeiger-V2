@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -32,8 +32,15 @@ elseif(BOARD STREQUAL "feathers3_d")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_FEATHERS3_D=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.feathers3_d")
+elseif(BOARD STREQUAL "adafruit_qtpy_esp32_pico")
+    # Adafruit QT Py ESP32-PICO (PID 5395). Original ESP32 LX6 SiP with
+    # in-package 8 MB flash + 2 MB PSRAM. NeoPixel-equipped, no piezo, drops
+    # OLED + speaker via HAL_HAS_OLED=0 / HAL_HAS_SPEAKER=0 in hal.h.
+    set(IDF_TARGET "esp32" CACHE STRING "")
+    add_compile_definitions(BOARD_ADAFRUIT_QTPY_ESP32_PICO=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.adafruit_qtpy_esp32_pico")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

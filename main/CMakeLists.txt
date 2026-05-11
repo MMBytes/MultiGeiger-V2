@@ -20,6 +20,7 @@ idf_component_register(
         "log_ftp.c"
         "speaker.c"
         "display.c"
+        "neopixel.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -31,6 +32,7 @@ idf_component_register(
         esp_driver_gptimer
         esp_driver_i2c
         esp_driver_ledc
+        esp_driver_rmt
         esp_http_client
         esp_http_server
         esp-tls

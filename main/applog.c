@@ -19,19 +19,14 @@ static const char *TAG = "applog";
 // hook runs on whichever task emitted the line, so the ring and its
 // bookkeeping are protected by a FreeRTOS mutex.
 //
-// Buffer size depends on board: PSRAM-equipped boards get 4 MB so the ring
-// holds many hours of context; SRAM-only boards stay at 60 KB.
-// 4 MB on the 8 MB PSRAM still leaves ~4 MB headroom for any future feature
-// that wants large heap allocations from external RAM. Streaming /log + FTPS
-// (V2.3.16/17) means ring size no longer creates transient internal-DRAM
-// peaks, so the only practical cost is FTPS upload time scaling with body
-// length (~5 s per MB on the LAN).
+// Buffer size is chosen per-board in hal.h via HAL_LOG_RING_BYTES — small
+// boards stay at 60 KB internal DRAM, PSRAM boards size to a fraction of
+// available external RAM (4 MB on FeatherS3-D 8 MB, 1 MB on QT Py 2 MB).
+// Streaming /log + FTPS (V2.3.16/17) means ring size no longer creates
+// transient internal-DRAM peaks, so the only practical cost is FTPS upload
+// time scaling with body length (~5 s per MB on the LAN).
 
-#if HAL_HAS_PSRAM
-#define LOG_RING_SIZE   (4 * 1024 * 1024)
-#else
-#define LOG_RING_SIZE   (60 * 1024)
-#endif
+#define LOG_RING_SIZE   HAL_LOG_RING_BYTES
 #define LOG_LINE_MAX    1024
 
 // Heap-allocated rather than static so the PSRAM path can request the

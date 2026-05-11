@@ -1,5 +1,14 @@
 #include "speaker.h"
 
+#include "hal.h"   // PIN_SPEAKER_P, PIN_SPEAKER_N, PIN_PIN_LED_BUILTIN, HAL_HAS_SPEAKER
+
+// Boards without a piezo (HAL_HAS_SPEAKER == 0, e.g. small QT Py form factor
+// where pin budget can't accommodate it) get no-op stubs for the public API.
+// All the LEDC + esp_timer + ISR plumbing is gated out so the firmware
+// doesn't try to drive PIN_SPEAKER_* (which are intentionally undefined on
+// those boards) and doesn't allocate hardware resources it'll never use.
+#if HAL_HAS_SPEAKER
+
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_attr.h"
@@ -9,7 +18,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "hal.h"   // PIN_SPEAKER_P, PIN_SPEAKER_N, PIN_PIN_LED_BUILTIN
 #include "tube.h"
 
 static const char *TAG = "speaker";
@@ -146,3 +154,14 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
              PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
 }
+
+#else   // HAL_HAS_SPEAKER == 0 → no-op stubs for boards without a piezo.
+
+void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
+    (void)play_sound; (void)led_tick; (void)speaker_tick;
+}
+void speaker_set_modes(bool led_tick, bool speaker_tick) {
+    (void)led_tick; (void)speaker_tick;
+}
+
+#endif  // HAL_HAS_SPEAKER

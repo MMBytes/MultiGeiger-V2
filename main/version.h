@@ -1,47 +1,69 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
-// V2.3.19 — bug fix release. The V2.3.15-deferred FTPS+TLS 1.3 "426
-// Connection reset by peer" failure on the data channel is fixed by
-// properly flushing the TLS close_notify alert before tearing down
-// the socket.
+// V2.3.20 — feature release. Adds 4th board target + NeoPixel driver +
+// HAL refactor for board-conditional log ring sizing.
 //
-// Root cause: `mbedtls_ssl_close_notify()` is non-blocking and frequently
-// returns `MBEDTLS_ERR_SSL_WANT_WRITE` right after a large body upload
-// while the lwIP TCP send buffer drains. Pre-V2.3.19 `io_close()` ignored
-// the return value and immediately closed the TCP socket, so the
-// close_notify alert never made it onto the wire.
+//   1. **New board: Adafruit QT Py ESP32-PICO (PID 5395).** Original ESP32
+//      LX6 SiP — *not* S3, despite the modern USB-C form factor. ESP32-
+//      PICO-V3-02 with in-package 8 MB flash + 2 MB PSRAM. 11 castellated
+//      GPIO pads + STEMMA QT connector + onboard NeoPixel.
 //
-// RFC 8446 §6.1: TLS 1.3 servers MUST treat TCP close without close_notify
-// as a possible truncation attack. The project's LAN FTPS server reacted
-// with "426 Connection reset by peer" on the data channel after the body
-// otherwise transferred cleanly. TLS 1.2 servers are lenient about this
-// for backwards compatibility with old broken clients, so the bug only
-// manifested once we re-enabled TLS 1.3 in V2.3.5.
+//      Pin budget on the QT Py is much tighter than the Feather form
+//      factor, so this board configuration drops the OLED (already gone
+//      on PSRAM-class boards) AND the piezo speaker. Geiger uses 3 pads:
+//      A0=IO26 (HV_CAP_FUL), A1=IO25 (GMC_COUNT), A2=IO27 (HV_FET).
+//      Same function-per-A-position as feathers3_d so a Feather-style
+//      wiring harness drops onto the QT Py with only the GPIO numbers
+//      changing in hal.h. Env sensor plugs into the STEMMA QT connector
+//      (IO22 SDA / IO19 SCL — the secondary I²C bus, no GPIO pad cost).
 //
-// Diagnosis came from comparing FileZilla (which loops close_notify until
-// the alert is actually flushed — standard mature-TLS-client behaviour)
-// against our fire-and-forget call. The cipher (AES-128-GCM) and key
-// exchange (ECDHE-secp384r1-RSA-PSS-RSAE-SHA256) FileZilla negotiated
-// against the same server were both well within mbedTLS's defaults, ruling
-// out crypto-suite mismatch.
+//      Strapping pin hazards on the QT Py — documented in hal.h:
+//        - IO12 (MTDI / MISO pad): driving HIGH at boot bricks flash boot
+//          until power-cycle. Avoid for outputs that go HIGH.
+//        - IO15 (MTDO / A3 pad): driving LOW at boot silences the boot
+//          log. Annoying but recoverable.
+//        - IO5 (NeoPixel data) and IO0 (BOOT button): also strap pins,
+//          handled by Adafruit and our boot sequence respectively.
 //
-// Fix in `log_ftp.c::io_close`: deadline-bounded retry loop using the
-// same WANT_READ / WANT_WRITE continuation pattern we already use in
-// `io_send_all` / `io_recv1`. 2 s deadline keeps us from blocking
-// forever on a genuinely stalled socket; in normal operation the loop
-// fires once or twice and exits in <50 ms. ~15 LOC.
+//   2. **NeoPixel driver — `neopixel.[ch]` (~150 LOC).** Hand-rolled
+//      WS2812 driver using ESP-IDF's RMT TX channel + bytes_encoder.
+//      No external led_strip component needed.
 //
-// HTTPS targets (Madavi / SC / Radmon / OSM / aqi.eco) own their own
-// close path inside esp_http_client; this fix doesn't touch them. They
-// have not exhibited analogous issues — the cloud terminators are more
-// permissive than the LAN FTPS server about truncation.
+//      Concurrency model: tube-pulse ISR notifies a small dedicated
+//      FreeRTOS task via task notification; task wakes, drives pixel
+//      red briefly (~40 ms), then black, then blocks again. ISR-side
+//      cost is one xTaskNotifyGiveFromISR. Multiple coincident pulses
+//      collapse to one visible flash (eye couldn't distinguish anyway).
+//      Brightness intentionally low (R=20/255) to avoid being annoying
+//      in dark rooms while still visible at arm's length.
 //
-// Now that the fix is in place, the V2.3.15 `ftp_tls12_only` checkbox
-// (default ON) can be unticked to use TLS 1.3 against the LAN FTPS
-// server. Default stays ON for one release as a safety net; if V2.3.19
-// soaks cleanly we can flip the default to OFF in V2.3.20.
+//      Wired only when `HAL_HAS_NEOPIXEL=1` (currently QT Py only).
+//      All other boards get no-op stubs — calls in main.c stay
+//      unconditional, no `#if HAL_HAS_NEOPIXEL` guards needed at the
+//      call sites.
 //
-// OTA-safe from V2.3.18 (no partition layout changes, no sdkconfig
-// changes). 15 release artefacts (5 × 3 boards).
-#define VERSION_STR "V2.3.19"
+//   3. **HAL refactor — `HAL_HAS_SPEAKER`, `HAL_HAS_NEOPIXEL`,
+//      `HAL_LOG_RING_BYTES`.** Three new flags that every board branch
+//      must define. Replaces the old `#if HAL_HAS_PSRAM` cascade in
+//      `applog.c` (now consults `HAL_LOG_RING_BYTES` directly) and
+//      gates the entire `speaker.c` body so boards without a piezo
+//      compile to no-op stubs (mirror of `display.c`'s `HAL_HAS_OLED`
+//      pattern). `HAL_LOG_RING_BYTES` per board: 60 KB on Heltec
+//      (internal SRAM), 4 MB on FeatherS3-D (8 MB PSRAM), 1 MB on QT Py
+//      (2 MB PSRAM — 50 % headroom).
+//
+//   4. **OTA upload form recognises the new board.** `http_server.c`
+//      adds a 4th `BOARD_ADAFRUIT_QTPY_ESP32_PICO` branch in the
+//      board-specific upload prompt — pairs with V2.3.13's chip-ID
+//      validation to steer users to the right binary before upload.
+//
+// Heltec 8 MB / Heltec 4 MB / FeatherS3-D builds: byte-for-byte
+// equivalent in observed behaviour to V2.3.19 — the new flags default
+// to their previous values for those boards (HAS_SPEAKER=1,
+// HAS_NEOPIXEL=0, LOG_RING_BYTES same as before).
+//
+// OTA-safe from V2.3.19 (no partition layout changes for existing
+// boards, no sdkconfig changes for them). 20 release artefacts
+// (5 × 4 boards).
+#define VERSION_STR "V2.3.20"

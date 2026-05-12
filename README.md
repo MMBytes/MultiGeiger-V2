@@ -1,6 +1,6 @@
 # MultiGeiger V2 (ESP-IDF native)
 
-A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0** for the Heltec Wireless Stick V2 (ESP32) with a Si22G pancake tube.
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0** for the Heltec WiFi Kit 32 V2 (ESP32) with a Si22G pancake tube.
 
 ## Status
 
@@ -22,7 +22,7 @@ Running. First overnight soak passed without crashes, uploading to all three def
 
 ## Target hardware
 
-- **MCU:** Heltec Wireless Stick V2 (ESP32-D0WDQ6, 8 MB flash)
+- **MCU:** Heltec Wifi Kit 32 V2 (ESP32-D0WDQ6, 8 MB flash)
 - **Tube:** Si22G (high-sensitivity pancake; other tubes need a calibration constant change)
 - **Optional:** BME280 on I²C (Wire pins per Heltec V2 default)
 - **HV driver:** as per upstream MultiGeiger hardware

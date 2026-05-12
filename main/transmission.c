@@ -626,24 +626,37 @@ static int send_radmon(const tx_context_t *c) {
 }
 
 // --- Combined Luftdaten body (used by openSenseMap + aqi.eco) ---------------
-// Both targets accept the full sensor bundle in a single POST — Si22G_* (radiation),
-// BME280_* (T/H/P), SPS30_* (PM), pulse stats, signal. The fields ride together
-// as `sensordatavalues` array entries. openSenseMap needs the URL query
-// `?luftdaten=1` to switch its parser into Luftdaten compatibility mode; aqi.eco
-// expects the body wrapped with an `esp8266id` field at the top so we emit a
-// slightly different body for that target via `prefix_aqi_id`.
+// Both targets accept a Luftdaten-style sensordatavalues array. openSenseMap
+// gets the full sensor bundle (Si22G_* radiation, BME280_* T/H/P, SPS30_* PM,
+// DNMS_noise_*, pulse stats, signal) because per-box channel mappings can
+// route each field where the user wants. aqi.eco has a fixed hardcoded
+// VALUE_MAPPING in updater.php that only knows specific value_type aliases,
+// so for aqi.eco we trim out everything it doesn't map (radiation, pulse
+// stats, SPS30_TS, DNMS min/max) and add NAMF-style alias duplicates for
+// T/H/P (SHT3X_*, BMP_*) so the server can pick whichever alias it prefers.
+//
+// V2.3.25: also strip "esp32-" prefix from chip_id when emitting esp8266id
+// for aqi.eco — the server's devices.esp8266_id column is bigint, so a
+// non-numeric value silently breaks the per-cycle UPDATE and surfaces as
+// HTTP 500 with an empty body. Took a full evening of probing to identify
+// (see reference_aqi_eco.md).
+//
+// openSenseMap needs the URL query `?luftdaten=1` to switch its parser into
+// Luftdaten compatibility mode; aqi.eco expects the body wrapped with an
+// `esp8266id` field at the top.
 static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
                                  bool prefix_aqi_id) {
     int n = 0;
     if (prefix_aqi_id) {
-        // aqi.eco: `esp8266id` is the legacy field name from the airrohr fork
-        // — keep it for compatibility, the value is our esp32-N chip ID.
+        // aqi.eco: strip "esp32-" so the value parses as bigint server-side.
+        const char *aqi_id = c->chip_id;
+        if (strncmp(aqi_id, "esp32-", 6) == 0) aqi_id += 6;
         n += snprintf(buf + n, cap - n,
             "{\n"
             " \"esp8266id\": \"%s\",\n"
             " \"software_version\": \"%s\",\n"
             " \"sensordatavalues\": [\n",
-            c->chip_id, c->sw_version);
+            aqi_id, c->sw_version);
     } else {
         n += snprintf(buf + n, cap - n,
             "{\n"
@@ -655,10 +668,10 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     bool first = true;
     #define COMMA() do { if (!first) n += snprintf(buf + n, cap - n, ",\n"); first = false; } while (0)
 
-    if (c->tube_enabled) {
-        // Si22G_* prefix used here too (rather than the lowercase canonical
-        // names sensor.community uses) so the field-name routing on Madavi
-        // and downstream Luftdaten consumers stays consistent.
+    // Radiation block — Si22G_* are not in aqi.eco's VALUE_MAPPING (no
+    // radiation column), so skip the entire block for aqi.eco. openSenseMap
+    // can route Si22G data to a configured per-box channel.
+    if (c->tube_enabled && !prefix_aqi_id) {
         float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;
         COMMA();
         n += snprintf(buf + n, cap - n,
@@ -687,6 +700,20 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
             "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
             c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+        if (prefix_aqi_id) {
+            // V2.3.25 NAMF-style alias duplicates — aqi.eco's VALUE_MAPPING
+            // lists SHT3X_* first in temperature/humidity alias arrays and
+            // BMP_pressure as an accepted alias for pressure. Sending the
+            // same value under multiple aliases maximises compatibility
+            // against any future server-side preference change. Same numeric
+            // value, so picking SHT3X vs BME280 doesn't affect the data.
+            n += snprintf(buf + n, cap - n,
+                ",\n"
+                "  {\"value_type\": \"SHT3X_temperature\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"SHT3X_humidity\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"BMP_pressure\", \"value\": \"%.2f\"}",
+                c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+        }
     }
     if (c->pm_valid) {
         COMMA();
@@ -699,22 +726,33 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
             "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
+            "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"}",
             c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
-            c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
-            c->pm.typ_size_um);
+            c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10);
+        // SPS30_TS (typical particle size) — not in aqi.eco's VALUE_MAPPING.
+        // Kept for openSenseMap which can route it to a per-box channel.
+        if (!prefix_aqi_id) {
+            n += snprintf(buf + n, cap - n,
+                ",\n"
+                "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
+                c->pm.typ_size_um);
+        }
     }
     if (c->noise_valid) {
-        // DNMS_noise_* prefix matches Madavi's prefix-routing convention and
-        // sensor.community's X-PIN 15 body — keeps the field naming consistent
-        // across all four upload targets.
+        // DNMS_noise_LAeq is the only noise alias in aqi.eco's VALUE_MAPPING
+        // (canonical column = noise_level). LA_min/LA_max have no
+        // destination columns there — kept for openSenseMap only.
         COMMA();
         n += snprintf(buf + n, cap - n,
-            "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
-            c->noise.laeq, c->noise.la_min, c->noise.la_max);
+            "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"}",
+            c->noise.laeq);
+        if (!prefix_aqi_id) {
+            n += snprintf(buf + n, cap - n,
+                ",\n"
+                "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
+                c->noise.la_min, c->noise.la_max);
+        }
     }
     COMMA();
     n += snprintf(buf + n, cap - n,

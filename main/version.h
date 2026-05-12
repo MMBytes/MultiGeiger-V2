@@ -1,6 +1,54 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.25 — aqi.eco compatibility fix + body trim.
+//
+// **Headline fix:** aqi.eco's `devices.esp8266_id` column is `bigint` (per
+// `mysql-schema.sql` in `trekawek/air-quality-info`). Our V2 firmware was
+// emitting `"esp8266id": "esp32-5965048"` in the body — a string. Server
+// tried to `UPDATE devices SET esp8266_id = 'esp32-5965048'`, MySQL failed
+// to coerce the string to bigint, PHP threw an unhandled exception, nginx
+// returned 500 with empty body. Symptom: every aqi.eco POST returned 500
+// and our circuit breaker would eventually open. NAMF firmware sends bare
+// numeric IDs (e.g. `"7738603"`) because ESP8266 chip IDs ARE bigints — we
+// happen to wrap ours with `"esp32-"` for display, which broke the parse.
+//
+// Fix: in `build_luftdaten_body`, when `prefix_aqi_id == true`, strip the
+// leading `"esp32-"` from `c->chip_id` before emitting the `esp8266id`
+// field. Verified end-to-end 2026-05-12 by manual POST: `"5965048"` →
+// HTTP 200 OK; `"esp32-5965048"` → HTTP 500. ~5 LOC change.
+//
+// **Other aqi.eco body trims** (per the same investigation — full table in
+// `reference_aqi_eco.md`'s VALUE_MAPPING section):
+//   * Drop `Si22G_*` radiation block entirely (aqi.eco has no radiation
+//     column; data was being silently discarded). Includes `samples`,
+//     `min_micro`, `max_micro` which only made sense alongside Si22G.
+//   * Drop `SPS30_TS` (typical particle size) — not in VALUE_MAPPING.
+//   * Drop `DNMS_noise_LA_min` / `DNMS_noise_LA_max` — only LAeq is mapped
+//     (canonical column `noise_level`).
+//
+// **Other aqi.eco body additions** (NAMF spray-and-pray pattern):
+//   * Add `SHT3X_temperature`, `SHT3X_humidity` alongside `BME280_*` —
+//     aqi.eco's VALUE_MAPPING lists SHT3X first in the temperature and
+//     humidity alias arrays. Same numeric value, two aliases — server
+//     picks whichever it prefers.
+//   * Add `BMP_pressure` alongside `BME280_pressure` — also in the
+//     pressure alias array (after BME280_pressure).
+//
+// Net body size: ~30 % smaller per aqi.eco POST (radiation and noise tail
+// dropped). One more handshake's worth of bytes saved per upload.
+//
+// **openSenseMap path unchanged** — still gets the full bundle including
+// Si22G, SPS30_TS, DNMS min/max. Per-box channel mapping on openSenseMap
+// can route each field where the user wants. The aqi.eco-specific trims
+// are gated on `prefix_aqi_id == true`.
+//
+// **No other behaviour changes.** All other targets (Madavi, sensor.community
+// X-PIN 1/11/15/19, Radmon) use separate body builders and are untouched.
+//
+// OTA-safe from V2.3.24 (no partition layout changes, no sdkconfig
+// changes). 20 release artefacts (5 × 4 boards).
+//
 // V2.3.24 — the wrap-corruption fix + UX polish.
 //
 // Headline fix: the V2.3.16-era streaming snapshot in applog_stream_begin had
@@ -118,4 +166,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.24"
+#define VERSION_STR "V2.3.25"

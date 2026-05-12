@@ -29,10 +29,22 @@ static const char *TAG = "applog";
 #define LOG_RING_SIZE   HAL_LOG_RING_BYTES
 #define LOG_LINE_MAX    1024
 
+// V2.3.24: snapshot scratch buffer size — sourced from hal.h per board so
+// internal-DRAM-only boards (Heltec) can run a tight 6 KB and PSRAM boards
+// (FeatherS3-D, QT Py) get a more generous 16 KB. At applog_stream_begin()
+// we copy the first SNAP_SCRATCH_BYTES of the oldest-half tail (the segment
+// most exposed to writer corruption — see applog.h header). Sized to cover
+// realistic cumulative log writes during a 3-30 s FTPS upload: ~1 KB from
+// the FTPS handshake itself, plus ~1-3 KB of concurrent TX worker / WiFi /
+// status-page activity. Pre-allocated at init so there's no per-snapshot
+// heap activity and no malloc-failure path.
+#define SNAP_SCRATCH_BYTES HAL_LOG_SNAP_SCRATCH_BYTES
+
 // Heap-allocated rather than static so the PSRAM path can request the
 // allocation come from external SPIRAM. Allocated once in applog_init();
 // applog_vprintf only runs after init succeeds.
 static char             *s_ring        = NULL;
+static char             *s_snap_scratch = NULL; // V2.3.24: snapshot scratch (see SNAP_SCRATCH_BYTES)
 static size_t            s_pos         = 0;     // next write offset
 static bool              s_wrapped     = false; // has the ring wrapped at least once
 static size_t            s_valid_end   = 0;     // high-water when not wrapped; == size when wrapped
@@ -185,10 +197,23 @@ void applog_init(void) {
     s_ring = malloc(LOG_RING_SIZE);
 #endif
     if (!s_ring) return;  // caller continues; hook just won't install
+
+    // V2.3.24: pre-allocate snapshot scratch. Same memory class as the ring
+    // (PSRAM where available, internal DRAM otherwise). If allocation fails
+    // here the streaming snapshot falls back to the V2.3.16-compatible
+    // zero-copy path with the known torn-line corruption — degraded but
+    // still functional, so don't bail.
+#if HAL_HAS_PSRAM
+    s_snap_scratch = heap_caps_malloc(SNAP_SCRATCH_BYTES, MALLOC_CAP_SPIRAM);
+#else
+    s_snap_scratch = malloc(SNAP_SCRATCH_BYTES);
+#endif
+
     s_mtx = xSemaphoreCreateMutex();
     if (!s_mtx) {
         free(s_ring);
         s_ring = NULL;
+        if (s_snap_scratch) { free(s_snap_scratch); s_snap_scratch = NULL; }
         return;
     }
     s_prev_hook   = esp_log_set_vprintf(applog_vprintf);
@@ -255,43 +280,83 @@ char *applog_snapshot(size_t *out_len) {
     return out;
 }
 
-// V2.3.16: zero-copy streaming snapshot. Captures segment pointers into the
-// ring memory under the log mutex (briefly), then releases the mutex. Caller
-// reads directly from those pointers and sends/processes the bytes itself —
-// no body buffer is malloc'd. The wrap-handling logic is identical to
-// applog_snapshot's.
+// V2.3.24: snapshot returns up to three segments — see applog.h for the full
+// failure-mode write-up. Summary: in the wrapped case, the oldest-half tail
+// starts at exactly s_ring + s_pos + skip, which is also where the writer's
+// next ring_append() lands. Releasing the mutex with that pointer exposes the
+// segment's start to in-flight overwrites. V2.3.24 fixes this by copying the
+// first SNAP_SCRATCH_BYTES of the tail into a pre-allocated scratch buffer
+// under the mutex; the caller streams scratch + ring-tail-remainder + newer
+// pre-wrap half. The first segment is now bit-stable for the entire snapshot
+// lifetime (provided cumulative writes during the upload stay below the
+// scratch size + skip — ~8 KB, comfortably above realistic worst case).
 //
-// In-flight inconsistency: between begin() and end() the writer may continue
-// to advance the ring, potentially overwriting a few bytes near the segment
-// tail. Acceptable trade-off — see header comment. If this ever bites
-// (corrupted upload tails), add a `s_snapshot_active` flag here that
-// applog_vprintf checks to drop writes during the snapshot window.
+// Degradation if s_snap_scratch is NULL (allocation failed at init): falls
+// back to the V2.3.16 behaviour (zero-copy seg_a pointing into the ring,
+// torn-line corruption returns) rather than failing the snapshot outright.
 bool applog_stream_begin(applog_stream_t *out) {
     out->seg_a = NULL;
     out->len_a = 0;
     out->seg_b = NULL;
     out->len_b = 0;
+    out->seg_c = NULL;
+    out->len_c = 0;
 
     if (!s_mtx) return false;
 
     xSemaphoreTake(s_mtx, portMAX_DELAY);
 
     if (s_wrapped) {
-        // Same wrap-handling as applog_snapshot: skip to first newline after
-        // s_pos so segment_a starts on a clean line boundary.
+        // Skip to the first newline after s_pos so the snapshot starts on a
+        // clean line boundary (the byte at s_pos itself is mid-line: it's
+        // where the writer's last ring_append() ended, partway through some
+        // log entry that was wrapped over).
         size_t tail_len = LOG_RING_SIZE - s_pos;
         const char *tail = s_ring + s_pos;
         size_t skip = 0;
         while (skip < tail_len && tail[skip] != '\n') skip++;
         if (skip < tail_len) skip++;  // consume the newline itself
-        out->seg_a = tail + skip;
-        out->len_a = tail_len - skip;
-        out->seg_b = s_ring;
-        out->len_b = s_pos;
+
+        const char *tail_start = tail + skip;
+        size_t      tail_avail = tail_len - skip;
+
+        if (s_snap_scratch && tail_avail > 0) {
+            // Copy the danger zone (first SNAP_SCRATCH_BYTES of the tail) into
+            // scratch. memcpy under the mutex — the writer can't be running
+            // ring_append concurrently, so the source bytes are stable for
+            // the duration of the copy.
+            size_t copy_len = (tail_avail < SNAP_SCRATCH_BYTES) ? tail_avail : SNAP_SCRATCH_BYTES;
+            memcpy(s_snap_scratch, tail_start, copy_len);
+
+            out->seg_a = s_snap_scratch;
+            out->len_a = copy_len;
+            // seg_b is the tail remainder past the danger zone — still in
+            // ring memory but safe from writer corruption since writes from
+            // s_pos forward have to fill skip + SNAP_SCRATCH_BYTES bytes
+            // before reaching this region.
+            if (tail_avail > copy_len) {
+                out->seg_b = tail_start + copy_len;
+                out->len_b = tail_avail - copy_len;
+            }
+            out->seg_c = s_ring;
+            out->len_c = s_pos;
+        } else {
+            // V2.3.16 fallback: scratch unavailable (init OOM). Zero-copy
+            // tail pointer; corruption resumes for files past the first wrap.
+            out->seg_a = tail_start;
+            out->len_a = tail_avail;
+            out->seg_b = s_ring;
+            out->len_b = s_pos;
+            // seg_c stays NULL/0
+        }
     } else {
+        // Pre-wrap: writer has only ever appended forward, so the segment
+        // is naturally line-aligned at byte 0 and writes during the snapshot
+        // go to s_pos which is past s_valid_end. No corruption possible —
+        // serve the ring directly with no copy.
         out->seg_a = s_ring;
         out->len_a = s_valid_end;
-        // out->seg_b / len_b stay NULL/0
+        // seg_b / seg_c stay NULL/0
     }
 
     xSemaphoreGive(s_mtx);
@@ -299,6 +364,7 @@ bool applog_stream_begin(applog_stream_t *out) {
 }
 
 void applog_stream_end(void) {
-    // V2.3.16: currently no-op. Reserved for future write-pause coordination
-    // if the in-flight ring-mutation inconsistency becomes a problem.
+    // V2.3.24: still a no-op. Scratch is reused across snapshots, not freed.
+    // Kept as a public API so callers always pair begin/end (forward-compat
+    // for any future per-snapshot bookkeeping).
 }

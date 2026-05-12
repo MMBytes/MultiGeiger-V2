@@ -256,10 +256,14 @@ static void io_close(ftp_io_t *io) {
             if (esp_timer_get_time() > drain_deadline_us) break;
             vTaskDelay(pdMS_TO_TICKS(10));
         }
-        // One concise summary line — visible at INFO so it lands in /log
-        // without being noisy. Useful if FTPS ever regresses: a "drain not
-        // clean" line points at the close-sequence path immediately.
-        ESP_LOGI(TAG, "TLS shutdown: drain iters=%d tickets=%d %s",
+        // V2.3.24: downgraded INFO→DEBUG. Was visible at INFO from V2.3.22 to
+        // confirm the bidirectional-close fix in production; with that arc
+        // closed and the V2.3.24 snapshot-scratch fix removing per-upload
+        // boilerplate from the ring, kept at DEBUG for future regression
+        // investigation. Recompile with CONFIG_LOG_DEFAULT_LEVEL=DEBUG (or
+        // call esp_log_level_set("ftp", ESP_LOG_DEBUG) from the console) to
+        // see "drain not clean" the moment the close-sequence path regresses.
+        ESP_LOGD(TAG, "TLS shutdown: drain iters=%d tickets=%d %s",
                  drain_iters, drain_tickets,
                  drain_clean ? "clean (PEER_CLOSE_NOTIFY)" : "no PEER_CLOSE_NOTIFY");
 
@@ -432,9 +436,14 @@ static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
     // a guessing game whether the issue is version mismatch, cipher mismatch,
     // session resumption, or something else. mbedtls_ssl_get_version() and
     // _ciphersuite() return strings owned by mbedTLS; do not free.
+    //
+    // V2.3.24: downgraded INFO→DEBUG. Two of these per upload (ctrl + data)
+    // is repetitive boilerplate once the TLS arc is settled; bring back at
+    // INFO via esp_log_level_set("ftp", ESP_LOG_DEBUG) when investigating
+    // a TLS regression on a new server.
     const char *ver  = mbedtls_ssl_get_version(&io->ssl);
     const char *ciph = mbedtls_ssl_get_ciphersuite(&io->ssl);
-    ESP_LOGI(TAG, "TLS %s on %s channel: cipher=%s",
+    ESP_LOGD(TAG, "TLS %s on %s channel: cipher=%s",
              ver ? ver : "?", is_data ? "data" : "ctrl", ciph ? ciph : "?");
 
     io->tls = true;
@@ -466,7 +475,11 @@ static int io_recv1(ftp_io_t *io, char *out) {
             // exhaustion — at that time io_recv1 didn't decode mbedTLS errors
             // (V2.3.10 added that diagnostic) so -0x7B00 surfaced as a bare -1.
             if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
-                ESP_LOGI(TAG, "TLS 1.3 NewSessionTicket received (ignored — V2.3.16 will save)");
+                // V2.3.24: downgraded INFO→DEBUG. Twice per upload — pure
+                // boilerplate now that TLS 1.3 ticket handling is settled.
+                // Re-enable via esp_log_level_set("ftp", ESP_LOG_DEBUG) when
+                // investigating a session-resumption regression.
+                ESP_LOGD(TAG, "TLS 1.3 NewSessionTicket received (ignored — V2.3.16 will save)");
                 continue;
             }
             if (r == MBEDTLS_ERR_SSL_TIMEOUT) return 0;
@@ -805,12 +818,17 @@ static bool do_ftp_upload(void) {
     // ring memory; no body buffer is allocated. Saves the equivalent of
     // ring-size DRAM during the upload window — ~60 KB on Heltec (huge given
     // the V2.3.15 min_free pressure), ~1 MB PSRAM on FeatherS3-D.
+    //
+    // V2.3.24: snapshot now returns up to three segments — see applog.h. The
+    // first segment is a scratch-buffer copy of the danger zone (where the
+    // writer's next ring_append() lands), preventing the torn-line corruption
+    // observed at file head from V2.3.16-V2.3.23 once the ring had wrapped.
     applog_stream_t stream;
     if (!applog_stream_begin(&stream)) {
         ESP_LOGE(TAG, "applog_stream_begin failed (applog not initialised?)");
         return false;
     }
-    size_t body_len = stream.len_a + stream.len_b;
+    size_t body_len = stream.len_a + stream.len_b + stream.len_c;
 
     ftp_io_t      ctrl = { .sock = -1 };
     ftp_io_t      data = { .sock = -1 };
@@ -927,15 +945,20 @@ static bool do_ftp_upload(void) {
     }
 
     // V2.3.16: send segments directly from the ring (no body buffer alloc).
-    // Two calls when the ring has wrapped (seg_a is the older half post-wrap,
-    // seg_b is the newer pre-wrap half); single call when not wrapped (seg_b
-    // is NULL/0). ftp_write_buf is unchanged — it just sees a smaller len.
+    // V2.3.24: up to three segments now in chronological order — seg_a is
+    // the scratch-buffer copy of the danger zone (or the full pre-wrap
+    // content), seg_b is the ring tail past the danger zone (wrapped only),
+    // seg_c is the newer pre-wrap half (wrapped only). ftp_write_buf is
+    // unchanged.
     write_ok = true;
     if (stream.len_a > 0) {
         write_ok = ftp_write_buf(&data, stream.seg_a, stream.len_a);
     }
     if (write_ok && stream.len_b > 0) {
         write_ok = ftp_write_buf(&data, stream.seg_b, stream.len_b);
+    }
+    if (write_ok && stream.len_c > 0) {
+        write_ok = ftp_write_buf(&data, stream.seg_c, stream.len_c);
     }
     io_close(&data);
 

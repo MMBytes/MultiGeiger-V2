@@ -1,6 +1,68 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.24 — the wrap-corruption fix + UX polish.
+//
+// Headline fix: the V2.3.16-era streaming snapshot in applog_stream_begin had
+// a wrap-specific pointer aliasing bug. In the wrapped case the oldest-half
+// segment (seg_a) started at exactly `s_ring + s_pos + skip`, which is also
+// where the writer's next ring_append() lands. Releasing the mutex with that
+// pointer exposed the segment's start to in-flight overwrites — visible from
+// V2.3.16 onwards as torn lines at the head of every uploaded FTPS file
+// (and would have hit any concurrent /log browser request the same way).
+// The bug only manifested on Heltec because PSRAM boards' giant 4 MB ring
+// barely wraps in production lifetime; Heltec's 60 KB ring wraps every ~3 h
+// so files #2 onwards always took the wrapped branch.
+//
+// Fix: applog_stream_begin now copies the danger zone (first
+// HAL_LOG_SNAP_SCRATCH_BYTES of seg_a's content) into a pre-allocated
+// scratch buffer under the mutex, and exposes a third segment so callers
+// stream `scratch + ring-tail-remainder + newer-pre-wrap-half` in
+// chronological order. Per-board scratch sizing (in hal.h):
+//   Heltec V2 (8 MB + 4 MB clone) : 4 KB internal DRAM
+//   FeatherS3-D                   : 16 KB external PSRAM
+//   QT Py ESP32-PICO              : 16 KB external PSRAM
+// Worst-case writes during a 3-30 s upload are <500 B (after the FTPS-
+// internal handshake noise was downgraded — see below), so 4 KB on Heltec
+// gives ~8× headroom while costing only ~4 % of free_heap. Failure mode if
+// scratch overflows: degrades to V2.3.23 torn-line behaviour — never worse.
+// Init-time scratch allocation failure is non-fatal: falls back to the
+// V2.3.16 zero-copy path.
+//
+// FTPS-internal log lines downgraded INFO→DEBUG. Six lines per upload
+// (~660 B): TLS-cipher on ctrl/data channels, NewSessionTicket received ×2,
+// TLS-shutdown drain summary ×2. They're now in source as ESP_LOGD —
+// re-enable any time via `esp_log_level_set("ftp", ESP_LOG_DEBUG)` from
+// the console (or with CONFIG_LOG_DEFAULT_LEVEL=DEBUG at build time) when
+// investigating a TLS regression. The drain summary was production-validated
+// in V2.3.22; with that arc closed it's no longer needed at INFO every hour.
+//
+// Status page small wins:
+//   - FTP "next" duration now uses the same H/M/S split as "ago" (e.g.
+//     "in 11m 12s" instead of "in 672s").
+//   - NTP line: "synced · now <ts>" → "synced · clock now <ts>" so it's
+//     clearer that the timestamp is current device time (not last-sync time).
+//   - <code> elements no longer shrink (browser default is ~85 % of body);
+//     forced to 1em so chip-id and MAC visually match the surrounding label.
+//
+// Config page UX rework — two submit buttons:
+//   - Save        : persists to NVS, no reboot. Live-applied for fields
+//                   read per-cycle / per-request (TX targets + their HTTPS
+//                   toggles + credentials, FTP settings, BME280 altitude,
+//                   speaker/LED tick, web admin password).
+//   - Save and restart : persists + flags reboot (V2.3.23 behaviour).
+// Reboot-required fields are visually marked with a red `*`; a legend at
+// the top of the form explains. The user owns the decision — no server-
+// side diff logic. Saved-no-restart response page links back to /config
+// and / so the user isn't dead-ended.
+//
+// Reboot response page now also links back to / (was a dead-end).
+//
+// OTA-safe from V2.3.23 (no partition layout changes, no sdkconfig
+// changes). 20 release artefacts (5 × 4 boards). Heltec gains 4 KB of
+// permanent internal-DRAM allocation for the snapshot scratch; FeatherS3-D
+// and QT Py gain 16 KB of permanent PSRAM allocation (negligible vs pool).
+//
 // V2.3.23 — closes out the V2.3.5 → V2.3.22 FTPS+TLS 1.3 arc + adds slow-
 // fragmentation prevention. Two small changes:
 //
@@ -56,4 +118,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.23"
+#define VERSION_STR "V2.3.24"

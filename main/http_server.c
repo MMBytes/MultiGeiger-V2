@@ -417,7 +417,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
     if (now > 1735689600) {     // > 2025-01-01
         char ts[24];
         format_wallclock((int64_t)now, ts, sizeof(ts));
-        snprintf(ntp_line, sizeof(ntp_line), "synced &middot; now %s", ts);
+        snprintf(ntp_line, sizeof(ntp_line), "synced &middot; clock now %s", ts);
     } else {
         snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");
     }
@@ -642,11 +642,17 @@ static void format_uploads(char *out, size_t sz) {
             snprintf(wall, sizeof(wall), "never");
             ago[0] = 0;
         }
-        // next_due_ms is monotonic uptime ms. Convert to "in N seconds".
+        // next_due_ms is monotonic uptime ms. Convert to a duration string
+        // mirroring format_ago's H/M/S split (V2.3.24 — was "in Nseconds"
+        // only, awkward at hourly cadence).
         unsigned long uptime_ms = (unsigned long)(esp_timer_get_time() / 1000LL);
         long remaining_ms = (long)(f.next_due_ms - uptime_ms);
         if (remaining_ms < 0) remaining_ms = 0;
-        snprintf(next_buf, sizeof(next_buf), "in %lds", remaining_ms / 1000);
+        long rs = remaining_ms / 1000;
+        if      (rs < 60)    snprintf(next_buf, sizeof(next_buf), "in %lds", rs);
+        else if (rs < 3600)  snprintf(next_buf, sizeof(next_buf), "in %ldm %lds", rs / 60, rs % 60);
+        else if (rs < 86400) snprintf(next_buf, sizeof(next_buf), "in %ldh %ldm", rs / 3600, (rs / 60) % 60);
+        else                 snprintf(next_buf, sizeof(next_buf), "in %ldd %ldh", rs / 86400, (rs / 3600) % 24);
 
         const char *result_html;
         if (!f.have_last)         result_html = "—";
@@ -847,19 +853,37 @@ static esp_err_t config_get(httpd_req_t *req) {
         "label{display:block;margin-top:.8em}"
         "input[type=text],input[type=password],input[type=number]{width:100%%;padding:.4em;box-sizing:border-box}"
         "input[type=submit]{padding:.6em 1.2em;margin-top:1.2em;font-size:1em}"
-        ".chk{display:inline-block;margin-right:1em;margin-top:.4em}</style>"
+        ".chk{display:inline-block;margin-right:1em;margin-top:.4em}"
+        // V2.3.24: browsers' user-agent stylesheet shrinks <code> to ~85 % of
+        // body text. Override so the chip-id / MAC values stay visually equal
+        // to the surrounding label text — monospace is the distinguishing cue,
+        // not size.
+        "code{font-size:1em}"
+        // V2.3.24: red asterisk class for "requires reboot" field markers.
+        // Paired with two submit buttons (Save / Save and restart) so the
+        // user picks the right one based on whether they touched any of the
+        // marked fields.
+        ".r{color:#c00;font-weight:bold}"
+        // Stack the two submit buttons with a small gap; suppress the
+        // .8em label-style top margin browsers apply when an input lives
+        // inside a non-label parent.
+        ".btns{margin-top:1.2em}.btns input{margin-right:.6em}</style>"
         "</head><body><h1>Configuration</h1>"
+        "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
+        "use <b>Save and restart</b> at the bottom when changing these.</p>"
         "<form method=\"post\" action=\"/config\">"
-        "<label>WiFi SSID<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
-        "<label>WiFi password<input type=\"password\" name=\"wifi_pw\" value=\"%s\"></label>"
-        "<label>DHCP hostname (visible in router) "
+        "<label>WiFi SSID <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
+        "<label>WiFi password <span class=\"r\">*</span>"
+        "<input type=\"password\" name=\"wifi_pw\" value=\"%s\"></label>"
+        "<label>DHCP hostname (visible in router) <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"wifi_host\" value=\"%s\" maxlength=\"32\"></label>"
-        "<label>AP SSID (used in AP / fallback mode) "
+        "<label>AP SSID (used in AP / fallback mode) <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
-        "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g</label></div>"
+        "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
-        "id=\"wifi_ht20\" %s> Limit to 20MHz</label></div>"
+        "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span></label></div>"
         "<script>function syncHt20(){"
         "var bg=document.getElementById('wifi_11bg');"
         "var ht=document.getElementById('wifi_ht20');"
@@ -868,18 +892,19 @@ static esp_err_t config_get(httpd_req_t *req) {
         "}syncHt20();</script>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" "
         "id=\"wifi_ps_dis\" onchange=\"syncFtpPs()\" %s> "
-        "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops)</label></div>"
+        "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops) "
+        "<span class=\"r\">*</span></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ext_a\" "
-        "id=\"wifi_ext_a\" %s %s> Use External Antenna Port"
+        "id=\"wifi_ext_a\" %s %s> Use External Antenna Port <span class=\"r\">*</span>"
         "%s</label></div>"
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
         "<h3>Hardware</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" %s> "
         "Enable Geiger tube (HV pump, pulse counter, radiation uploads). "
-        "Uncheck for non-Geiger deployments — disables HV/ISR/gptimer at boot "
+        "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
-        "Reboot required.</label></div>"
+        "<span class=\"r\">*</span></label></div>"
         "<h3>Transmission targets</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
@@ -934,20 +959,34 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"led_tick\" %s> "
         "LED flash on each GM pulse</label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
-        "Play boot chirp</label></div><br>"
+        "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
-        "Drive OLED display</label></div>"
+        "Drive OLED display <span class=\"r\">*</span></label></div>"
         "<h3>Other</h3>"
-        "<label>NTP server 1<input type=\"text\" name=\"ntp1\" value=\"%s\"></label>"
-        "<label>NTP server 2 (optional)<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
-        "<label>NTP server 3 (optional)<input type=\"text\" name=\"ntp3\" value=\"%s\"></label>"
-        "<label>Timezone (POSIX TZ)<input type=\"text\" name=\"tz_posix\" value=\"%s\" maxlength=\"47\">"
+        "<label>NTP server 1 <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"ntp1\" value=\"%s\"></label>"
+        "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
+        "<label>NTP server 3 (optional) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"ntp3\" value=\"%s\"></label>"
+        "<label>Timezone (POSIX TZ) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"tz_posix\" value=\"%s\" maxlength=\"47\">"
         "<small>e.g. <code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney), "
         "<code>CET-1CEST,M3.5.0,M10.5.0/3</code> (Germany), "
         "<code>UTC0</code> (UTC). See <code>man tzset</code>.</small></label>"
         "<label>Web admin and access point password<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
-        "<label>Sensor data upload interval (ms)<input type=\"number\" name=\"tx_int_ms\" value=\"%lu\" min=\"10000\" max=\"3600000\"></label>"
-        "<input type=\"submit\" value=\"Save and restart\">"
+        "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
+        "<input type=\"number\" name=\"tx_int_ms\" value=\"%lu\" min=\"10000\" max=\"3600000\"></label>"
+        // V2.3.24: two submit buttons. The clicked button's name=value is the
+        // only one included in the POST body (standard HTML form behaviour),
+        // so the handler distinguishes via the "save_restart" key. Plain
+        // "Save" leaves the device running with the new NVS values applied
+        // live to the fields that read s_cfg per cycle / per request — see
+        // asterisk legend at the top of the form for which fields don't.
+        "<div class=\"btns\">"
+        "<input type=\"submit\" name=\"save\" value=\"Save\">"
+        "<input type=\"submit\" name=\"save_restart\" value=\"Save and restart\">"
+        "</div>"
         "</form>"
         "<h3>Reboot</h3>"
         "<form method=\"post\" action=\"/reboot\" "
@@ -1038,6 +1077,13 @@ static esp_err_t config_post(httpd_req_t *req) {
     }
     buf[total] = 0;
 
+    // V2.3.24: which submit button was clicked? "save_restart" key only
+    // appears when the user clicked "Save and restart"; plain "save" appears
+    // when they clicked "Save" (NVS persists, no reboot triggered). Default
+    // is no-restart so a hand-crafted POST that omits both keys also stays
+    // running.
+    bool restart_after_save = false;
+
     // Work on a local copy so a parse failure can't half-apply. Booleans
     // default to false — form only includes the name when the box is checked.
     config_t next = *s_cfg;
@@ -1126,6 +1172,8 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "led_tick"))   next.led_tick     = true;
         else if (!strcmp(p, "play_sound")) next.play_sound   = true;
         else if (!strcmp(p, "show_disp"))  next.show_display = true;
+        else if (!strcmp(p, "save_restart")) restart_after_save = true;
+        // (a "save" key with no other meaning is fine — silently ignored.)
 
         if (!amp) break;
         p = amp + 1;
@@ -1157,18 +1205,35 @@ static esp_err_t config_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
-    s_restart_requested = true;
-    ESP_LOGI(TAG, "config saved via POST — restart flagged");
 
-    const char *ok =
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<title>Saved</title></head><body>"
-        "<h1>Saved. Restarting...</h1>"
-        "<p>Device will restart in ~2 seconds. Your browser will drop the "
-        "connection; reconnect to the new WiFi settings if you changed them.</p>"
-        "</body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+    if (restart_after_save) {
+        s_restart_requested = true;
+        ESP_LOGI(TAG, "config saved via POST — restart flagged");
+        const char *ok =
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>Saved</title></head><body>"
+            "<h1>Saved. Restarting...</h1>"
+            "<p>Device will restart in ~2 seconds. Your browser will drop the "
+            "connection; reconnect to the new WiFi settings if you changed them.</p>"
+            "<p><a href=\"/\">Back to status</a></p>"
+            "</body></html>";
+        return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+    } else {
+        ESP_LOGI(TAG, "config saved via POST — no restart requested");
+        const char *ok =
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>Saved</title></head><body>"
+            "<h1>Saved.</h1>"
+            "<p>New settings persisted to NVS and applied live. If you changed "
+            "any field marked with <span style=\"color:#c00;font-weight:bold\">*</span> "
+            "(reboot-required) the new value won't take effect until the next "
+            "restart.</p>"
+            "<p><a href=\"/config\">Back to configuration</a> &middot; "
+            "<a href=\"/\">Back to status</a></p>"
+            "</body></html>";
+        return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+    }
 }
 
 // --- POST /reboot (manual restart button) ----------------------------------
@@ -1183,6 +1248,7 @@ static esp_err_t reboot_post(httpd_req_t *req) {
         "<title>Rebooting</title></head><body>"
         "<h1>Rebooting...</h1>"
         "<p>Device will restart in ~2 seconds.</p>"
+        "<p><a href=\"/\">Back to status</a></p>"
         "</body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
@@ -1447,6 +1513,10 @@ static esp_err_t update_post(httpd_req_t *req) {
 // malloc entirely. Browser doesn't care about missing Content-Length —
 // chunked is HTTP/1.1 standard. Memory cost: ~0 KB (just the existing
 // 2 KB chunk-sized stack copy in httpd_resp_send_chunk).
+//
+// V2.3.24: snapshot returns up to three segments now (scratch copy of the
+// danger zone + tail remainder + newer pre-wrap half) — see applog.h. The
+// loop bound just bumped from 2 to 3.
 static esp_err_t log_get(httpd_req_t *req) {
     log_access(req, "GET /log");
     if (!check_auth(req)) return ESP_OK;
@@ -1459,13 +1529,14 @@ static esp_err_t log_get(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
 
-    // Send each segment in LOG_CHUNK-sized pieces. seg_a is the older half
-    // post-wrap (NULL/0 if the ring hasn't wrapped); seg_b is the newer
-    // pre-wrap half. httpd_resp_send_chunk handles the chunked-encoding
-    // framing per HTTP/1.1.
-    const char *segs[2]  = { s.seg_a, s.seg_b };
-    size_t      sizes[2] = { s.len_a, s.len_b };
-    for (int i = 0; i < 2; i++) {
+    // Send each segment in LOG_CHUNK-sized pieces, in chronological order:
+    // seg_a (oldest — V2.3.24 scratch copy when wrapped, ring otherwise),
+    // seg_b (tail remainder past the scratch copy when wrapped),
+    // seg_c (newer pre-wrap half when wrapped). httpd_resp_send_chunk
+    // handles HTTP/1.1 chunked-encoding framing.
+    const char *segs[3]  = { s.seg_a, s.seg_b, s.seg_c };
+    size_t      sizes[3] = { s.len_a, s.len_b, s.len_c };
+    for (int i = 0; i < 3; i++) {
         size_t sent = 0;
         while (sent < sizes[i]) {
             size_t n = sizes[i] - sent;

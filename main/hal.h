@@ -23,6 +23,9 @@
  *    HAL_HAS_SPEAKER         speaker.c stubs out when 0 (small-board path)
  *    HAL_HAS_NEOPIXEL        neopixel.c init + tube-pulse hook gated on this
  *    HAL_LOG_RING_BYTES      applog ring size — varies by available memory
+ *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
+ *                            small (6 KB) on internal-DRAM-only boards, larger
+ *                            (16 KB) when scratch lives in PSRAM (V2.3.24)
  */
 
 #if defined(BOARD_HELTEC_V2)
@@ -44,6 +47,15 @@
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_LOG_RING_BYTES      (60 * 1024)  // Internal SRAM only — keep small
+    // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
+    // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient
+    // demand ~99 KB) so internal-DRAM headroom matters. Realistic writes
+    // during a single FTPS upload window dropped to <500 B in V2.3.24 once
+    // the FTPS-internal TLS handshake/shutdown chatter was downgraded to
+    // DEBUG (cipher + NewSessionTicket + drain summary lines). 4 KB is now
+    // ~8× the typical case, with concurrent TX-cycle overlap (~2-20 % of
+    // uploads, ~500 B extra) still covered.
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (4 * 1024)
     #define PIN_VEXT                21
 
     // Geiger / HV pins
@@ -76,6 +88,9 @@
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (V2.3.18)
+    // V2.3.24: 16 KB snapshot scratch in PSRAM — negligible vs the 4 MB
+    // PSRAM pool, and 2× the Heltec margin since the PSRAM cost is free.
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
     // PIN_ANTENNA_SELECT controls the onboard SPDT RF switch (NOT exposed as a
     // user header — this is an MCU↔switch trace internal to the FeatherS3-D).
     // Per the FeatherS3-D pinout silkscreen:
@@ -157,6 +172,9 @@
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
+    // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
+    // FeatherS3-D since the PSRAM cost is negligible.
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
 
     // Geiger / HV pins — wired to QT Py A0/A1/A2 castellated pads. Same
     // function-per-position as feathers3_d so a wiring harness designed for

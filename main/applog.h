@@ -32,36 +32,50 @@ void applog_init(void);
  */
 char *applog_snapshot(size_t *out_len);
 
-/** @brief Streaming snapshot — captures segment pointers into the ring with
- *  no allocation.
+/** @brief Streaming snapshot — returns up to three segment descriptors the
+ *  caller reads in order (seg_a → seg_b → seg_c) to consume the ring in
+ *  chronological order.
  *
- *  V2.3.16: zero-copy alternative to applog_snapshot() for the FTPS upload
- *  path. Returns up to two segment descriptors (seg_a + optional seg_b for
- *  the wrapped case) that point DIRECTLY into the ring memory. The caller
- *  reads from these pointers and sends the data via TLS in chunks of its
- *  own choosing. No body buffer allocated; total transient heap demand
- *  during upload drops by `ring_size` (60 KB on Heltec, 1 MB on FeatherS3-D).
+ *  V2.3.16 introduced this as a zero-copy alternative to applog_snapshot,
+ *  pointing all segments directly at ring memory and releasing the mutex
+ *  before the upload completed. V2.3.24 fixes a wrap-specific corruption
+ *  bug that made the V2.3.16 design unsafe: in the wrapped case the
+ *  oldest-data segment started exactly at `s_ring + s_pos + skip`, which is
+ *  also where the writer's next ring_append() lands. Any log line emitted
+ *  during the upload window (FTPS handshake messages, concurrent TX worker
+ *  output, WiFi events) overwrote the start of that segment in-place,
+ *  producing torn lines at the head of every uploaded file once the ring
+ *  had wrapped at least once.
  *
- *  Lifetime: the returned pointers are valid until applog_stream_end() is
- *  called. The mutex is held only briefly during applog_stream_begin() (to
- *  capture the segments); the writer (applog_vprintf) continues to advance
- *  the ring during the stream window. This means the LAST few bytes of the
- *  stream may include data the writer added after begin() returned (small
- *  inconsistency at the wrap boundary). Acceptable trade-off vs the cost
- *  of pausing all log writes for the upload duration.
+ *  V2.3.24 fix: in the wrapped case, copy the first APPLOG_SNAP_SCRATCH_BYTES
+ *  of the oldest-half tail into a pre-allocated scratch buffer at begin().
+ *  The reader streams [scratch] → [tail remainder still in ring] → [newer
+ *  pre-wrap half]. Writes during the snapshot land in the scratch's
+ *  original ring address, leaving the scratch copy untouched. Provided
+ *  cumulative writes during the snapshot stay below
+ *  APPLOG_SNAP_SCRATCH_BYTES + skip, the snapshot's first segment is
+ *  bit-perfect. If they exceed, corruption resumes past the scratch
+ *  boundary — never worse than the V2.3.16 behaviour.
+ *
+ *  Mapping of segments per ring state:
+ *    not wrapped:  seg_a = ring[0 .. s_valid_end];   seg_b/seg_c = NULL/0
+ *    wrapped:      seg_a = scratch copy of oldest danger zone;
+ *                  seg_b = ring tail remainder past the danger zone;
+ *                  seg_c = ring[0 .. s_pos]   (newer pre-wrap half)
  *
  *  Returns false only if applog has not been initialised; otherwise true,
- *  with seg_a/seg_b NULL+0 if the ring is empty.
+ *  with all-NULL segments if the ring is empty.
  *
- *  Pair every begin() with exactly one end(). Currently end() is a no-op;
- *  reserved for future write-pause coordination if the in-flight inconsistency
- *  becomes a problem in practice.
+ *  Pair every begin() with exactly one end(). end() remains a no-op —
+ *  scratch is reused across snapshots, not freed.
  */
 typedef struct {
-    const char *seg_a;   /**< first contiguous segment, NULL if empty stream */
+    const char *seg_a;   /**< first segment (scratch copy when wrapped, ring otherwise); NULL if empty */
     size_t      len_a;
-    const char *seg_b;   /**< second segment after wrap (NULL if not wrapped) */
+    const char *seg_b;   /**< second segment — ring tail past the scratch copy; NULL if not used */
     size_t      len_b;
+    const char *seg_c;   /**< third segment — newer pre-wrap half; NULL if not wrapped */
+    size_t      len_c;
 } applog_stream_t;
 
 bool applog_stream_begin(applog_stream_t *out);

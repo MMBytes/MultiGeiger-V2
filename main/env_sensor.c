@@ -92,9 +92,25 @@ bool env_sensor_present(void) {
 }
 
 esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
-                          float *pressure_pa) {
+                          float *pressure_pa,
+                          char *raw_log, size_t raw_log_cap) {
     float t = 0, h = 0, p = 0;
     bool  have_t = false, have_h = false, have_p = false;
+
+    // V2.3.26: optional per-sensor raw-reading log. Each present sensor that
+    // gets called appends one segment (its own T/H/P, or "read failed"). The
+    // caller logs this alongside the fused result, so the source of any single
+    // field is visible — essential for diagnosing flaky sensors that fail
+    // silently and let the cascade fall through to a fallback chip (the H=0.00%
+    // problem on esp32-176432, May 2026). NULL buffer disables the log build.
+    size_t rl_off = 0;
+    if (raw_log && raw_log_cap > 0) raw_log[0] = '\0';
+    #define RL(...) do { \
+        if (raw_log && raw_log_cap > rl_off + 1) { \
+            int _n = snprintf(raw_log + rl_off, raw_log_cap - rl_off, __VA_ARGS__); \
+            if (_n > 0) rl_off += (size_t)_n; \
+        } \
+    } while (0)
 
     // Temperature + humidity: SHT45 is primary (best accuracy and lowest
     // self-heating of all our T/H options).
@@ -103,6 +119,9 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
         if (sht45_read(&st, &sh) == ESP_OK) {
             t = st; h = sh;
             have_t = have_h = true;
+            RL("SHT45: T=%.2f°C  H=%.2f%%, ", st, sh);
+        } else {
+            RL("SHT45: read failed, ");
         }
     }
 
@@ -116,6 +135,9 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
             p = bp;
             have_p = true;
             if (!have_t) { t = bt; have_t = true; }
+            RL("BMP581: T=%.2f°C P=%.2fhPa, ", bt, bp / 100.0f);
+        } else {
+            RL("BMP581: read failed, ");
         }
     }
 
@@ -128,6 +150,9 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
             p = bp;
             have_p = true;
             if (!have_t) { t = bt; have_t = true; }
+            RL("BMP390: T=%.2f°C P=%.2fhPa, ", bt, bp / 100.0f);
+        } else {
+            RL("BMP390: read failed, ");
         }
     }
 
@@ -140,6 +165,9 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
             if (!have_t) { t = bt; have_t = true; }
             if (!have_h) { h = bh; have_h = true; }
             if (!have_p) { p = bp; have_p = true; }
+            RL("BME688: T=%.2f°C  H=%.2f%% P=%.2fhPa, ", bt, bh, bp / 100.0f);
+        } else {
+            RL("BME688: read failed, ");
         }
     }
 
@@ -151,8 +179,18 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
             if (!have_t) { t = bt; have_t = true; }
             if (!have_h) { h = bh; have_h = true; }
             if (!have_p) { p = bp; have_p = true; }
+            RL("BME280: T=%.2f°C  H=%.2f%% P=%.2fhPa, ", bt, bh, bp / 100.0f);
+        } else {
+            RL("BME280: read failed, ");
         }
     }
+
+    // Strip trailing ", " so the caller can append " <fused>" with one space.
+    if (raw_log && rl_off >= 2 &&
+        raw_log[rl_off - 2] == ',' && raw_log[rl_off - 1] == ' ') {
+        raw_log[rl_off - 2] = '\0';
+    }
+    #undef RL
 
     if (!have_t && !have_h && !have_p) return ESP_FAIL;
 

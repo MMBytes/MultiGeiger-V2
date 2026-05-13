@@ -1,6 +1,45 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.26 — env-sensor diagnostics (no behaviour change).
+//
+// **Headline:** make a flaky SHT45 (or any silently-failing env sensor) visible
+// in the logs. Two changes:
+//
+//   1. `sht45_read()` previously returned `esp_err_t` from the two I²C steps
+//      (CMD_MEASURE_HIGH write, post-measure receive) without any log. The
+//      CRC-mismatch path already logged. Now both silent paths emit
+//      `ESP_LOGW(TAG, "measure_high write: <err>")` /
+//      `ESP_LOGW(TAG, "post-measure read: <err>")` mirroring the init path's
+//      `try_init_pass()` step-by-step verbosity. Triggered by esp32-176432
+//      (knock-off Heltec): SHT45 ACK'd at init and read 61.62 % RH on the
+//      verification probe, then on every cycle after that env_sensor_read
+//      reported H=0.00 % with T tracking BMP390 → SHT45 was failing silently
+//      and the cascade quietly fell through to BMP390 (which has no humidity
+//      channel), leaving the local `h` at its initial 0.0f.
+//
+//   2. `env_sensor_read()` gained an optional `(char *raw_log, size_t cap)`
+//      tail so the caller can see WHAT each present-and-called sensor
+//      returned, alongside the existing fused result. Each sensor segment is
+//      `"<NAME>: T=...  H=... [P=...]"` (only fields the chip provides) or
+//      `"<NAME>: read failed"`, comma-separated. `main.c`'s cycle log line
+//      now reads e.g.
+//        SHT45: T=18.86°C  H=0.00%, BMP390: T=18.88°C P=1026.60hPa SHT45+BMP390: T=18.86°C  H=0.00%  P=1026.60hPa
+//      Per-sensor segment is omitted for sensors not present (so the line
+//      shrinks naturally on single-chip configurations). The fused
+//      `<combined-name>:` block at the end is unchanged in shape.
+//
+// **Code surface:** sht45.c (+2 ESP_LOGW), env_sensor.c (per-sensor RL append
+// inside the existing cascade), env_sensor.h (signature + size_t include +
+// docstring), main.c (160-byte stack buffer + new format string). No CPU/heap
+// cost in the steady state — RL macro is a snprintf into a stack buffer that
+// gets discarded after the log line is emitted.
+//
+// **No behaviour changes.** Same I²C transactions per cycle, same fallback
+// cascade priority, same fused output to /status, transmission, FTP, OLED.
+// All four boards build identically; OTA-safe from V2.3.25 (no partition or
+// sdkconfig changes). 20 release artefacts (5 × 4 boards).
+//
 // V2.3.25 — aqi.eco compatibility fix + body trim.
 //
 // **Headline fix:** aqi.eco's `devices.esp8266_id` column is `bigint` (per
@@ -166,4 +205,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.25"
+#define VERSION_STR "V2.3.26"

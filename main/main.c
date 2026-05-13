@@ -364,13 +364,17 @@ static void do_tx_cycle(void) {
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
     if (env_sensor_present()) {
-        if (env_sensor_read(&bme_t, &bme_h, &bme_p) == ESP_OK) {
+        // V2.3.26: per-sensor raw values logged alongside the fused result so
+        // any divergence (flaky SHT45 silently failing → BMP390 fallback fills
+        // T but not H, etc.) is immediately visible.
+        char env_raw[160];
+        if (env_sensor_read(&bme_t, &bme_h, &bme_p, env_raw, sizeof(env_raw)) == ESP_OK) {
             bme_valid = true;
-            ESP_LOGI(TAG, "%s: T=%.2f°C  H=%.2f%%  P=%.2fhPa",
-                     env_sensor_name(), bme_t, bme_h, bme_p / 100.0f);
+            ESP_LOGI(TAG, "%s %s: T=%.2f°C  H=%.2f%%  P=%.2fhPa",
+                     env_raw, env_sensor_name(), bme_t, bme_h, bme_p / 100.0f);
             env_sensor_heat_periodic((uint32_t)(esp_timer_get_time() / 1000), bme_h);
         } else {
-            ESP_LOGW(TAG, "%s: read failed", env_sensor_name());
+            ESP_LOGW(TAG, "%s: read failed (%s)", env_sensor_name(), env_raw);
         }
     }
 

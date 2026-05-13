@@ -147,15 +147,27 @@ bool sht45_present(void) {
 esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
     if (!s_dev) return ESP_FAIL;
 
+    // V2.3.26: log the two silent error paths. Previously sht45_read() returned
+    // a bare esp_err_t on write/receive failure with no log, so an SHT45 that
+    // ACK'd at init but went flaky in steady state (loose connector, marginal
+    // pull-up, counterfeit chip dropping its address) produced H=0.00% on every
+    // cycle with no trace of WHY. The init path's try_init_pass() already logs
+    // every step; mirror that here.
     esp_err_t err = send_cmd(CMD_MEASURE_HIGH);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "measure_high write: %s", esp_err_to_name(err));
+        return err;
+    }
 
     // High-precision conversion: 8.2 ms typical, 9.4 ms max. 10 ms is safe.
     vTaskDelay(pdMS_TO_TICKS(10));
 
     uint8_t buf[6];
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "post-measure read: %s", esp_err_to_name(err));
+        return err;
+    }
 
     if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
         ESP_LOGW(TAG, "SHT45 CRC mismatch");

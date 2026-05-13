@@ -24,6 +24,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "driver/i2c_master.h"
@@ -47,9 +48,16 @@ bool env_sensor_present(void);
  *
  *  Units: temperature °C, humidity %RH, pressure Pa.
  *  Returns ESP_OK on success; ESP_FAIL if no sensor is ready or read failed.
+ *
+ *  V2.3.26: optional `raw_log` buffer (NULL to skip) is filled with one comma-
+ *  separated segment per present-and-called sensor, e.g.
+ *    "SHT45: T=18.86°C  H=0.00%, BMP390: T=18.86°C P=1026.60hPa"
+ *  Failed reads emit "<NAME>: read failed". Trailing ", " is stripped so the
+ *  caller can append " <fused>" with one space. Suggested cap: 160 bytes.
  */
 esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
-                          float *pressure_pa);
+                          float *pressure_pa,
+                          char *raw_log, size_t raw_log_cap);
 
 /** @brief Short human-readable label describing the active sensor combination.
  *

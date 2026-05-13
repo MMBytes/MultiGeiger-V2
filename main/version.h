@@ -1,6 +1,35 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.27 — FeatherS3-D pin map: HV_FET + speaker moved off A2..A4.
+//
+// PCB harness rev: HV_FET_OUT moved from A2 (IO14) to A5 (IO5); SPEAKER_P
+// moved from A3 (IO12) to D10 (IO3); SPEAKER_N moved from A4 (IO6) to D9
+// (IO1). Frees the contiguous A2..A4 trio for future analog expansion
+// (true ADC-capable channels live there on every ESP32-family Feather).
+//
+// Notes:
+//   * IO3 (now PIN_SPEAKER_P) is an ESP32-S3 boot strap (JTAG vs USB-Serial-
+//     JTAG select). The chip's internal pull-up holds it HIGH at boot →
+//     default USB-Serial-JTAG mode. We only drive the line in speaker_setup()
+//     which runs AFTER config + WiFi bring-up, so the strap reads correctly.
+//     A piezo at hi-Z does not pull the line down at boot.
+//   * A5 (IO5) was previously listed as the reserved future "HWTESTPIN" slot
+//     in the wiring harness; that reservation is dropped here. No firmware
+//     ever read HWTESTPIN in V2, so this is purely a wire-harness rename.
+//
+// Affected boards: FeatherS3-D ONLY. Heltec V2 / Heltec V2 4MB / QT Py
+// builds are bit-identical to V2.3.26 — same diagnostic log changes, same
+// transmission code, same UI. We still cut all 4 board binaries so each
+// board's release artefact carries a consistent V2.3.27 tag.
+//
+// OTA-safe from V2.3.26 (no partition layout changes, no sdkconfig changes).
+// 20 release artefacts (5 × 4 boards). FeatherS3-D installs MUST be
+// flashed BEFORE re-attaching the new PCB harness — the old V2.3.26 will
+// PWM-drive IO14 expecting HV_FET, which on the new harness is now A5's
+// IO5 with no MOSFET attached (and IO5 is being driven HIGH from the new
+// PCB side, harmless on the chip side).
+//
 // V2.3.26 — env-sensor diagnostics (no behaviour change).
 //
 // **Headline:** make a flaky SHT45 (or any silently-failing env sensor) visible
@@ -205,4 +234,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.26"
+#define VERSION_STR "V2.3.27"

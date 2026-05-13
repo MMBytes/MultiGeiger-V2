@@ -100,28 +100,36 @@
     #define PIN_ANTENNA_SELECT             41
     #define ANTENNA_SELECT_HIGH_IS_EXTERNAL 1
 
-    // Geiger / HV pins — wired to Feather A0..A5 hole positions for cross-board
-    // portability. A0..A5 are guaranteed analog-capable across the Feather
-    // form factor; on ESP32-family Feathers all six also support digital I/O,
-    // PWM (LEDC) and interrupts. Same PCB harness should drop onto a different
-    // Feather (e.g. Adafruit ESP32-S3 #5323) by changing only the GPIO numbers
-    // below — physical hole positions on the carrier stay identical.
+    // Geiger / HV / speaker pins — Feather form-factor hole positions. A0–A5
+    // are analog-capable on every Feather; on ESP32-family Feathers all six
+    // also support digital I/O, PWM (LEDC) and interrupts. D5–D13 are the
+    // standard Feather digital-pin positions on the OPPOSITE long edge.
+    //
+    // V2.3.27 PCB harness moved HV_FET / SPEAKER off A2..A4 onto A5 + D9/D10
+    // to free the contiguous A2..A4 trio for future analog use. Side effects
+    // worth knowing about:
+    //   * D10 = IO3 is an ESP32-S3 boot strap (JTAG vs USB-Serial-JTAG select).
+    //     Internal pull-up holds it HIGH at boot → default USB-Serial-JTAG
+    //     mode. We only drive it post-boot (speaker is initialised in
+    //     speaker_setup() AFTER config + WiFi bring-up), so the strap reads
+    //     correctly. A piezo at hi-Z does not pull it down.
+    //   * A5 = IO5 was previously listed as a reserved future-HWTESTPIN slot
+    //     in the wiring harness; that reservation is dropped in V2.3.27.
     //
     // Position    FeatherS3-D    Adafruit ESP32-S3 Feather (#5323) — for ref
     // --------    -----------    ------------------------------------------
     // A0          GPIO 17        GPIO 18
     // A1          GPIO 18        GPIO 17
-    // A2          GPIO 14        GPIO 16
-    // A3          GPIO 12        GPIO 15
-    // A4          GPIO  6        GPIO 14
     // A5          GPIO  5        GPIO  8
-    #define PIN_HV_CAP_FULL_INPUT   17   // A0  — comparator interrupt (digital)
-    #define PIN_GMC_COUNT_INPUT     18   // A1  — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT       14   // A2  — HV MOSFET gate (LEDC PWM via gptimer)
+    // D9          GPIO  1        GPIO  6
+    // D10         GPIO  3        GPIO  5
+    #define PIN_HV_CAP_FULL_INPUT   17   // A0   — comparator interrupt (digital)
+    #define PIN_GMC_COUNT_INPUT     18   // A1   — Geiger pulse interrupt
+    #define PIN_HV_FET_OUTPUT        5   // A5   — HV MOSFET gate (LEDC PWM via gptimer)
 
     // Piezo pins
-    #define PIN_SPEAKER_P           12   // A3  — LEDC PWM
-    #define PIN_SPEAKER_N            6   // A4  — digital low
+    #define PIN_SPEAKER_P            3   // D10  — LEDC PWM. IO3 is a boot strap (see note above)
+    #define PIN_SPEAKER_N            1   // D9   — digital low
 
     // Onboard Blue LED (FeatherS3-D internal — IO13). Drives during LED-tick
     // if the config flag is set; harmless if not.
@@ -135,17 +143,16 @@
     // No OLED on this board — PIN_OLED_RESET intentionally undefined.
     // display.c provides no-op stubs when HAL_HAS_OLED == 0.
 
-    // RESERVED for future hardware test jumper (HWTESTPIN — A5 / IO5).
-    // Position locked in the wire harness; firmware does not yet read it.
-    // #define PIN_HWTEST              5
-
     // RESERVED pins on FeatherS3-D — never repurpose these in firmware:
     //   IO0  strap (BOOT button)         IO19/20  native USB D-/D+
-    //   IO3  strap                       IO34     VBUS-present detect
-    //   IO45/46 strap                    IO39     LDO2 enable (controls 3V3.2)
-    //   IO40 onboard RGB LED             IO4      ambient light sensor
-    //   IO2  fuel gauge interrupt        IO8/9    Qwiic + fuel gauge bus
-    //   IO41 antenna SPDT select (used by PIN_ANTENNA_SELECT above)
+    //   IO34 VBUS-present detect         IO45/46  strap pins (not exposed)
+    //   IO39 LDO2 enable (controls       IO40     onboard RGB LED
+    //        3V3.2 — pulling low         IO4      ambient light sensor
+    //        kills 3V3 rail to PCB!)     IO2      fuel gauge interrupt
+    //   IO8/9 Qwiic + fuel gauge bus     IO41     antenna SPDT select
+    //                                             (used by PIN_ANTENNA_SELECT above)
+    // IO3 is also a strap but we DO use it now (PIN_SPEAKER_P above) —
+    // safe because the speaker driver is hi-Z at boot.
 
 #elif defined(BOARD_ADAFRUIT_QTPY_ESP32_PICO)
 

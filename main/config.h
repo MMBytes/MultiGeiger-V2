@@ -163,6 +163,13 @@ typedef struct {
     bool     play_sound;
     bool     show_display;
 
+    // V2.3.30: OLED contrast / SerLCD backlight brightness in percent.
+    // Valid values: 10..100 in steps of 10. Independent of show_display
+    // (which is the on/off toggle); brightness only matters when
+    // show_display is true. Live-applied via display_set_contrast() —
+    // no reboot required (the field has NO red asterisk in /config).
+    uint8_t  oled_brightness_pct;
+
     // When false, the Geiger subsystem is fully disabled at boot:
     //   - tube_setup() skips ISR install, HV gptimer and HV charge-pump GPIOs
     //     (HV_FET is driven LOW so the boost MOSFET stays off, but no

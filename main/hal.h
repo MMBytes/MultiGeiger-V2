@@ -22,6 +22,14 @@
  *    HAL_HAS_ANTENNA_SWITCH  external u.FL antenna toggle in /config UI
  *    HAL_HAS_SPEAKER         speaker.c stubs out when 0 (small-board path)
  *    HAL_HAS_NEOPIXEL        neopixel.c init + tube-pulse hook gated on this
+ *    HAL_MULTIPAGE_ROTATION  V2.3.29: 1 = display.c spawns the 5-page rotation
+ *                            task and main.c feeds display_update_snapshot;
+ *                            0 = legacy display_running per-TX-cycle path
+ *                            (Geiger radiation page on Heltec)
+ *    HAL_HAS_ALS             V2.3.29: 1 = onboard ALS-PT19 ambient-light sensor
+ *                            on PIN_ALS (FeatherS3-D's IO4); als.c is active
+ *                            and /status renders an ambient-light row. 0 elsewhere
+ *                            stubs the driver out.
  *    HAL_LOG_RING_BYTES      applog ring size — varies by available memory
  *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
  *                            small (6 KB) on internal-DRAM-only boards, larger
@@ -46,6 +54,8 @@
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
+    #define HAL_MULTIPAGE_ROTATION  0   // Heltec keeps the radiation display_running() page
+    #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_LOG_RING_BYTES      (60 * 1024)  // Internal SRAM only — keep small
     // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
     // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient
@@ -80,7 +90,15 @@
 #elif defined(BOARD_FEATHERS3_D)
 
     #define BOARD_NAME              "feathers3_d"
-    #define HAL_HAS_OLED            0   // No onboard display
+    // V2.3.28: SSD1309 2.42" external OLED on STEMMA1 or STEMMA2 at 0x3C
+    // (Core Electronics CE09964 — 4-pin I²C, no dedicated reset line;
+    // relies on chip POR). V2.3.29 added auto-detect across both buses
+    // (display.c probes STEMMA1 first, falls through to STEMMA2). Probe
+    // is silent — if no panel present, display.c stays dormant. Driver
+    // is register-compatible with SSD1306.
+    #define HAL_HAS_OLED            1   // External SSD1309 on STEMMA1 (optional — probe-detected)
+    #define HAL_MULTIPAGE_ROTATION  1   // V2.3.29: 5-page display task on Env / PM Mass / PM Number / Uploads / System
+    #define HAL_HAS_ALS             1   // V2.3.29: onboard ALS-PT19 ambient-light sensor on PIN_ALS
     #define HAL_HAS_PSRAM           1   // 8 MB QSPI PSRAM
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No Vext gate — sensors powered via Qwiic 3V3
@@ -140,19 +158,40 @@
     #define PIN_I2C_SDA              8
     #define PIN_I2C_SCL              9
 
-    // No OLED on this board — PIN_OLED_RESET intentionally undefined.
-    // display.c provides no-op stubs when HAL_HAS_OLED == 0.
+    // V2.3.29: onboard ALS-PT19 ambient-light sensor (analog phototransistor).
+    // Wired to GPIO 4 = ADC1_CH3. ADC1 is independent of WiFi (only ADC2
+    // has the front-end coexistence conflict). See als.c for the read path.
+    #define PIN_ALS                  4
+
+    // PIN_OLED_RESET intentionally undefined — the external SSD1309 breakout
+    // (4-pin I²C) has no reset line; display.c skips the reset pulse when
+    // PIN_OLED_RESET is not defined.
 
     // RESERVED pins on FeatherS3-D — never repurpose these in firmware:
     //   IO0  strap (BOOT button)         IO19/20  native USB D-/D+
     //   IO34 VBUS-present detect         IO45/46  strap pins (not exposed)
-    //   IO39 LDO2 enable (controls       IO40     onboard RGB LED
-    //        3V3.2 — pulling low         IO4      ambient light sensor
-    //        kills 3V3 rail to PCB!)     IO2      fuel gauge interrupt
-    //   IO8/9 Qwiic + fuel gauge bus     IO41     antenna SPDT select
+    //   IO40 onboard RGB LED (NeoPixel)  IO4      ambient light sensor
+    //   IO2  fuel gauge interrupt        IO41     antenna SPDT select
     //                                             (used by PIN_ANTENNA_SELECT above)
-    // IO3 is also a strap but we DO use it now (PIN_SPEAKER_P above) —
-    // safe because the speaker driver is hi-Z at boot.
+    //   IO8/9 STEMMA1 connector + MAX17048 fuel gauge bus (env / PM / noise sensors)
+    //
+    // PINS WE NOW DRIVE (despite reservation / strap status):
+    //   IO3  strap (JTAG vs USB-Serial-JTAG select). Used as PIN_SPEAKER_P;
+    //        safe because the speaker driver is hi-Z at boot — strap reads
+    //        correctly during ROM bootloader.
+    //   IO39 LDO2 enable. V2.3.28 introduced eager LDO2 enable for STEMMA2;
+    //        V2.3.29 made it lazy + sheddable — i2c_bus.c only enables LDO2
+    //        when a consumer (display or sensor) actually requests the
+    //        secondary bus, and tears it down at end-of-init if nothing is
+    //        bound there (saves ~5–10 mA quiescent + NeoPixel idle). Default
+    //        is hi-Z + internal pull-down → LDO2 OFF. Side effect when on:
+    //        powers the onboard NeoPixel on IO40 (we leave that data line
+    //        floating; WS2812 POR keeps it dark).
+    //   IO15/IO16 STEMMA2 I²C bus — second I²C controller (I2C_NUM_1) on
+    //        FeatherS3-D, powered by LDO2 above. Currently used only by the
+    //        external OLED (display.c brings up the bus); see deferred memory
+    //        `project_stemma2_software_enable_deferred.md` for the broader
+    //        per-driver refactor needed to host SENSORS on this bus.
 
 #elif defined(BOARD_ADAFRUIT_QTPY_ESP32_PICO)
 
@@ -171,13 +210,20 @@
     // GPIO numbers verified against
     // github.com/espressif/arduino-esp32 variants/adafruit_qtpy_esp32/pins_arduino.h
     #define BOARD_NAME              "adafruit_qtpy_esp32_pico"
-    #define HAL_HAS_OLED            0   // No onboard display, no OLED in deployment
+    // V2.3.29: like FeatherS3-D, no onboard display BUT supports an external
+    // SSD1306/SSD1309 OLED or SparkFun SerLCD via the STEMMA QT connector
+    // (auto-detected at boot). Display lives on the SAME I²C bus as the env
+    // sensor (IO22 SDA / IO19 SCL) — no LDO2 / second-bus complexity unlike
+    // FeatherS3-D's STEMMA2.
+    #define HAL_HAS_OLED            1   // External display via STEMMA QT (optional — probe-detected)
     #define HAL_HAS_PSRAM           1   // 2 MB in-package SiP PSRAM
     #define HAL_HAS_NATIVE_USB      0   // USB-C via CH9102F or CP2102N UART bridge (NOT native — original ESP32 has no USB-OTG)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — STEMMA QT bus always powered
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
+    #define HAL_MULTIPAGE_ROTATION  1   // V2.3.29: 5-page display task (same as FeatherS3-D)
+    #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
     // FeatherS3-D since the PSRAM cost is negligible.

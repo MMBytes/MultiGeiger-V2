@@ -14,13 +14,12 @@
  *    5. BME280 at 0x76 or 0x77 — legacy fallback (only 0x76 if a previous
  *                              0x77-family chip claimed 0x77)
  *
- *  This module owns the I2C bus. All devices on that bus (OLED SSD1306,
- *  pressure chip, SHT45) share the same handle, obtained via
- *  env_sensor_get_i2c_bus().
- *
- *  main.c replaces all bme280_*() calls with env_sensor_*() calls.
- *  display.c replaces bme280_get_i2c_bus() with env_sensor_get_i2c_bus().
- *  transmission.c is unchanged — the tx_context_t fields are identical.
+ *  V2.3.29: bus ownership moved out to `i2c_bus.c`. This module is now a
+ *  pure consumer — it accepts a bus handle in env_sensor_init() and runs
+ *  the cascade probe on it. main.c orchestrates which bus(es) to try.
+ *  Same module can be re-init'd against a second bus if the first call
+ *  found nothing (idempotent at the sub-driver level: each sht45_init /
+ *  bmp*_init / bme*_init returns early if already bound).
  */
 
 #include <stdbool.h>
@@ -29,12 +28,17 @@
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 
-/** @brief Create the I2C bus and probe for sensors in priority order.
+/** @brief Probe for env sensors on the given I²C bus, in priority order.
  *
  *  Always returns ESP_OK — sensor absence is non-fatal. Check
  *  env_sensor_present() to know whether any THP data is available.
+ *
+ *  Caller (main.c) typically calls once with the primary bus; if no
+ *  sensor was found, may call again with the secondary bus. Sub-driver
+ *  inits are idempotent so a second call against a different bus
+ *  re-probes cleanly.
  */
-esp_err_t env_sensor_init(void);
+esp_err_t env_sensor_init(i2c_master_bus_handle_t bus);
 
 /** @brief True if at least one sensor capable of temperature reading is present. */
 bool env_sensor_present(void);
@@ -69,9 +73,3 @@ const char *env_sensor_name(void);
  *         built-in heater (see sht45.h for policy details).
  */
 void env_sensor_heat_periodic(uint32_t now_ms, float humidity_pct);
-
-/** @brief Shared I2C master bus for the OLED and all on-board sensors.
- *
- *  Returns NULL if env_sensor_init() has not been called yet.
- */
-i2c_master_bus_handle_t env_sensor_get_i2c_bus(void);

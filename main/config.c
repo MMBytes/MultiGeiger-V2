@@ -65,6 +65,10 @@ static const char *NS  = "geiger";
 #define DEF_LED_TICK        true
 #define DEF_PLAY_SOUND      false
 #define DEF_SHOW_DISPLAY    true
+// V2.3.30: OLED contrast / SerLCD backlight default. 80 % matches the
+// V2.3.28..V2.3.29 hardcoded contrast register 0xCC; users who don't
+// change the new dropdown stay at the brightness they already have.
+#define DEF_OLED_BRIGHTNESS_PCT 80
 #define DEF_WIFI_11BG_ONLY  false
 #define DEF_WIFI_HT20_ONLY  false
 #define DEF_WIFI_PS_DISABLED false
@@ -114,6 +118,7 @@ void config_defaults(config_t *cfg) {
     cfg->led_tick             = DEF_LED_TICK;
     cfg->play_sound           = DEF_PLAY_SOUND;
     cfg->show_display         = DEF_SHOW_DISPLAY;
+    cfg->oled_brightness_pct  = DEF_OLED_BRIGHTNESS_PCT;
     cfg->wifi_11bg_only       = DEF_WIFI_11BG_ONLY;
     cfg->wifi_ht20_only       = DEF_WIFI_HT20_ONLY;
     cfg->wifi_ps_disabled     = DEF_WIFI_PS_DISABLED;
@@ -199,6 +204,13 @@ void config_load(config_t *cfg) {
     load_bool(h, "led_tick",   &cfg->led_tick);
     load_bool(h, "play_sound", &cfg->play_sound);
     load_bool(h, "show_disp",  &cfg->show_display);
+    {
+        // V2.3.30: raw uint8_t load (load_bool would clamp to 0/1).
+        uint8_t v;
+        if (nvs_get_u8(h, "oled_bright", &v) == ESP_OK) {
+            cfg->oled_brightness_pct = v;
+        }
+    }
     load_bool(h, "tube_en",    &cfg->tube_enabled);
     load_bool(h, "send_osm",   &cfg->send_osm);
     load_str (h, "osm_box",    cfg->osm_box_id,       sizeof(cfg->osm_box_id));
@@ -243,8 +255,9 @@ void config_load(config_t *cfg) {
              cfg->ftp_path[0] ? cfg->ftp_path : "<empty>",
              (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled,
              cfg->ftp_tls12_only);
-    ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d",
-             cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display);
+    ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d oled_brightness=%d%%",
+             cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display,
+             cfg->oled_brightness_pct);
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
@@ -303,6 +316,9 @@ esp_err_t config_save(const config_t *cfg) {
     SET_U8 ("led_tick",   cfg->led_tick);
     SET_U8 ("play_sound", cfg->play_sound);
     SET_U8 ("show_disp",  cfg->show_display);
+    // V2.3.30: raw uint8_t save (the SET_U8 macro above clamps to 0/1).
+    err = nvs_set_u8(h, "oled_bright", cfg->oled_brightness_pct);
+    if (err) goto out;
     SET_U8 ("tube_en",    cfg->tube_enabled);
     SET_U8 ("send_osm",   cfg->send_osm);
     SET_STR("osm_box",    cfg->osm_box_id);

@@ -16,9 +16,11 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
+#include "als.h"
 #include "applog.h"
 #include "hal.h"
 #include "env_sensor.h"
+#include "i2c_bus.h"            // V2.3.29: bus lifecycle (replaces env_sensor_get_i2c_bus)
 #include "pm_sensor.h"
 #include "noise_sensor.h"
 #include "config.h"
@@ -97,6 +99,23 @@ float    main_status_env_p(void)         { return g_last_bme_p; }
 int64_t  main_status_last_cycle_at(void) { return g_last_cycle_at; }
 uint32_t main_status_last_cycle_ms(void) { return g_last_cycle_ms; }
 uint32_t main_status_reconnects(void)    { return n_disconnects; }
+
+// V2.3.29: per-target enable accessor used by the multi-page display
+// task to hide disabled rows from the Uploads page (and skip the page
+// entirely when nothing is enabled). Mirrors http_server.c's
+// target_enabled() pattern but exposes the g_cfg.send_* flags through
+// a single function so display.c / display_serlcd.c don't need a config
+// pointer.
+bool main_target_enabled(int target_id) {
+    switch (target_id) {
+        case TX_TARGET_MADAVI:  return g_cfg.send_madavi;
+        case TX_TARGET_SENSORC: return g_cfg.send_sensorc;
+        case TX_TARGET_RADMON:  return g_cfg.send_radmon;
+        case TX_TARGET_OSM:     return g_cfg.send_osm;
+        case TX_TARGET_AQI:     return g_cfg.send_aqi;
+        default: return false;
+    }
+}
 
 // --- Strict single-mode WiFi:
 //   boot .. AP_WINDOW_US:     AP only (STA not started — radio unshared)
@@ -359,7 +378,15 @@ static void do_tx_cycle(void) {
     int time_sec   = (int)(esp_timer_get_time() / 1000000LL);
     int rad_nsvph  = g_cfg.tube_enabled ? (int)(usvph * 1000.0f) : 0;
     int cpm_disp   = g_cfg.tube_enabled ? (int)cpm : 0;
+#if HAL_MULTIPAGE_ROTATION
+    // V2.3.29: multi-page display task owns the panel — radiation page
+    // is not part of the rotation set on these boards (FeatherS3-D
+    // dust deployment + QT Py). Suppress the radiation draw so the
+    // task's pages aren't briefly flashed-then-overwritten.
+    (void)time_sec; (void)rad_nsvph; (void)cpm_disp;
+#else
     display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
+#endif
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
@@ -445,6 +472,27 @@ static void do_tx_cycle(void) {
                      noise_sensor_name());
         }
     }
+
+#if HAL_MULTIPAGE_ROTATION
+    // V2.3.29: feed the multi-page display task with this cycle's sensor
+    // readings. The task wakes every 5 s, rotates through Env / PM Mass /
+    // PM Number / Uploads / System (skipping pages whose sensors aren't
+    // fitted), and renders independently. Dynamic data not in the
+    // snapshot (uptime, free heap, TX cycles, upload counters) is read
+    // live at render time so the relevant pages update every 5 s, not
+    // every 150 s.
+    display_snapshot_t snap = {
+        .env_valid   = bme_valid,
+        .env_t_c     = bme_t,
+        .env_h_pct   = bme_h,
+        .env_p_pa    = bme_p,
+        .pm_valid    = pm_valid,
+        .pm          = pm,
+        .noise_valid = noise_valid,
+        .noise       = noise,
+    };
+    display_update_snapshot(&snap);
+#endif
 
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
@@ -550,26 +598,54 @@ void app_main(void) {
     ESP_LOGI(TAG, "ap_name: '%s'  wifi_hostname: '%s'",
              g_cfg.ap_name, g_cfg.wifi_hostname);
 
-    // Probe for environmental sensors before WiFi — independent of network,
-    // failure is non-fatal (env_sensor_present() gates readings later).
-    // env_sensor_init() also owns the I2C bus used by the OLED below.
-    env_sensor_init();
+    // V2.3.29: dual-bus device probing.
+    //
+    // i2c_bus.c owns both buses (primary always-on, secondary lazy +
+    // sheddable). For each sensor module we try the primary bus first;
+    // if no device was found, we ask for the secondary bus (which
+    // lazily enables LDO2 on FeatherS3-D, returns NULL on Heltec / QT Py)
+    // and probe again. On a hit, mark the secondary bus as kept-alive
+    // so i2c_bus_finalize() below doesn't tear it down.
+    //
+    // Display does its own dual-bus auto-detect inside display_setup()
+    // (and calls i2c_bus_secondary_keep_alive() itself if it lands on
+    // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
+    // nothing — sensor or display — ended up on STEMMA2.
+    i2c_master_bus_handle_t bus1 = i2c_bus_get_primary();
 
-    // Probe for PM (particulate-matter) sensors on the same bus owned by
-    // env_sensor. Currently only the Sensirion SPS30 is supported. Init
-    // also starts continuous-measurement mode so the fan is running by
-    // the time the first TX cycle reads from it.
-    pm_sensor_init(env_sensor_get_i2c_bus());
+    // Helper macro: try a sensor's init on bus 1; if no device bound,
+    // try bus 2; if a device was found there, keep the bus alive.
+    #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
+        do {                                                                \
+            init_fn(bus1);                                                  \
+            if (!present_fn()) {                                            \
+                i2c_master_bus_handle_t _b2 = i2c_bus_get_secondary();      \
+                if (_b2) {                                                  \
+                    init_fn(_b2);                                           \
+                    if (present_fn()) i2c_bus_secondary_keep_alive();       \
+                }                                                           \
+            }                                                               \
+        } while (0)
 
-    // Probe for a noise sensor (currently DNMS at 0x55) on the same shared
-    // bus. Init also issues the first CALCULATE_LEQ trigger, so the LAeq
-    // window is integrating by the time the first TX cycle reads it.
-    noise_sensor_init(env_sensor_get_i2c_bus());
+    PROBE_ON_BOTH_BUSES(env_sensor_init,   env_sensor_present,   bus1);
+    PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);
+    PROBE_ON_BOTH_BUSES(noise_sensor_init, noise_sensor_present, bus1);
 
-    // OLED shares the env_sensor I2C bus — bring it up now so the
-    // boot splash is visible while WiFi/NTP/etc. come up.
-    display_setup(g_cfg.show_display);
+    #undef PROBE_ON_BOTH_BUSES
+
+    // V2.3.29: ALS-PT19 ambient-light sensor (FeatherS3-D only — analog,
+    // ADC1_CH3 on GPIO 4). On other boards als_init() is a no-op stub.
+    als_init();
+
+    // Display: probes both buses internally, marks bus 2 kept-alive
+    // itself if it lands there.
+    display_setup(g_cfg.show_display, g_cfg.oled_brightness_pct);
     display_boot_screen();
+
+    // End-of-init: if the secondary bus was lazily enabled but no
+    // consumer (sensor or display) bound to it, drop LDO2 to save the
+    // ~5–10 mA quiescent + NeoPixel idle current.
+    i2c_bus_finalize();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

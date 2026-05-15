@@ -12,6 +12,8 @@ idf_component_register(
         "bmp390.c"
         "bmp581.c"
         "env_sensor.c"
+        "i2c_bus.c"
+        "als.c"
         "pm_sensor.c"
         "sps30.c"
         "noise_sensor.c"
@@ -20,6 +22,7 @@ idf_component_register(
         "log_ftp.c"
         "speaker.c"
         "display.c"
+        "display_serlcd.c"
         "neopixel.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -31,6 +34,7 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_gptimer
         esp_driver_i2c
+        esp_adc
         esp_driver_ledc
         esp_driver_rmt
         esp_http_client

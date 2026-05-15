@@ -285,12 +285,54 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
     #define COMMA() do { if (!first) n += snprintf(buf + n, cap - n, ",\n"); first = false; } while (0)
 
     if (c->bme_valid) {
+        // V2.3.29 fix: bme_valid is set when ANY sub-sensor in the env
+        // cascade reports a reading. With only an SHT45 fitted (no Bosch
+        // pressure chip), bme_pressure_pa stays at its zero-init value
+        // and the previous unconditional emit sent "BME280_pressure: 0.00"
+        // — Madavi accepted it but graphed a 0 Pa flatline forever.
+        //
+        // Sentinel-based field selection picks the right Madavi field
+        // names based on which actual fields have data:
+        //   - have_p (>1 hPa)  → full Bosch trio "BME280_*" → Madavi
+        //                         routes to data-{ID}-bme280-highres.rrd
+        //   - !have_p, have_h  → DHT-style "temperature"/"humidity" →
+        //                         routes to data-{ID}-dht-highres.rrd
+        //                         (slight semantic lie — graph labels as
+        //                         "DHT" — but values are correct)
+        //   - T only           → "temperature" only (e.g. broken H read)
+        // Atmospheric pressure on Earth never goes below 1 hPa even at
+        // the edge of space, so 100 Pa is a safe "no sensor" sentinel.
+        // Humidity 0.01 % RH never occurs in practice; default 0 means
+        // sensor absent. Bug only affects Madavi here — sensor.community,
+        // OSM, aqi.eco have their own body builders that need separate
+        // fixes if the same problem matters for them.
+        bool have_p = (c->bme_pressure_pa > 100.0f);
+        bool have_h = (c->bme_humidity_pct > 0.01f);
+
         COMMA();
-        n += snprintf(buf + n, cap - n,
-            "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
-            "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
-            c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+        if (have_p) {
+            // Full Bosch-family trio (BME280, BMP581, BMP390, BME688
+            // — all relabelled to BME280_* since that's what Madavi's
+            // hardcoded value_type whitelist recognises).
+            n += snprintf(buf + n, cap - n,
+                "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
+                c->bme_temperature_c, c->bme_humidity_pct, c->bme_pressure_pa);
+        } else if (have_h) {
+            // SHT45 (or similar T+H-only) without a paired Bosch chip.
+            // Use unprefixed names → Madavi's DHT RRD.
+            n += snprintf(buf + n, cap - n,
+                "  {\"value_type\": \"temperature\", \"value\": \"%.2f\"},\n"
+                "  {\"value_type\": \"humidity\", \"value\": \"%.2f\"}",
+                c->bme_temperature_c, c->bme_humidity_pct);
+        } else {
+            // Edge case: only T is valid (e.g. SHT45 H read failed
+            // mid-cycle, leaving cached T but H=0). Emit T alone.
+            n += snprintf(buf + n, cap - n,
+                "  {\"value_type\": \"temperature\", \"value\": \"%.2f\"}",
+                c->bme_temperature_c);
+        }
     }
     if (c->pm_valid) {
         // SPS30_* prefix matches Madavi's field-prefix routing convention

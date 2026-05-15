@@ -1,6 +1,178 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.29 — multi-page display + dual-bus auto-detect + brightness control
+// + ALS-PT19 + i2c_bus refactor.
+//
+// **Headline:** Major V2 architectural cleanup plus four user-facing
+// additions, all OTA-safe from V2.3.28:
+//
+//   1. **Multi-page display rotation** (5 pages, 7 s each) on FeatherS3-D
+//      and QT Py — replaces V2.3.28's single Env page. Single binary
+//      auto-detects which display is fitted (SerLCD at 0x72 OR SSD1309/6
+//      at 0x3C) AND which I²C bus it lives on. Page set adapts to the
+//      sensors actually present.
+//
+//   2. **Dual-bus auto-detect** for both displays AND sensors. Probes
+//      STEMMA1 first, falls through to STEMMA2 (FeatherS3-D only). LDO2
+//      is enabled lazily and torn down at end-of-init if no consumer
+//      bound to STEMMA2 — saves ~5–10 mA quiescent + NeoPixel idle.
+//
+//   3. **OLED contrast / SerLCD backlight brightness dropdown** in
+//      /config — 10 % steps (10 % to 100 %). Live-applied on Save (no
+//      reboot). Default 80 % matches the V2.3.28 hardcoded register.
+//
+//   4. **Onboard ALS-PT19 ambient-light sensor** exposed (FeatherS3-D
+//      only — GPIO 4 = ADC1_CH3). New /status row "Ambient light:
+//      245 mV (~127 lux, indoor lit)". Two-layer calibrated (eFuse mV
+//      + nominal 1.6 mV/lux, ±50 % typical accuracy).
+//
+// **Pages (logical 4-row layout, mirrored on OLED 8-char and SerLCD 20-char):**
+//   Env       — T / RH / P (+ Noise on row 3 if DNMS present)
+//   PM Mass   — PM1.0 / PM2.5 / PM4.0 / PM10  (ug/m³)
+//   PM Number — n0.5 / n1.0 / n2.5 / n4.0     (per cm³, k-suffix on OLED ≥1000)
+//   Uploads   — Madavi / Sensor / OSM / AQI
+//               OLED: percentages ("MA 100%")
+//               SerLCD: success/attempt counts ("Madavi   919/919")
+//               Only enabled targets shown; Radmon excluded by design.
+//   System    — TX cycles / uptime / heap stats
+//               OLED: 2x font for cycles+uptime, 1x font for Free/Min/Max.
+//                     Uptime adapts: "%2dh %2dm" < 1 day, "%3dd%2dh" ≥ 1 day.
+//                     TX cycles "C%5.1fk" k-suffix at ≥ 100000 (~4.75 yr).
+//               SerLCD: Cycles / Uptime / Free / Max (no Min row).
+//
+// **Architectural changes:**
+//   1. New `i2c_bus.c/.h` module — owns BOTH I²C buses. Lazy init for
+//      both; secondary (FeatherS3-D STEMMA2) is sheddable via
+//      i2c_bus_finalize() if no consumer. Replaces env_sensor's previous
+//      bus ownership and display.c's previous bring_up_stemma2_bus().
+//      Per-board bus power handling (Heltec Vext, FeatherS3-D LDO2)
+//      lives here, not scattered across consumers.
+//   2. `env_sensor.h` API change: `env_sensor_init(bus)` takes the bus
+//      handle. Removed `env_sensor_get_i2c_bus()`. Sub-driver inits
+//      (sht45, bmp581, etc.) are idempotent so main.c can re-call init
+//      with the secondary bus if the first call found nothing.
+//   3. main.c sensor probing uses a `PROBE_ON_BOTH_BUSES` macro: try
+//      bus 1, fall through to bus 2 if `*_present()` returns false.
+//      Each successful bus 2 bind calls `i2c_bus_secondary_keep_alive()`.
+//   4. New `HAL_MULTIPAGE_ROTATION` hal.h flag — 1 on FeatherS3-D + QT
+//      Py, 0 on Heltec V2 / V2 4MB. Drives display task spawn + main.c
+//      snapshot push. Heltec keeps the V2.3.x radiation `display_running()`
+//      path entirely.
+//   5. New `HAL_HAS_ALS` hal.h flag — 1 on FeatherS3-D, 0 elsewhere.
+//      `als.c` stubs out when 0; /status skips the ambient-light row.
+//   6. New `display_snapshot_t` in display.h — sensor data pushed once
+//      per TX cycle from main.c. Single-writer torn-tolerant pattern.
+//      Dynamic data (uptime, heap, cycles, upload counters) is read
+//      live at render time via existing accessors, not stored in the
+//      snapshot — System and Uploads pages refresh every 7 s.
+//   7. New `display_task` FreeRTOS task (gated by HAL_MULTIPAGE_ROTATION,
+//      4 KB stack, priority 5). Boot splash visible 7 s before rotation
+//      starts. Page enum + per-backend dispatch via switch.
+//   8. Per-page render functions:
+//      - OLED: `render_oled_env / _pm_mass / _pm_number / _uploads /
+//        _system` in display.c
+//      - SerLCD: `display_serlcd_render_env / _pm_mass / _pm_number /
+//        _uploads / _system` in display_serlcd.c
+//   9. OLED invert (0xA6/0xA7) toggles at the start of each new rotation
+//      — anti-burn-in. First rotation keeps boot-splash polarity (normal).
+//  10. New `display_set_contrast(uint8_t pct)` — backend-aware live
+//      brightness apply. OLED writes contrast register; SerLCD writes
+//      RGB backlight at white. Called from display_setup() at boot and
+//      from /config save handler for live changes.
+//  11. The old `display_environment()` / `display_serlcd_environment()`
+//      APIs are gone. main.c now calls `display_update_snapshot()` once
+//      per do_tx_cycle on multi-page boards. `display_running()` is
+//      preserved for Heltec.
+//  12. `display_set_status()` is a no-op on multi-page boards
+//      (s_status[] still updated for symmetry) — the radiation-era
+//      status line would otherwise overlay rotation pages.
+//  13. New `main_target_enabled(int)` accessor — main.c exposes per-
+//      target enable state so display.c (Uploads page) can hide disabled
+//      targets without needing a config pointer.
+//
+// **Madavi compatibility fix:** `build_madavi_env_body()` previously
+// emitted `BME280_pressure: 0.00` whenever any env sensor was present
+// — sending fake 0 Pa data when only an SHT45 was fitted (no Bosch
+// pressure chip). V2.3.29 uses sentinel-based field selection: emits
+// the full BME280_* trio only when pressure is real (>1 hPa); falls
+// back to DHT-style "temperature"/"humidity" for SHT45-only setups,
+// or just "temperature" for sensors with neither H nor P. Madavi's
+// hardcoded value_type whitelist routes the unprefixed names to its
+// dht-highres.rrd file. (The same bug still exists in the
+// sensor.community / openSenseMap / aqi.eco body builders — fixed
+// only for Madavi at user request.)
+//
+// **Affected boards:** FeatherS3-D and QT Py get the full feature set.
+// Heltec V2 / V2 4MB get the i2c_bus.c refactor (transparent — same
+// bus, same Vext drive) plus the Madavi fix; everything else is bit-
+// identical from V2.3.28 (display_running unchanged, no display task,
+// no ALS, brightness dropdown UI present but only contrast register
+// to drive on the Heltec OLED).
+//
+// **Rollback:** revert hal.h, display.h/.c, display_serlcd.h/.c,
+// als.h/.c, i2c_bus.h/.c, env_sensor.h/.c, http_server.c, config.h/.c,
+// main.c, transmission.c, version.h, CMakeLists.txt. The
+// display_environment / display_serlcd_environment / env_sensor_get_i2c_bus
+// APIs were removed — note for any external code that referenced them
+// (none in this repo).
+//
+// OTA-safe from V2.3.28 (no partition layout / sdkconfig changes).
+//
+// V2.3.28 — external SSD1309 OLED on FeatherS3-D STEMMA2 (MVP, single page).
+//
+// **Headline:** add support for an external 2.42" SSD1309 128x64 OLED
+// (Core Electronics CE09964) on the FeatherS3-D's SECOND STEMMA QT
+// connector (STEMMA2 — IO15 SCL / IO16 SDA, powered from LDO2 / 3V3.2).
+// Routing the OLED to STEMMA2 instead of STEMMA1 keeps cable runs short
+// when the panel sits on the opposite side of the box from the sensors.
+//
+// **What's new:**
+//   1. `hal.h` FeatherS3-D branch: `HAL_HAS_OLED` 0 → 1.
+//   2. `display.c` `display_setup()`:
+//      - Brings up STEMMA2 by driving IO39 HIGH (LDO2 enable) + creating
+//        a second `i2c_master_bus_handle_t` on I2C_NUM_1 (IO15/IO16).
+//      - Reset block (was unconditional `gpio_set_level(PIN_OLED_RST, ..)`)
+//        is now `#ifdef PIN_OLED_RESET` — the external SSD1309 breakout
+//        is 4-pin I²C (no reset line); chip POR handles it.
+//      - SSD1306 init sequence reused unchanged — SSD1309 is register-
+//        compatible. Charge-pump command (0x8D 0x14) stays in the
+//        sequence; SSD1309 modules with onboard charge pumps ignore
+//        it harmlessly.
+//   3. New `display_environment(valid, t, h, p, noise_valid, noise_db,
+//      use_display)` renders a single-page T/RH/P (+ optional LAeq) view.
+//   4. `main.c` `do_tx_cycle()`: on FeatherS3-D, calls
+//      `display_environment()` AFTER env + noise reads complete, instead
+//      of the radiation-focused `display_running()`. Other boards
+//      unchanged.
+//
+// **NOT in this release** (deferred):
+//   - SENSORS on STEMMA2 — requires a per-driver bus-handle refactor
+//     (see deferred memory `project_stemma2_software_enable_deferred`).
+//   - Page rotation / multiple pages — single Environment view only.
+//   - Radiation page on FeatherS3-D — display_running() suppressed on
+//     this board variant since radiation isn't the headline metric in
+//     the dust-sensor deployment context this targets.
+//
+// **Side effect: NeoPixel power.** Enabling LDO2 also powers the onboard
+// WS2812 NeoPixel on IO40. We never drive its data line, so the WS2812's
+// internal POR keeps it dark (no valid 24-bit RGB frame ever arrives).
+// Quiescent current ~1 mA.
+//
+// **Affected boards:** FeatherS3-D ONLY. Heltec V2 / Heltec V2 4MB / QT Py
+// builds are bit-identical to V2.3.27 — same hal.h non-FeatherS3-D
+// branches, same call site for `display_running()` (gated by
+// `#if !defined(BOARD_FEATHERS3_D)`).
+//
+// **Rollback:** revert the 4 files (hal.h, display.c, display.h, main.c).
+// Or runtime: toggle `show_display=false` on /config to clear the panel
+// without reverting firmware. Deployment context for this MVP is the
+// dust sensor (esp32-5965048) in a clear-window box where the OLED is
+// visible — not the Geiger which lives in a sealed PVC tube.
+//
+// OTA-safe from V2.3.27 (no partition layout changes, no sdkconfig
+// changes).
+//
 // V2.3.27 — FeatherS3-D pin map: HV_FET + speaker moved off A2..A4.
 //
 // PCB harness rev: HV_FET_OUT moved from A2 (IO14) to A5 (IO5); SPEAKER_P
@@ -234,4 +406,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.27"
+#define VERSION_STR "V2.3.29"

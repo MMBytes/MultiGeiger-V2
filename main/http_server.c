@@ -31,6 +31,8 @@
 #include "pm_sensor.h"
 #include "env_sensor.h"
 #include "noise_sensor.h"
+#include "display.h"           // V2.3.30: live-apply OLED brightness via display_set_contrast
+#include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "tube.h"
 #include "transmission.h"
 #include "log_ftp.h"
@@ -535,6 +537,30 @@ static void format_environment(char *out, size_t sz) {
         main_status_env_p() / 100.0f);
 }
 
+// --- Ambient light block (FeatherS3-D ALS-PT19) -----------------------------
+// Reads on demand each /status request — no periodic poll, no cached state.
+// One ADC read takes ~10 µs, fresh enough for a status page that's only
+// loaded when the user opens it. Skipped on boards without HAL_HAS_ALS.
+static void format_als(char *out, size_t sz) {
+    if (!als_present()) { out[0] = 0; return; }
+    uint32_t mv = 0;
+    float    lux = 0.0f;
+    if (als_read(NULL, &mv, &lux) != ESP_OK) {
+        snprintf(out, sz,
+            "<div class=\"info\"><h3>Ambient light</h3>"
+            "<b>Sensor:</b> ALS-PT19<br>"
+            "read failed"
+            "</div>");
+        return;
+    }
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Ambient light</h3>"
+        "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>"
+        "<b>Reading:</b> %lu mV (~%d lux, %s)"
+        "</div>",
+        (unsigned long)mv, (int)lux, als_brightness_label(lux));
+}
+
 // --- Noise block -------------------------------------------------------------
 static void format_noise(char *out, size_t sz) {
     if (!noise_sensor_present()) { out[0] = 0; return; }
@@ -789,6 +815,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_cycle      (buf, sizeof(buf), uptime_ms); if (!send_block(req, buf)) goto fail;
     format_radiation  (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_environment(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_als        (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
@@ -845,6 +872,19 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
     html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
+
+    // V2.3.30: build the OLED-brightness <option> list dynamically — 10 %
+    // through 100 % in 10 % steps. Builder keeps the main snprintf args list
+    // sane (one extra %s instead of ten "selected" vs "" args).
+    char br_opts[512];
+    int br_n = 0;
+    for (int v = 10; v <= 100; v += 10) {
+        br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
+                         "<option value=\"%d\"%s>%d%%</option>",
+                         v,
+                         (s_cfg->oled_brightness_pct == v) ? " selected" : "",
+                         v);
+    }
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -962,6 +1002,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
         "Drive OLED display <span class=\"r\">*</span></label></div>"
+        "<label>OLED brightness "
+        "<select name=\"oled_bright\">%s</select>"
+        " <small>(live — applies on Save without reboot)</small></label>"
         "<h3>Other</h3>"
         "<label>NTP server 1 <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"ntp1\" value=\"%s\"></label>"
@@ -1035,6 +1078,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
         s_cfg->show_display ? "checked" : "",
+        br_opts,
         e_ntp1, e_ntp2, e_ntp3, e_tz, e_ap,
         (unsigned long)s_cfg->tx_interval_ms);
 
@@ -1172,6 +1216,15 @@ static esp_err_t config_post(httpd_req_t *req) {
         else if (!strcmp(p, "led_tick"))   next.led_tick     = true;
         else if (!strcmp(p, "play_sound")) next.play_sound   = true;
         else if (!strcmp(p, "show_disp"))  next.show_display = true;
+        else if (!strcmp(p, "oled_bright")) {
+            // V2.3.30: validated 10..100 in steps of 10. Out-of-range or
+            // non-stepped values are silently ignored (next.oled_brightness_pct
+            // stays at the value preserved from the *s_cfg copy at the top).
+            long v = strtol(val, NULL, 10);
+            if (v >= 10 && v <= 100 && (v % 10) == 0) {
+                next.oled_brightness_pct = (uint8_t)v;
+            }
+        }
         else if (!strcmp(p, "save_restart")) restart_after_save = true;
         // (a "save" key with no other meaning is fine — silently ignored.)
 
@@ -1205,6 +1258,11 @@ static esp_err_t config_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
+
+    // V2.3.30: live-apply OLED/SerLCD brightness (no reboot for this field).
+    // No-op if the panel is dark (show_display=false) or if the value didn't
+    // change. ~1 ms (OLED) or ~10 ms (SerLCD) of I²C traffic.
+    display_set_contrast(s_cfg->oled_brightness_pct);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     if (restart_after_save) {

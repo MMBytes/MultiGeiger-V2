@@ -595,19 +595,34 @@ void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
 // (0x81 + value); for SerLCD, the RGB backlight set to white at the level.
 // The percent → register / level map is linear (×255/100), which matches
 // human perception "well enough" for the 10-step UI dropdown.
+//
+// V2.3.32: pct=0 means OFF.
+//   - OLED  : 0xAE drives the panel into sleep mode (segment + common
+//             drivers off, charge pump can stay on; near-zero current).
+//             0xAF on next non-zero call wakes it; the existing contrast
+//             register and RAM contents are retained, so a re-enable
+//             after a few seconds shows the same image instantly.
+//   - SerLCD: backlight RGB→0,0,0 turns the white LED off. Pixels are
+//             still being driven on the LCD glass, so in strong external
+//             light the text would still be faintly readable — that's
+//             fine, sealed-tube deployments are dark anyway.
 void display_set_contrast(uint8_t pct) {
-    if (pct < 10)  pct = 10;
     if (pct > 100) pct = 100;
     s_brightness_pct = pct;
 
     if (!s_show) return;
 
-    uint8_t level = (uint8_t)((pct * 255) / 100);
-
     if (s_backend == BACKEND_OLED) {
-        oled_cmd(0x81);
-        oled_cmd(level);
+        if (pct == 0) {
+            oled_cmd(0xAE);                               // display OFF (sleep)
+        } else {
+            uint8_t level = (uint8_t)((pct * 255) / 100);
+            oled_cmd(0xAF);                               // ensure ON (idempotent)
+            oled_cmd(0x81);
+            oled_cmd(level);
+        }
     } else if (s_backend == BACKEND_SERLCD) {
+        uint8_t level = (uint8_t)((pct * 255) / 100);     // pct=0 → level=0 → backlight off
         display_serlcd_set_backlight(level, level, level);
     }
 }

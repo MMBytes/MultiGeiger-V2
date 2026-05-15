@@ -800,10 +800,15 @@ static const char STATUS_HEAD[] =
     "h1{color:#333}h3{margin:0 0 6px 0;color:#444}a{color:#0066cc}"
     ".info{background:#f5f5f5;border:1px solid #ddd;padding:10px;border-radius:4px;margin:10px 0}"
     "</style></head><body>";
-static const char STATUS_LINKS[] =
+// V2.3.32: split into HEAD + TAIL so status_get can inject the optional
+// per-chip Madavi graphs link between them when madavi uploads are enabled.
+// Resolved once per page render (no JS): if Madavi is toggled on/off in
+// /config, the link only appears/disappears on the next page load.
+static const char STATUS_LINKS_HEAD[] =
     "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
     "<p><a href=\"/update\">&#11014; Firmware Update (OTA)</a> (requires password)</p>"
-    "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>"
+    "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>";
+static const char STATUS_LINKS_TAIL[] =
     "</body></html>";
 
 // Streaming-friendly send: skip if format function emitted nothing (the
@@ -846,7 +851,23 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
 
-    if (httpd_resp_send_chunk(req, STATUS_LINKS, sizeof(STATUS_LINKS) - 1) != ESP_OK) goto fail;
+    if (httpd_resp_send_chunk(req, STATUS_LINKS_HEAD, sizeof(STATUS_LINKS_HEAD) - 1) != ESP_OK) goto fail;
+
+    // V2.3.32: optional per-chip Madavi graph link. Only emitted if the
+    // user has Madavi uploads enabled — there's no point linking to a graph
+    // page that has no data behind it. The dashboard ID + path are baked in
+    // from the user's confirmed working URL on 2026-05-16; if Madavi ever
+    // restructures the Grafana URL space we'll need to refresh it here.
+    if (s_cfg && s_cfg->send_madavi && s_chip_id && s_chip_id[0]) {
+        n = snprintf(buf, sizeof(buf),
+            "<p><a href=\"https://api-rrd.madavi.de:3000/grafana/d/q87EBfWGk/"
+            "temperature-humidity-pressure?var-chipID=%s\" target=\"_blank\" "
+            "rel=\"noopener\">&#128202; Madavi graphs for %s</a></p>",
+            s_chip_id, s_chip_id);
+        if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) goto fail;
+    }
+
+    if (httpd_resp_send_chunk(req, STATUS_LINKS_TAIL, sizeof(STATUS_LINKS_TAIL) - 1) != ESP_OK) goto fail;
     httpd_resp_send_chunk(req, NULL, 0);   // end-of-stream sentinel
     return ESP_OK;
 fail:
@@ -899,11 +920,17 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
 
-    // V2.3.30: build the OLED-brightness <option> list dynamically — 10 %
-    // through 100 % in 10 % steps. Builder keeps the main snprintf args list
-    // sane (one extra %s instead of ten "selected" vs "" args).
+    // V2.3.30: build the display-brightness <option> list dynamically — OFF
+    // (0 %) followed by 10 % through 100 % in 10 % steps. Builder keeps the
+    // main snprintf args list sane (one extra %s instead of eleven "selected"
+    // vs "" args). V2.3.32: added OFF entry — turns the SerLCD backlight
+    // fully dark (panel pixels still drawn but invisible) and powers the
+    // OLED panel down via 0xAE (zero-current state). See display_set_contrast.
     char br_opts[512];
     int br_n = 0;
+    br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
+                     "<option value=\"0\"%s>OFF</option>",
+                     (s_cfg->oled_brightness_pct == 0) ? " selected" : "");
     for (int v = 10; v <= 100; v += 10) {
         br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
                          "<option value=\"%d\"%s>%d%%</option>",
@@ -1027,8 +1054,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
         "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
-        "Drive OLED display <span class=\"r\">*</span></label></div>"
-        "<label>OLED brightness "
+        "Enable Display <span class=\"r\">*</span></label></div>"
+        "<label>Display brightness "
         "<select name=\"oled_bright\">%s</select>"
         " <small>(live — applies on Save without reboot)</small></label>"
         "<h3>Other</h3>"
@@ -1246,8 +1273,10 @@ static esp_err_t config_post(httpd_req_t *req) {
             // V2.3.30: validated 10..100 in steps of 10. Out-of-range or
             // non-stepped values are silently ignored (next.oled_brightness_pct
             // stays at the value preserved from the *s_cfg copy at the top).
+            // V2.3.32: 0 (OFF) is now also accepted — display_set_contrast
+            // interprets it as panel-dark (OLED 0xAE) / backlight-off (SerLCD).
             long v = strtol(val, NULL, 10);
-            if (v >= 10 && v <= 100 && (v % 10) == 0) {
+            if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
                 next.oled_brightness_pct = (uint8_t)v;
             }
         }

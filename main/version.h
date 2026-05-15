@@ -1,6 +1,48 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.32 — config-page polish + status-page Madavi link + display OFF.
+//
+// **Three small UX changes — all in http_server.c + display.c:**
+//
+//   1. Config page label rename. "Drive OLED display" → "Enable Display".
+//      "OLED brightness" → "Display brightness". The OLED-only labels were
+//      misleading on FeatherS3-D + Heltec where the field also drives the
+//      SerLCD backlight (V2.3.28 added SerLCD support but didn't relabel
+//      the form). NVS key stays `oled_bright` — no migration needed.
+//
+//   2. Brightness dropdown gains an "OFF" entry (value 0). Lets the user
+//      put the display fully dark without unchecking "Enable Display"
+//      (which would also disable the multi-page render task). On OLED,
+//      0xAE puts the panel into sleep mode — segment + common drivers
+//      off, charge pump retained, RAM contents preserved → instant
+//      re-enable on the next non-zero brightness write. On SerLCD, the
+//      RGB backlight goes to (0,0,0); the LCD glass is still being
+//      driven so a strong external light would show faint text, but in
+//      a sealed-tube deployment that's invisible.
+//      `display_set_contrast()` previously clamped pct < 10 to 10; that
+//      clamp is removed so 0 reaches the backend.
+//
+//   3. Status page: per-chip Madavi link in the bottom links block. Only
+//      emitted when `send_madavi=1` in /config — no point linking to a
+//      graph page with no data behind it. Resolved at HTML render time
+//      (no JavaScript), so toggling Madavi in /config only changes the
+//      link's visibility on the next status-page load. URL pattern:
+//      api-rrd.madavi.de:3000/grafana/d/q87EBfWGk/temperature-humidity-pressure?var-chipID={chip}
+//      (the dashboard ID is what the user's browser was on 2026-05-16 —
+//      if Madavi ever restructures Grafana paths we'll need to refresh).
+//
+// **Files touched:**
+//   * `http_server.c` — 4 sites: brightness <option> builder (prepend OFF),
+//     config form labels, POST validator (accept 0), status page links
+//     split into HEAD/TAIL with conditional Madavi link injection.
+//   * `display.c` — 1 site: `display_set_contrast()` interprets 0 as OFF
+//     for both backends; documented sleep-mode semantics.
+//
+// **Compatibility:** no NVS key changes, no sdkconfig changes, no
+// partition changes. OTA-safe from V2.3.31. Existing brightness values
+// (10..100) keep working unchanged. 20 release artefacts (5 × 4 boards).
+//
 // V2.3.31 — fix sub-tick `vTaskDelay` timing in I²C drivers (SHT45 H=0% root
 // cause + audit-driven sweep across the rest of the env / PM stack).
 //
@@ -523,4 +565,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.31"
+#define VERSION_STR "V2.3.32"

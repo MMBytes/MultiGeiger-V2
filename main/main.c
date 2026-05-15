@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 
 #include "als.h"
+#include "veml7700.h"
 #include "applog.h"
 #include "hal.h"
 #include "env_sensor.h"
@@ -630,6 +631,7 @@ void app_main(void) {
     PROBE_ON_BOTH_BUSES(env_sensor_init,   env_sensor_present,   bus1);
     PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);
     PROBE_ON_BOTH_BUSES(noise_sensor_init, noise_sensor_present, bus1);
+    PROBE_ON_BOTH_BUSES(veml7700_init,     veml7700_present,     bus1);
 
     #undef PROBE_ON_BOTH_BUSES
 

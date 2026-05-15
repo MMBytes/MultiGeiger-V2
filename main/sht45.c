@@ -11,6 +11,7 @@ static const char *TAG = "sht45";
 
 // Commands (datasheet table 8)
 #define CMD_MEASURE_HIGH    0xFD   // high-precision T+RH, ~8.2 ms
+#define CMD_READ_SERIAL     0x89   // read 32-bit factory serial; ~1 ms
 #define CMD_HEATER_200MW    0x39   // 200 mW for 0.1 s, then measure
 #define CMD_SOFT_RESET      0x94
 
@@ -34,6 +35,27 @@ static bool crc_ok(uint8_t a, uint8_t b, uint8_t crc) {
 
 static esp_err_t send_cmd(uint8_t cmd) {
     return i2c_master_transmit(s_dev, &cmd, 1, 50);
+}
+
+// V2.3.30: read the factory-burned 32-bit serial via cmd 0x89 (datasheet
+// §4.5). Response is 6 bytes: serial[31:16] + CRC + serial[15:0] + CRC.
+// Used at init time only — gives a way to identify a specific physical
+// chip in mixed-board test scenarios (helpful when one of several SHT45s
+// is faulty and you need to mark which physical part to retire).
+static esp_err_t sht45_read_serial(uint32_t *serial) {
+    if (!s_dev || !serial) return ESP_FAIL;
+    esp_err_t err = send_cmd(CMD_READ_SERIAL);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(2));   // datasheet: ~1 ms; 2 ms gives margin
+    uint8_t buf[6];
+    err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
+    if (err != ESP_OK) return err;
+    if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
+        return ESP_FAIL;
+    }
+    *serial = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+              ((uint32_t)buf[3] <<  8) |  (uint32_t)buf[4];
+    return ESP_OK;
 }
 
 // Try one full init pass: soft-reset + verification measurement. Logs every
@@ -136,6 +158,17 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
     }
 
     s_ready = true;
+
+    // V2.3.30: log the factory serial — diagnostic aid for tracking which
+    // physical chip is which in dev / multi-board scenarios. Failure to
+    // read serial is non-fatal (chip is otherwise working).
+    uint32_t serial = 0;
+    if (sht45_read_serial(&serial) == ESP_OK) {
+        ESP_LOGI(TAG, "SHT45 serial = 0x%08lX", (unsigned long)serial);
+    } else {
+        ESP_LOGW(TAG, "SHT45 serial read failed (chip otherwise OK)");
+    }
+
     ESP_LOGI(TAG, "SHT45 ready at 0x%02X (high-precision mode)", SHT45_ADDR);
     return ESP_OK;
 }

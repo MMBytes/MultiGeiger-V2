@@ -21,6 +21,7 @@ static const char *TAG = "sps30";
 #define CMD_READ_DEVICE_STATUS  0xD206
 #define CMD_START_FAN_CLEAN     0x5607
 #define CMD_RESET               0xD304
+#define CMD_READ_SERIAL         0xD033   // V2.3.30: 32-byte ASCII serial (null-padded)
 
 // Wire format selector for CMD_START_MEASUREMENT.
 //   0x03 0x00 — big-endian IEEE-754 float (60 bytes per read)
@@ -71,6 +72,38 @@ static esp_err_t recv(uint8_t *buf, size_t n) {
     return i2c_master_receive(s_dev, buf, n, 100);
 }
 
+// V2.3.30: read the factory serial (cmd 0xD033). Sensirion's wire format
+// returns 48 bytes = 16 word-pairs, where each pair is 2 ASCII chars
+// followed by 1 CRC byte (32 ASCII total + 16 CRC = 48). The serial is
+// null-padded, typically 8-16 chars on Sensirion-shipped SPS30s.
+//
+// outsz must be ≥ 33 (32 chars + null). On success, *out is null-terminated.
+// Returns ESP_OK only if all 16 CRCs validate AND the recv succeeded.
+static esp_err_t sps30_read_serial(char *out, size_t outsz) {
+    if (!s_dev || !out || outsz < 33) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = send_cmd(CMD_READ_SERIAL);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(5));   // datasheet: max 5 ms before result available
+
+    uint8_t buf[48];
+    err = recv(buf, sizeof(buf));
+    if (err != ESP_OK) return err;
+
+    size_t out_idx = 0;
+    for (size_t i = 0; i < sizeof(buf); i += 3) {
+        if (crc8(&buf[i], 2) != buf[i + 2]) return ESP_FAIL;
+        out[out_idx++] = (char)buf[i];
+        out[out_idx++] = (char)buf[i + 1];
+    }
+    out[out_idx] = '\0';
+    // Trim trailing nulls / non-printables (Sensirion null-pads short serials).
+    for (size_t i = 0; i < out_idx; i++) {
+        if (out[i] == '\0') break;
+        if (out[i] < 0x20 || out[i] > 0x7E) { out[i] = '\0'; break; }
+    }
+    return ESP_OK;
+}
+
 esp_err_t sps30_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
 
@@ -108,6 +141,18 @@ esp_err_t sps30_init(i2c_master_bus_handle_t bus) {
     vTaskDelay(pdMS_TO_TICKS(30));
 
     s_ready = true;
+
+    // V2.3.30: log the factory serial — diagnostic aid for tracking
+    // physical chips. Read AFTER start_measurement so a partial bus
+    // reset / re-init flow doesn't leave the chip half-configured if
+    // the serial read happens to fail. Failure is non-fatal.
+    char serial[33] = {0};
+    if (sps30_read_serial(serial, sizeof(serial)) == ESP_OK) {
+        ESP_LOGI(TAG, "SPS30 serial = \"%s\"", serial);
+    } else {
+        ESP_LOGW(TAG, "SPS30 serial read failed (chip otherwise OK)");
+    }
+
     ESP_LOGI(TAG, "SPS30 ready at 0x%02X (continuous float mode, fan ON, "
              "auto-clean every 7 days)", SPS30_ADDR);
     return ESP_OK;

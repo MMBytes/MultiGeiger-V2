@@ -33,6 +33,7 @@
 #include "noise_sensor.h"
 #include "display.h"           // V2.3.30: live-apply OLED brightness via display_set_contrast
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
+#include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "tube.h"
 #include "transmission.h"
 #include "log_ftp.h"
@@ -537,28 +538,53 @@ static void format_environment(char *out, size_t sz) {
         main_status_env_p() / 100.0f);
 }
 
-// --- Ambient light block (FeatherS3-D ALS-PT19) -----------------------------
-// Reads on demand each /status request — no periodic poll, no cached state.
-// One ADC read takes ~10 µs, fresh enough for a status page that's only
-// loaded when the user opens it. Skipped on boards without HAL_HAS_ALS.
+// --- Ambient light block ----------------------------------------------------
+// Two possible sources, both shown when present:
+//   * VEML7700 (I²C, any board, fixed 0x10) — accurate lux + raw ALS + white
+//   * ALS-PT19 (FeatherS3-D analog, GPIO 4) — rough lux from voltage divider
+//
+// Reads happen on every /status request — VEML7700 is two short I²C reads
+// (~1 ms total at 400 kHz), ALS-PT19 is a ~10 µs ADC oneshot. Fresh data
+// for a page that's only loaded when the user opens it. The whole block
+// is skipped if neither sensor is present.
 static void format_als(char *out, size_t sz) {
-    if (!als_present()) { out[0] = 0; return; }
-    uint32_t mv = 0;
-    float    lux = 0.0f;
-    if (als_read(NULL, &mv, &lux) != ESP_OK) {
-        snprintf(out, sz,
-            "<div class=\"info\"><h3>Ambient light</h3>"
-            "<b>Sensor:</b> ALS-PT19<br>"
-            "read failed"
-            "</div>");
-        return;
+    bool have_veml = veml7700_present();
+    bool have_pt19 = als_present();
+    if (!have_veml && !have_pt19) { out[0] = 0; return; }
+
+    int n = snprintf(out, sz, "<div class=\"info\"><h3>Ambient light</h3>");
+
+    if (have_veml) {
+        uint16_t als_raw = 0, white_raw = 0;
+        float    lux = 0.0f;
+        if (veml7700_read(&als_raw, &white_raw, &lux) == ESP_OK) {
+            n += snprintf(out + n, sz - n,
+                "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>"
+                "<b>Reading:</b> %.1f lux (raw ALS=%u, white=%u, %s)",
+                (double)lux, (unsigned)als_raw, (unsigned)white_raw,
+                als_brightness_label(lux));
+        } else {
+            n += snprintf(out + n, sz - n,
+                "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>read failed");
+        }
+        if (have_pt19) n += snprintf(out + n, sz - n, "<br><br>");
     }
-    snprintf(out, sz,
-        "<div class=\"info\"><h3>Ambient light</h3>"
-        "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>"
-        "<b>Reading:</b> %lu mV (~%d lux, %s)"
-        "</div>",
-        (unsigned long)mv, (int)lux, als_brightness_label(lux));
+
+    if (have_pt19) {
+        uint32_t mv = 0;
+        float    lux = 0.0f;
+        if (als_read(NULL, &mv, &lux) == ESP_OK) {
+            n += snprintf(out + n, sz - n,
+                "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>"
+                "<b>Reading:</b> %lu mV (~%d lux, %s)",
+                (unsigned long)mv, (int)lux, als_brightness_label(lux));
+        } else {
+            n += snprintf(out + n, sz - n,
+                "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>read failed");
+        }
+    }
+
+    snprintf(out + n, sz - n, "</div>");
 }
 
 // --- Noise block -------------------------------------------------------------

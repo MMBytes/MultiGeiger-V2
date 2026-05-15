@@ -14,6 +14,7 @@ idf_component_register(
         "env_sensor.c"
         "i2c_bus.c"
         "als.c"
+        "veml7700.c"
         "pm_sensor.c"
         "sps30.c"
         "noise_sensor.c"

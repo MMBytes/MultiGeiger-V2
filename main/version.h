@@ -1,6 +1,47 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.30 — sensor serials at boot + VEML7700 ambient-light driver.
+//
+// **Headline:** small additive release — diagnostic-friendly serial-number
+// logging for two sensors that have factory-burned unique IDs, plus a new
+// I²C ambient-light sensor driver. No architecture changes, no removed
+// APIs. OTA-safe from V2.3.29.
+//
+//   1. **SHT45 serial logged at init** (`sht45.c`) — read via cmd 0x89,
+//      logged as 8-char hex. Diagnostic aid for distinguishing physical
+//      chips when several are in dev rotation. Surfaced after a faulty
+//      Adafruit #6174 SHT45 (post-measure NACKs in steady state, init
+//      OK) needed identification across board swaps.
+//   2. **SPS30 serial logged at init** (`sps30.c`) — read via cmd 0xD033,
+//      32-char ASCII (typically null-padded to ~16). All 16 word-pair
+//      CRCs validated; failure non-fatal.
+//   3. **New Vishay VEML7700 driver** (`veml7700.c/.h`) — I²C ambient-
+//      light sensor at fixed address 0x10. Auto-detected via the
+//      existing `PROBE_ON_BOTH_BUSES` chain — works on STEMMA1, STEMMA2
+//      (FeatherS3-D), or the single shared bus on Heltec / QT Py.
+//      Returns 3 measurements: lux (computed from raw ALS × resolution
+//      with polynomial non-linearity correction), raw 16-bit ALS count,
+//      raw 16-bit white-channel count. Default config: gain 1/8×, IT
+//      100 ms → 0.54 lux/count, ~0–35 klux range. Designed to coexist
+//      with the existing onboard ALS-PT19 (analog, FeatherS3-D only).
+//   4. **`/status` "Ambient light" block extended** to render BOTH
+//      sensors when present — VEML7700 (lux + raw ALS + raw white) and
+//      ALS-PT19 (mV + approx lux). Block is omitted entirely if
+//      neither is fitted.
+//
+// **Affected boards:** all four (FeatherS3-D, QT Py, Heltec V2, Heltec
+// V2 4MB). All gain the SHT45 + SPS30 serial logging. VEML7700 driver
+// compiles into every board's binary but only activates when the chip
+// is physically present (probe at 0x10) — no impact on boards without
+// one. Heltec / QT Py users can plug a VEML7700 breakout into their
+// shared I²C bus and the /status row appears automatically.
+//
+// **No removed APIs.** SHT45 / SPS30 / display / i2c_bus / env_sensor
+// public surfaces unchanged. Pure additive release.
+//
+// OTA-safe from V2.3.29 (no partition layout / sdkconfig changes).
+//
 // V2.3.29 — multi-page display + dual-bus auto-detect + brightness control
 // + ALS-PT19 + i2c_bus refactor.
 //
@@ -406,4 +447,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.29"
+#define VERSION_STR "V2.3.30"

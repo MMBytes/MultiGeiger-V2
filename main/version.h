@@ -1,6 +1,82 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.31 — fix sub-tick `vTaskDelay` timing in I²C drivers (SHT45 H=0% root
+// cause + audit-driven sweep across the rest of the env / PM stack).
+//
+// **Headline:** at the ESP-IDF default `CONFIG_FREERTOS_HZ=100` (10 ms tick),
+// `vTaskDelay(pdMS_TO_TICKS(N))` for N ≤ 10 evaluates to `vTaskDelay(1)` —
+// a 1-tick yield that actually sleeps **0..10 ms** depending on the call's
+// phase relative to the next tick boundary. Several driver post-command
+// waits assumed millisecond precision and were silently shorter than the
+// chip's conversion / response time, causing intermittent failures that
+// looked like flaky hardware.
+//
+// Most visible symptom: SHT45 returning H=0.00% with valid T (cycles 1358
+// + 1409 on esp32-5965048), or post-measure NACK `ESP_ERR_INVALID_RESPONSE`.
+// SHT45 measures T first then H; if the read happens at 4-9 ms the T
+// register is fresh but the H register is still 0x0000, with CRC byte 0x81
+// (CRC-8 of `00 00`) which **passes** the integrity check. Looked like a
+// chip fault for V2.3.0..V2.3.30. The other SHT45 in the user's stock had
+// the same behaviour, just less often → diagnostic clue that proved it
+// wasn't a chip fault.
+//
+// **Fix pattern:** for sub-20 ms timing-critical waits, replace
+// `vTaskDelay(pdMS_TO_TICKS(N))` with `esp_rom_delay_us(N * 1000)` — a
+// precise busy-wait via the system RTC. CPU cost is real but trivial:
+// 15 ms once per 150 s TX cycle = 0.01 % CPU. For ≥ 20 ms waits,
+// `vTaskDelay` is fine (the worst-case ±10 ms quantisation is small
+// relative to the wait).
+//
+// **Files touched:**
+//   1. `sht45.c` (4 sites) — post-measurement wait in `sht45_read()` (THE
+//      cycle-bug fix), post-measurement wait in `try_init_pass()`
+//      (init-time variant of same bug), serial-read wait in
+//      `sht45_read_serial()`, post-soft-reset wait in `try_init_pass()`
+//      (conditional: busy-wait if requested wait < 20 ms, else vTaskDelay).
+//   2. `bmp581.c` (1 site) — forced-mode 12 ms post-conversion wait.
+//      Chip needs 11.4 ms; 1-tick vTaskDelay was 0..10 ms = below spec.
+//   3. `bme280.c` (1 site) — bumped 55 → 70 ms target on post-measurement
+//      wait. Chip needs 46.1 ms; vTaskDelay(pdMS_TO_TICKS(55)) at 100 Hz
+//      = 5 ticks = 40..50 ms actual = sometimes below spec. New value
+//      gives 60..70 ms minimum 60 ms. Kept as vTaskDelay (busy-wait is
+//      heavy at 50 ms; an extra 10 ms on the yield is cheap).
+//   4. `sps30.c` (4 sites) — Sensirion-style 5 ms inter-command waits in
+//      serial read, data-ready poll, measurement read, status read.
+//      Datasheet allows up to 5 ms response; 1-tick vTaskDelay was 0..10 ms
+//      = could miss the response window.
+//   5. `veml7700.c` (1 site) — post-wake 5 ms wait. Datasheet tWAKE = 2.5 ms.
+//
+// **Files audited and intentionally NOT changed:**
+//   * `bme688.c` — post-measure 60 ms (6 ticks = 50..60 ms actual; chip
+//     max 46 ms; thin margin but always above spec). Reset-poll waits are
+//     inside iteration loops where natural retry covers any short wait.
+//   * `bmp390.c` — post-measure 30 ms (3 ticks = 20..30 ms; chip needs
+//     ~13 ms; comfortable margin).
+//   * `i2c_bus.c` — LDO2 settle 10 ms (LDO2 hardware turn-on is ~1 ms;
+//     even 0 ms would be fine).
+//   * `bme280.c` reset/NVM polling — short waits inside polling loops.
+//
+// **Pin-cite primary source:** Sensirion SHT45 datasheet §"Measurement
+// Conversion Time" specifies typ 8.2 ms / max 9.4 ms for high-precision
+// command 0xFD, and §"Measurement Sequence" confirms T-then-H ordering.
+// FreeRTOS ESP-IDF port docs confirm `pdMS_TO_TICKS()` truncates and
+// `vTaskDelay(N)` actual sleep is `(N-1)..N × tick_period`.
+//
+// **Affected boards:** all four (FeatherS3-D, QT Py ESP32-PICO, Heltec V2,
+// Heltec V2 4MB) — same FreeRTOS tick rate, same drivers, same fix.
+// Production dust node esp32-5965048 (FeatherS3-D, SHT45 + BMP581 + SPS30)
+// gets all five driver fixes.
+//
+// **Memory notes:** `reference_sht45.md` (NEW) — full SHT45 reference
+// including the FreeRTOS sub-tick trap section. `feedback_freertos_subtick_vtaskdelay.md`
+// (NEW) — generic feedback so future drivers don't repeat the pattern.
+//
+// **Rollback:** revert sht45.c, bmp581.c, bme280.c, sps30.c, veml7700.c,
+// version.h. No public API changes, no sdkconfig changes, no partition
+// changes — pure timing fix. OTA-safe from V2.3.30. 20 release artefacts
+// (5 × 4 boards).
+//
 // V2.3.30 — sensor serials at boot + VEML7700 ambient-light driver.
 //
 // **Headline:** small additive release — diagnostic-friendly serial-number
@@ -447,4 +523,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.30"
+#define VERSION_STR "V2.3.31"

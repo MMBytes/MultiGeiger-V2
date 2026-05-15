@@ -4,6 +4,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -83,7 +84,9 @@ static esp_err_t sps30_read_serial(char *out, size_t outsz) {
     if (!s_dev || !out || outsz < 33) return ESP_ERR_INVALID_ARG;
     esp_err_t err = send_cmd(CMD_READ_SERIAL);
     if (err != ESP_OK) return err;
-    vTaskDelay(pdMS_TO_TICKS(5));   // datasheet: max 5 ms before result available
+    // V2.3.31: busy-wait. vTaskDelay(pdMS_TO_TICKS(5)) at 100 Hz tick = 1 tick
+    // = 0..10 ms actual; the 0 ms case races the chip's max-5-ms response time.
+    esp_rom_delay_us(5000);
 
     uint8_t buf[48];
     err = recv(buf, sizeof(buf));
@@ -167,7 +170,7 @@ bool sps30_present(void) {
 static esp_err_t wait_data_ready(void) {
     for (int i = 0; i < 10; i++) {
         if (send_cmd(CMD_READ_DATA_READY) != ESP_OK) return ESP_FAIL;
-        vTaskDelay(pdMS_TO_TICKS(5));
+        esp_rom_delay_us(5000);   // V2.3.31: precise wait — see file header
         uint8_t buf[3];
         if (recv(buf, sizeof(buf)) != ESP_OK) return ESP_FAIL;
         if (crc8(buf, 2) != buf[2]) return ESP_FAIL;
@@ -188,7 +191,8 @@ esp_err_t sps30_read(pm_sample_t *out) {
     }
 
     if (send_cmd(CMD_READ_MEASURED) != ESP_OK) return ESP_FAIL;
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // V2.3.31: busy-wait — vTaskDelay(pdMS_TO_TICKS(5)) at 100 Hz = 0..10 ms.
+    esp_rom_delay_us(5000);
 
     // Float mode: 10 floats × (2 bytes data + 1 byte CRC) × 2 words = 60 bytes.
     // Layout per float: [hi_word_b0, hi_word_b1, hi_crc, lo_word_b0, lo_word_b1, lo_crc].
@@ -235,7 +239,8 @@ esp_err_t sps30_read_device_status(uint32_t *status_out) {
     if (!status_out) return ESP_ERR_INVALID_ARG;
 
     if (send_cmd(CMD_READ_DEVICE_STATUS) != ESP_OK) return ESP_FAIL;
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // V2.3.31: busy-wait — vTaskDelay(pdMS_TO_TICKS(5)) at 100 Hz = 0..10 ms.
+    esp_rom_delay_us(5000);
 
     // 4-byte status word as 2 words × (2 data bytes + 1 CRC) = 6 bytes.
     uint8_t buf[6];

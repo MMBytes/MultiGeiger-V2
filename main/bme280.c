@@ -247,8 +247,11 @@ esp_err_t bme280_read(float *t_out, float *h_out, float *p_out) {
 
     // T x2 + P x16 + H x1 worst-case measurement time per datasheet 9.1:
     //   t_meas = 1.25 + 2.3*2 + (2.3*16 + 0.575) + (2.3*1 + 0.575) ≈ 46.1 ms
-    // Wait 55 ms for comfortable margin.
-    vTaskDelay(pdMS_TO_TICKS(55));
+    // V2.3.31: bumped 55 → 70 ms. At CONFIG_FREERTOS_HZ=100 (10 ms tick),
+    // pdMS_TO_TICKS(55) = 5 ticks → 40..50 ms actual sleep, sometimes BELOW
+    // the chip's 46.1 ms requirement → stale-register read with no error.
+    // pdMS_TO_TICKS(70) = 7 ticks → 60..70 ms guaranteed minimum 60 ms.
+    vTaskDelay(pdMS_TO_TICKS(70));
 
     uint8_t d[8];
     err = read_regs(REG_DATA, d, sizeof(d));

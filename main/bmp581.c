@@ -3,6 +3,7 @@
 #include <string.h>
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -200,7 +201,11 @@ esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
     esp_err_t err = write_reg(REG_ODR_CONFIG, ODR_CONFIG_FORCED);
     if (err != ESP_OK) return err;
 
-    vTaskDelay(pdMS_TO_TICKS(FORCED_WAIT_MS));
+    // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(12)) at the default
+    // CONFIG_FREERTOS_HZ=100 (10 ms tick) rounds to 1 tick = 0..10 ms actual,
+    // shorter than the chip's 11.4 ms forced-mode conversion → stale data
+    // register read. 12 ms busy-wait per 150 s TX cycle = 0.008 % CPU.
+    esp_rom_delay_us(FORCED_WAIT_MS * 1000);
 
     // Burst-read 6 bytes from TEMP_DATA_XLSB. Datasheet §4.5.1 mandates a
     // single-burst read of all 6 data bytes to ride the shadow-register logic

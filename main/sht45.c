@@ -2,6 +2,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -46,7 +47,11 @@ static esp_err_t sht45_read_serial(uint32_t *serial) {
     if (!s_dev || !serial) return ESP_FAIL;
     esp_err_t err = send_cmd(CMD_READ_SERIAL);
     if (err != ESP_OK) return err;
-    vTaskDelay(pdMS_TO_TICKS(2));   // datasheet: ~1 ms; 2 ms gives margin
+    // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(2)) at the default
+    // CONFIG_FREERTOS_HZ=100 (10 ms tick) is 1 tick = 0..10 ms actual — it
+    // could return immediately, before the chip has the serial ready (datasheet
+    // says ~1 ms). 2 ms busy-wait costs nothing at boot and is deterministic.
+    esp_rom_delay_us(2000);
     uint8_t buf[6];
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
     if (err != ESP_OK) return err;
@@ -70,7 +75,14 @@ static esp_err_t try_init_pass(uint32_t reset_wait_ms, const char *label) {
         ESP_LOGW(TAG, "[%s] soft_reset write: %s", label, esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(reset_wait_ms));
+    // V2.3.31: for sub-20 ms post-reset waits use esp_rom_delay_us so the
+    // 100 Hz tick rate doesn't shorten the wait. ≥20 ms can stay on
+    // vTaskDelay (worst-case quantisation is small relative to the wait).
+    if (reset_wait_ms < 20) {
+        esp_rom_delay_us(reset_wait_ms * 1000);
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(reset_wait_ms));
+    }
 
     // Inline the measurement+read so we can log each step. Mirrors
     // sht45_read but with verbose error reporting.
@@ -79,7 +91,9 @@ static esp_err_t try_init_pass(uint32_t reset_wait_ms, const char *label) {
         ESP_LOGW(TAG, "[%s] measure_high write: %s", label, esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(10));   // 8.2 ms typical, 9.4 ms max
+    // V2.3.31: 8.2 ms typical, 9.4 ms max — vTaskDelay(pdMS_TO_TICKS(10))
+    // = 1 tick at 100 Hz = 0..10 ms actual. See reference_sht45.md.
+    esp_rom_delay_us(15000);
 
     uint8_t buf[6];
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
@@ -192,8 +206,17 @@ esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
         return err;
     }
 
-    // High-precision conversion: 8.2 ms typical, 9.4 ms max. 10 ms is safe.
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // V2.3.31: precise busy-wait for the post-measurement window. The previous
+    // vTaskDelay(pdMS_TO_TICKS(10)) was the root cause of intermittent H=0.00%
+    // (with valid T) and post-measure NACK in V2.3.0..V2.3.30: at the default
+    // CONFIG_FREERTOS_HZ=100 (10 ms tick) it evaluates to vTaskDelay(1) which
+    // sleeps 0..10 ms. Sometimes shorter than the chip's 9.4 ms max conversion
+    // time → I²C address NACK on the recv (Mode 2) OR a successful read where
+    // the H register hasn't latched yet (Mode 1: H=0x0000, CRC of 00 00 = 0x81
+    // passes the integrity check). Switching to esp_rom_delay_us() costs ~15 ms
+    // of CPU per 150 s TX cycle = 0.01 % — negligible. See reference_sht45.md
+    // §"FreeRTOS sub-tick trap" for the full diagnosis.
+    esp_rom_delay_us(15000);
 
     uint8_t buf[6];
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);

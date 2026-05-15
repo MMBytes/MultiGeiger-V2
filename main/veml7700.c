@@ -4,6 +4,7 @@
 #include "veml7700.h"
 
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -96,7 +97,10 @@ esp_err_t veml7700_init(i2c_master_bus_handle_t bus) {
         s_dev = NULL;
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(5)) at 100 Hz tick
+    // = 1 tick = 0..10 ms actual, sometimes shorter than tWAKE = 2.5 ms but
+    // also unpredictable; busy-wait is deterministic and only runs once at init.
+    esp_rom_delay_us(5000);
 
     // 2. Apply our default operating mode (gain + IT).
     err = reg_write16(REG_ALS_CONFIG, build_config(DEFAULT_GAIN, DEFAULT_IT));

@@ -1,159 +1,45 @@
 #include "config.h"
 
 #include <string.h>
+#include <stdlib.h>
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "util.h"
 
 static const char *TAG = "config";
 static const char *NS  = "geiger";
 
 // --- Compile-time defaults ---------------------------------------------------
-// Change a DEF_* here and reflash to seed a blank NVS; /config POST is the
-// runtime path for everything else.
-
-// WiFi creds default to empty — first-boot users configure them via the
-// 2-minute AP window. ap_name + wifi_hostname also default empty so main.c
-// can fill them with chip-id-derived defaults after reading the factory MAC.
-// All other defaults stay populated so a clean device still transmits
-// correctly once WiFi is configured.
-#define DEF_WIFI_SSID       ""
-#define DEF_WIFI_PASSWORD   ""
-#define DEF_WIFI_HOSTNAME   ""
-#define DEF_AP_NAME         ""
-#define DEF_SEND_MADAVI     true
-#define DEF_MADAVI_HTTPS    true
-#define DEF_SEND_SENSORC    true
-#define DEF_SENSORC_HTTPS   true
-#define DEF_SEND_RADMON     false
-#define DEF_RADMON_HTTPS    true
-#define DEF_RADMON_USER     ""
-#define DEF_RADMON_PASSWORD ""
-#define DEF_NTP_SERVER      "pool.ntp.org"
-#define DEF_NTP_SERVER2     ""
-#define DEF_NTP_SERVER3     ""
-#define DEF_TZ_POSIX        "AEST-10AEDT,M10.1.0,M4.1.0/3"
-#define DEF_AP_PASSWORD     "ESP32Geiger"
-#define DEF_TX_INTERVAL_MS  150000
-#define DEF_ALTITUDE_M      0.0f
-#define DEF_SEND_SEALEVEL   false
-#define DEF_FTP_ENABLED     false
-#define DEF_FTP_TLS         false
-#define DEF_FTP_HOST        ""
-#define DEF_FTP_USER        ""
-#define DEF_FTP_PASSWORD    ""
-#define DEF_FTP_PATH        ""
-#define DEF_FTP_INTERVAL_MIN 60
-#define DEF_FTP_PS_DISABLED false
-// FTPS TLS-version cap. Default true = capped at TLS 1.2.
 //
-// V2.3.15 bench testing on the project's LAN FTPS server (192.168.123.1)
-// confirmed: TLS 1.3 + this server = STOR fails with "426 Data Connection:
-// Connection reset by peer" on the data channel. Verified independent of
-// session reuse (with PSK or without — same 426). Most likely the server
-// either doesn't fully implement TLS 1.3 on the data channel, or its
-// V2.3.23: default flipped to false now that V2.3.22's bidirectional close
-// fix is production-validated against the project's LAN FTPS server. The
-// /config "Limit FTPS to TLS 1.2" checkbox stays for any future server we
-// haven't yet handled. Existing devices upgrading from V2.3.22 keep their
-// saved value via NVS — only fresh / NVS-erased devices get the new default.
-// Pre-V2.3.22 the default was true because TLS 1.3 against this server got
-// "426 Connection reset" (now fixed by draining server's NewSessionTickets
-// before TCP close). See reference_ftps_tls13_investigation.md.
-#define DEF_FTP_TLS12_ONLY  false
-#define DEF_SPEAKER_TICK    false
-#define DEF_LED_TICK        true
-#define DEF_PLAY_SOUND      false
-#define DEF_SHOW_DISPLAY    true
-// V2.3.30: OLED contrast / SerLCD backlight default. 80 % matches the
-// V2.3.28..V2.3.29 hardcoded contrast register 0xCC; users who don't
-// change the new dropdown stay at the brightness they already have.
-#define DEF_OLED_BRIGHTNESS_PCT 80
-#define DEF_WIFI_11BG_ONLY  false
-#define DEF_WIFI_HT20_ONLY  false
-#define DEF_WIFI_PS_DISABLED false
-#define DEF_USE_EXT_ANTENNA  false
-#define DEF_TUBE_ENABLED     true
-#define DEF_SEND_OSM         false
-#define DEF_OSM_BOX_ID       ""
-// V2.3.16: openSenseMap access token. Empty default = unauthenticated upload
-// (the historical Luftdaten path). Set via /config when the box-side
-// authentication toggle is enabled on the OSM dashboard.
-#define DEF_OSM_ACCESS_TOKEN ""
-#define DEF_SEND_AQI         false
-#define DEF_AQI_TOKEN        ""
+// V2.4.1: all field defaults are declared INLINE in `config_fields.def`
+// as the third (or fourth) argument of each X_* macro. Adding a new
+// field's default = same line as the field declaration. The previous
+// DEF_* macro tier (~50 #define lines) is gone — one source of truth.
 
 void config_defaults(config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->wifi_ssid,       DEF_WIFI_SSID,       sizeof(cfg->wifi_ssid) - 1);
-    strncpy(cfg->wifi_password,   DEF_WIFI_PASSWORD,   sizeof(cfg->wifi_password) - 1);
-    strncpy(cfg->wifi_hostname,   DEF_WIFI_HOSTNAME,   sizeof(cfg->wifi_hostname) - 1);
-    strncpy(cfg->ap_name,         DEF_AP_NAME,         sizeof(cfg->ap_name) - 1);
-    cfg->send_madavi   = DEF_SEND_MADAVI;
-    cfg->madavi_https  = DEF_MADAVI_HTTPS;
-    cfg->send_sensorc  = DEF_SEND_SENSORC;
-    cfg->sensorc_https = DEF_SENSORC_HTTPS;
-    cfg->send_radmon   = DEF_SEND_RADMON;
-    cfg->radmon_https  = DEF_RADMON_HTTPS;
-    strncpy(cfg->radmon_user,     DEF_RADMON_USER,     sizeof(cfg->radmon_user) - 1);
-    strncpy(cfg->radmon_password, DEF_RADMON_PASSWORD, sizeof(cfg->radmon_password) - 1);
-    strncpy(cfg->ntp_server,      DEF_NTP_SERVER,      sizeof(cfg->ntp_server) - 1);
-    strncpy(cfg->ntp_server2,     DEF_NTP_SERVER2,     sizeof(cfg->ntp_server2) - 1);
-    strncpy(cfg->ntp_server3,     DEF_NTP_SERVER3,     sizeof(cfg->ntp_server3) - 1);
-    strncpy(cfg->tz_posix,        DEF_TZ_POSIX,        sizeof(cfg->tz_posix) - 1);
-    strncpy(cfg->ap_password,     DEF_AP_PASSWORD,     sizeof(cfg->ap_password) - 1);
-    cfg->tx_interval_ms       = DEF_TX_INTERVAL_MS;
-    cfg->station_altitude_m   = DEF_ALTITUDE_M;
-    cfg->send_sealevel_pressure = DEF_SEND_SEALEVEL;
-    cfg->ftp_enabled          = DEF_FTP_ENABLED;
-    cfg->ftp_tls              = DEF_FTP_TLS;
-    strncpy(cfg->ftp_host,     DEF_FTP_HOST,     sizeof(cfg->ftp_host) - 1);
-    strncpy(cfg->ftp_user,     DEF_FTP_USER,     sizeof(cfg->ftp_user) - 1);
-    strncpy(cfg->ftp_password, DEF_FTP_PASSWORD, sizeof(cfg->ftp_password) - 1);
-    strncpy(cfg->ftp_path,     DEF_FTP_PATH,     sizeof(cfg->ftp_path) - 1);
-    cfg->ftp_interval_min     = DEF_FTP_INTERVAL_MIN;
-    cfg->ftp_ps_disabled      = DEF_FTP_PS_DISABLED;
-    cfg->ftp_tls12_only       = DEF_FTP_TLS12_ONLY;
-    cfg->speaker_tick         = DEF_SPEAKER_TICK;
-    cfg->led_tick             = DEF_LED_TICK;
-    cfg->play_sound           = DEF_PLAY_SOUND;
-    cfg->show_display         = DEF_SHOW_DISPLAY;
-    cfg->oled_brightness_pct  = DEF_OLED_BRIGHTNESS_PCT;
-    cfg->wifi_11bg_only       = DEF_WIFI_11BG_ONLY;
-    cfg->wifi_ht20_only       = DEF_WIFI_HT20_ONLY;
-    cfg->wifi_ps_disabled     = DEF_WIFI_PS_DISABLED;
-    cfg->use_external_antenna = DEF_USE_EXT_ANTENNA;
-    cfg->tube_enabled         = DEF_TUBE_ENABLED;
-    cfg->send_osm             = DEF_SEND_OSM;
-    strncpy(cfg->osm_box_id,       DEF_OSM_BOX_ID,       sizeof(cfg->osm_box_id) - 1);
-    strncpy(cfg->osm_access_token, DEF_OSM_ACCESS_TOKEN, sizeof(cfg->osm_access_token) - 1);
-    cfg->send_aqi             = DEF_SEND_AQI;
-    strncpy(cfg->aqi_token,  DEF_AQI_TOKEN,  sizeof(cfg->aqi_token)  - 1);
-}
 
-static void load_str(nvs_handle_t h, const char *key, char *buf, size_t bufsz) {
-    size_t len = bufsz;
-    nvs_get_str(h, key, buf, &len);  // leaves default untouched on failure
-}
-
-static void load_bool(nvs_handle_t h, const char *key, bool *out) {
-    uint8_t v;
-    if (nvs_get_u8(h, key, &v) == ESP_OK) *out = (v != 0);
-}
-
-static void load_u32(nvs_handle_t h, const char *key, uint32_t *out) {
-    uint32_t v;
-    if (nvs_get_u32(h, key, &v) == ESP_OK) *out = v;
+    // Generated default assignments — see config_fields.def. String fields
+    // use the bounded-copy safe_strcpy helper. Numeric / bool fields use
+    // direct assign.
+    #define X_STR(name, size, key, def)         \
+        safe_strcpy(cfg->name, (def), (size));
+    #define X_BOOL(name, key, def)              cfg->name = (def);
+    #define X_U32(name, key, def, lo, hi)       cfg->name = (def);
+    #define X_F32(name, key, def, lo, hi)       cfg->name = (def);
+    #define X_U8(name, key, def, lo, hi)        cfg->name = (def);
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
 }
 
 // NVS has no float type. Store the IEEE-754 bit pattern in a u32 so we keep
 // the full 32-bit precision without the round-trip lossiness of snprintf/atof.
-static void load_f32(nvs_handle_t h, const char *key, float *out) {
-    uint32_t v;
-    if (nvs_get_u32(h, key, &v) == ESP_OK) {
-        memcpy(out, &v, sizeof(*out));
-    }
-}
 
 void config_load(config_t *cfg) {
     config_defaults(cfg);
@@ -167,62 +53,77 @@ void config_load(config_t *cfg) {
         ESP_LOGW(TAG, "nvs_open failed: %s — using defaults", esp_err_to_name(err));
         return;
     }
-    load_str (h, "wifi_ssid",  cfg->wifi_ssid,       sizeof(cfg->wifi_ssid));
-    load_str (h, "wifi_pw",    cfg->wifi_password,   sizeof(cfg->wifi_password));
-    load_str (h, "wifi_host",  cfg->wifi_hostname,   sizeof(cfg->wifi_hostname));
-    load_str (h, "ap_name",    cfg->ap_name,         sizeof(cfg->ap_name));
-    load_bool(h, "wifi_11bg",  &cfg->wifi_11bg_only);
-    load_bool(h, "wifi_ht20",  &cfg->wifi_ht20_only);
-    load_bool(h, "wifi_ps_dis",&cfg->wifi_ps_disabled);
-    load_bool(h, "wifi_ext_a", &cfg->use_external_antenna);
-    load_bool(h, "send_mad",   &cfg->send_madavi);
-    load_bool(h, "mad_https",  &cfg->madavi_https);
-    load_bool(h, "send_sc",    &cfg->send_sensorc);
-    load_bool(h, "sc_https",   &cfg->sensorc_https);
-    load_bool(h, "send_rad",   &cfg->send_radmon);
-    load_bool(h, "rad_https",  &cfg->radmon_https);
-    load_str (h, "rad_user",   cfg->radmon_user,     sizeof(cfg->radmon_user));
-    load_str (h, "rad_pw",     cfg->radmon_password, sizeof(cfg->radmon_password));
-    load_str (h, "ntp",        cfg->ntp_server,      sizeof(cfg->ntp_server));
-    load_str (h, "ntp2",       cfg->ntp_server2,     sizeof(cfg->ntp_server2));
-    load_str (h, "ntp3",       cfg->ntp_server3,     sizeof(cfg->ntp_server3));
-    load_str (h, "tz_posix",   cfg->tz_posix,        sizeof(cfg->tz_posix));
-    load_str (h, "ap_pw",      cfg->ap_password,     sizeof(cfg->ap_password));
-    load_u32 (h, "tx_int_ms",  &cfg->tx_interval_ms);
-    load_f32 (h, "alt_m",      &cfg->station_altitude_m);
-    load_bool(h, "send_sl",    &cfg->send_sealevel_pressure);
-    load_bool(h, "ftp_en",     &cfg->ftp_enabled);
-    load_bool(h, "ftp_tls",    &cfg->ftp_tls);
-    load_str (h, "ftp_host",   cfg->ftp_host,     sizeof(cfg->ftp_host));
-    load_str (h, "ftp_user",   cfg->ftp_user,     sizeof(cfg->ftp_user));
-    load_str (h, "ftp_pw",     cfg->ftp_password, sizeof(cfg->ftp_password));
-    load_str (h, "ftp_path",   cfg->ftp_path,     sizeof(cfg->ftp_path));
-    load_u32 (h, "ftp_int",    &cfg->ftp_interval_min);
-    load_bool(h, "ftp_ps_dis", &cfg->ftp_ps_disabled);
-    load_bool(h, "ftp_t12only",&cfg->ftp_tls12_only);
-    load_bool(h, "sp_tick",    &cfg->speaker_tick);
-    load_bool(h, "led_tick",   &cfg->led_tick);
-    load_bool(h, "play_sound", &cfg->play_sound);
-    load_bool(h, "show_disp",  &cfg->show_display);
-    {
-        // V2.3.30: raw uint8_t load (load_bool would clamp to 0/1).
-        uint8_t v;
-        if (nvs_get_u8(h, "oled_bright", &v) == ESP_OK) {
-            cfg->oled_brightness_pct = v;
-        }
-    }
-    load_bool(h, "tube_en",    &cfg->tube_enabled);
-    load_bool(h, "send_osm",   &cfg->send_osm);
-    load_str (h, "osm_box",    cfg->osm_box_id,       sizeof(cfg->osm_box_id));
-    load_str (h, "osm_tok",    cfg->osm_access_token, sizeof(cfg->osm_access_token));
-    load_bool(h, "send_aqi",   &cfg->send_aqi);
-    load_str (h, "aqi_tok",    cfg->aqi_token,  sizeof(cfg->aqi_token));
+
+    // Generated NVS-read loop. Each field keeps its default on missing
+    // (ESP_ERR_NVS_NOT_FOUND — first boot or newly-added schema field).
+    // V2.4.1 (B2): unexpected failures (ESP_ERR_NVS_INVALID_LENGTH —
+    // stored value larger than the current buffer, e.g. downgrade from
+    // a future version that grew a field; or any other non-OK return)
+    // now log ESP_LOGW so the user doesn't silently see their saved
+    // value reverting to the compile-time default. The buffer is left
+    // untouched on every failure (verified against the IDF nvs_get_str
+    // contract), so this is purely a visibility fix.
+    #define CFG_LOAD_LOG(_r, _key)                                              \
+        do {                                                                    \
+            if ((_r) != ESP_OK && (_r) != ESP_ERR_NVS_NOT_FOUND) {              \
+                ESP_LOGW(TAG, "load '%s': %s (kept default)",                   \
+                         (_key), esp_err_to_name(_r));                          \
+            }                                                                   \
+        } while (0)
+
+    #define X_STR(name, size, key, def)               \
+        do {                                          \
+            size_t _len = (size);                     \
+            esp_err_t _r = nvs_get_str(h, key, cfg->name, &_len); \
+            CFG_LOAD_LOG(_r, key);                    \
+        } while (0);
+    #define X_BOOL(name, key, def)                    \
+        do {                                          \
+            uint8_t _v;                               \
+            esp_err_t _r = nvs_get_u8(h, key, &_v);   \
+            if (_r == ESP_OK) cfg->name = (_v != 0); \
+            CFG_LOAD_LOG(_r, key);                    \
+        } while (0);
+    #define X_U32(name, key, def, lo, hi)             \
+        do {                                          \
+            uint32_t _v;                              \
+            esp_err_t _r = nvs_get_u32(h, key, &_v);  \
+            if (_r == ESP_OK) cfg->name = _v;         \
+            CFG_LOAD_LOG(_r, key);                    \
+        } while (0);
+    #define X_F32(name, key, def, lo, hi)             \
+        do {                                          \
+            uint32_t _u;                              \
+            esp_err_t _r = nvs_get_u32(h, key, &_u);  \
+            if (_r == ESP_OK) memcpy(&cfg->name, &_u, sizeof(float)); \
+            CFG_LOAD_LOG(_r, key);                    \
+        } while (0);
+    #define X_U8(name, key, def, lo, hi)              \
+        do {                                          \
+            uint8_t _v;                               \
+            esp_err_t _r = nvs_get_u8(h, key, &_v);   \
+            if (_r == ESP_OK) cfg->name = _v;         \
+            CFG_LOAD_LOG(_r, key);                    \
+        } while (0);
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
+    #undef CFG_LOAD_LOG
+
     nvs_close(h);
+
+    // Boot-time dump — DELIBERATELY NOT generated from the schema. The
+    // current shape (grouping fields per line, masking password fields
+    // under a single token) is more readable than what a per-field loop
+    // would produce, and the cost of updating this when adding a field
+    // is tiny vs. the benefit of a clean serial trace.
     ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
              (unsigned long)cfg->tx_interval_ms);
 
-    // Full dump — passwords are masked so /log + FTP'd files don't leak them.
     #define MASK(s) ((s)[0] ? "<set>" : "<empty>")
     ESP_LOGI(TAG, "  wifi:             ssid=%s pw=%s host=%s ap_name=%s",
              cfg->wifi_ssid, MASK(cfg->wifi_password), cfg->wifi_hostname, cfg->ap_name);
@@ -275,61 +176,40 @@ esp_err_t config_save(const config_t *cfg) {
         ESP_LOGE(TAG, "nvs_open RW failed: %s", esp_err_to_name(err));
         return err;
     }
-    #define SET_STR(k, v)  do { err = nvs_set_str(h, k, v); if (err) goto out; } while (0)
-    #define SET_U8(k, v)   do { uint8_t u = (v) ? 1 : 0; err = nvs_set_u8(h, k, u); if (err) goto out; } while (0)
-    #define SET_U32(k, v)  do { err = nvs_set_u32(h, k, v); if (err) goto out; } while (0)
-    #define SET_F32(k, v)  do { uint32_t u; memcpy(&u, &(v), sizeof(u)); err = nvs_set_u32(h, k, u); if (err) goto out; } while (0)
-    SET_STR("wifi_ssid",  cfg->wifi_ssid);
-    SET_STR("wifi_pw",    cfg->wifi_password);
-    SET_STR("wifi_host",  cfg->wifi_hostname);
-    SET_STR("ap_name",    cfg->ap_name);
-    SET_U8 ("wifi_11bg",  cfg->wifi_11bg_only);
-    SET_U8 ("wifi_ht20",  cfg->wifi_ht20_only);
-    SET_U8 ("wifi_ps_dis",cfg->wifi_ps_disabled);
-    SET_U8 ("wifi_ext_a", cfg->use_external_antenna);
-    SET_U8 ("send_mad",   cfg->send_madavi);
-    SET_U8 ("mad_https",  cfg->madavi_https);
-    SET_U8 ("send_sc",    cfg->send_sensorc);
-    SET_U8 ("sc_https",   cfg->sensorc_https);
-    SET_U8 ("send_rad",   cfg->send_radmon);
-    SET_U8 ("rad_https",  cfg->radmon_https);
-    SET_STR("rad_user",   cfg->radmon_user);
-    SET_STR("rad_pw",     cfg->radmon_password);
-    SET_STR("ntp",        cfg->ntp_server);
-    SET_STR("ntp2",       cfg->ntp_server2);
-    SET_STR("ntp3",       cfg->ntp_server3);
-    SET_STR("tz_posix",   cfg->tz_posix);
-    SET_STR("ap_pw",      cfg->ap_password);
-    SET_U32("tx_int_ms",  cfg->tx_interval_ms);
-    SET_F32("alt_m",      cfg->station_altitude_m);
-    SET_U8 ("send_sl",    cfg->send_sealevel_pressure);
-    SET_U8 ("ftp_en",     cfg->ftp_enabled);
-    SET_U8 ("ftp_tls",    cfg->ftp_tls);
-    SET_STR("ftp_host",   cfg->ftp_host);
-    SET_STR("ftp_user",   cfg->ftp_user);
-    SET_STR("ftp_pw",     cfg->ftp_password);
-    SET_STR("ftp_path",   cfg->ftp_path);
-    SET_U32("ftp_int",    cfg->ftp_interval_min);
-    SET_U8 ("ftp_ps_dis", cfg->ftp_ps_disabled);
-    SET_U8 ("ftp_t12only",cfg->ftp_tls12_only);
-    SET_U8 ("sp_tick",    cfg->speaker_tick);
-    SET_U8 ("led_tick",   cfg->led_tick);
-    SET_U8 ("play_sound", cfg->play_sound);
-    SET_U8 ("show_disp",  cfg->show_display);
-    // V2.3.30: raw uint8_t save (the SET_U8 macro above clamps to 0/1).
-    err = nvs_set_u8(h, "oled_bright", cfg->oled_brightness_pct);
-    if (err) goto out;
-    SET_U8 ("tube_en",    cfg->tube_enabled);
-    SET_U8 ("send_osm",   cfg->send_osm);
-    SET_STR("osm_box",    cfg->osm_box_id);
-    SET_STR("osm_tok",    cfg->osm_access_token);
-    SET_U8 ("send_aqi",   cfg->send_aqi);
-    SET_STR("aqi_tok",    cfg->aqi_token);
+
+    // Generated NVS-write loop. Float fields stored as u32 bit pattern
+    // (no NVS native float type). Errors short-circuit to `out:` so we
+    // always commit (or skip) cleanly and close the handle.
+    #define X_STR(name, size, key, def)               \
+        err = nvs_set_str(h, key, cfg->name);         \
+        if (err) goto out;
+    #define X_BOOL(name, key, def)                    \
+        do {                                          \
+            uint8_t _u = cfg->name ? 1 : 0;           \
+            err = nvs_set_u8(h, key, _u);             \
+            if (err) goto out;                        \
+        } while (0);
+    #define X_U32(name, key, def, lo, hi)             \
+        err = nvs_set_u32(h, key, cfg->name);         \
+        if (err) goto out;
+    #define X_F32(name, key, def, lo, hi)             \
+        do {                                          \
+            uint32_t _u;                              \
+            memcpy(&_u, &cfg->name, sizeof(float));   \
+            err = nvs_set_u32(h, key, _u);            \
+            if (err) goto out;                        \
+        } while (0);
+    #define X_U8(name, key, def, lo, hi)              \
+        err = nvs_set_u8(h, key, cfg->name);          \
+        if (err) goto out;
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
+
     err = nvs_commit(h);
-    #undef SET_STR
-    #undef SET_U8
-    #undef SET_U32
-    #undef SET_F32
 out:
     nvs_close(h);
     if (err == ESP_OK) {
@@ -338,4 +218,73 @@ out:
         ESP_LOGE(TAG, "config_save failed: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+// --- HTTP POST helpers (consumed by http_server.c::config_post) ------------
+//
+// V2.4.1: the per-field POST dispatch is also derived from the schema.
+// Keeping the helpers HERE (in config.c) rather than http_server.c keeps
+// schema-touching code in one translation unit — http_server.c just calls
+// `config_post_preclear_bools()` then loops over the form body calling
+// `config_post_apply_field()` for each k=v.
+
+void config_post_preclear_bools(config_t *next) {
+    // Form submissions only include ticked checkboxes — every bool must
+    // be reset to false before parsing so unticked boxes apply.
+    #define X_STR(name, size, key, def)         /* string — not pre-cleared */
+    #define X_BOOL(name, key, def)              next->name = false;
+    #define X_U32(name, key, def, lo, hi)       /* numeric — kept */
+    #define X_F32(name, key, def, lo, hi)       /* numeric — kept */
+    #define X_U8(name, key, def, lo, hi)        /* numeric — kept */
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
+}
+
+bool config_post_apply_field(config_t *next, const char *key, const char *val) {
+    // Generated per-field dispatch. Each branch returns true when the
+    // key matches, regardless of whether the value passed validation —
+    // out-of-range numerics keep the prior field value silently.
+    #define X_STR(name, size, k, def)                            \
+        if (strcmp(key, k) == 0) {                               \
+            safe_strcpy(next->name, val, (size));                \
+            return true;                                         \
+        }
+    #define X_BOOL(name, k, def)                                 \
+        if (strcmp(key, k) == 0) {                               \
+            next->name = true;                                   \
+            return true;                                         \
+        }
+    #define X_U32(name, k, def, lo, hi)                          \
+        if (strcmp(key, k) == 0) {                               \
+            long _v = strtol(val, NULL, 10);                     \
+            if (_v >= (long)(lo) && _v <= (long)(hi))            \
+                next->name = (uint32_t)_v;                       \
+            return true;                                         \
+        }
+    #define X_F32(name, k, def, lo, hi)                          \
+        if (strcmp(key, k) == 0) {                               \
+            float _v = strtof(val, NULL);                        \
+            if (_v >= (lo) && _v <= (hi))                        \
+                next->name = _v;                                 \
+            return true;                                         \
+        }
+    #define X_U8(name, k, def, lo, hi)                           \
+        if (strcmp(key, k) == 0) {                               \
+            long _v = strtol(val, NULL, 10);                     \
+            if (_v >= (long)(lo) && _v <= (long)(hi))            \
+                next->name = (uint8_t)_v;                        \
+            return true;                                         \
+        }
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
+
+    return false;   // no schema field matched
 }

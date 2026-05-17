@@ -36,10 +36,20 @@ static portMUX_TYPE mux_cap = portMUX_INITIALIZER_UNLOCKED;
 static int64_t last_read_us = 0;
 
 // Per-pulse callback (speaker/LED tick). Set via tube_set_pulse_callback.
+// V2.4.1 (B4): write guarded by the same critical section style as the
+// other ISR-shared state in this file. An aligned 32-bit pointer store
+// is atomic per ESP32 TRM, but the bare write was the only ISR-touched
+// state in tube.c NOT going through portENTER_CRITICAL — fix the
+// inconsistency so future callers (post-boot reassignment) don't need
+// to re-discover the memory-barrier reasoning. Cost: ~10ns at boot,
+// nothing in the ISR hot path (read in ISR is still a single load).
 static volatile tube_pulse_cb_t s_pulse_cb = NULL;
+static portMUX_TYPE mux_pulse_cb = portMUX_INITIALIZER_UNLOCKED;
 
 void tube_set_pulse_callback(tube_pulse_cb_t cb) {
+    portENTER_CRITICAL(&mux_pulse_cb);
     s_pulse_cb = cb;
+    portEXIT_CRITICAL(&mux_pulse_cb);
 }
 
 // --- Recharge timer — 100 µs tick ---

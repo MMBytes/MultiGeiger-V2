@@ -28,11 +28,13 @@
 #include "display.h"
 #include "http_server.h"
 #include "log_ftp.h"
+#include "main_status.h"
 #include "neopixel.h"
 #include "ntp.h"
 #include "speaker.h"
 #include "transmission.h"
 #include "tube.h"
+#include "util.h"
 #include "version.h"
 
 static const char *TAG = "v2_main";
@@ -52,6 +54,19 @@ static uint32_t  g_chip_num;
 static EventGroupHandle_t s_events;
 #define EV_GOT_IP       BIT0
 #define EV_DISCONNECTED BIT1
+// V2.4.1 (A9): bit set by main_request_restart() to wake the main loop
+// from xEventGroupWaitBits — drops restart latency from up to 1 s
+// (the previous polled-flag pattern bounded by the loop's wait cap) to
+// the FreeRTOS context-switch time (~µs). Persistent state lives in
+// g_restart_requested below since the event bit is consumed by the
+// xClearOnExit=pdTRUE wait — see main loop policy.
+#define EV_RESTART      BIT2
+static volatile bool g_restart_requested = false;
+
+void main_request_restart(void) {
+    g_restart_requested = true;
+    xEventGroupSetBits(s_events, EV_RESTART);
+}
 
 // --- Soak diagnostics (carried over) ---
 static int64_t  t_attempt_start_us = 0;
@@ -68,10 +83,19 @@ static uint32_t tx_cycles   = 0;
 // --- Cached last-cycle snapshot (for the status page) ---
 //
 // All fields written ONLY by the main task in do_tx_cycle() (single writer);
-// read lock-free by the HTTP server task. Field types are 32-bit/64-bit
-// scalars so word-aligned loads/stores are torn-tolerant on Xtensa. A
-// momentary inconsistency between cpm/usvph and bme_t/h/p is acceptable
+// read lock-free by the HTTP server task. 32-bit scalar fields are
+// word-aligned and torn-tolerant on Xtensa LX6/LX7 — no lock needed.
+// A momentary inconsistency between cpm/usvph and bme_t/h/p is acceptable
 // — they're for at-a-glance status, not for accounting.
+//
+// V2.4.1 (B1): the 64-bit `g_last_cycle_at` IS NOT torn-tolerant on a
+// 32-bit core. A naive int64_t store is two 32-bit stores; a reader on
+// another task could see the high half of one write and the low half of
+// the next (manifest: momentary year-2038-ish garbage timestamp on the
+// status page for a few µs around each TX cycle). Protected by a
+// dedicated spinlock for the read/write pair below. The other scalars
+// don't need the lock — keeping them out preserves the existing zero-
+// cost reads on the hot status-page path.
 static uint32_t g_last_dt_ms      = 0;
 static uint32_t g_last_counts     = 0;
 static uint32_t g_last_cpm        = 0;
@@ -84,22 +108,33 @@ static float    g_last_bme_h      = 0.0f;
 static float    g_last_bme_p      = 0.0f;
 static int64_t  g_last_cycle_at   = 0;     // wall-clock unix epoch (0 = never)
 static uint32_t g_last_cycle_ms   = 0;     // monotonic uptime ms (0 = never)
+static portMUX_TYPE g_last_cycle_at_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Public accessors — declared inline in http_server.c via extern, see comment
-// at top of that file. These reads do NOT take a lock (see invariant above).
-uint32_t main_status_cycles(void)        { return tx_cycles; }
-uint32_t main_status_last_dt_ms(void)    { return g_last_dt_ms; }
-uint32_t main_status_last_cpm(void)      { return g_last_cpm; }
-float    main_status_last_usvph(void)    { return g_last_usvph; }
-uint32_t main_status_last_hv_pulses(void){ return g_last_hv_pulses; }
-bool     main_status_last_hv_error(void) { return g_last_hv_error; }
-bool     main_status_have_env(void)      { return g_last_bme_valid; }
-float    main_status_env_t(void)         { return g_last_bme_t; }
-float    main_status_env_h(void)         { return g_last_bme_h; }
-float    main_status_env_p(void)         { return g_last_bme_p; }
-int64_t  main_status_last_cycle_at(void) { return g_last_cycle_at; }
-uint32_t main_status_last_cycle_ms(void) { return g_last_cycle_ms; }
-uint32_t main_status_reconnects(void)    { return n_disconnects; }
+// Public snapshot getter — V2.4.1 (A4): replaces 13 individual extern
+// functions previously hand-declared at the top of http_server.c and
+// display.c. Reader gets every field in one call; the int64_t
+// `last_cycle_at` is read under the spinlock to pair with the write in
+// `do_tx_cycle` (B1 atomic fix). 32-bit fields are word-aligned and
+// torn-tolerant on Xtensa, so they don't take a lock — the snapshot is
+// not inter-field consistent (e.g. cpm could be from cycle N and env_t
+// from cycle N+1) but each scalar is individually intact.
+void main_status_snapshot(main_status_t *out) {
+    out->cycles         = tx_cycles;
+    out->last_dt_ms     = g_last_dt_ms;
+    out->last_cpm       = g_last_cpm;
+    out->last_usvph     = g_last_usvph;
+    out->last_hv_pulses = g_last_hv_pulses;
+    out->last_hv_error  = g_last_hv_error;
+    out->have_env       = g_last_bme_valid;
+    out->env_t          = g_last_bme_t;
+    out->env_h          = g_last_bme_h;
+    out->env_p          = g_last_bme_p;
+    portENTER_CRITICAL(&g_last_cycle_at_mux);
+    out->last_cycle_at  = g_last_cycle_at;
+    portEXIT_CRITICAL(&g_last_cycle_at_mux);
+    out->last_cycle_ms  = g_last_cycle_ms;
+    out->reconnects     = n_disconnects;
+}
 
 // V2.3.29: per-target enable accessor used by the multi-page display
 // task to hide disabled rows from the Uploads page (and skip the page
@@ -299,27 +334,11 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->station_altitude_m   = g_cfg.station_altitude_m;
     ctx->send_sealevel_pressure = g_cfg.send_sealevel_pressure;
 
-    ctx->madavi = (tx_target_t){
-        .enabled = g_cfg.send_madavi,
-        .url_http  = "http://api-rrd.madavi.de/data.php",
-        .url_https = "https://api-rrd.madavi.de/data.php",
-        .use_https = g_cfg.madavi_https,
-        .use_insecure = false,
-    };
-    ctx->sensorc = (tx_target_t){
-        .enabled = g_cfg.send_sensorc,
-        .url_http  = "http://api.sensor.community/v1/push-sensor-data/",
-        .url_https = "https://api.sensor.community/v1/push-sensor-data/",
-        .use_https = g_cfg.sensorc_https,
-        .use_insecure = false,
-    };
-    ctx->radmon = (tx_target_t){
-        .enabled = g_cfg.send_radmon,
-        .url_http  = "http://radmon.org/radmon.php",
-        .url_https = "https://radmon.org/radmon.php",
-        .use_https = g_cfg.radmon_https,
-        .use_insecure = false,
-    };
+    // V2.4.1 (C9): URLs moved to transmission.c. main.c just passes the
+    // per-cycle config flags; the helper fills the URL pair + insecure=false.
+    tx_target_configure(&ctx->madavi,  TX_TARGET_MADAVI,  g_cfg.send_madavi,  g_cfg.madavi_https);
+    tx_target_configure(&ctx->sensorc, TX_TARGET_SENSORC, g_cfg.send_sensorc, g_cfg.sensorc_https);
+    tx_target_configure(&ctx->radmon,  TX_TARGET_RADMON,  g_cfg.send_radmon,  g_cfg.radmon_https);
     ctx->radmon_user     = g_cfg.radmon_user;
     ctx->radmon_password = g_cfg.radmon_password;
 
@@ -367,7 +386,11 @@ static void do_tx_cycle(void) {
     g_last_usvph     = usvph;
     g_last_hv_pulses = hv_pulses;
     g_last_hv_error  = hv_error;
+    // V2.4.1 (B1): 64-bit store on a 32-bit core isn't atomic — wrap to
+    // pair with the spinlock'd read in main_status_last_cycle_at.
+    portENTER_CRITICAL(&g_last_cycle_at_mux);
     g_last_cycle_at  = (int64_t)time(NULL);
+    portEXIT_CRITICAL(&g_last_cycle_at_mux);
     g_last_cycle_ms  = (uint32_t)(esp_timer_get_time() / 1000LL);
 
     // Display: when the tube is disabled the radiation/CPM areas show zero
@@ -688,7 +711,7 @@ void app_main(void) {
     apc.ap.channel       = 1;
     apc.ap.max_connection = 4;
     if (strlen(g_cfg.ap_password) >= 8) {
-        strncpy((char *)apc.ap.password, g_cfg.ap_password, sizeof(apc.ap.password) - 1);
+        safe_strcpy((char *)apc.ap.password, g_cfg.ap_password, sizeof(apc.ap.password));
         apc.ap.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
         apc.ap.authmode = WIFI_AUTH_OPEN;
@@ -738,13 +761,17 @@ void app_main(void) {
     while (1) {
         TickType_t now = xTaskGetTickCount();
         TickType_t wait = (next_tx > now) ? (next_tx - now) : 1;
-        // Cap wait so post-loop polls (restart flag, NTP, AP window, FTP)
-        // run at least once a second. Without this cap the wait can be the
-        // full tx_interval (~150 s) and a restart flag set by /config or
-        // /update only fires after the next TX cycle.
+        // Cap wait so post-loop polls (NTP, AP window, STA watchdog, FTP)
+        // run at least once a second. The restart flag is now event-driven
+        // (V2.4.1 A9 — EV_RESTART wakes us within µs) but the other periodic
+        // checks still need the 1 s tick.
         if (wait > pdMS_TO_TICKS(1000)) wait = pdMS_TO_TICKS(1000);
         EventBits_t bits = xEventGroupWaitBits(
-            s_events, EV_GOT_IP | EV_DISCONNECTED, pdTRUE, pdFALSE, wait);
+            s_events,
+            EV_GOT_IP | EV_DISCONNECTED | EV_RESTART,
+            pdTRUE,    // clear matched bits — EV_RESTART persistence lives in g_restart_requested
+            pdFALSE,
+            wait);
 
         if (bits & EV_GOT_IP) {
             if (!ntp_started) {
@@ -776,8 +803,8 @@ void app_main(void) {
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
             wifi_config_t wc = { 0 };
-            strncpy((char *)wc.sta.ssid,     g_cfg.wifi_ssid,     sizeof(wc.sta.ssid) - 1);
-            strncpy((char *)wc.sta.password, g_cfg.wifi_password, sizeof(wc.sta.password) - 1);
+            safe_strcpy((char *)wc.sta.ssid,     g_cfg.wifi_ssid,     sizeof(wc.sta.ssid));
+            safe_strcpy((char *)wc.sta.password, g_cfg.wifi_password, sizeof(wc.sta.password));
             wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
             // All-channel scan + strongest-first. Default fast_scan picks
             // the first BSSID it finds matching the SSID, which on mesh /
@@ -809,11 +836,13 @@ void app_main(void) {
         }
 
         // Defer config-save / OTA restart until the TX worker has drained
-         // its current job — killing an HTTPS POST mid-handshake would lose
-         // a cycle of data and also risks a dirty TLS close. Also suppress
-         // starting NEW TX cycles once a restart is pending so we don't
-         // enqueue work we'd just cut short.
-        if (http_server_restart_requested()) {
+        // its current job — killing an HTTPS POST mid-handshake would lose
+        // a cycle of data and also risks a dirty TLS close. Also suppress
+        // starting NEW TX cycles once a restart is pending so we don't
+        // enqueue work we'd just cut short. V2.4.1 (A9): g_restart_requested
+        // is set by main_request_restart() (was http_server's static flag);
+        // EV_RESTART wakes us immediately when set.
+        if (g_restart_requested) {
             if (tx_is_idle()) {
                 ESP_LOGW(TAG, "restart requested — TX idle, rebooting in 2s");
                 vTaskDelay(pdMS_TO_TICKS(2000));

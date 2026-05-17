@@ -52,6 +52,7 @@
 #include "applog.h"
 #include "ntp.h"
 #include "transmission.h"
+#include "util.h"
 
 static const char *TAG = "ftp";
 
@@ -99,20 +100,31 @@ static uint32_t        s_next_upload_ms = 0;   // set in log_ftp_init from cfg
 static int             s_retry_count    = 0;   // retries remaining (0 = none pending)
 static uint32_t        s_retry_ms       = 0;   // wall-clock ms for next retry
 
-// Public stats — populated at end of each upload attempt; read lock-free
-// by the HTTP server task via log_ftp_get_stats().
-static bool     s_have_last  = false;
-static bool     s_last_ok    = false;
-static int64_t  s_last_at    = 0;
-static uint32_t s_last_bytes = 0;
+// Public stats — populated at end of each upload attempt by the main task
+// (FTPS runs on main, see [[feedback_main_task_runs_ftps_not_worker.md]]);
+// read by the HTTP server task via log_ftp_get_stats.
+//
+// V2.4.1 (B1): s_last_at is int64_t — naive store is two 32-bit writes on
+// the 32-bit Xtensa cores, so a cross-task reader can see torn halves
+// (manifest: momentary year-2038-ish garbage timestamp on the status page
+// around FTPS upload completion). Spinlock guards every read/write of the
+// stats group so the reader also gets a consistent snapshot of
+// have_last/last_ok/last_at/last_bytes from one upload event.
+static bool          s_have_last  = false;
+static bool          s_last_ok    = false;
+static int64_t       s_last_at    = 0;
+static uint32_t      s_last_bytes = 0;
+static portMUX_TYPE  s_stats_mux  = portMUX_INITIALIZER_UNLOCKED;
 
 void log_ftp_get_stats(log_ftp_stats_t *out) {
     if (!out) return;
+    portENTER_CRITICAL(&s_stats_mux);
     out->have_last   = s_have_last;
     out->last_ok     = s_last_ok;
     out->last_at     = s_last_at;
     out->last_bytes  = s_last_bytes;
-    out->next_due_ms = s_next_upload_ms;
+    portEXIT_CRITICAL(&s_stats_mux);
+    out->next_due_ms = s_next_upload_ms;   // u32 — torn-tolerant, no lock
 }
 
 static bool wifi_up_ftp(void) {
@@ -584,17 +596,11 @@ static int ftp_read_response(ftp_io_t *io, uint32_t timeout_ms, char *out_last, 
                         expected[2] = line[2];
                         expected[3] = 0;
                     } else {
-                        if (out_last && out_sz) {
-                            strncpy(out_last, line, out_sz - 1);
-                            out_last[out_sz - 1] = 0;
-                        }
+                        if (out_last && out_sz) safe_strcpy(out_last, line, out_sz);
                         return code;
                     }
                 } else if (strncmp(line, expected, 3) == 0 && ll >= 4 && line[3] == ' ') {
-                    if (out_last && out_sz) {
-                        strncpy(out_last, line, out_sz - 1);
-                        out_last[out_sz - 1] = 0;
-                    }
+                    if (out_last && out_sz) safe_strcpy(out_last, line, out_sz);
                     return code;
                 }
             }
@@ -804,8 +810,7 @@ static bool do_ftp_upload(void) {
             if (p >= 1 && p <= 65535) ftp_port_use = (int)p;
             // Else: malformed port → fall back silently to default 21.
         } else {
-            strncpy(host_buf, s_cfg->ftp_host, sizeof(host_buf) - 1);
-            host_buf[sizeof(host_buf) - 1] = 0;
+            safe_strcpy(host_buf, s_cfg->ftp_host, sizeof(host_buf));
         }
     }
 
@@ -997,11 +1002,15 @@ done:
                      s_cfg->ftp_tls ? "S" : "");
 
     // Publish to stats. last_bytes only updated on success so a failed retry
-    // doesn't blank the previous-good byte count visible on /.
+    // doesn't blank the previous-good byte count visible on /. V2.4.1 (B1):
+    // wrap the group write to pair with the spinlock'd read in
+    // log_ftp_get_stats — int64_t s_last_at needs cross-task atomicity.
+    portENTER_CRITICAL(&s_stats_mux);
     s_have_last = true;
     s_last_ok   = ok;
     s_last_at   = (int64_t)time(NULL);
     if (ok) s_last_bytes = (uint32_t)body_len;
+    portEXIT_CRITICAL(&s_stats_mux);
 
     // V2.3.15: PSA recovery decision.
     //

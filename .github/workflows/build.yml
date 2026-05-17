@@ -1,0 +1,102 @@
+# GitHub Actions: build all 4 board targets on every push + PR.
+#
+# Catches "broke board X while testing on Y" before a manual flash. Each
+# job runs in parallel — failure of one board doesn't cancel the others
+# (fail-fast: false), so a single push shows the full breakage matrix.
+#
+# Uses the official Espressif CI action (espressif/esp-idf-ci-action),
+# which spins up the IDF Docker image and runs idf.py inside it. The
+# IDF version pinned to v6.0 matches the local dev toolchain at
+# C:\esp\v6.0\esp-idf (see [[reference_geiger_environment.md]]).
+#
+# Added in V2.4.1 (T2 — code-review item) — see CHANGELOG.md.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'main/**'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults*'
+      - 'partitions*.csv'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'main/**'
+      - 'CMakeLists.txt'
+      - 'sdkconfig.defaults*'
+      - 'partitions*.csv'
+      - '.github/workflows/**'
+  workflow_dispatch: {}   # allow manual triggering from the Actions tab
+
+jobs:
+  build:
+    name: build / ${{ matrix.board }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - heltec_v2
+          - heltec_v2_4mb
+          - feathers3_d
+          - adafruit_qtpy_esp32_pico
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0
+          # Determine target chip from BOARD (mirrors CMakeLists.txt's
+          # IDF_TARGET selection — kept in sync manually).
+          target: ${{ startsWith(matrix.board, 'heltec_v2') && 'esp32' || (matrix.board == 'feathers3_d' && 'esp32s3' || 'esp32') }}
+          path: '.'
+          # idf.py invocation — same form as local _build.cmd. Build dir
+          # is per-board so multiple jobs on the same runner (if matrix
+          # ever runs sequentially) don't clobber each other.
+          command: idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} build
+
+      - name: Report binary size
+        run: |
+          set -e
+          BIN="build_${{ matrix.board }}/geiger_v2.bin"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::binary not produced at $BIN"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$BIN")
+          HEX=$(printf '0x%x' "$SIZE")
+          echo "::notice::${{ matrix.board }} geiger_v2.bin = $SIZE bytes ($HEX)"
+          echo "## ${{ matrix.board }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "geiger_v2.bin: **$SIZE bytes** ($HEX)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify VERSION_STR embedded
+        run: |
+          set -e
+          # Sanity check: the binary really has the version string from
+          # main/version.h baked in. Catches the cache-staleness bug from
+          # V2.3.10/.11 (App version skew) before it reaches a flash.
+          VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
+          if ! strings "build_${{ matrix.board }}/geiger_v2.bin" | grep -qF "$VER"; then
+            echo "::error::expected VERSION_STR '$VER' not found in binary"
+            exit 1
+          fi
+          echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: geiger_v2_${{ matrix.board }}_${{ github.sha }}
+          path: |
+            build_${{ matrix.board }}/geiger_v2.bin
+            build_${{ matrix.board }}/bootloader/bootloader.bin
+            build_${{ matrix.board }}/partition_table/partition-table.bin
+            build_${{ matrix.board }}/ota_data_initial.bin
+          if-no-files-found: error
+          retention-days: 14

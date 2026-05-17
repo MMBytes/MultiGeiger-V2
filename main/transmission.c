@@ -25,8 +25,19 @@
 static const char *TAG = "tx";
 
 // Per-target stats surfaced on /. Updated only from the TX worker task; read
-// lock-free from the HTTP server task. See transmission.h for field semantics.
+// from the HTTP server task. See transmission.h for field semantics.
+//
+// V2.4.1 (B1): `last_at` is an int64_t. On the 32-bit Xtensa LX6/LX7 cores
+// a naive int64_t store is two 32-bit stores, so a reader on a different
+// task can see torn high/low halves (manifest: momentary year-2038-ish
+// timestamp on the status page around each TX cycle's record_attempt).
+// Protect every read AND write of s_stats[] with a single spinlock — also
+// gives the reader a consistent snapshot of attempted/succeeded/last_rc/
+// last_at as written by ONE record event, instead of a mix from two
+// successive events. Spinlock is ~10ns per access vs the seconds-scale
+// network operations nearby — cost is negligible.
 static tx_target_stats_t s_stats[TX_TARGET_COUNT] = {0};
+static portMUX_TYPE      s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_target_names[TX_TARGET_COUNT] = {
     "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco"
 };
@@ -36,24 +47,59 @@ const char *tx_target_name(tx_target_id_t id) {
     return s_target_names[id];
 }
 
+// V2.4.1 (C9): static URL table for the three "fixed-URL" upload targets.
+// Pre-V2.4.1 these literals lived inline in main.c::build_tx_context, which
+// leaked endpoint knowledge to the wrong layer. OSM and aqi.eco are absent
+// because their URLs are per-box / per-account and built dynamically inside
+// send_osm() / send_aqi() in this file.
+static const struct {
+    const char *url_http;
+    const char *url_https;
+} s_target_urls[TX_TARGET_COUNT] = {
+    [TX_TARGET_MADAVI]  = { "http://api-rrd.madavi.de/data.php",
+                            "https://api-rrd.madavi.de/data.php" },
+    [TX_TARGET_SENSORC] = { "http://api.sensor.community/v1/push-sensor-data/",
+                            "https://api.sensor.community/v1/push-sensor-data/" },
+    [TX_TARGET_RADMON]  = { "http://radmon.org/radmon.php",
+                            "https://radmon.org/radmon.php" },
+    [TX_TARGET_OSM]     = { NULL, NULL },   // dynamic — see send_osm()
+    [TX_TARGET_AQI]     = { NULL, NULL },   // dynamic — see send_aqi()
+};
+
+void tx_target_configure(tx_target_t *out, tx_target_id_t id,
+                         bool enabled, bool use_https) {
+    if (!out) return;
+    if (id < 0 || id >= TX_TARGET_COUNT) return;
+    out->enabled      = enabled;
+    out->use_https    = use_https;
+    out->use_insecure = false;
+    out->url_http     = s_target_urls[id].url_http;
+    out->url_https    = s_target_urls[id].url_https;
+}
+
 void tx_get_stats(tx_target_id_t id, tx_target_stats_t *out) {
     if (!out || id < 0 || id >= TX_TARGET_COUNT) {
         if (out) memset(out, 0, sizeof(*out));
         return;
     }
-    *out = s_stats[id];   // Single-task writer + scalar fields → torn-tolerant
+    portENTER_CRITICAL(&s_stats_mux);
+    *out = s_stats[id];
+    portEXIT_CRITICAL(&s_stats_mux);
 }
 
-// Helper used from the orchestrator: record one attempt outcome. ok_codes is
-// a 0-terminated list of HTTP status values that count as success for this
-// target (e.g. {201, 200, 0} for OSM which accepts both).
-static void record_attempt(tx_target_id_t id, int rc) {
+// V2.4.1 (C6): single record_outcome replaces the V2.3.x
+// record_attempt + record_success pair. All field updates land under one
+// spinlock acquire, so a concurrent reader can't see attempted++ but
+// not-yet-succeeded++ from the same call — fixes a 1-cycle inconsistency
+// window that was always present pre-V2.4.1. `ok` should be true iff the
+// caller's target-specific success-code check (200 / 201 / both) matched.
+static void record_outcome(tx_target_id_t id, int rc, bool ok) {
+    portENTER_CRITICAL(&s_stats_mux);
     s_stats[id].attempted++;
-    s_stats[id].last_rc   = rc;
-    s_stats[id].last_at   = (int64_t)time(NULL);
-}
-static void record_success(tx_target_id_t id) {
-    s_stats[id].succeeded++;
+    if (ok) s_stats[id].succeeded++;
+    s_stats[id].last_rc = rc;
+    s_stats[id].last_at = (int64_t)time(NULL);
+    portEXIT_CRITICAL(&s_stats_mux);
 }
 
 // TX runs on its own CPU1-pinned task so mbedTLS handshakes don't starve
@@ -929,6 +975,14 @@ static void tx_run(tx_context_t *c) {
     // Per-target consecutive-fail streak — internal only. The "skip remaining"
     // counters were promoted to s_stats[i].breaker_open_cycles so the status
     // page can show them; updates here keep them in sync (single-writer).
+    //
+    // V2.4.1 (B5): these are function-static which means they survive across
+    // calls. SAFE ONLY because TX_QUEUE_DEPTH == 1 and exactly one tx_task
+    // exists — tx_run is never reentered. If either invariant ever changes
+    // (deeper queue OR a second worker on the other core), promote to
+    // module-static with a per-target spinlock OR pass these in via the
+    // tx_context_t. Adding a comment rather than restructuring today —
+    // single-worker queue is a long-standing design choice.
     static int madavi_fail_streak  = 0;
     static int sensorc_fail_streak = 0;
     static int radmon_fail_streak  = 0;
@@ -961,8 +1015,7 @@ static void tx_run(tx_context_t *c) {
             display_set_status(DSP_STATUS_MADAVI, DSP_SRV_SENDING);
             int rc = send_madavi(c);
             bool ok = (rc == 200);
-            record_attempt(TX_TARGET_MADAVI, rc);
-            if (ok) record_success(TX_TARGET_MADAVI);
+            record_outcome(TX_TARGET_MADAVI, rc, ok);
             ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
             display_set_status(DSP_STATUS_MADAVI, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
@@ -995,8 +1048,7 @@ static void tx_run(tx_context_t *c) {
             display_set_status(DSP_STATUS_SCOMM, DSP_SRV_SENDING);
             int rc = send_sensorc(c);
             bool ok = (rc == 201);
-            record_attempt(TX_TARGET_SENSORC, rc);
-            if (ok) record_success(TX_TARGET_SENSORC);
+            record_outcome(TX_TARGET_SENSORC, rc, ok);
             ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
             display_set_status(DSP_STATUS_SCOMM, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
@@ -1029,8 +1081,7 @@ static void tx_run(tx_context_t *c) {
             display_set_status(DSP_STATUS_RADMON, DSP_SRV_SENDING);
             int rc = send_radmon(c);
             bool ok = (rc == 200);
-            record_attempt(TX_TARGET_RADMON, rc);
-            if (ok) record_success(TX_TARGET_RADMON);
+            record_outcome(TX_TARGET_RADMON, rc, ok);
             ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
             display_set_status(DSP_STATUS_RADMON, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
             if (ok) {
@@ -1061,8 +1112,7 @@ static void tx_run(tx_context_t *c) {
             ESP_LOGI(TAG, "Sending to openSenseMap (https)");
             int rc = send_osm(c);
             bool ok = (rc == 201 || rc == 200);
-            record_attempt(TX_TARGET_OSM, rc);
-            if (ok) record_success(TX_TARGET_OSM);
+            record_outcome(TX_TARGET_OSM, rc, ok);
             ESP_LOGI(TAG, "openSenseMap: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 osm_fail_streak = 0;
@@ -1089,8 +1139,7 @@ static void tx_run(tx_context_t *c) {
             ESP_LOGI(TAG, "Sending to aqi.eco (https)");
             int rc = send_aqi(c);
             bool ok = (rc == 200 || rc == 201);
-            record_attempt(TX_TARGET_AQI, rc);
-            if (ok) record_success(TX_TARGET_AQI);
+            record_outcome(TX_TARGET_AQI, rc, ok);
             ESP_LOGI(TAG, "aqi.eco: %s (rc=%d)", ok ? "ok" : "error", rc);
             if (ok) {
                 aqi_fail_streak = 0;

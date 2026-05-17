@@ -18,11 +18,12 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "main_status.h"    // V2.4.1 (A4): consolidated status snapshot
 #include "transmission.h"   // V2.3.29: tx_get_stats() for the Uploads page
 
-// V2.3.29: main.c-defined accessors.
-extern uint32_t main_status_cycles(void);
-extern bool main_target_enabled(int target_id);   // for hiding disabled upload rows
+// main.c-defined accessor (separate from main_status — controls per-target
+// row visibility on the Uploads page).
+extern bool main_target_enabled(int target_id);
 
 static const char *TAG = "serlcd";
 
@@ -311,8 +312,9 @@ void display_serlcd_render_system(void) {
 
     char line[32];
 
-    snprintf(line, sizeof(line), "TX Cycles %lu",
-             (unsigned long)main_status_cycles());
+    main_status_t st;
+    main_status_snapshot(&st);
+    snprintf(line, sizeof(line), "TX Cycles %lu", (unsigned long)st.cycles);
     serlcd_set_cursor(0, 0); serlcd_write_text(line);
 
     int64_t us = esp_timer_get_time();

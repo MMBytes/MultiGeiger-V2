@@ -162,3 +162,16 @@ const char *tx_target_name(tx_target_id_t id);
  *         fields are 32-bit/64-bit aligned; reads are torn-tolerant.
  */
 void tx_get_stats(tx_target_id_t id, tx_target_stats_t *out);
+
+/** @brief Populate a tx_target_t for a built-in upload target.
+ *
+ *  V2.4.1 (C9): URL strings for Madavi / sensor.community / Radmon live
+ *  inside transmission.c instead of being hardcoded at the main.c call
+ *  site. Caller passes the per-cycle config flags; this fills the static
+ *  URLs + `use_insecure = false` default. No-op (leaves `*out` zero-init)
+ *  if `id` is one of TX_TARGET_OSM / TX_TARGET_AQI — those URLs are built
+ *  dynamically from per-box / per-account tokens, see send_osm() /
+ *  send_aqi() in transmission.c.
+ */
+void tx_target_configure(tx_target_t *out, tx_target_id_t id,
+                         bool enabled, bool use_https);

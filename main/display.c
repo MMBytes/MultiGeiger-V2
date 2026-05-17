@@ -687,11 +687,12 @@ void display_update_snapshot(const display_snapshot_t *snap) {
 #include "display_serlcd.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+#include "main_status.h"      // V2.4.1 (A4): consolidated status snapshot
 #include "transmission.h"
 
-// main.c-defined accessors.
-extern uint32_t main_status_cycles(void);
-extern bool main_target_enabled(int target_id);   // for hiding disabled upload rows
+// main.c-defined accessor (separate from main_status — controls per-target
+// row visibility on the Uploads page).
+extern bool main_target_enabled(int target_id);
 
 typedef enum {
     PAGE_ENV = 0,
@@ -832,7 +833,9 @@ static void render_oled_system(void) {
     // Row 0 (2x): TX cycles. < 100000 → integer "C %5d"; ≥ 100000 →
     // "C%5.1fk" giving "C 99.9k" through "C999.9k" — covers ~4.75 years
     // at 150 s TX interval.
-    uint32_t cycles = main_status_cycles();
+    main_status_t st;
+    main_status_snapshot(&st);
+    uint32_t cycles = st.cycles;
     if (cycles < 100000) {
         snprintf(line, sizeof(line), "C %5lu", (unsigned long)cycles);
     } else {

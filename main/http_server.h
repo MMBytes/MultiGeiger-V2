@@ -21,15 +21,8 @@
 /** @brief Start the server on port 80.
  *
  *  @p cfg is captured by pointer: GET reads it, POST updates in place and
- *  calls config_save() + sets the restart flag. @p chip_id is captured by
- *  pointer too — it's hardware-derived, owned by main.c, shown on the
- *  status and config pages.
+ *  calls config_save() + main_request_restart() (V2.4.1 A9 — was a polled
+ *  flag pre-V2.4.1). @p chip_id is captured by pointer too — hardware-
+ *  derived, owned by main.c, shown on the status and config pages.
  */
 void http_server_start(config_t *cfg, const char *chip_id);
-
-/** @brief Polled by the main task; true if a handler requested a restart.
- *
- *  main flushes pending log and calls esp_restart() so new settings
- *  (WiFi, NTP, targets) take effect on a clean boot.
- */
-bool http_server_restart_requested(void);

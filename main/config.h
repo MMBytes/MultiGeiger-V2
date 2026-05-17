@@ -4,184 +4,61 @@
  *  @brief Runtime-editable configuration, persisted in NVS.
  *
  *  Stored under the "geiger" NVS namespace. Missing keys fall back to
- *  compile-time defaults (DEF_* in config.c) so the device always boots
- *  with usable settings, even with a wiped NVS.
+ *  compile-time defaults declared alongside each field in
+ *  `config_fields.def` — so a wiped NVS always boots into a usable state.
+ *
+ *  V2.4.1: the struct and the NVS/POST plumbing are now generated from a
+ *  single schema in `config_fields.def` via X-macros. The previous design
+ *  had the field list duplicated across:
+ *    - the struct here in config.h
+ *    - `config_defaults()` in config.c
+ *    - the NVS load loop in config.c
+ *    - the NVS save loop in config.c
+ *    - the POST pre-clear-bools loop in http_server.c
+ *    - the POST per-field dispatch in http_server.c
+ *  Adding one field used to touch ~6 places; now it's one line in the .def.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 
+// V2.4.1 (C3): named upper bounds for the string-field MAX content
+// length (NOT including the null terminator). Pre-V2.4.1 these were
+// inline magic numbers next to every `char field[33];` / `[65];` /
+// `[26];` declaration with the rationale in adjacent comments.
+// Each `X_STR` in `config_fields.def` declares `field[CFG_*_MAX + 1]`
+// so the buffer always has room for content + NUL.
+//
+// Values are derived from real spec / protocol limits:
+#define CFG_WIFI_SSID_MAX    32   // IEEE 802.11 SSID maximum (32 bytes)
+#define CFG_WIFI_PSK_MAX     64   // WPA-PSK: 64 hex chars OR 8..63 ASCII
+#define CFG_HOSTNAME_MAX     32   // DNS label / DHCP option-12 practical
+#define CFG_AP_NAME_MAX      32   // Same as SSID since the AP IS an SSID
+#define CFG_NTP_HOST_MAX     63   // RFC 1123 single-label cap
+#define CFG_TZ_POSIX_MAX     47   // POSIX TZ string practical max
+#define CFG_AP_PW_MAX        32   // Web admin + AP password — WPA2 min 8
+#define CFG_USER_NAME_MAX    32   // Radmon / FTP user
+#define CFG_PASSWORD_MAX     64   // Radmon / FTP password
+#define CFG_FTP_HOST_MAX     63   // FQDN or "host:port" — RFC 1123 cap
+#define CFG_FTP_PATH_MAX     63   // remote dir path
+#define CFG_OSM_BOX_MAX      25   // MongoDB ObjectId hex (24 chars)
+#define CFG_TOKEN_MAX        64   // OSM / aqi.eco access token (64 hex)
+
 typedef struct {
-    // WiFi station credentials. Compile-time defaults cover first boot.
-    char     wifi_ssid[33];
-    char     wifi_password[65];
-
-    // DHCP hostname (DHCP option 12 in the router lease table).
-    // Empty = auto-filled at boot with "MultiGeiger<chip-id-decimal>"
-    // (no hyphen — TP-Link DHCP silently drops DISCOVERs with hyphens).
-    char     wifi_hostname[33];
-
-    // AP-mode SSID broadcast during the 2-minute boot window and when no STA
-    // credentials are configured. Empty = auto-filled at boot with
-    // "esp32-<chip-id-decimal>".
-    char     ap_name[33];
-
-    // Radio capability limits applied to the STA interface before connect.
-    //   wifi_11bg_only: disables 802.11n (radio falls back to 11b/g only).
-    //   wifi_ht20_only: forces 20 MHz channel bandwidth (disables HT40).
-    // Both default false = full capability. Compatibility knob for APs that
-    // mishandle HT40 or 11n management frames.
-    bool     wifi_11bg_only;
-    bool     wifi_ht20_only;
-
-    // When true, WiFi modem sleep is disabled (WIFI_PS_NONE). When false
-    // (default), minimum modem sleep is used (WIFI_PS_MIN_MODEM), matching
-    // the upstream MultiGeiger behaviour and reducing power draw slightly.
-    bool     wifi_ps_disabled;
-
-    // When true, route the WiFi RF chain to the u.FL external-antenna
-    // connector (FeatherS3-D and similar boards with an onboard SPDT RF
-    // switch). When false (default), the onboard PCB antenna is used.
-    // No effect on boards without HAL_HAS_ANTENNA_SWITCH; the /config UI
-    // greys the checkbox out in that case.
-    bool     use_external_antenna;
-
-    // Upload targets — per-target enable plus HTTPS toggle.
-    bool     send_madavi;
-    bool     madavi_https;
-    bool     send_sensorc;
-    bool     sensorc_https;
-    bool     send_radmon;
-    bool     radmon_https;
-    char     radmon_user[33];
-    char     radmon_password[65];
-
-    // openSenseMap (https://opensensemap.org). One POST per cycle to
-    // ingress.opensensemap.org/boxes/<BOX_ID>/data?luftdaten=1 carrying the
-    // standard Luftdaten body — server picks up Si22G_*, BME280_* and SPS30_*
-    // fields and writes them to the matching senseBox channels (channel ID
-    // matching is configured per-box on the openSenseMap dashboard).
-    // Always HTTPS (the http variant 301-redirects to https). Box IDs are
-    // 24-char MongoDB ObjectId hex strings; field sized to 25 chars + null.
-    bool     send_osm;
-    char     osm_box_id[26];
-
-    // openSenseMap access token (V2.3.16). Optional — when empty, uploads go
-    // unauthenticated as they did pre-V2.3.16 (the Luftdaten compatibility
-    // path historically accepted unauthenticated POSTs to a known box ID).
-    // openSenseMap recently added an opt-in "require authentication" toggle
-    // per-box on their dashboard — when enabled, unauthenticated POSTs are
-    // rejected. Setting this token (generated under "Edit Box" → "Access
-    // Token") and leaving the box's auth toggle on lets uploads continue
-    // without disabling the box-side toggle. send_osm passes the token as
-    // `Authorization: Bearer <token>` when non-empty. Token is a 64-char hex
-    // string per OSM convention; field sized for 64 + null.
-    char     osm_access_token[65];
-
-    // aqi.eco (https://aqi.eco). POST to api.aqi.eco/update/<TOKEN> carrying
-    // the same Luftdaten body wrapped with an esp8266id field at the top
-    // (field name is legacy from the original airrohr fork — accepted for
-    // ESP32-derived chip IDs too). Token is per-device, generated by the
-    // user account on aqi.eco.
-    bool     send_aqi;
-    char     aqi_token[65];
-
-    // Up to three NTP servers. Empty strings are skipped.
-    char     ntp_server[64];
-    char     ntp_server2[64];
-    char     ntp_server3[64];
-
-    // POSIX TZ string (see `man tzset`). Drives localtime() and strftime()
-    // for log timestamps, the OLED time readout, and FTP upload filenames.
-    // Examples:
-    //   AEST-10AEDT,M10.1.0,M4.1.0/3   Sydney
-    //   CET-1CEST,M3.5.0,M10.5.0/3     Germany
-    //   UTC0                           UTC (no DST)
-    char     tz_posix[48];
-
-    // Web UI auth (user is always "admin"). Used by /config, /log and
-    // /update. Default: ESP32Geiger.
-    char     ap_password[33];
-
-    // TX cycle interval (milliseconds).
-    uint32_t tx_interval_ms;
-
-    // Station altitude above sea level (metres). Used only to compute the
-    // pressure-at-sealevel value sent to sensor.community.
-    float    station_altitude_m;
-
-    // When true, sensor.community receives pressure_sealevel in addition to
-    // the raw pressure field. When false (default), the altitude-derived
-    // value is omitted.
-    bool     send_sealevel_pressure;
-
-    // FTP log upload — periodically ships the in-memory log ring to a LAN
-    // FTP server (e.g. router USB share). Passive mode.
-    //   ftp_user/ftp_password empty = anonymous.
-    //   ftp_host  : hostname or IPv4 address. Optional :port suffix (V2.3.16+)
-    //               — if absent or malformed, defaults to FTP port 21.
-    //               Example: "192.168.1.1" or "192.168.1.1:2121".
-    //   ftp_path: remote directory; filename auto-generated as geiger_<chip>_<ts>.log.
-    //   ftp_tls : explicit TLS (AUTH TLS on port 21). Certificate NOT verified
-    //             (most LAN FTP servers use self-signed certs).
-    bool     ftp_enabled;
-    bool     ftp_tls;
-    char     ftp_host[64];
-    char     ftp_user[33];
-    char     ftp_password[65];
-    char     ftp_path[64];
-    uint32_t ftp_interval_min;
-
-    // When true, WiFi modem sleep is forced off for the duration of each FTP
-    // transfer and restored to WIFI_PS_MIN_MODEM at the end. Workaround for
-    // boards where DTIM-delayed TCP ACKs stall FTPS uploads (observed on the
-    // older sensor with degraded WiFi RX). Default false — newer boards do
-    // not need it. Has no effect when wifi_ps_disabled is true (radio is
-    // already always-on); the /config UI greys this box out in that case.
-    bool     ftp_ps_disabled;
-
-    // When true (default in V2.3.15), FTPS handshakes are capped at TLS 1.2
-    // (mbedtls_ssl_conf_max_tls_version). V2.3.15 bench testing confirmed
-    // TLS 1.3 fails with "426 Connection reset by peer" on the data channel
-    // against the project's LAN FTPS server — independent of session reuse.
-    // TLS 1.2 + ctrl-session reuse on data is the known-working combination.
-    // Untick the /config checkbox to allow TLS 1.3 (works against modern
-    // cloud TLS terminators; YMMV on older / embedded FTPS daemons). HTTPS
-    // targets (Madavi / SC / Radmon / OSM / aqi.eco) are unaffected — they
-    // always negotiate 1.3 freely via esp_tls (separate code path). See
-    // reference_ftps_tls13_investigation.md memory for full background.
-    bool     ftp_tls12_only;
-
-    // User-facing feedback knobs.
-    //   speaker_tick: piezo click on every counted GM pulse.
-    //   led_tick    : onboard LED flash on every counted GM pulse.
-    //   play_sound  : short boot chirp confirming the speaker is wired up.
-    //   show_display: drive the OLED (boot splash + running stats).
-    bool     speaker_tick;
-    bool     led_tick;
-    bool     play_sound;
-    bool     show_display;
-
-    // V2.3.30: OLED contrast / SerLCD backlight brightness in percent.
-    // Valid values: 10..100 in steps of 10. Independent of show_display
-    // (which is the on/off toggle); brightness only matters when
-    // show_display is true. Live-applied via display_set_contrast() —
-    // no reboot required (the field has NO red asterisk in /config).
-    uint8_t  oled_brightness_pct;
-
-    // When false, the Geiger subsystem is fully disabled at boot:
-    //   - tube_setup() skips ISR install, HV gptimer and HV charge-pump GPIOs
-    //     (HV_FET is driven LOW so the boost MOSFET stays off, but no
-    //     recharge cycles run and no edge interrupts fire).
-    //   - tube_read() returns zero counts / dt_ms / hv_pulses.
-    //   - Radiation upload paths are skipped (Madavi geiger POST, sensor.community
-    //     X-PIN 19 POST, and Radmon entirely). Madavi/SC THP paths still run if
-    //     an env sensor is present.
-    // Default true — preserves the original Geiger-counter behaviour when
-    // upgrading from V2.2.x. Toggle requires reboot (config_post sets the
-    // restart flag automatically).
-    bool     tube_enabled;
+    // Struct members generated from the schema. See `config_fields.def`
+    // for the canonical field list (name, NVS key, default, validation).
+    #define X_STR(name, size, key, def)            char     name[size];
+    #define X_BOOL(name, key, def)                 bool     name;
+    #define X_U32(name, key, def, lo, hi)          uint32_t name;
+    #define X_F32(name, key, def, lo, hi)          float    name;
+    #define X_U8(name, key, def, lo, hi)           uint8_t  name;
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
 } config_t;
 
 /** @brief Fill cfg with compile-time defaults. Always safe to call. */
@@ -195,3 +72,26 @@ void config_load(config_t *cfg);
 
 /** @brief Persist cfg to NVS. Returns esp_err from nvs_commit. */
 esp_err_t config_save(const config_t *cfg);
+
+/** @brief Pre-clear all bool fields in `next`.
+ *
+ *  Helper for the HTTP POST handler: form submissions only include
+ *  ticked checkboxes, so every bool must be set false before parsing
+ *  and re-enabled on key match. Generated from the schema so adding
+ *  a new bool needs no parallel edit here.
+ */
+void config_post_preclear_bools(config_t *next);
+
+/** @brief Try to apply one form field to `next`.
+ *
+ *  Returns true if `key` matched a known schema field (regardless of
+ *  whether the value passed validation — out-of-range numerics are
+ *  silently ignored and the field keeps its prior value). Returns
+ *  false if `key` is unknown — caller can then check for non-schema
+ *  keys (e.g. `save`, `save_restart`) or ignore.
+ *
+ *  Specialised validators (e.g. OLED brightness step constraint) are
+ *  applied by the caller BEFORE calling this — if the special handler
+ *  consumed the key, don't call here.
+ */
+bool config_post_apply_field(config_t *next, const char *key, const char *val);

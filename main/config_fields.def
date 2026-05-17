@@ -1,0 +1,132 @@
+// Single-source-of-truth schema for the runtime configuration.
+//
+// Included multiple times by config.h / config.c / http_server.c with
+// different X_* macro expansions to derive in one go:
+//   * the `config_t` struct in config.h
+//   * `config_defaults()` in config.c
+//   * `config_load()`     NVS-read loop in config.c
+//   * `config_save()`     NVS-write loop in config.c
+//   * the POST pre-clear-bools loop in http_server.c
+//   * the POST per-field dispatch in http_server.c
+//
+// Adding a field = ONE new line below. Removing or renaming = ONE edit.
+// All previous duplication (struct + 3 NVS sites + 2 POST sites) is gone.
+//
+// Field-type macros each include must define before #include "config_fields.def":
+//   X_STR(name, size, nvs_key, default)
+//   X_BOOL(name, nvs_key, default)
+//   X_U32(name, nvs_key, default, min, max)
+//   X_F32(name, nvs_key, default, min, max)
+//   X_U8(name, nvs_key, default, min, max)
+//
+// Any X_* an include does not care about must still be #define'd to nothing
+// (the X_NOP macro at the bottom of each include block handles this).
+//
+// CONVENTIONS:
+//   * `nvs_key` is also the HTML form field name (used by config_post). When
+//     they ever need to differ, split the schema into two columns — for now
+//     they are byte-identical across every field.
+//   * `default` for strings is a C string literal; the truncated copy is
+//     done at expansion time so users can pass anything fits in `size - 1`.
+//   * `min`/`max` for numeric types are validation bounds applied by the
+//     POST handler (out-of-range values are silently ignored and the field
+//     keeps its prior value). Some specialised validators are still
+//     hand-written in http_server.c — see the OLED_BRIGHTNESS comment.
+//   * Field ORDER below is the canonical order used by the generated
+//     `config_t` struct, defaults block, and NVS load/save loops. Kept to
+//     match the legacy hand-written struct so this refactor is a pure
+//     code-motion change with zero behaviour or NVS-key delta.
+//   * Boot-time log dump (`config.c`) is intentionally NOT generated from
+//     this schema — it has bespoke grouping and password masking that
+//     would be ugly to derive automatically.
+//   * The HTML form rendering in `http_server.c::config_get` is also NOT
+//     generated — too much custom layout (headings, scripts, antenna
+//     gating, brightness dropdown builder). A future revision could move
+//     toward a generated form, but the cost/benefit isn't there yet.
+
+// --- WiFi credentials + identity --------------------------------------------
+//
+// V2.4.1 (C3): buffer sizes use CFG_*_MAX named constants from config.h
+// (real protocol/spec maxima) instead of inline magic numbers. Pre-V2.4.1
+// each field was `[33]` / `[65]` etc. with the rationale only in comments.
+
+X_STR (wifi_ssid,          CFG_WIFI_SSID_MAX + 1,  "wifi_ssid",  "")
+X_STR (wifi_password,      CFG_WIFI_PSK_MAX  + 1,  "wifi_pw",    "")
+X_STR (wifi_hostname,      CFG_HOSTNAME_MAX  + 1,  "wifi_host",  "")
+X_STR (ap_name,            CFG_AP_NAME_MAX   + 1,  "ap_name",    "")
+
+X_BOOL(wifi_11bg_only,         "wifi_11bg",  false)
+X_BOOL(wifi_ht20_only,         "wifi_ht20",  false)
+X_BOOL(wifi_ps_disabled,       "wifi_ps_dis", false)
+X_BOOL(use_external_antenna,   "wifi_ext_a", false)
+
+// --- Tube ENABLE master switch ----------------------------------------------
+
+X_BOOL(tube_enabled,           "tube_en",    true)
+
+// --- Madavi / sensor.community / Radmon -------------------------------------
+
+X_BOOL(send_madavi,            "send_mad",   true)
+X_BOOL(madavi_https,           "mad_https",  true)
+X_BOOL(send_sensorc,           "send_sc",    true)
+X_BOOL(sensorc_https,          "sc_https",   true)
+X_BOOL(send_radmon,            "send_rad",   false)
+X_BOOL(radmon_https,           "rad_https",  true)
+X_STR (radmon_user,        CFG_USER_NAME_MAX + 1,  "rad_user",   "")
+X_STR (radmon_password,    CFG_PASSWORD_MAX  + 1,  "rad_pw",     "")
+
+// --- openSenseMap + aqi.eco -------------------------------------------------
+
+X_BOOL(send_osm,               "send_osm",   false)
+X_STR (osm_box_id,         CFG_OSM_BOX_MAX   + 1,  "osm_box",    "")
+X_STR (osm_access_token,   CFG_TOKEN_MAX     + 1,  "osm_tok",    "")
+
+X_BOOL(send_aqi,               "send_aqi",   false)
+X_STR (aqi_token,          CFG_TOKEN_MAX     + 1,  "aqi_tok",    "")
+
+// --- NTP + timezone ---------------------------------------------------------
+
+X_STR (ntp_server,         CFG_NTP_HOST_MAX + 1,  "ntp",        "pool.ntp.org")
+X_STR (ntp_server2,        CFG_NTP_HOST_MAX + 1,  "ntp2",       "")
+X_STR (ntp_server3,        CFG_NTP_HOST_MAX + 1,  "ntp3",       "")
+X_STR (tz_posix,           CFG_TZ_POSIX_MAX + 1,  "tz_posix",   "AEST-10AEDT,M10.1.0,M4.1.0/3")
+
+// --- Web admin + transmission cadence ---------------------------------------
+
+X_STR (ap_password,        CFG_AP_PW_MAX    + 1,  "ap_pw",      "ESP32Geiger")
+X_U32 (tx_interval_ms,         "tx_int_ms",  150000,   10000, 3600000)
+
+// --- BME / barometric configuration -----------------------------------------
+
+X_F32 (station_altitude_m,     "alt_m",      0.0f,     -500.0f, 9000.0f)
+X_BOOL(send_sealevel_pressure, "send_sl",    false)
+
+// --- FTP log upload ---------------------------------------------------------
+
+X_BOOL(ftp_enabled,            "ftp_en",     false)
+X_BOOL(ftp_tls,                "ftp_tls",    false)
+X_STR (ftp_host,           CFG_FTP_HOST_MAX  + 1,  "ftp_host",   "")
+X_STR (ftp_user,           CFG_USER_NAME_MAX + 1,  "ftp_user",   "")
+X_STR (ftp_password,       CFG_PASSWORD_MAX  + 1,  "ftp_pw",     "")
+X_STR (ftp_path,           CFG_FTP_PATH_MAX  + 1,  "ftp_path",   "")
+X_U32 (ftp_interval_min,       "ftp_int",    60,       1,       1440)
+X_BOOL(ftp_ps_disabled,        "ftp_ps_dis", false)
+X_BOOL(ftp_tls12_only,         "ftp_t12only", false)
+
+// --- UI feedback ------------------------------------------------------------
+
+X_BOOL(speaker_tick,           "sp_tick",    false)
+X_BOOL(led_tick,               "led_tick",   true)
+X_BOOL(play_sound,             "play_sound", false)
+X_BOOL(show_display,           "show_disp",  true)
+
+// --- Display brightness -----------------------------------------------------
+//
+// X_U8 generic dispatch accepts any value in [min, max]. The current
+// behaviour ALSO restricts to 0 OR (10..100 step 10). That step check
+// stays as a hand-written special case in http_server.c::config_post,
+// applied BEFORE the generic dispatch sees the field. The (0, 100)
+// bounds here are the loose envelope; the step constraint is the
+// tightening on top.
+
+X_U8  (oled_brightness_pct,    "oled_bright", 80,      0,       100)

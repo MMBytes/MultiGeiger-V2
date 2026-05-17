@@ -37,23 +37,7 @@
 #include "tube.h"
 #include "transmission.h"
 #include "log_ftp.h"
-
-// Cached snapshot accessors implemented in main.c. All are single-writer
-// (main task) / multi-reader (HTTP task) on word-aligned scalars, so no lock
-// needed. See the g_last_* declarations + comment block at the top of main.c.
-extern uint32_t main_status_cycles(void);
-extern uint32_t main_status_last_dt_ms(void);
-extern uint32_t main_status_last_cpm(void);
-extern float    main_status_last_usvph(void);
-extern uint32_t main_status_last_hv_pulses(void);
-extern bool     main_status_last_hv_error(void);
-extern bool     main_status_have_env(void);
-extern float    main_status_env_t(void);
-extern float    main_status_env_h(void);
-extern float    main_status_env_p(void);
-extern int64_t  main_status_last_cycle_at(void);
-extern uint32_t main_status_last_cycle_ms(void);
-extern uint32_t main_status_reconnects(void);
+#include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 
 static const char *TAG = "http";
 
@@ -61,7 +45,12 @@ static httpd_handle_t s_server   = NULL;
 static config_t      *s_cfg      = NULL;
 static const char    *s_chip_id  = "";
 static char           s_mac_str[18] = "??:??:??:??:??:??";   // filled at start
-static volatile bool  s_restart_requested = false;
+// V2.4.1 (A9): the pre-V2.4.1 `static volatile bool s_restart_requested`
+// + `http_server_restart_requested()` polled-flag pair was replaced with
+// an event-bit notification — handlers now call main_request_restart()
+// from main_status.h, which both sets a persistent flag and wakes the
+// main loop's xEventGroupWaitBits via EV_RESTART. Drops "click Save and
+// restart" -> reboot latency from up to 1 s to ~µs.
 
 // --- Access log --------------------------------------------------------------
 // Logs every incoming request with its URI and client IP. Called at the top of
@@ -264,20 +253,29 @@ static int hex_nibble(char c) {
     return -1;
 }
 
+// V2.4.1 (B6): RFC 3986 §2.1 — `%XY` must be two hex digits, anything
+// else is malformed. Pre-V2.4.1 we copied the literal `%` and walked
+// past it, producing surprising stored values on corrupt or hand-
+// crafted POSTs (e.g. `hello%G5world` stayed as `hello%G5world` in NVS).
+// Now we DROP the lone `%` and let the trailing bytes process as
+// plain characters — `%G5` → `G5`, `%2` (at end) → `2`, `%` (at end)
+// → empty. Keeps the user-typed payload while removing the rogue
+// percent marker. Browsers always encode properly so legitimate input
+// is unchanged.
 static void url_decode(char *s) {
     char *w = s;
     while (*s) {
         if (*s == '+') {
             *w++ = ' ';
             s++;
-        } else if (*s == '%' && s[1] && s[2]) {
-            int hi = hex_nibble(s[1]);
-            int lo = hex_nibble(s[2]);
+        } else if (*s == '%') {
+            int hi = s[1] ? hex_nibble(s[1]) : -1;
+            int lo = (s[1] && s[2]) ? hex_nibble(s[2]) : -1;
             if (hi >= 0 && lo >= 0) {
                 *w++ = (char)((hi << 4) | lo);
                 s += 3;
             } else {
-                *w++ = *s++;
+                s++;   // drop lone/malformed `%`, keep walking
             }
         } else {
             *w++ = *s++;
@@ -368,6 +366,8 @@ static void format_net_info(char *out, size_t sz) {
         // member in 5.x). 0 = not associated / unknown.
         uint16_t aid = 0;
         esp_wifi_sta_get_aid(&aid);
+        main_status_t st;
+        main_status_snapshot(&st);
         snprintf(out, sz,
                  "<div class=\"info\"><h3>Network</h3>"
                  "<b>SSID:</b> %s<br>"
@@ -388,7 +388,7 @@ static void format_net_info(char *out, size_t sz) {
                  (int)ap.rssi,
                  ip_s, gw_s, nm_s,
                  d1_s, has_d2 ? ", " : "", has_d2 ? d2_s : "",
-                 (unsigned long)main_status_reconnects());
+                 (unsigned long)st.reconnects);
         return;
     }
 
@@ -544,21 +544,19 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
 
 // --- Cycle block -------------------------------------------------------------
 static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
-    uint32_t cycles  = main_status_cycles();
-    uint32_t last_dt = main_status_last_dt_ms();
-    int64_t  last_at = main_status_last_cycle_at();
-    uint32_t last_ms = main_status_last_cycle_ms();
+    main_status_t st;
+    main_status_snapshot(&st);
 
     char wall[32], ago[24];
-    format_wallclock(last_at, wall, sizeof(wall));
-    format_ago((int64_t)time(NULL), last_at, ago, sizeof(ago));
+    format_wallclock(st.last_cycle_at, wall, sizeof(wall));
+    format_ago((int64_t)time(NULL), st.last_cycle_at, ago, sizeof(ago));
 
     // Next cycle = last + tx_interval. If we haven't run yet, "—".
     char next_line[64];
-    if (last_ms == 0) {
+    if (st.last_cycle_ms == 0) {
         snprintf(next_line, sizeof(next_line), "—");
     } else {
-        long remaining_ms = (long)(last_ms + s_cfg->tx_interval_ms) - (long)uptime_ms;
+        long remaining_ms = (long)(st.last_cycle_ms + s_cfg->tx_interval_ms) - (long)uptime_ms;
         if (remaining_ms < 0) remaining_ms = 0;
         snprintf(next_line, sizeof(next_line), "in %lds", remaining_ms / 1000);
     }
@@ -571,8 +569,8 @@ static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
         "<b>Last cycle:</b> %s &nbsp; (%s)<br>"
         "<b>Next cycle:</b> %s"
         "</div>",
-        (unsigned long)cycles,
-        (unsigned long)last_dt,
+        (unsigned long)st.cycles,
+        (unsigned long)st.last_dt_ms,
         (unsigned long)s_cfg->tx_interval_ms,
         wall, ago,
         next_line);
@@ -582,22 +580,19 @@ static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
 static void format_radiation(char *out, size_t sz) {
     if (!tube_is_enabled()) { out[0] = 0; return; }
 
-    uint32_t cpm        = main_status_last_cpm();
-    float    usvph      = main_status_last_usvph();
-    uint32_t hv_pulses  = main_status_last_hv_pulses();
-    bool     hv_error   = main_status_last_hv_error();
-    uint32_t dt_ms      = main_status_last_dt_ms();
+    main_status_t st;
+    main_status_snapshot(&st);
 
     // HV pulses per minute over the last cycle window. dt_ms == 0 means no
     // cycle has run yet; show a dash so we don't divide by zero.
     char hv_line[64];
-    if (dt_ms > 0) {
-        float hv_per_min = (float)hv_pulses * 60000.0f / (float)dt_ms;
+    if (st.last_dt_ms > 0) {
+        float hv_per_min = (float)st.last_hv_pulses * 60000.0f / (float)st.last_dt_ms;
         snprintf(hv_line, sizeof(hv_line), "%.1f / min  (cumulative %lu)",
-                 hv_per_min, (unsigned long)hv_pulses);
+                 hv_per_min, (unsigned long)st.last_hv_pulses);
     } else {
         snprintf(hv_line, sizeof(hv_line), "—  (cumulative %lu)",
-                 (unsigned long)hv_pulses);
+                 (unsigned long)st.last_hv_pulses);
     }
 
     snprintf(out, sz,
@@ -607,15 +602,17 @@ static void format_radiation(char *out, size_t sz) {
         "<b>Dose rate:</b> %.3f µSv/h<br>"
         "<b>HV pulses:</b> %s"
         "</div>",
-        hv_error ? " &middot; <span style='color:#c00;font-weight:bold'>HV ERROR</span>" : "",
-        (unsigned long)cpm, usvph,
+        st.last_hv_error ? " &middot; <span style='color:#c00;font-weight:bold'>HV ERROR</span>" : "",
+        (unsigned long)st.last_cpm, st.last_usvph,
         hv_line);
 }
 
 // --- Environment block -------------------------------------------------------
 static void format_environment(char *out, size_t sz) {
     if (!env_sensor_present()) { out[0] = 0; return; }
-    if (!main_status_have_env()) {
+    main_status_t st;
+    main_status_snapshot(&st);
+    if (!st.have_env) {
         snprintf(out, sz,
             "<div class=\"info\"><h3>Environment</h3>"
             "<b>Sensor:</b> %s<br>"
@@ -631,9 +628,9 @@ static void format_environment(char *out, size_t sz) {
         "<b>Pressure:</b> %.2f hPa"
         "</div>",
         env_sensor_name(),
-        main_status_env_t(),
-        main_status_env_h(),
-        main_status_env_p() / 100.0f);
+        st.env_t,
+        st.env_h,
+        st.env_p / 100.0f);
 }
 
 // --- Ambient light block ----------------------------------------------------
@@ -1150,9 +1147,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
-        "Speaker tick on each GM pulse</label></div><br>"
+        "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"led_tick\" %s> "
-        "LED flash on each GM pulse</label></div><br>"
+        "LED flash on each GM pulse <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
         "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
@@ -1162,7 +1159,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         " <small>(live — applies on Save without reboot)</small></label>"
         "<h3>Other</h3>"
         "<label>NTP server 1 <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"ntp1\" value=\"%s\"></label>"
+        "<input type=\"text\" name=\"ntp\" value=\"%s\"></label>"
         "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
         "<label>NTP server 3 (optional) <span class=\"r\">*</span>"
@@ -1256,19 +1253,28 @@ static esp_err_t config_get(httpd_req_t *req) {
 }
 
 // --- POST /config (parse form, save, flag restart) --------------------------
-
-static void assign_str(char *dst, size_t dstsz, const char *src) {
-    strncpy(dst, src, dstsz - 1);
-    dst[dstsz - 1] = 0;
-}
+//
+// V2.4.1: the per-field plumbing (pre-clear bools + dispatch) is now
+// generated from the schema in config_fields.def via the helpers
+// config_post_preclear_bools() and config_post_apply_field() in config.c.
+// This handler owns only the parts that DON'T fit the schema:
+//   * HTTP body slurp + URL-form parsing
+//   * Special-case key handling (`save_restart`, `oled_bright` step check)
+//   * Cross-field invariants applied after the dispatch (wifi_11bg → ht20,
+//     antenna force-clear on boards lacking hardware, ftp_ps preserve when
+//     global PS is off)
 
 static esp_err_t config_post(httpd_req_t *req) {
     log_access(req, "POST /config");
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
 
-    int total = req->content_len;
-    if (total <= 0 || total > 4096) {
+    // V2.4.1 (C5): content_len is size_t in esp_http_server. Hold it
+    // as size_t throughout to avoid silent narrowing on huge values.
+    // 4096 hard cap blocks abuse; recv loop uses size_t for position
+    // and the (signed) int return value of httpd_req_recv for error.
+    size_t total = req->content_len;
+    if (total == 0 || total > 4096) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body size out of range");
         return ESP_OK;
     }
@@ -1277,7 +1283,7 @@ static esp_err_t config_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
         return ESP_OK;
     }
-    int received = 0;
+    size_t received = 0;
     while (received < total) {
         int r = httpd_req_recv(req, buf + received, total - received);
         if (r <= 0) {
@@ -1285,7 +1291,7 @@ static esp_err_t config_post(httpd_req_t *req) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
             return ESP_OK;
         }
-        received += r;
+        received += (size_t)r;
     }
     buf[total] = 0;
 
@@ -1296,31 +1302,11 @@ static esp_err_t config_post(httpd_req_t *req) {
     // running.
     bool restart_after_save = false;
 
-    // Work on a local copy so a parse failure can't half-apply. Booleans
-    // default to false — form only includes the name when the box is checked.
+    // Start from the current config; pre-clear every bool (forms only POST
+    // ticked checkboxes, so an absent key means "unticked"). Schema-derived
+    // — see config.c::config_post_preclear_bools.
     config_t next = *s_cfg;
-    next.send_madavi            = false;
-    next.madavi_https           = false;
-    next.send_sensorc           = false;
-    next.sensorc_https          = false;
-    next.send_radmon            = false;
-    next.radmon_https           = false;
-    next.send_sealevel_pressure = false;
-    next.ftp_enabled            = false;
-    next.ftp_tls                = false;
-    next.ftp_ps_disabled        = false;
-    next.ftp_tls12_only         = false;
-    next.speaker_tick           = false;
-    next.led_tick               = false;
-    next.play_sound             = false;
-    next.show_display           = false;
-    next.wifi_11bg_only         = false;
-    next.wifi_ht20_only         = false;
-    next.wifi_ps_disabled       = false;
-    next.use_external_antenna   = false;
-    next.tube_enabled           = false;
-    next.send_osm               = false;
-    next.send_aqi               = false;
+    config_post_preclear_bools(&next);
 
     char *p = buf;
     while (*p) {
@@ -1332,76 +1318,32 @@ static esp_err_t config_post(httpd_req_t *req) {
         if (amp) *amp = 0;
         url_decode(val);
 
-        if      (!strcmp(p, "wifi_ssid")) assign_str(next.wifi_ssid,     sizeof(next.wifi_ssid),     val);
-        else if (!strcmp(p, "wifi_pw"))   assign_str(next.wifi_password, sizeof(next.wifi_password), val);
-        else if (!strcmp(p, "wifi_host")) assign_str(next.wifi_hostname, sizeof(next.wifi_hostname), val);
-        else if (!strcmp(p, "ap_name"))   assign_str(next.ap_name,       sizeof(next.ap_name),       val);
-        else if (!strcmp(p, "wifi_11bg"))  next.wifi_11bg_only   = true;
-        else if (!strcmp(p, "wifi_ht20"))  next.wifi_ht20_only   = true;
-        else if (!strcmp(p, "wifi_ps_dis")) next.wifi_ps_disabled = true;
-        else if (!strcmp(p, "wifi_ext_a"))  next.use_external_antenna = true;
-        else if (!strcmp(p, "tube_en"))   next.tube_enabled  = true;
-        else if (!strcmp(p, "send_osm"))  next.send_osm      = true;
-        else if (!strcmp(p, "osm_box"))   assign_str(next.osm_box_id,       sizeof(next.osm_box_id),       val);
-        else if (!strcmp(p, "osm_tok"))   assign_str(next.osm_access_token, sizeof(next.osm_access_token), val);
-        else if (!strcmp(p, "send_aqi"))  next.send_aqi      = true;
-        else if (!strcmp(p, "aqi_tok"))   assign_str(next.aqi_token,  sizeof(next.aqi_token),  val);
-        else if (!strcmp(p, "send_mad"))  next.send_madavi   = true;
-        else if (!strcmp(p, "mad_https")) next.madavi_https  = true;
-        else if (!strcmp(p, "send_sc"))   next.send_sensorc  = true;
-        else if (!strcmp(p, "sc_https"))  next.sensorc_https = true;
-        else if (!strcmp(p, "send_rad"))  next.send_radmon   = true;
-        else if (!strcmp(p, "rad_https")) next.radmon_https  = true;
-        else if (!strcmp(p, "rad_user"))  assign_str(next.radmon_user,     sizeof(next.radmon_user),     val);
-        else if (!strcmp(p, "rad_pw"))    assign_str(next.radmon_password, sizeof(next.radmon_password), val);
-        else if (!strcmp(p, "ntp1"))      assign_str(next.ntp_server,      sizeof(next.ntp_server),      val);
-        else if (!strcmp(p, "ntp2"))      assign_str(next.ntp_server2,     sizeof(next.ntp_server2),     val);
-        else if (!strcmp(p, "ntp3"))      assign_str(next.ntp_server3,     sizeof(next.ntp_server3),     val);
-        else if (!strcmp(p, "tz_posix"))  assign_str(next.tz_posix,        sizeof(next.tz_posix),        val);
-        else if (!strcmp(p, "ap_pw"))     assign_str(next.ap_password,     sizeof(next.ap_password),     val);
-        else if (!strcmp(p, "tx_int_ms")) {
-            long v = strtol(val, NULL, 10);
-            if (v >= 10000 && v <= 3600000) next.tx_interval_ms = (uint32_t)v;
-        }
-        else if (!strcmp(p, "alt_m")) {
-            float v = strtof(val, NULL);
-            if (v >= -500.0f && v <= 9000.0f) next.station_altitude_m = v;
-        }
-        else if (!strcmp(p, "send_sl")) next.send_sealevel_pressure = true;
-        else if (!strcmp(p, "ftp_en"))  next.ftp_enabled = true;
-        else if (!strcmp(p, "ftp_tls")) next.ftp_tls     = true;
-        else if (!strcmp(p, "ftp_host")) assign_str(next.ftp_host,     sizeof(next.ftp_host),     val);
-        else if (!strcmp(p, "ftp_user")) assign_str(next.ftp_user,     sizeof(next.ftp_user),     val);
-        else if (!strcmp(p, "ftp_pw"))   assign_str(next.ftp_password, sizeof(next.ftp_password), val);
-        else if (!strcmp(p, "ftp_path")) assign_str(next.ftp_path,     sizeof(next.ftp_path),     val);
-        else if (!strcmp(p, "ftp_int")) {
-            long v = strtol(val, NULL, 10);
-            if (v >= 1 && v <= 1440) next.ftp_interval_min = (uint32_t)v;
-        }
-        else if (!strcmp(p, "ftp_ps_dis")) next.ftp_ps_disabled = true;
-        else if (!strcmp(p, "ftp_t12only")) next.ftp_tls12_only  = true;
-        else if (!strcmp(p, "sp_tick"))    next.speaker_tick = true;
-        else if (!strcmp(p, "led_tick"))   next.led_tick     = true;
-        else if (!strcmp(p, "play_sound")) next.play_sound   = true;
-        else if (!strcmp(p, "show_disp"))  next.show_display = true;
-        else if (!strcmp(p, "oled_bright")) {
-            // V2.3.30: validated 10..100 in steps of 10. Out-of-range or
-            // non-stepped values are silently ignored (next.oled_brightness_pct
-            // stays at the value preserved from the *s_cfg copy at the top).
-            // V2.3.32: 0 (OFF) is now also accepted — display_set_contrast
-            // interprets it as panel-dark (OLED 0xAE) / backlight-off (SerLCD).
+        // V2.3.30: oled_bright needs a STEP validator (0 or 10..100 step 10)
+        // that's tighter than the schema's generic [0,100] envelope. Handle
+        // it FIRST so the generic dispatch never sees this key.
+        // V2.3.32: 0 (OFF) accepted — display_set_contrast interprets as
+        // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
+        if (strcmp(p, "oled_bright") == 0) {
             long v = strtol(val, NULL, 10);
             if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
                 next.oled_brightness_pct = (uint8_t)v;
             }
+            // Out-of-step values silently keep the prior value.
         }
-        else if (!strcmp(p, "save_restart")) restart_after_save = true;
-        // (a "save" key with no other meaning is fine — silently ignored.)
+        // Generic schema dispatch. Returns true if `p` matched a known
+        // field (out-of-range numerics silently keep prior value).
+        else if (!config_post_apply_field(&next, p, val)) {
+            // Non-schema control keys.
+            if (strcmp(p, "save_restart") == 0) restart_after_save = true;
+            // Plain "save" and any unknown keys are silently ignored.
+        }
 
         if (!amp) break;
         p = amp + 1;
     }
     free(buf);
+
+    // --- Cross-field invariants — applied after dispatch ----------------
 
     // 802.11b/g channels are always 20 MHz — HT40 only exists under 11n.
     // A disabled checkbox doesn't POST, so the form may send wifi_ht20=0
@@ -1437,7 +1379,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
     if (restart_after_save) {
-        s_restart_requested = true;
+        main_request_restart();
         ESP_LOGI(TAG, "config saved via POST — restart flagged");
         const char *ok =
             "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -1471,7 +1413,7 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     log_access(req, "POST /reboot");
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
-    s_restart_requested = true;
+    main_request_restart();
     ESP_LOGW(TAG, "manual reboot requested via /reboot");
     const char *ok =
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -1553,8 +1495,9 @@ static esp_err_t update_post(httpd_req_t *req) {
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
 
-    int total = req->content_len;
-    if (total <= 0) {
+    // V2.4.1 (C5): content_len is size_t; hold as size_t throughout.
+    size_t total = req->content_len;
+    if (total == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
         return ESP_OK;
     }
@@ -1570,19 +1513,19 @@ static esp_err_t update_post(httpd_req_t *req) {
     // but checking here lets us reject early with a clear error and
     // prevents a malicious client from claiming a giant content_len and
     // slowloris-ing the recv loop one chunk at a time.
-    if ((size_t)total > target->size) {
-        ESP_LOGE(TAG, "OTA refused: claimed body %d > partition size %lu",
-                 total, (unsigned long)target->size);
+    if (total > target->size) {
+        ESP_LOGE(TAG, "OTA refused: claimed body %u > partition size %lu",
+                 (unsigned)total, (unsigned long)target->size);
         char msg[128];
         snprintf(msg, sizeof(msg),
-                 "Image (%d bytes) larger than OTA partition (%lu bytes)",
-                 total, (unsigned long)target->size);
+                 "Image (%u bytes) larger than OTA partition (%lu bytes)",
+                 (unsigned)total, (unsigned long)target->size);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "OTA: %d bytes -> partition %s @ 0x%lx",
-             total, target->label, (unsigned long)target->address);
+    ESP_LOGI(TAG, "OTA: %u bytes -> partition %s @ 0x%lx",
+             (unsigned)total, target->label, (unsigned long)target->address);
 
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(target, total, &ota);
@@ -1599,27 +1542,29 @@ static esp_err_t update_post(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    int received = 0;
+    size_t received = 0;
     while (received < total) {
-        int want = total - received;
+        size_t want = total - received;
         if (want > OTA_CHUNK) want = OTA_CHUNK;
         int r = httpd_req_recv(req, buf, want);
         if (r <= 0) {
-            ESP_LOGE(TAG, "recv failed at %d/%d (r=%d)", received, total, r);
+            ESP_LOGE(TAG, "recv failed at %u/%u (r=%d)",
+                     (unsigned)received, (unsigned)total, r);
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
             return ESP_OK;
         }
-        err = esp_ota_write(ota, buf, r);
+        err = esp_ota_write(ota, buf, (size_t)r);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_ota_write failed at %d: %s", received, esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_ota_write failed at %u: %s",
+                     (unsigned)received, esp_err_to_name(err));
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
             return ESP_OK;
         }
-        received += r;
+        received += (size_t)r;
     }
     free(buf);
 
@@ -1740,8 +1685,8 @@ static esp_err_t update_post(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    s_restart_requested = true;
-    ESP_LOGW(TAG, "OTA written (%d bytes) — restart flagged", total);
+    main_request_restart();
+    ESP_LOGW(TAG, "OTA written (%u bytes) — restart flagged", (unsigned)total);
 
     const char *ok = "OTA OK — restarting in ~2s";
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -1868,8 +1813,4 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_reboot_post);
     httpd_register_uri_handler(s_server, &uri_log_get);
     ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log)");
-}
-
-bool http_server_restart_requested(void) {
-    return s_restart_requested;
 }

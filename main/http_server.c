@@ -95,6 +95,21 @@ static void log_access(httpd_req_t *req, const char *what) {
 
 // --- Auth --------------------------------------------------------------------
 
+// V2.3.33: constant-time byte compare for credential material. Standard
+// strcmp/memcmp short-circuit on the first differing byte, which leaks
+// position information via response-time variance and in principle enables
+// byte-at-a-time brute force. ESP32 + WiFi jitter makes this practical
+// only for a patient adversary with statistical averaging on a quiet LAN,
+// but the principle is wrong and the fix is trivial. Returns 0 if the two
+// buffers of length n are identical, non-zero otherwise.
+static int ct_memcmp(const void *a, const void *b, size_t n) {
+    const uint8_t *pa = a;
+    const uint8_t *pb = b;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (uint8_t)(pa[i] ^ pb[i]);
+    return diff;
+}
+
 // Returns true if Authorization header is "Basic base64(admin:<ap_password>)".
 // On failure, sends 401 + WWW-Authenticate and returns false. The caller must
 // return ESP_OK immediately without sending anything further.
@@ -123,7 +138,12 @@ static bool check_auth(httpd_req_t *req) {
         goto unauth;
     }
     expected[enc_len] = 0;
-    if (strcmp(header + 6, (char *)expected) != 0) goto unauth;
+    // V2.3.33: length check first, then constant-time byte compare. Length
+    // mismatch is non-secret (derivable from the credential layout) so the
+    // early exit is fine; the byte comparison must be timing-safe.
+    size_t got_len = strlen(header + 6);
+    if (got_len != enc_len) goto unauth;
+    if (ct_memcmp(header + 6, expected, enc_len) != 0) goto unauth;
     return true;
 
 unauth:
@@ -136,6 +156,84 @@ unauth:
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MultiGeiger\"");
     httpd_resp_send(req, NULL, 0);
     return false;
+}
+
+// --- CSRF guard for state-changing POST handlers ----------------------------
+//
+// V2.3.33: defends against cross-site request forgery on /config, /update,
+// /reboot. Basic-auth credentials are cached per-origin by browsers and
+// auto-attached to any subsequent request to the same origin — including
+// cross-origin form POSTs from a malicious page the admin happens to visit
+// in the same browser session. Without this guard, an attacker page can
+// `<form action="http://device/config" method=POST>` with arbitrary fields,
+// the browser attaches the cached Authorization header, and the request
+// succeeds silently.
+//
+// Defence: require the request's Origin header to match Host (preferred —
+// all modern browsers set Origin on cross-origin POST and on most
+// same-origin POSTs); fall back to Referer match on host prefix. If
+// neither header is present, deny — programmatic clients (curl, scripts)
+// can pass `-H "Origin: http://<device>:<port>"` to satisfy the check.
+//
+// Caller must `return ESP_OK` immediately when this returns false.
+static bool check_same_origin(httpd_req_t *req) {
+    char host[64];
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+        goto deny;
+    }
+    size_t host_len = strlen(host);
+
+    char origin[128];
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
+        // Origin format: "scheme://host[:port]" with no path. After stripping
+        // the scheme prefix, what remains must equal Host exactly.
+        const char *p = strstr(origin, "://");
+        if (!p) goto deny;
+        p += 3;
+        if (strcmp(p, host) == 0) return true;
+        goto deny;
+    }
+
+    char referer[160];
+    if (httpd_req_get_hdr_value_str(req, "Referer", referer, sizeof(referer)) == ESP_OK) {
+        // Referer format: "scheme://host[:port]/path?query#frag". After
+        // stripping the scheme, the host portion (up to the first '/', '?',
+        // '#' or NUL terminator) must equal Host.
+        const char *p = strstr(referer, "://");
+        if (!p) goto deny;
+        p += 3;
+        if (strncmp(p, host, host_len) == 0) {
+            char next = p[host_len];
+            if (next == '/' || next == 0 || next == '?' || next == '#') {
+                return true;
+            }
+        }
+        goto deny;
+    }
+
+deny:
+    {
+        char ipstr[48];
+        peer_ipstr(req, ipstr, sizeof(ipstr));
+        ESP_LOGW(TAG, "CSRF check failed for POST %s from %s", req->uri, ipstr);
+    }
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "Cross-origin POST refused (CSRF protection). "
+                        "Submit from the device's own pages.",
+                    HTTPD_RESP_USE_STRLEN);
+    return false;
+}
+
+// --- Security response headers ----------------------------------------------
+//
+// V2.3.33: clickjacking protection for the admin UI. `DENY` blocks framing
+// from any origin (the device never frames itself either). Applied to
+// success responses on /config, /update, /reboot — the pages browsers
+// actually render. Error responses funnelled through `httpd_resp_send_err`
+// build their own minimal response and aren't normally framed in attacks.
+static void set_security_headers(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
 }
 
 // --- HTML escape for attribute values ---------------------------------------
@@ -807,7 +905,7 @@ static const char STATUS_HEAD[] =
 static const char STATUS_LINKS_HEAD[] =
     "<p><a href=\"/config\">&#9881; Configuration</a> (requires password)</p>"
     "<p><a href=\"/update\">&#11014; Firmware Update (OTA)</a> (requires password)</p>"
-    "<p><a href=\"/log\">&#128221; View log buffer</a> (requires password)</p>";
+    "<p><a href=\"/log\">&#128221; View log buffer</a></p>";
 static const char STATUS_LINKS_TAIL[] =
     "</body></html>";
 
@@ -879,9 +977,13 @@ fail:
 // --- GET /config (auth'd form) -----------------------------------------------
 
 // Bumped from 6144 in V2.3.3 — adding the openSenseMap + aqi.eco rows pushed
-// the worst-case formatted length past the old ceiling. 8192 has ~1.5 kB
-// headroom for future fields.
-#define CFG_FORM_BUF_SIZE 8192
+// the worst-case formatted length past the old ceiling. V2.3.33: bumped 8192
+// → 16384 after silent snprintf truncation surfaced as missing page tail on
+// devices with longer field values (longer SSIDs/FTP paths/tokens consumed
+// the remaining budget; cut point varied per board because field lengths
+// varied). 16 KB gives ~8 KB headroom; truncation is now also logged at
+// ERROR level (see config_get) so any future near-miss is loud, not silent.
+#define CFG_FORM_BUF_SIZE 16384
 
 static esp_err_t config_get(httpd_req_t *req) {
     log_access(req, "GET /config");
@@ -1019,7 +1121,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label>"
         "<h3>BME280 (environmental)</h3>"
         "<label>Station altitude (m above sea level) "
-        "<input type=\"number\" step=\"0.1\" name=\"alt_m\" value=\"%.1f\"></label>"
+        "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sl\" %s> "
         "Send pressure-at-sealevel to sensor.community</label></div>"
         "<h3>FTP log upload</h3>"
@@ -1034,7 +1136,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
         "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
         "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
-        "<label>Upload interval (minutes)<input type=\"number\" name=\"ftp_int\" value=\"%lu\" min=\"1\" max=\"1440\"></label>"
+        "<label>Upload interval (minutes)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
         "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
         "(prevents DTIM-delayed TCP ACKs; auto-cleared if WiFi PS is already disabled above)</label></div>"
@@ -1072,7 +1174,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<code>UTC0</code> (UTC). See <code>man tzset</code>.</small></label>"
         "<label>Web admin and access point password<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
         "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
-        "<input type=\"number\" name=\"tx_int_ms\" value=\"%lu\" min=\"10000\" max=\"3600000\"></label>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
         // V2.3.24: two submit buttons. The clicked button's name=value is the
         // only one included in the POST body (standard HTML form behaviour),
         // so the handler distinguishes via the "save_restart" key. Plain
@@ -1135,7 +1237,19 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_ntp1, e_ntp2, e_ntp3, e_tz, e_ap,
         (unsigned long)s_cfg->tx_interval_ms);
 
+    // V2.3.33: snprintf returns the would-have-been length on truncation,
+    // not the bytes actually written. If n >= buffer size the page tail was
+    // cut — log loudly so the issue surfaces in serial instead of silently
+    // producing a broken HTML page. Clamp the send length to the buffer
+    // to avoid reading past it.
+    if (n >= (int)CFG_FORM_BUF_SIZE) {
+        ESP_LOGE(TAG, "config page truncated: needed %d bytes, buffer is %u; "
+                 "increase CFG_FORM_BUF_SIZE", n, (unsigned)CFG_FORM_BUF_SIZE);
+        n = CFG_FORM_BUF_SIZE - 1;
+    }
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    set_security_headers(req);
     esp_err_t err = httpd_resp_send(req, body, n > 0 ? n : 0);
     free(body);
     return err;
@@ -1151,6 +1265,7 @@ static void assign_str(char *dst, size_t dstsz, const char *src) {
 static esp_err_t config_post(httpd_req_t *req) {
     log_access(req, "POST /config");
     if (!check_auth(req)) return ESP_OK;
+    if (!check_same_origin(req)) return ESP_OK;
 
     int total = req->content_len;
     if (total <= 0 || total > 4096) {
@@ -1320,6 +1435,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     display_set_contrast(s_cfg->oled_brightness_pct);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    set_security_headers(req);
     if (restart_after_save) {
         s_restart_requested = true;
         ESP_LOGI(TAG, "config saved via POST — restart flagged");
@@ -1354,6 +1470,7 @@ static esp_err_t config_post(httpd_req_t *req) {
 static esp_err_t reboot_post(httpd_req_t *req) {
     log_access(req, "POST /reboot");
     if (!check_auth(req)) return ESP_OK;
+    if (!check_same_origin(req)) return ESP_OK;
     s_restart_requested = true;
     ESP_LOGW(TAG, "manual reboot requested via /reboot");
     const char *ok =
@@ -1364,6 +1481,7 @@ static esp_err_t reboot_post(httpd_req_t *req) {
         "<p><a href=\"/\">Back to status</a></p>"
         "</body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    set_security_headers(req);
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1422,6 +1540,7 @@ static esp_err_t update_get(httpd_req_t *req) {
         "}"
         "</script></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    set_security_headers(req);
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1432,6 +1551,7 @@ static esp_err_t update_get(httpd_req_t *req) {
 static esp_err_t update_post(httpd_req_t *req) {
     log_access(req, "POST /update");
     if (!check_auth(req)) return ESP_OK;
+    if (!check_same_origin(req)) return ESP_OK;
 
     int total = req->content_len;
     if (total <= 0) {
@@ -1444,6 +1564,23 @@ static esp_err_t update_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA slot");
         return ESP_OK;
     }
+
+    // V2.3.33: bound the upload size by the OTA partition before doing any
+    // work. esp_ota_begin would fail on out-of-range image_size anyway,
+    // but checking here lets us reject early with a clear error and
+    // prevents a malicious client from claiming a giant content_len and
+    // slowloris-ing the recv loop one chunk at a time.
+    if ((size_t)total > target->size) {
+        ESP_LOGE(TAG, "OTA refused: claimed body %d > partition size %lu",
+                 total, (unsigned long)target->size);
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "Image (%d bytes) larger than OTA partition (%lu bytes)",
+                 total, (unsigned long)target->size);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "OTA: %d bytes -> partition %s @ 0x%lx",
              total, target->label, (unsigned long)target->address);
 
@@ -1608,6 +1745,7 @@ static esp_err_t update_post(httpd_req_t *req) {
 
     const char *ok = "OTA OK — restarting in ~2s";
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    set_security_headers(req);
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -1632,7 +1770,11 @@ static esp_err_t update_post(httpd_req_t *req) {
 // loop bound just bumped from 2 to 3.
 static esp_err_t log_get(httpd_req_t *req) {
     log_access(req, "GET /log");
-    if (!check_auth(req)) return ESP_OK;
+    // V2.3.33: /log is no longer auth-gated. The ring buffer is diagnostic
+    // output (boot banner, WiFi/upload status, sensor readings) — same
+    // class of information the device already broadcasts to Madavi /
+    // sensor.community / Grafana publicly. Removing the prompt makes it
+    // a one-click "view log" link from the unauth'd /status page.
 
     applog_stream_t s;
     if (!applog_stream_begin(&s)) {

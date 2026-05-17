@@ -1,6 +1,141 @@
 #pragma once
 // Bump before build; commit after successful flash.
 //
+// V2.3.33 — fix silent /config page truncation + accidental-scroll value
+// drift on number fields + drop auth from /log + web-UI security hardening.
+//
+// **Four unrelated web-UI changes shipping together.**
+//
+// **(A) Silent page truncation under longer field values.**
+//
+// *Symptom:* the /config page rendered partially on some boards — different
+// devices were cut at different points (one feather stopped after the bold
+// "Reboot" header, the Heltec stopped just before the "Firmware update"
+// link, the other feather rendered fully). Replicable across reboots,
+// fixed config — no transient state involved.
+//
+// *Root cause:* `config_get` builds the whole page into a single 8 KB
+// heap buffer via one big `snprintf`, then `httpd_resp_send`s it. The
+// static template alone is ~7 KB; once you add field values (escaped
+// SSID, FTP host/user/pw/path, three NTP servers, TZ string, openSenseMap
+// box+token, aqi token), longer configs blow past 8192. `snprintf`
+// silently truncates and returns the would-have-been length. Different
+// boards have different field values → different cut points; same board
+// always cuts at the same place. Latent since V2.3.3 (the buffer was
+// last sized then for the openSenseMap + aqi.eco additions).
+//
+// *Fix:*
+//   1. `CFG_FORM_BUF_SIZE` 8192 → 16384 in `http_server.c`. Heap-only
+//      during the few ms of request handling, freed immediately. Gives
+//      ~8 KB headroom over the current worst case, plenty for many more
+//      releases of form growth.
+//   2. New `ESP_LOGE` after the `snprintf` if `n >= CFG_FORM_BUF_SIZE`
+//      so any future truncation surfaces in serial instead of producing
+//      another batch of silently-broken pages. Also clamps the send
+//      length to the buffer so we never read past it.
+//
+// *Why not chunked sends:* the natural "robust" fix would be to convert
+// `config_get` to chunked `httpd_resp_send_chunk` like `status_get`
+// already does, but the cost/benefit didn't justify it: ~100 LOC of
+// mechanical refactor across a critical UI page, multiplied retest
+// matrix, and the actual problem here was "we had no alarm on
+// truncation" — fixed by the one-line ESP_LOGE. The 16 KB ceiling is
+// plenty until form growth or a future fragmentation issue forces the
+// hand.
+//
+// **(B) Number inputs converted to text-with-inputmode to disable the
+// wheel-decrements-value trap.**
+//
+// *Symptom:* `station_altitude_m` (and previously) values drifting by small
+// multiples of the field's `step` between saves — Heltec set to 63.0 m
+// reading back as 62.8 m (2 × 0.1 m), prior incident on 66.0 m → 65.8 m.
+// Same UX trap caused, but never identified for years.
+//
+// *Root cause:* `<input type="number">` on both Chrome and Firefox treats
+// the focused element as a mouse-wheel target — scrolling decrements or
+// increments by `step`. User edits the field, finishes typing, then
+// scrolls the page to reach the Save button; the focused number input
+// eats the wheel events, value silently ticks down, Save persists the
+// wrong value. Affected the three number fields on the form
+// (`alt_m`, `ftp_int`, `tx_int_ms`).
+//
+// *Fix:* converted all three to `type="text" inputmode="decimal|numeric"`.
+// No spinner arrows; no wheel-value behaviour; mobile keyboards still
+// pop the numeric/decimal layout via the `inputmode` hint. Loses HTML5
+// `min`/`max` live validation, but the POST handler already enforces
+// the same bounds server-side (alt_m [-500, 9000], ftp_int [1, 1440],
+// tx_int_ms [10000, 3600000]) — so functionally identical, just no
+// in-browser red outline.
+//
+// **(C) /log no longer auth-gated.**
+//
+// One-click view from the unauth'd /status page. The ring buffer is
+// diagnostic output (boot banner, WiFi/upload status, sensor cycle
+// summaries) — same class of information the device already publishes
+// to Madavi / sensor.community / Grafana publicly, so the password
+// prompt added friction without protecting anything sensitive. /config,
+// /update, /reboot remain password-protected.
+//
+// **(D) Web-UI security hardening — 4 fixes from the /config + /update
+// audit.**
+//
+// All in `http_server.c`. Closes the realistic attack surface for a
+// LAN sensor without pulling in HTTPS / signed-boot / NVS encryption
+// (deferred: see audit notes).
+//
+//   1. **CSRF protection on POST handlers.** Basic-auth credentials are
+//      cached per-origin by browsers and auto-attached to any subsequent
+//      same-origin request — including cross-origin form POSTs from a
+//      malicious page the admin happens to visit in the same browser
+//      session. Without protection, attacker.com can submit
+//      `<form action="http://device/config" method=POST>` with arbitrary
+//      fields and the browser attaches cached `Authorization`. New
+//      `check_same_origin()` helper requires the request's `Origin`
+//      header (or `Referer` as fallback) to match `Host`. Applied to
+//      `/config`, `/update`, `/reboot` POST handlers. Programmatic
+//      clients (curl/scripts) need `-H "Origin: http://<device>:<port>"`.
+//
+//   2. **Constant-time credential compare.** `check_auth` previously
+//      used `strcmp` to compare the received Authorization header
+//      against the expected base64, which short-circuits on the first
+//      differing byte — leaks position via response-time variance,
+//      enables byte-at-a-time brute force on a timing-attack-capable
+//      adversary. New `ct_memcmp()` inline helper runs over the full
+//      buffer regardless of position of the mismatch. Length check is
+//      still early-exit (length is non-secret).
+//
+//   3. **OTA `content_len` clamp to partition size.** `update_post`
+//      previously trusted the client-claimed `content_len` as the recv
+//      loop bound. Auth'd attacker could claim a giant size and dribble
+//      bytes (slowloris) to hold the OTA partition open. Now rejected
+//      with HTTP 400 before any erase happens.
+//
+//   4. **X-Frame-Options: DENY on /config, /update, /reboot.** Free
+//      clickjacking protection — blocks framing from any origin (the
+//      device never frames itself either). New `set_security_headers()`
+//      helper called on success-response paths.
+//
+// **Deferred** (called out in audit, not addressed in this release):
+// HTTPS migration (LAN-only, not worth heap+UX cost), signed-app OTA
+// (production-hardening, key-management overhead), flash + NVS
+// encryption (same), auth-failure rate limit / lockout (mostly
+// informational without HTTPS).
+//
+// **Files touched:** `http_server.c` only. ~16 sites total: (A) buffer
+// #define + truncation guard + log; (B) three input element
+// conversions; (C) `check_auth` removal in `log_get` + status-page
+// link text; (D) `ct_memcmp` helper, `check_same_origin` helper,
+// `set_security_headers` helper, length-check + ct_memcmp in
+// `check_auth`, `check_same_origin` calls in 3 POST handlers, size
+// clamp in `update_post`, `set_security_headers` calls on 5 success-
+// response paths.
+//
+// **Compatibility:** no NVS key changes, no sdkconfig changes, no
+// partition changes. OTA-safe from V2.3.32. 20 release artefacts
+// (5 × 4 boards). +8 KB transient heap during /config render only.
+// Programmatic POSTs from outside a browser now require an explicit
+// `Origin` or `Referer` header (curl needs `-H "Origin: http://..."`).
+//
 // V2.3.32 — config-page polish + status-page Madavi link + display OFF.
 //
 // **Three small UX changes — all in http_server.c + display.c:**
@@ -565,4 +700,4 @@
 // OTA-safe from V2.3.22 (no partition layout changes, no sdkconfig
 // changes). 20 release artefacts (5 × 4 boards). All four boards share
 // the FTPS code path and benefit from both changes.
-#define VERSION_STR "V2.3.32"
+#define VERSION_STR "V2.3.33"

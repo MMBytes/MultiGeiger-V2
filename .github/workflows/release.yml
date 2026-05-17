@@ -172,16 +172,31 @@ jobs:
         run: |
           set -e
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          # Extract the section between "## TAG ..." and the next "## ".
-          # Trailing `[^0-9A-Za-z]` ensures V2.4.1 doesn't match V2.4.10
-          # (next char must be space, en-dash byte, EOL, etc.).
+          # Extract the section between "## TAG" and the next "## ".
+          #
+          # Match two heading shapes:
+          #   * "## V2.4.2"           — heading with no trailing text
+          #     (the common case in our CHANGELOG.md)
+          #   * "## V2.4.2 — title"   — heading with a separator + label
+          #     (the trailing `[^0-9A-Za-z]` check on the next char
+          #     prevents V2.4.1 from also matching V2.4.10).
+          # The bug pre-V2.4.4 was matching only the second shape, so
+          # bare-heading sections (V2.4.2 + V2.4.3) released with the
+          # "Release notes not yet added" placeholder.
+          #
+          # `sed` post-processor: drop any trailing `---` horizontal-rule
+          # separator + blank lines that sit between version sections in
+          # our CHANGELOG layout, since they look like noise at the
+          # bottom of a release page.
           awk -v ver="$TAG" '
             /^## / {
               if (in_section) exit
-              if ($0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next }
+              if ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next }
             }
             in_section { print }
-          ' CHANGELOG.md > release_notes.md
+          ' CHANGELOG.md \
+            | sed -e :a -e '/^[[:space:]-]*$/{$d;N;ba' -e '}' \
+            > release_notes.md
           if [ ! -s release_notes.md ]; then
             echo "::warning::no matching section in CHANGELOG.md for tag $TAG"
             {

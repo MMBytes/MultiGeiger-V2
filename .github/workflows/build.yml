@@ -84,12 +84,12 @@ jobs:
                    ./test/run
 
   # V2.4.1+ (T3): cppcheck static analysis on main/. Pure C analysis,
-  # no IDF headers needed. Currently informational only — `continue-on-error`
-  # is true so the job's findings show in the step summary without
-  # turning the workflow red. Promote to fail-on-error after the first
-  # triage pass cleans the baseline.
+  # no IDF headers needed. Originally landed as informational; promoted
+  # to a hard CI gate once the baseline went clean (2026-05-17). New
+  # findings now fail the job — fix them or add an inline
+  # `cppcheck-suppress <id>` comment with a reason.
   static-analysis:
-    name: cppcheck (informational)
+    name: cppcheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -99,7 +99,6 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
 
       - name: Run cppcheck on main/
-        continue-on-error: true
         run: |
           set +e
           # --enable: include warning/style/performance/portability findings.
@@ -110,7 +109,10 @@ jobs:
           #   unusedStructMember    — struct members read via memcpy or by
           #                            external IDF code
           #   internalAstError      — known cppcheck issue with some macros
-          # -DESP_PLATFORM=1 mirrors the real build's macro definition.
+          #   unknownMacro          — IDF-defined macros (MACSTR, IP2STR, ...)
+          #                            that cppcheck has no header for
+          # -DESP_PLATFORM=1 + -DBOARD_HELTEC_V2=1 mirror the real build
+          # so hal.h enters a real branch instead of the fallback #error.
           cppcheck \
             --enable=warning,style,performance,portability \
             --inline-suppr \
@@ -138,11 +140,16 @@ jobs:
             echo ""
             echo "cppcheck exit code: $RC (0=clean)"
           } >> "$GITHUB_STEP_SUMMARY"
-          # Informational: don't fail the job. Promote to `exit $RC` after
-          # the baseline is clean.
-          exit 0
+          # Hard gate: cppcheck's exit code is honored. Fix new findings
+          # at source, or add an inline `// cppcheck-suppress <id>` with
+          # a reason explaining why the warning is a false positive in
+          # this context.
+          exit $RC
 
       - name: Upload cppcheck output as artifact
+        # Run even on cppcheck failure so the user can download the
+        # findings from the failed run page.
+        if: always()
         uses: actions/upload-artifact@v5
         with:
           name: cppcheck-${{ github.sha }}

@@ -44,6 +44,10 @@
 #define CFG_FTP_PATH_MAX     63   // remote dir path
 #define CFG_OSM_BOX_MAX      25   // MongoDB ObjectId hex (24 chars)
 #define CFG_TOKEN_MAX        64   // OSM / aqi.eco access token (64 hex)
+#define CFG_MQTT_HOST_MAX    63   // broker FQDN / IPv4 / "host:port" — RFC 1123
+#define CFG_MQTT_PFX_MAX     31   // topic prefix — kept short, full topic is
+                                  //   "<pfx>/<chip-id>/state" so MQTT 64-char
+                                  //   single-level cap leaves room for both
 
 typedef struct {
     // Struct members generated from the schema. See `config_fields.def`

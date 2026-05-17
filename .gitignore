@@ -12,7 +12,11 @@ sdkconfig.*.old
 
 # Per-release staging dir for `gh release upload` (board-suffixed binaries).
 release_staging/
-dependencies.lock
+
+# IDF Component Manager: COMMIT `dependencies.lock` (pins resolved versions of
+# espressif/mqtt etc. — needed for reproducible builds across dev + CI). The
+# fetched component sources under `managed_components/` are regenerated on
+# every clean build and must NOT be committed.
 managed_components/
 
 # VS Code workspace settings (machine-local)

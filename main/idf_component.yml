@@ -1,0 +1,16 @@
+# Managed component dependencies declared via the IDF Component Manager.
+#
+# ESP-MQTT (the `mqtt_client.h` library used by main/mqtt.c) was removed from
+# bundled IDF components in v6.0 and is now distributed via the registry at
+# https://components.espressif.com/components/espressif/mqtt — confirmed by
+# `docs/en/migration-guides/release-6.x/6.0/protocols.rst` line 151. The
+# pinned form `^1.0.0` allows any 1.x version (semver-compatible patches +
+# minors); the resolved version is recorded in `dependencies.lock` at the
+# repo root after first build.
+#
+# Added V2.4.2 alongside the new mqtt.c module.
+
+dependencies:
+  idf:
+    version: ">=6.0"
+  espressif/mqtt: "^1.0.0"

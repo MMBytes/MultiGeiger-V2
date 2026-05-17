@@ -29,6 +29,7 @@
 #include "http_server.h"
 #include "log_ftp.h"
 #include "main_status.h"
+#include "mqtt.h"
 #include "neopixel.h"
 #include "ntp.h"
 #include "speaker.h"
@@ -538,6 +539,17 @@ static void do_tx_cycle(void) {
                      noise_valid, &noise);
     tx_transmit(&ctx);
 
+    // V2.4.2: MQTT publish of the same per-cycle sample. Non-blocking —
+    // silently drops if disabled or broker disconnected, so it can't
+    // disturb the existing TX path. Built from the just-written g_last_*
+    // cache via main_status_snapshot() so the JSON includes uptime / cycles
+    // / reconnects without re-reading state here.
+    {
+        main_status_t snap;
+        main_status_snapshot(&snap);
+        mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise);
+    }
+
     // Start the next LAeq window so the next cycle's read covers the full
     // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —
     // it just enqueues the snapshot) so we don't add the I²C round-trip to
@@ -743,6 +755,9 @@ void app_main(void) {
     tx_setup();
     http_server_start(&g_cfg, g_chip_id);
     log_ftp_init(g_chip_id, &g_cfg);
+    // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.
+    // Has to start AFTER http_server so failures don't block /config access.
+    mqtt_init(&g_cfg, g_chip_id);
 
     ESP_LOGI(TAG, "AP up: SSID=%s auth=%d (2-min boot window)",
              (char *)apc.ap.ssid, apc.ap.authmode);

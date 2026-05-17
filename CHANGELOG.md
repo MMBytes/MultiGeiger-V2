@@ -13,6 +13,33 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 Accumulating for the next tag. Bump + ship when ready.
 
+---
+
+## V2.4.2
+
+**MQTT 3.1.1 publish-only client — Phase 1 (skeleton)** + the post-V2.4.1 CI infrastructure batch shipped together.
+
+### MQTT 3.1.1 publish-only client (Phase 1)
+
+Generic MQTT publish path so a Home Assistant / Mosquitto setup on the LAN can subscribe to live sensor readings. Phases 2 (HA Discovery) and 3 (config UI + status row) follow in V2.4.3 / V2.4.4.
+
+- **Build-system change: first managed component dependency.** ESP-MQTT was removed from bundled IDF components in v6.0 and is now distributed via the IDF Component Manager at `components.espressif.com/components/espressif/mqtt` (per `docs/en/migration-guides/release-6.x/6.0/protocols.rst:151`). Declared in new `main/idf_component.yml` (`espressif/mqtt: "^1.0.0"`). Resolved version (currently 1.0.0) pinned in new `dependencies.lock` at the repo root — **now committed to git** (previously gitignored as a defensive default before any managed components were in use). The fetched component sources land under `managed_components/` (still gitignored — regenerated on every clean build). First build on any new machine / CI runner needs internet access to fetch from the registry. The `mqtt` keyword is intentionally NOT in `main/CMakeLists.txt::REQUIRES` — the Component Manager auto-injects it.
+- New `main/mqtt.c` + `main/mqtt.h` wrapping ESP-IDF's `esp-mqtt` (`mqtt_client.h`). Singleton client; one event handler updates a `s_connected` flag and re-publishes the "online" availability message on each reconnect.
+- New config fields (X-macro one-liners in `config_fields.def`): `mqtt_enable` (default false), `mqtt_broker`, `mqtt_port` (default 1883), `mqtt_user`, `mqtt_password`, `mqtt_topic_prefix` (default `geiger`), `mqtt_ha_discovery` (default true, used in V2.4.3).
+- Two new size constants in `config.h`: `CFG_MQTT_HOST_MAX` (63) and `CFG_MQTT_PFX_MAX` (31).
+- Topic layout:
+  - `<prefix>/<chip-id>/state` — JSON object, published QoS 0 / retain false once per TX cycle (~150 s).
+  - `<prefix>/<chip-id>/availability` — `online` (QoS 1, retain) on connect; LWT `offline` registered so abrupt power loss flips HA to unavailable within keepalive×1.5 s.
+- JSON payload skips absent sensors entirely (Geiger-only Heltec build sends just radiation/RSSI/uptime). Fields use the natural HA Discovery attribute names (`pm25`, `env_t`, `usvph`, `noise_laeq`, `lux`) so Phase 2's `value_template` is trivial.
+- `mqtt_init()` is a no-op when disabled OR when the broker field is empty — defensive against DNS-bombing the LAN with empty-host lookups if a user enables before configuring.
+- Publish is non-blocking; if the broker isn't currently connected the publish is silently dropped (debug log) so MQTT can never disturb the existing Madavi / sensor.community TX path.
+- HA Discovery payloads, `/config` UI rows, and `/status` row land in V2.4.3 (Phase 2) and V2.4.4 (Phase 3).
+- TLS-to-broker (`mqtts://` on port 8883) deferred — one URI scheme + cert handling away, ~3 h.
+
+**No `/config` UI yet for the new fields** — V2.4.2 just adds the schema + plumbing. To exercise the publish path before V2.4.4, set `mqtt_enable=1` and `mqtt_brk=<host>` via NVS tool, or wait.
+
+### Post-V2.4.1 CI batch (T1 / T3 / T4-lite / valgrind / release.yml)
+
 - (T1) **Host-side unit tests.** Five pure helpers (`safe_strcpy`, `ct_memcmp`, `hex_nibble`, `url_decode`, `html_esc`) moved from inline `static` in `http_server.c` to `static inline` in `main/util.h` so they're host-includable. New `test/test_main.c` with 32 test cases (plain-C, no Unity dependency); new `_test.cmd` Windows runner that checks for gcc and exits with install hints if absent; new `host-test` job in `.github/workflows/build.yml` running on Ubuntu via system gcc. Catches regressions in the small pure-C surface (where most recent bugs lived — B6 url_decode, C1 strncpy). No binary-size change — `static inline` produces equivalent machine code to the old `static` functions.
 - (T3) **cppcheck static analysis** in CI. New `static-analysis` job runs cppcheck on `main/` with `--enable=warning,style,performance,portability` and IDF-aware suppressions (`unusedFunction` for callback entry points, `missingIncludeSystem` since we don't ship IDF headers, `unknownMacro` for IDF macros like `MACSTR`). Landed informational, **promoted to a hard CI gate** once round-2 triage took the baseline to 0 findings. New findings now fail the job — fix at source or add an inline `// cppcheck-suppress <id>` comment with a reason. Output also uploaded as a 14-day artifact (`if: always()` so it survives failure too).
 - (T4-lite) **Property-based fuzz for `url_decode`.** New `test_url_decode_fuzz_invariants` test runs 10000 random inputs (deterministic seed `0xDEADBEEF` for reproducibility) biased toward `%` and `+` chars, asserts (1) output length ≤ input length, (2) guard bytes immediately before/after the working buffer are untouched (no out-of-bounds write), (3) decoder terminates (implicit via CI timeout). ~50 ms per CI run. Catches the "weird input crashes the parser" class without the libFuzzer ceremony.
@@ -30,6 +57,12 @@ Accumulating for the next tag. Bump + ship when ready.
   - `display_serlcd.c` three `uint8_t buf[N]` arrays declared `const` (passed to I²C write but never mutated).
   - `http_server.c` `size_t sizes[3]` declared `const` (alongside the existing `const char *segs[3]` peer).
   - `main.c` `MACSTR` cppcheck warning suppressed via workflow-level `--suppress=unknownMacro` (IDF-defined macro, cppcheck has no IDF headers).
+
+---
+
+## V2.4.1
+
+Code-review refactor batch — A1 / A4 / A9 + B1 / B2 / B3 / B4 / B5 / B6 + C1 / C3 / C5 / C6 / C9 + T2. No user-visible functional change.
 
 - (A1) schema-driven config (X-macro) — eliminates 5-way hand-duplication
 - (B1) atomic 64-bit timestamps — fixes torn-read on cross-task int64_t

@@ -21,6 +21,7 @@ idf_component_register(
         "dnms.c"
         "applog.c"
         "log_ftp.c"
+        "mqtt.c"
         "speaker.c"
         "display.c"
         "display_serlcd.c"
@@ -46,4 +47,11 @@ idf_component_register(
         app_update
         esp_partition
         spi_flash
+        # NOTE: `mqtt` is NOT listed here — V2.4.2's MQTT client
+        # (`mqtt_client.h` in main/mqtt.c) ships via the IDF Component
+        # Manager as `espressif/mqtt`, declared in main/idf_component.yml.
+        # The Component Manager auto-injects the resolved component into
+        # the build graph; adding it here would either no-op or break
+        # depending on resolver state. See IDF v6.0 migration guide
+        # `docs/en/migration-guides/release-6.x/6.0/protocols.rst:151`.
 )

@@ -130,3 +130,21 @@ X_BOOL(show_display,           "show_disp",  true)
 // tightening on top.
 
 X_U8  (oled_brightness_pct,    "oled_bright", 80,      0,       100)
+
+// --- MQTT broker client (V2.4.2 Phase 1) ------------------------------------
+//
+// Generic MQTT 3.1.1 publish-only client. State is published as a single JSON
+// object on `<prefix>/<chip>/state` once per TX cycle; an availability topic
+// `<prefix>/<chip>/availability` is retained with LWT for online/offline.
+// HA Discovery payloads land in V2.4.3 (Phase 2) gated by mqtt_ha_discovery.
+//
+// Disabled by default — empty broker also disables (defensive; init returns
+// early so no socket / DNS attempt happens until the user fills it in).
+
+X_BOOL(mqtt_enable,            "mqtt_en",     false)
+X_STR (mqtt_broker,        CFG_MQTT_HOST_MAX + 1,  "mqtt_brk",   "")
+X_U32 (mqtt_port,              "mqtt_port",   1883,     1,       65535)
+X_STR (mqtt_user,          CFG_USER_NAME_MAX + 1,  "mqtt_user",  "")
+X_STR (mqtt_password,      CFG_PASSWORD_MAX  + 1,  "mqtt_pw",    "")
+X_STR (mqtt_topic_prefix,  CFG_MQTT_PFX_MAX  + 1,  "mqtt_pfx",   "geiger")
+X_BOOL(mqtt_ha_discovery,      "mqtt_ha",     true)

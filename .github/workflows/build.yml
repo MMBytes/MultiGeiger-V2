@@ -34,6 +34,17 @@ on:
       - '.github/workflows/**'
   workflow_dispatch: {}   # allow manual triggering from the Actions tab
 
+# Force all JavaScript-based actions (checkout, upload-artifact,
+# esp-idf-ci-action, ...) to run under Node.js 24 instead of the
+# default Node.js 20. GitHub deprecates Node 20 on the runners
+# 2026-06-02 (forced default) / 2026-09-16 (removed). Setting the
+# opt-in env var here covers every JS action without having to chase
+# per-action version bumps. Drop this line once Node 24 is the default
+# and all our actions are known-compatible.
+# See: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # V2.4.1+ (T1): host-side unit tests for the pure helpers in main/util.h.
   # Runs first because it's cheap (~10 s) and a regression here likely

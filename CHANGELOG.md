@@ -15,6 +15,42 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.4
+
+**MQTT — Phase 3 (UI integration).** Completes the V2.4.2 → V2.4.4 MQTT phased rollout. Adds `/config` form rows for every MQTT field + a `/status` row showing live broker state. No new MQTT functionality — purely makes the existing client configurable + observable through the web UI rather than requiring NVS-tool access.
+
+### `/config` form rows
+
+New "MQTT (Home Assistant / Mosquitto)" section between "FTP log upload" and "Tick, LED and display". Six inputs:
+
+- `mqtt_en` checkbox — enable / disable the publisher (requires reboot, marked with `*`).
+- `mqtt_brk` text — broker hostname or IP. Required.
+- `mqtt_port` numeric (text + `inputmode=numeric` to dodge the wheel-decrement trap fixed in V2.3.33). Default 1883.
+- `mqtt_user` / `mqtt_pw` — optional creds. Password field uses `type=password` for shoulder-surfing resistance only (the value still lives in plaintext NVS).
+- `mqtt_pfx` text — topic prefix used as `<prefix>/<chip>/state`. Default `geiger`. Max 31 chars per `CFG_MQTT_PFX_MAX`.
+- `mqtt_ha` checkbox — publish HA Discovery on connect (default on; reboot to apply).
+
+Form POST handling falls through the existing `config_post_apply_field()` X-macro dispatcher (added in V2.4.1 A1) — no per-field special-case code needed.
+
+### `/status` row
+
+New "MQTT" block between Uploads and the page-foot links. Skipped entirely when `mqtt_enable=false` (same convention as the Noise / PM / FTPS blocks). Shows:
+
+- Broker `host:port` (or `(not set)` if empty)
+- Live state (green `connected` / red `disconnected`)
+- Cumulative `mqtt_publish_count()` since boot
+- Topic prefix as `<code>`
+- HA Discovery on/off
+
+State read is lock-free from `mqtt.c`'s flag + counter — no I/O from the HTTP-handler context.
+
+### Other
+
+- `CFG_FORM_BUF_SIZE` (16 KB since V2.3.33) absorbs the new section comfortably — actual form is ~6 KB rendered, plenty of headroom.
+- Binary growth feathers3_d: +3 KB (1265152 → 1268208).
+
+---
+
 ## V2.4.3
 
 **MQTT — Phase 2 (Home Assistant Discovery)** + two latent compile-warning fixes + IDF v6.0 PSA-config plumbing.

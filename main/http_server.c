@@ -38,6 +38,7 @@
 #include "transmission.h"
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
+#include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 
 static const char *TAG = "http";
@@ -640,6 +641,39 @@ static void format_noise(char *out, size_t sz) {
         n.laeq, n.la_min, n.la_max);
 }
 
+// --- MQTT block --------------------------------------------------------------
+//
+// V2.4.4 (Phase 3): /status row for the MQTT client added in V2.4.2. Skipped
+// when the user hasn't enabled MQTT — keeps the page tight on Madavi-only
+// devices. Reads only from mqtt.c's connect-state flag + publish counter,
+// never touches the broker from this HTTP-handler context (no I/O blocking).
+static void format_mqtt(char *out, size_t sz) {
+    if (!s_cfg->mqtt_enable) { out[0] = 0; return; }
+
+    const bool connected = mqtt_is_connected();
+    const uint32_t pubs  = mqtt_publish_count();
+    const char *state_html = connected
+        ? "<span style='color:#080'>connected</span>"
+        : "<span style='color:#c00'>disconnected</span>";
+    const char *broker_html = (s_cfg->mqtt_broker[0])
+        ? s_cfg->mqtt_broker
+        : "<i>(not set)</i>";
+
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>MQTT</h3>"
+        "<b>Broker:</b> %s:%lu<br>"
+        "<b>State:</b> %s<br>"
+        "<b>Publishes since boot:</b> %lu<br>"
+        "<b>Topic prefix:</b> <code>%s</code><br>"
+        "<b>HA Discovery:</b> %s"
+        "</div>",
+        broker_html, (unsigned long)s_cfg->mqtt_port,
+        state_html,
+        (unsigned long)pubs,
+        s_cfg->mqtt_topic_prefix[0] ? s_cfg->mqtt_topic_prefix : "<i>(empty)</i>",
+        s_cfg->mqtt_ha_discovery ? "enabled" : "disabled");
+}
+
 // --- Uploads block -----------------------------------------------------------
 //
 // Per-target succeeded/attempted + last_rc + breaker state, plus FTPS line.
@@ -881,6 +915,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_mqtt       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
 
     if (httpd_resp_send_chunk(req, STATUS_LINKS_HEAD, sizeof(STATUS_LINKS_HEAD) - 1) != ESP_OK) goto fail;
 
@@ -935,6 +970,10 @@ static esp_err_t config_get(httpd_req_t *req) {
     char e_apn[96], e_host[96];
     char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
     char e_osm[80], e_osm_tok[160], e_aqi[160];
+    // V2.4.4: MQTT fields. e_mhost generously sized — html_esc 4x worst case
+    // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
+    // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
+    char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
     html_esc(s_cfg->wifi_ssid,     e_ssid, sizeof(e_ssid));
     html_esc(s_cfg->wifi_password, e_pw,   sizeof(e_pw));
     html_esc(s_chip_id,            e_chip, sizeof(e_chip));  // read-only display
@@ -954,6 +993,10 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
     html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
+    html_esc(s_cfg->mqtt_broker,       e_mhost, sizeof(e_mhost));
+    html_esc(s_cfg->mqtt_user,         e_muser, sizeof(e_muser));
+    html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
+    html_esc(s_cfg->mqtt_topic_prefix, e_mpfx,  sizeof(e_mpfx));
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
     // (0 %) followed by 10 % through 100 % in 10 % steps. Builder keeps the
@@ -1081,6 +1124,28 @@ static esp_err_t config_get(httpd_req_t *req) {
         "}syncFtpPs();</script>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
         "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
+        "<h3>MQTT (Home Assistant / Mosquitto)</h3>"
+        "<p>Publish-only MQTT 3.1.1 client. Per TX cycle, sends one JSON state "
+        "message to <code>&lt;prefix&gt;/&lt;chip-id&gt;/state</code> with all "
+        "present-sensor readings. Availability flips offline via LWT when the "
+        "device drops. If <i>HA Discovery</i> is on, retained config payloads "
+        "land at <code>homeassistant/sensor/geiger_&lt;chip-id&gt;/&hellip;/config</code> "
+        "on every reconnect so Home Assistant auto-creates the entities.</p>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_en\" %s> "
+        "Enable MQTT publishing <span class=\"r\">*</span></label></div>"
+        "<label>Broker host (or IP) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"mqtt_brk\" value=\"%s\" maxlength=\"63\"></label>"
+        "<label>Broker port <span class=\"r\">*</span>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"mqtt_port\" value=\"%lu\"></label>"
+        "<label>Username (optional)"
+        "<input type=\"text\" name=\"mqtt_user\" value=\"%s\" maxlength=\"32\"></label>"
+        "<label>Password (optional)"
+        "<input type=\"password\" name=\"mqtt_pw\" value=\"%s\" maxlength=\"64\"></label>"
+        "<label>Topic prefix <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"mqtt_pfx\" value=\"%s\" maxlength=\"31\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_ha\" %s> "
+        "Publish Home Assistant Discovery payloads "
+        "<span class=\"r\">*</span></label></div>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
@@ -1162,6 +1227,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         (unsigned long)s_cfg->ftp_interval_min,
         s_cfg->ftp_ps_disabled ? "checked" : "",
         s_cfg->ftp_tls12_only  ? "checked" : "",
+        // V2.4.4: MQTT row format args (must match order of %s/%lu/%s/%s/%s/%s in the form HTML above).
+        s_cfg->mqtt_enable ? "checked" : "",
+        e_mhost,
+        (unsigned long)s_cfg->mqtt_port,
+        e_muser,
+        e_mpw,
+        e_mpfx,
+        s_cfg->mqtt_ha_discovery ? "checked" : "",
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",

@@ -121,6 +121,7 @@ jobs:
             --quiet \
             --error-exitcode=1 \
             -DESP_PLATFORM=1 \
+            -DBOARD_HELTEC_V2=1 \
             -I main \
             main/ 2>&1 | tee cppcheck.out
           RC=${PIPESTATUS[0]}

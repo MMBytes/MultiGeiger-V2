@@ -440,7 +440,8 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
             (unsigned long)c->max_micro);
     }
     COMMA();
-    n += snprintf(buf + n, cap - n,
+    // Final write — no need to advance `n` (nothing reads it after).
+    snprintf(buf + n, cap - n,
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
         " ]\n}",
         (int)c->rssi);
@@ -843,7 +844,8 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
         }
     }
     COMMA();
-    n += snprintf(buf + n, cap - n,
+    // Final write — no need to advance `n` (nothing reads it after).
+    snprintf(buf + n, cap - n,
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
         " ]\n}",
         (int)c->rssi);
@@ -983,10 +985,20 @@ static void tx_run(tx_context_t *c) {
     // module-static with a per-target spinlock OR pass these in via the
     // tx_context_t. Adding a comment rather than restructuring today —
     // single-worker queue is a long-standing design choice.
+    //
+    // cppcheck suggests moving each variable inside its per-target if-block
+    // (`variableScope` warning). That would work but loses the visual
+    // grouping at function entry that makes the persist-across-calls
+    // contract obvious. Suppress inline.
+    // cppcheck-suppress variableScope
     static int madavi_fail_streak  = 0;
+    // cppcheck-suppress variableScope
     static int sensorc_fail_streak = 0;
+    // cppcheck-suppress variableScope
     static int radmon_fail_streak  = 0;
+    // cppcheck-suppress variableScope
     static int osm_fail_streak     = 0;
+    // cppcheck-suppress variableScope
     static int aqi_fail_streak     = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();

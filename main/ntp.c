@@ -15,6 +15,9 @@ static const char *TAG = "ntp";
 static volatile bool     sync_pending = false;
 static volatile time_t   sync_tv_sec  = 0;
 
+// Signature is dictated by IDF's `sntp_set_time_sync_notification_cb_t`,
+// which uses non-const `struct timeval *`. We don't mutate *tv.
+// cppcheck-suppress constParameterCallback
 static void sync_cb(struct timeval *tv) {
     sync_tv_sec = tv->tv_sec;
     sync_pending = true;
@@ -60,7 +63,7 @@ void ntp_poll(void) {
     sync_pending = false;
     char buf[32];
     time_t t = sync_tv_sec;
-    struct tm *ti = localtime(&t);
+    const struct tm *ti = localtime(&t);
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S %Z", ti);
     ESP_LOGI(TAG, "sync OK: %s", buf);
 }
@@ -69,7 +72,7 @@ const char *ntp_localtime_str(void) {
     static char buf[32];
     time_t t;
     time(&t);
-    struct tm *ti = localtime(&t);
+    const struct tm *ti = localtime(&t);
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", ti);
     return buf;
 }

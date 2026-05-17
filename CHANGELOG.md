@@ -15,6 +15,37 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.3
+
+**MQTT — Phase 2 (Home Assistant Discovery)** + two latent compile-warning fixes + IDF v6.0 PSA-config plumbing.
+
+### HA Discovery (Phase 2)
+
+Auto-registers each present sensor as a Home Assistant entity the first time the device connects to the broker. No manual HA YAML required.
+
+- New `main/mqtt_discovery.[ch]` builds + publishes one retained QoS-1 config payload per entity on every `MQTT_EVENT_CONNECTED`. Topic format: `homeassistant/sensor/geiger_<chip>/<object_id>/config`.
+- Entity catalog covers 24 readings: system (cycles, reconnects, uptime), Geiger (cpm, dose rate, HV pulses — gated on `cfg.tube_enabled`), env (T/H/P), PM (PM1/2.5/4/10 + NC05/1/25/4/10 + typical size), noise (LAeq/min/max), illuminance (VEML7700 OR ALS-PT19).
+- Each entity gated by its driver's `*_present()` — Heltec V2 (tube only) gets 6 entities; FeatherS3-D with full sensor stack gets the full ~22.
+- HA short-form keys (`uniq_id` not `unique_id`, `stat_t` not `state_topic`, etc.) — ~50 % payload reduction over long form. Pressure value template converts Pa → hPa for cleaner HA charts.
+- All entities grouped under one HA device card via the `dev` block (identifiers, name, model, sw_version, manufacturer).
+- Republished on every reconnect — broker just overwrites identical retained payloads, so the cost is one MQTT packet per entity per reconnect and zero broker storage growth. Resilient against broker wipe / HA reinstall.
+- Gated by the `mqtt_ha_discovery` cfg flag (default true) added in V2.4.2.
+
+### Latent compile-warning fixes (surfaced by CI)
+
+Both were pre-existing — V2.4.2 didn't introduce them, CI's full build log just made them visible:
+
+- `i2c_bus.c:14` — `s_bus_secondary` declared at file scope but only read inside `#if defined(BOARD_FEATHERS3_D)`. Wrapped the declaration in the same `#if` so non-FeatherS3-D builds no longer trip `-Wunused-variable`.
+- `display.c:98` — `s_oled_inverted` (anti-burn-in invert toggle) declared inside `#if HAL_HAS_OLED` but only used in the nested `#if HAL_MULTIPAGE_ROTATION` block. Wrapped declaration in `#if HAL_MULTIPAGE_ROTATION` so single-page OLED boards (heltec_v2 / heltec_v2_4mb) compile clean.
+
+### IDF v6.0 PSA-config plumbing
+
+`CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT=128` in `sdkconfig.defaults` was silently ignored after the IDF v5 → v6 upgrade — the kconfig symbol was removed in mbedtls 4.x (PSA configuration moved into `psa/crypto_config.h`). The kconfig setting still has to be made — restored via `idf_build_set_property(COMPILE_DEFINITIONS "MBEDTLS_PSA_KEY_SLOT_COUNT=128" APPEND)` in the top-level CMakeLists. Pre-existing comment block in `sdkconfig.defaults` left as historical context with a pointer to the new injection site.
+
+Risk this exposed: between the kconfig removal and this fix, the PSA slot count was at the upstream mbedtls 4.x default (likely 32, our load needs ~30 peak). Could have manifested as `PSA_ERROR_INSUFFICIENT_MEMORY` (-141) under concurrent FTPS+HTTPS bursts. We didn't see this in production logs — either headroom was tight-but-OK, or the V2.3.22 TLS bidirectional-close fix reduced peak slot pressure more than estimated.
+
+---
+
 ## V2.4.2
 
 **MQTT 3.1.1 publish-only client — Phase 1 (skeleton)** + the post-V2.4.1 CI infrastructure batch shipped together.

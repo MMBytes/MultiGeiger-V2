@@ -94,7 +94,12 @@ CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # mbedtls_strerror cannot decode (PSA codes are a separate namespace).
 # Bump to 128: cost ≈ +9 KB DRAM (96 extra slots × ~88 B each), gives 4×
 # headroom against future feature growth (BMP581, DNMS, more upload targets).
-CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT=128
+#
+# V2.4.3: the `CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT` kconfig symbol was
+# REMOVED in IDF v6.0 / mbedtls 4.x (PSA config split out into
+# psa/crypto_config.h). The setting still has to happen, just via a
+# compile definition. See top-level CMakeLists.txt for the
+# `idf_build_set_property(COMPILE_DEFINITIONS ...)` injection.
 
 # OTA stability tweaks (lesson from V1.18.60): yield to TCPIP task during flash
 # erase so the browser's upload XHR doesn't stall and drop with status 0.

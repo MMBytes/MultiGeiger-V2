@@ -85,6 +85,7 @@ static bool s_cleared = true;    // panel is blank (no running screen drawn)
 // exactly the brightness they already had.
 static uint8_t s_brightness_pct = 80;
 
+#if HAL_MULTIPAGE_ROTATION
 // V2.3.29: anti-burn-in by alternating SSD1306/9 invert mode at the start
 // of each new rotation (page index wraps to 0 in display_task). Each pixel
 // state holds for one rotation (~14–35 s depending on enabled page count),
@@ -95,7 +96,12 @@ static uint8_t s_brightness_pct = 80;
 // normal — white text on black background). The first rotation skips the
 // toggle (`first_rotation` flag), so rotation 1 stays normal; rotation 2
 // toggles to inverted; rotation 3 back to normal; etc.
+//
+// Only declared when HAL_MULTIPAGE_ROTATION=1 — boards with single-page
+// displays (heltec_v2 / heltec_v2_4mb) never read this and would trip
+// -Wunused-variable otherwise.
 static bool s_oled_inverted = false;
+#endif
 
 static int s_status[DSP_STATUS_MAX] = { 0, 0, 0, 0, 0 };
 

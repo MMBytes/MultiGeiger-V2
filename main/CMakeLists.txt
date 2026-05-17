@@ -22,6 +22,7 @@ idf_component_register(
         "applog.c"
         "log_ftp.c"
         "mqtt.c"
+        "mqtt_discovery.c"
         "speaker.c"
         "display.c"
         "display_serlcd.c"

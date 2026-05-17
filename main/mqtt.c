@@ -32,8 +32,14 @@
 #include "mqtt_client.h"
 
 #include "als.h"
+#include "mqtt_discovery.h"
 #include "veml7700.h"
 #include "version.h"
+
+// Internal hook from mqtt_discovery.c — used at init to seed the
+// tube-enabled predicate without exposing cfg through the discovery
+// public API. Declared local so other modules can't accidentally use it.
+extern void mqtt_discovery_set_tube_enabled(bool enabled);
 
 static const char *TAG = "mqtt";
 
@@ -47,6 +53,7 @@ static const char *s_chip_id  = NULL;      // pointer borrowed from main.c
 static const char *s_prefix   = NULL;      // pointer borrowed from g_cfg
 static volatile bool s_connected = false;
 static volatile uint32_t s_publish_count = 0;
+static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_discovery
 
 // Topic scratch — built once at init from prefix + chip_id, reused for
 // every publish to avoid repeated snprintf cost in the hot path. Sized
@@ -76,6 +83,15 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
         // first state publish would otherwise see the stale "offline".
         esp_mqtt_client_publish(s_client, s_topic_avail,
                                 "online", 0, /*qos*/ 1, /*retain*/ 1);
+        // V2.4.3: republish HA Discovery config payloads on every
+        // (re)connect. They're retained on the broker so HA will pick them
+        // up even if it joins later, AND so a wiped broker or broker
+        // restart doesn't leave us in a state where HA never sees our
+        // entities. Cheap — broker just overwrites identical retained
+        // payloads at zero observable cost.
+        if (s_ha_discovery_enabled) {
+            mqtt_discovery_publish_all(s_client, s_chip_id, s_prefix);
+        }
         break;
     case MQTT_EVENT_DISCONNECTED:
         s_connected = false;
@@ -121,6 +137,10 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
 
     s_chip_id = chip_id;
     s_prefix  = cfg->mqtt_topic_prefix;
+    s_ha_discovery_enabled = cfg->mqtt_ha_discovery;
+    // Seed the tube-enabled predicate in mqtt_discovery so its entity
+    // gate function can run without reaching into main.c's cfg singleton.
+    mqtt_discovery_set_tube_enabled(cfg->tube_enabled);
 
     // Pre-build the per-device topic strings so the publish path doesn't
     // re-snprintf every cycle. snprintf return ignored — the buffers are

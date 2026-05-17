@@ -69,3 +69,15 @@ set_property(DIRECTORY APPEND PROPERTY
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(geiger_v2)
+
+# ----------------------------------------------------------------------------
+# V2.4.3: PSA key-slot count override.
+#
+# `CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT` was a valid kconfig knob through IDF
+# v5.x (set to 128 in sdkconfig.defaults — see comment there for the
+# rationale). IDF v6.0 + mbedtls 4.x removed it: PSA configuration moved
+# into psa/crypto_config.h. The setting still has to land, just via a
+# preprocessor define on the build line. `APPEND` so we don't clobber any
+# other -D's that future contributors add via this same property.
+# ----------------------------------------------------------------------------
+idf_build_set_property(COMPILE_DEFINITIONS "MBEDTLS_PSA_KEY_SLOT_COUNT=128" APPEND)

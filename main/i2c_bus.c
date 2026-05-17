@@ -11,7 +11,12 @@
 static const char *TAG = "i2c_bus";
 
 static i2c_master_bus_handle_t s_bus_primary    = NULL;
+#if defined(BOARD_FEATHERS3_D)
+// Only the FeatherS3-D ever brings the second STEMMA QT bus online; on the
+// other boards the declaration would trip -Wunused-variable. Keep the
+// declaration scoped to the boards that actually read/write it.
 static i2c_master_bus_handle_t s_bus_secondary  = NULL;
+#endif
 static bool                    s_secondary_kept = false;
 
 i2c_master_bus_handle_t i2c_bus_get_primary(void) {

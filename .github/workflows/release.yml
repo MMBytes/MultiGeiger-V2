@@ -1,0 +1,214 @@
+# Release workflow — fire on tag push, build all 4 boards, create the
+# GitHub Release with all 20 artefacts attached.
+#
+# Trigger:
+#   git tag V2.4.2 && git push --tags
+#       OR
+#   Actions tab → "release" → "Run workflow" → enter the existing tag
+#
+# What happens:
+#   1. build matrix (4 boards in parallel via espressif/esp-idf-ci-action)
+#      compiles + runs `idf.py merge-bin` + stages the 5 board-suffixed
+#      artefacts (geiger_v2_<board>.bin, geiger_v2_merged_<board>.bin,
+#      bootloader_<board>.bin, partition-table_<board>.bin,
+#      ota_data_initial_<board>.bin) per the V2.2.0+ convention.
+#   2. release job downloads all 20 artefacts, extracts the matching
+#      section from CHANGELOG.md for the tag, creates the GitHub Release.
+#
+# Pre-flight check: don't push the tag until `build.yml` is green on the
+# same commit. If a release-job build fails AFTER the tag is pushed, the
+# tag exists with no release — recoverable by deleting the tag, fixing,
+# re-pushing.
+#
+# Replaces the previous manual ceremony (4 local `_build.cmd` invocations
+# + 4 `_merge.cmd` + 20-file `gh release create`). Added post-V2.4.1.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'V*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. V2.4.2)'
+        required: true
+
+# See build.yml for the Node 20 → 24 deprecation rationale.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: build / ${{ matrix.board }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Keep all boards building even if one fails so the user can see the
+      # full breakage picture in one CI run.
+      fail-fast: false
+      matrix:
+        board:
+          - heltec_v2
+          - heltec_v2_4mb
+          - feathers3_d
+          - adafruit_qtpy_esp32_pico
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # For manual workflow_dispatch, check out the tag the user
+          # entered; for tag-push events, github.ref already points at it.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Build firmware + merged bin
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0
+          # Mirrors CMakeLists.txt's IDF_TARGET selection. Heltec V2 +
+          # heltec_v2_4mb + QT Py PICO are all original ESP32; FeatherS3-D
+          # is ESP32-S3.
+          target: ${{ startsWith(matrix.board, 'heltec_v2') && 'esp32' || (matrix.board == 'feathers3_d' && 'esp32s3' || 'esp32') }}
+          path: '.'
+          # Two-step: build, then merge-bin with the same -o filename the
+          # local _merge.cmd uses so paths are predictable across local
+          # and CI flows.
+          command: idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} build && idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} merge-bin -o geiger_v2_merged_${{ matrix.board }}.bin
+
+      - name: Verify VERSION_STR embedded
+        run: |
+          set -e
+          VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [ "$VER" != "$TAG" ]; then
+            echo "::error::main/version.h VERSION_STR='$VER' does not match the tag '$TAG'"
+            echo "Bump VERSION_STR and re-tag before releasing."
+            exit 1
+          fi
+          if ! strings "build_${{ matrix.board }}/geiger_v2.bin" | grep -qF "$VER"; then
+            echo "::error::VERSION_STR '$VER' not found in build_${{ matrix.board }}/geiger_v2.bin"
+            exit 1
+          fi
+          echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER (matches tag)"
+
+      - name: Stage board-suffixed artefacts
+        run: |
+          set -e
+          B=${{ matrix.board }}
+          BD=build_$B
+          mkdir -p stage
+          # Verify every expected output exists before renaming. Loud
+          # failure here is way better than a silent missing-file in
+          # the eventual GH release.
+          for src in \
+              "$BD/geiger_v2.bin" \
+              "$BD/geiger_v2_merged_$B.bin" \
+              "$BD/bootloader/bootloader.bin" \
+              "$BD/partition_table/partition-table.bin" \
+              "$BD/ota_data_initial.bin"
+          do
+              if [ ! -f "$src" ]; then
+                  echo "::error::missing build output: $src"
+                  echo "Directory contents:"
+                  ls -la "$BD" "$BD/bootloader" "$BD/partition_table" 2>/dev/null || true
+                  exit 1
+              fi
+          done
+          cp "$BD/geiger_v2.bin"                       "stage/geiger_v2_$B.bin"
+          cp "$BD/geiger_v2_merged_$B.bin"             "stage/geiger_v2_merged_$B.bin"
+          cp "$BD/bootloader/bootloader.bin"           "stage/bootloader_$B.bin"
+          cp "$BD/partition_table/partition-table.bin" "stage/partition-table_$B.bin"
+          cp "$BD/ota_data_initial.bin"                "stage/ota_data_initial_$B.bin"
+          echo "Staged 5 artefacts for $B:"
+          ls -la stage/
+
+      - name: Upload staged artefacts for release aggregation
+        uses: actions/upload-artifact@v4
+        with:
+          # `release-<board>` so the release job can collect them all
+          # under one pattern. Per-board names keep download separation
+          # if anyone needs to grab just one board.
+          name: release-${{ matrix.board }}
+          path: stage/*
+          if-no-files-found: error
+          # Short retention — the release job consumes these immediately
+          # and the permanent home is the GitHub Release itself.
+          retention-days: 3
+
+  release:
+    name: create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    # `gh release create` needs write access to repository contents.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Download all board artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts/
+          pattern: release-*
+          # All 4 jobs' stages collapse into one flat artefacts/ dir.
+          merge-multiple: true
+
+      - name: Verify 20 artefacts present
+        run: |
+          set -e
+          COUNT=$(find artefacts -maxdepth 1 -type f -name '*.bin' | wc -l)
+          if [ "$COUNT" != "20" ]; then
+            echo "::error::expected 20 .bin artefacts, found $COUNT"
+            ls -la artefacts/
+            exit 1
+          fi
+          echo "::notice::20 artefacts staged"
+          ls -la artefacts/
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          # Extract the section between "## TAG ..." and the next "## ".
+          # Trailing `[^0-9A-Za-z]` ensures V2.4.1 doesn't match V2.4.10
+          # (next char must be space, en-dash byte, EOL, etc.).
+          awk -v ver="$TAG" '
+            /^## / {
+              if (in_section) exit
+              if ($0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "::warning::no matching section in CHANGELOG.md for tag $TAG"
+            {
+              echo "Release notes not yet added to CHANGELOG.md for this tag."
+              echo ""
+              echo "See [the CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) at the repo root."
+            } > release_notes.md
+          fi
+          echo "--- release_notes.md preview (first 30 lines) ---"
+          head -30 release_notes.md
+          echo "--- end preview ---"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          # If a release already exists for this tag (re-run scenario),
+          # upload assets to it instead of creating a duplicate.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::release $TAG already exists, uploading assets (--clobber)"
+            gh release upload "$TAG" artefacts/*.bin --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release_notes.md \
+              artefacts/*.bin
+          fi
+          echo "::notice::release ready at $(gh release view "$TAG" --json url -q .url)"

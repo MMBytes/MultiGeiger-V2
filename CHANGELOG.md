@@ -9,7 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.4.1 — 2026-05-17 — internal refactor + concurrency bug fix + small cleanups
+## Unreleased
+
+Accumulating for the next tag. Bump + ship when ready.
+
+- (T1) **Host-side unit tests.** Five pure helpers (`safe_strcpy`, `ct_memcmp`, `hex_nibble`, `url_decode`, `html_esc`) moved from inline `static` in `http_server.c` to `static inline` in `main/util.h` so they're host-includable. New `test/test_main.c` with 32 test cases (plain-C, no Unity dependency); new `_test.cmd` Windows runner that checks for gcc and exits with install hints if absent; new `host-test` job in `.github/workflows/build.yml` running on Ubuntu via system gcc. Catches regressions in the small pure-C surface (where most recent bugs lived — B6 url_decode, C1 strncpy). No binary-size change — `static inline` produces equivalent machine code to the old `static` functions.
+- (T3) **cppcheck static analysis** in CI. New `static-analysis` job runs cppcheck on `main/` with `--enable=warning,style,performance,portability` and IDF-aware suppressions (`unusedFunction` for callback entry points, `missingIncludeSystem` since we don't ship IDF headers). Currently **informational only** (`continue-on-error: true`, exit 0 at end) — first run produces a triage list in the step summary, promote to fail-on-error after the baseline is clean. Output also uploaded as a 14-day artifact.
+- (T4-lite) **Property-based fuzz for `url_decode`.** New `test_url_decode_fuzz_invariants` test runs 10000 random inputs (deterministic seed `0xDEADBEEF` for reproducibility) biased toward `%` and `+` chars, asserts (1) output length ≤ input length, (2) guard bytes immediately before/after the working buffer are untouched (no out-of-bounds write), (3) decoder terminates (implicit via CI timeout). ~50 ms per CI run. Catches the "weird input crashes the parser" class without the libFuzzer ceremony.
+- (T-valgrind) **Valgrind sweep on host tests.** `host-test` job now runs the unit-test binary twice: once natively (fast pass/fail), once under `valgrind --leak-check=full --track-origins=yes --error-exitcode=2`. Compiled with `-g -O1` so valgrind has line numbers without the optimiser hiding bugs. Catches leak / use-after-free / uninit-read in any of the 5 helpers for free.
 
 - (A1) schema-driven config (X-macro) — eliminates 5-way hand-duplication
 - (B1) atomic 64-bit timestamps — fixes torn-read on cross-task int64_t

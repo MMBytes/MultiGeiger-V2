@@ -38,6 +38,7 @@
 #include "transmission.h"
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
+#include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 
 static const char *TAG = "http";
 
@@ -84,20 +85,9 @@ static void log_access(httpd_req_t *req, const char *what) {
 
 // --- Auth --------------------------------------------------------------------
 
-// V2.3.33: constant-time byte compare for credential material. Standard
-// strcmp/memcmp short-circuit on the first differing byte, which leaks
-// position information via response-time variance and in principle enables
-// byte-at-a-time brute force. ESP32 + WiFi jitter makes this practical
-// only for a patient adversary with statistical averaging on a quiet LAN,
-// but the principle is wrong and the fix is trivial. Returns 0 if the two
-// buffers of length n are identical, non-zero otherwise.
-static int ct_memcmp(const void *a, const void *b, size_t n) {
-    const uint8_t *pa = a;
-    const uint8_t *pb = b;
-    uint8_t diff = 0;
-    for (size_t i = 0; i < n; i++) diff |= (uint8_t)(pa[i] ^ pb[i]);
-    return diff;
-}
+// V2.4.1+ (T1): ct_memcmp moved to util.h as a static inline so the host-
+// side test runner under `test/` can include it directly. Same constant-
+// time semantics as the V2.3.33 (B2) original.
 
 // Returns true if Authorization header is "Basic base64(admin:<ap_password>)".
 // On failure, sends 401 + WWW-Authenticate and returns false. The caller must
@@ -225,64 +215,10 @@ static void set_security_headers(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
 }
 
-// --- HTML escape for attribute values ---------------------------------------
-// Only `&` and `"` matter in value="..." — escape both. `<` and `>` are legal
-// in attribute values but we escape them too for tag-safety.
-
-static void html_esc(const char *in, char *out, size_t bufsz) {
-    size_t o = 0;
-    while (*in && o + 7 < bufsz) {
-        switch (*in) {
-            case '&':  memcpy(out + o, "&amp;",  5); o += 5; break;
-            case '"':  memcpy(out + o, "&quot;", 6); o += 6; break;
-            case '<':  memcpy(out + o, "&lt;",   4); o += 4; break;
-            case '>':  memcpy(out + o, "&gt;",   4); o += 4; break;
-            default:   out[o++] = *in;
-        }
-        in++;
-    }
-    out[o] = 0;
-}
-
-// --- URL decode (in place) ---------------------------------------------------
-
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-// V2.4.1 (B6): RFC 3986 §2.1 — `%XY` must be two hex digits, anything
-// else is malformed. Pre-V2.4.1 we copied the literal `%` and walked
-// past it, producing surprising stored values on corrupt or hand-
-// crafted POSTs (e.g. `hello%G5world` stayed as `hello%G5world` in NVS).
-// Now we DROP the lone `%` and let the trailing bytes process as
-// plain characters — `%G5` → `G5`, `%2` (at end) → `2`, `%` (at end)
-// → empty. Keeps the user-typed payload while removing the rogue
-// percent marker. Browsers always encode properly so legitimate input
-// is unchanged.
-static void url_decode(char *s) {
-    char *w = s;
-    while (*s) {
-        if (*s == '+') {
-            *w++ = ' ';
-            s++;
-        } else if (*s == '%') {
-            int hi = s[1] ? hex_nibble(s[1]) : -1;
-            int lo = (s[1] && s[2]) ? hex_nibble(s[2]) : -1;
-            if (hi >= 0 && lo >= 0) {
-                *w++ = (char)((hi << 4) | lo);
-                s += 3;
-            } else {
-                s++;   // drop lone/malformed `%`, keep walking
-            }
-        } else {
-            *w++ = *s++;
-        }
-    }
-    *w = 0;
-}
+// --- HTML escape + URL decode + hex_nibble ----------------------------------
+// V2.4.1+ (T1): moved to util.h as static inline so the host-side test
+// runner under `test/` can include them directly. Same semantics as before
+// (html_esc V2.0+, hex_nibble V2.0+, url_decode V2.4.1 B6 RFC-strict).
 
 // --- GET / (status, no auth) -------------------------------------------------
 

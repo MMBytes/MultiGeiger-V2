@@ -18,6 +18,7 @@ on:
     branches: [main]
     paths:
       - 'main/**'
+      - 'test/**'
       - 'CMakeLists.txt'
       - 'sdkconfig.defaults*'
       - 'partitions*.csv'
@@ -26,6 +27,7 @@ on:
     branches: [main]
     paths:
       - 'main/**'
+      - 'test/**'
       - 'CMakeLists.txt'
       - 'sdkconfig.defaults*'
       - 'partitions*.csv'
@@ -33,6 +35,108 @@ on:
   workflow_dispatch: {}   # allow manual triggering from the Actions tab
 
 jobs:
+  # V2.4.1+ (T1): host-side unit tests for the pure helpers in main/util.h.
+  # Runs first because it's cheap (~10 s) and a regression here likely
+  # means the IDF builds will also fail — fail-fast on the cheap signal.
+  # See test/test_main.c for the test cases.
+  #
+  # V2.4.1+ extension: valgrind sweep on the same binary catches leaks /
+  # use-after-free / uninit-reads in the 5 pure helpers for free.
+  host-test:
+    name: host-test (pure helpers + valgrind)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install valgrind
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+
+      - name: Build host tests
+        run: |
+          set -e
+          # -g -O1 keeps debug info + lets valgrind report line numbers,
+          # without the compiler optimising away the bugs valgrind catches.
+          gcc -I main -Wall -Wextra -Werror -std=c11 -g -O1 \
+              -o test/run test/test_main.c
+
+      - name: Run host tests (native)
+        run: ./test/run
+
+      - name: Run host tests under valgrind
+        run: |
+          valgrind --error-exitcode=2 \
+                   --leak-check=full \
+                   --show-leak-kinds=all \
+                   --track-origins=yes \
+                   --errors-for-leak-kinds=all \
+                   ./test/run
+
+  # V2.4.1+ (T3): cppcheck static analysis on main/. Pure C analysis,
+  # no IDF headers needed. Currently informational only — `continue-on-error`
+  # is true so the job's findings show in the step summary without
+  # turning the workflow red. Promote to fail-on-error after the first
+  # triage pass cleans the baseline.
+  static-analysis:
+    name: cppcheck (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
+
+      - name: Run cppcheck on main/
+        continue-on-error: true
+        run: |
+          set +e
+          # --enable: include warning/style/performance/portability findings.
+          # Suppressions:
+          #   missingIncludeSystem  — we don't ship IDF headers in this check
+          #   unusedFunction        — many entry points are IDF/FreeRTOS
+          #                            callbacks cppcheck can't see being called
+          #   unusedStructMember    — struct members read via memcpy or by
+          #                            external IDF code
+          #   internalAstError      — known cppcheck issue with some macros
+          # -DESP_PLATFORM=1 mirrors the real build's macro definition.
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=unusedStructMember \
+            --suppress=internalAstError \
+            --quiet \
+            --error-exitcode=1 \
+            -DESP_PLATFORM=1 \
+            -I main \
+            main/ 2>&1 | tee cppcheck.out
+          RC=${PIPESTATUS[0]}
+          {
+            echo "## cppcheck findings"
+            if [ -s cppcheck.out ]; then
+              echo '```'
+              cat cppcheck.out
+              echo '```'
+            else
+              echo "_(clean — no findings at warning/style/performance/portability levels)_"
+            fi
+            echo ""
+            echo "cppcheck exit code: $RC (0=clean)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Informational: don't fail the job. Promote to `exit $RC` after
+          # the baseline is clean.
+          exit 0
+
+      - name: Upload cppcheck output as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-${{ github.sha }}
+          path: cppcheck.out
+          if-no-files-found: ignore
+          retention-days: 14
+
   build:
     name: build / ${{ matrix.board }}
     runs-on: ubuntu-latest

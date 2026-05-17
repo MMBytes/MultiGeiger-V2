@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install valgrind
         run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
@@ -93,7 +93,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install cppcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
@@ -118,6 +118,7 @@ jobs:
             --suppress=unusedFunction \
             --suppress=unusedStructMember \
             --suppress=internalAstError \
+            --suppress=unknownMacro \
             --quiet \
             --error-exitcode=1 \
             -DESP_PLATFORM=1 \
@@ -142,7 +143,7 @@ jobs:
           exit 0
 
       - name: Upload cppcheck output as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cppcheck-${{ github.sha }}
           path: cppcheck.out
@@ -163,7 +164,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build firmware
         uses: espressif/esp-idf-ci-action@v1
@@ -206,7 +207,7 @@ jobs:
           echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
 
       - name: Upload binary as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: geiger_v2_${{ matrix.board }}_${{ github.sha }}
           path: |

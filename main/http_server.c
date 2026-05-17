@@ -1670,8 +1670,8 @@ static esp_err_t log_get(httpd_req_t *req) {
     // seg_b (tail remainder past the scratch copy when wrapped),
     // seg_c (newer pre-wrap half when wrapped). httpd_resp_send_chunk
     // handles HTTP/1.1 chunked-encoding framing.
-    const char *segs[3]  = { s.seg_a, s.seg_b, s.seg_c };
-    size_t      sizes[3] = { s.len_a, s.len_b, s.len_c };
+    const char  *segs[3]  = { s.seg_a, s.seg_b, s.seg_c };
+    const size_t sizes[3] = { s.len_a, s.len_b, s.len_c };
     for (int i = 0; i < 3; i++) {
         size_t sent = 0;
         while (sent < sizes[i]) {

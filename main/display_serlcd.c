@@ -68,14 +68,14 @@ static esp_err_t serlcd_write(const uint8_t *buf, size_t n) {
 }
 
 static esp_err_t serlcd_send_special(uint8_t cmd) {
-    uint8_t buf[2] = { SERLCD_SPECIAL_PREFIX, cmd };
+    const uint8_t buf[2] = { SERLCD_SPECIAL_PREFIX, cmd };
     esp_err_t e = serlcd_write(buf, 2);
     vTaskDelay(pdMS_TO_TICKS(10));
     return e;
 }
 
 static esp_err_t serlcd_send_setting(uint8_t cmd) {
-    uint8_t buf[2] = { SERLCD_SETTING_PREFIX, cmd };
+    const uint8_t buf[2] = { SERLCD_SETTING_PREFIX, cmd };
     esp_err_t e = serlcd_write(buf, 2);
     vTaskDelay(pdMS_TO_TICKS(10));
     return e;
@@ -110,7 +110,7 @@ void display_serlcd_clear(void) {
 void display_serlcd_set_backlight(uint8_t r, uint8_t g, uint8_t b) {
     if (!s_dev) return;
     // setFastBacklight protocol: 0x7C, 0x2B, R, G, B (raw 0..255 each).
-    uint8_t buf[5] = { SERLCD_SETTING_PREFIX, SERLCD_CMD_SET_RGB, r, g, b };
+    const uint8_t buf[5] = { SERLCD_SETTING_PREFIX, SERLCD_CMD_SET_RGB, r, g, b };
     serlcd_write(buf, 5);
     vTaskDelay(pdMS_TO_TICKS(10));
 }
@@ -219,8 +219,8 @@ void display_serlcd_render_pm_mass(const display_snapshot_t *snap) {
     if (!s_dev || !snap) return;
     display_serlcd_clear();
 
-    char line[32];
     if (snap->pm_valid) {
+        char line[32];
         snprintf(line, sizeof(line), "PM1.0      %3d ug/m3",
                  (int)(snap->pm.pm1_0 + 0.5f));
         serlcd_set_cursor(0, 0); serlcd_write_text(line);
@@ -246,8 +246,8 @@ void display_serlcd_render_pm_number(const display_snapshot_t *snap) {
     if (!s_dev || !snap) return;
     display_serlcd_clear();
 
-    char line[32];
     if (snap->pm_valid) {
+        char line[32];
         snprintf(line, sizeof(line), "n0.5      %5d /cm3",
                  (int)(snap->pm.nc0_5 + 0.5f));
         serlcd_set_cursor(0, 0); serlcd_write_text(line);

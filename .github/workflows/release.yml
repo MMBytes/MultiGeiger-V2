@@ -55,7 +55,7 @@ jobs:
           - adafruit_qtpy_esp32_pico
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # For manual workflow_dispatch, check out the tag the user
           # entered; for tag-push events, github.ref already points at it.
@@ -123,7 +123,7 @@ jobs:
           ls -la stage/
 
       - name: Upload staged artefacts for release aggregation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           # `release-<board>` so the release job can collect them all
           # under one pattern. Per-board names keep download separation
@@ -144,7 +144,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 

@@ -12,18 +12,20 @@ CONFIG_XTAL_FREQ_AUTO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 
-# V2.4.5: mbedTLS dynamic buffer. Default (off) pre-allocates the full
-# CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN (16 KB) + SSL_OUT_CONTENT_LEN (4 KB)
-# = 20 KB per active TLS context AND keeps the big handshake scratch
-# (~16 KB more) alive for the lifetime of the mbedtls_ssl_context.
-# With dynamic-buffer on, mbedTLS only allocates the IN/OUT record
-# buffers as needed and frees the handshake scratch once the handshake
-# completes. Heltec V2 (140 KB free heap, 5.6 KB lifetime min during
-# TLS handshake) gets ~15-20 KB of transient headroom back; FeatherS3-D
-# / QT Py have abundant PSRAM heap and don't enable this (per-record
-# alloc/free CPU overhead not worth paying when the heap isn't tight).
-# Conservative enable: the DYNAMIC_FREE_CONFIG_DATA / DYNAMIC_FREE_CA_CERT
-# sub-options that interact with the cert bundle are intentionally left off.
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# V2.4.5 enabled CONFIG_MBEDTLS_DYNAMIC_BUFFER=y here for ~15-20 KB of
+# transient heap headroom. V2.4.7 REVERTED it because it interacts badly
+# with the hand-rolled mbedTLS session lifecycle in log_ftp.c — every FTPS
+# upload triggered a TLSF heap-corruption assert in
+# mbedtls_ssl_session_reset → mbedtls_ssl_session_reset_msg_layer → mbedtls_free,
+# panicking the device. esp_tls / esp_http_client clients (HTTPS uploads,
+# MQTT TLS) were unaffected because they don't expose mbedTLS internals.
+# The 15-20 KB transient gain is not worth the regression in the
+# load-bearing FTPS path. The V2.4.5 log-ring trim (60→45 KB) stays —
+# that's an independent change and is fine.
+#
+# To re-enable in the future, the log_ftp.c io_close / session-reset
+# path needs auditing to handle the dynamic-buffer free pattern (likely
+# a missing buffer-pointer reset or a double-free trigger).
+# CONFIG_MBEDTLS_DYNAMIC_BUFFER is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT is not set

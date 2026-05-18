@@ -24,10 +24,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # 1.875 MB each). Defined in partitions_4mb.csv at repo root.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
 
-# V2.4.5: mbedTLS dynamic buffer — same rationale as the genuine Heltec V2
-# overlay (sdkconfig.defaults.heltec_v2). Knock-off and genuine share the
-# same ESP32-D0WDQ6 silicon and ~140 KB of free internal DRAM; both need
-# the transient-handshake headroom. See heltec_v2 overlay for full comment.
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# V2.4.5 enabled CONFIG_MBEDTLS_DYNAMIC_BUFFER=y. V2.4.7 REVERTED it
+# because of FTPS heap-corruption crash — see sdkconfig.defaults.heltec_v2
+# for the full rationale. Same revert applied here since both Heltec
+# variants share the same FTPS code path.
+# CONFIG_MBEDTLS_DYNAMIC_BUFFER is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT is not set

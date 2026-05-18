@@ -15,6 +15,57 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.7
+
+**Hotfix — revert `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` on Heltec.** V2.4.5 enabled this option for ~15-20 KB of transient heap headroom during TLS handshakes. Bench testing of V2.4.6 (which carried the V2.4.5 change forward) revealed a regression: **every FTPS upload triggers a TLSF heap-corruption panic** on the Heltec V2.
+
+### The crash
+
+```
+assert failed: block_next tlsf_block_functions.h:161 (!block_is_last(block))
+
+Backtrace (decoded):
+  log_ftp.c:287  io_close()
+    → mbedtls_ssl_session_reset()
+      → mbedtls_ssl_session_reset_int()
+        → mbedtls_ssl_session_reset_msg_layer()  ← frees msg-layer buffers
+          → mbedtls_free()  → heap_caps_free()  → tlsf assert
+```
+
+Pre-upload heap was healthy (113 KB free / 85 KB min / 96 KB largest) — this is heap **corruption**, not OOM. With dynamic-buffer enabled, the session-reset path's free/alloc pattern changes; `log_ftp.c`'s hand-rolled mbedTLS session lifecycle (the only place we call raw `mbedtls_ssl_*` instead of going through `esp_tls` / `esp_http_client`) doesn't tolerate the new free order — likely a double-free or use-after-free in the message-layer buffer chain.
+
+esp_tls-based clients (HTTPS uploads to Madavi / SC / Radmon / OSM / aqi.eco + MQTT TLS) were unaffected because they don't expose mbedTLS internals.
+
+### Resolution
+
+- Removed `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` from `sdkconfig.defaults.heltec_v2` + `.heltec_v2_4mb`, replaced with explanatory comment about the FTPS conflict
+- Cached per-board sdkconfigs deleted to force re-derivation (per `[[feedback_sdkconfig_defaults_only_fills_missing]]` — defaults only fill missing keys, can't override cached y → not-set)
+- FeatherS3-D / QT Py unaffected (they never had this option enabled — V2.4.5 was Heltec-only)
+
+### What stays from V2.4.5
+
+The `HAL_LOG_RING_BYTES` 60 → 45 KB trim (the *other* V2.4.5 change) is independent and unaffected. Heltec V2 keeps the +15 KB permanent heap headroom from that change.
+
+### Heap budget on Heltec V2 after V2.4.7
+
+| Metric | Pre-V2.4.5 | V2.4.5+V2.4.6 | V2.4.7 (now) |
+|---|---|---|---|
+| Free heap (idle) | ~102 KB | ~117 KB | ~117 KB |
+| Min free heap (TLS handshake) | 5.6 KB | ~35-40 KB | ~20 KB |
+| FTPS upload | ✅ works | ❌ panics | ✅ works |
+
+V2.4.7 is still 4× better than the pre-V2.4.5 baseline on min-free during TLS (just less generous than the broken V2.4.6).
+
+### Future work
+
+The dynamic-buffer feature could be re-enabled in a future release if `log_ftp.c`'s `io_close` + session-reset path is audited and adjusted to handle dynamic-buffer free semantics. Likely a missing buffer-pointer reset or a double-free trigger. Not urgent — the heap budget is healthy without it.
+
+### Validation status
+
+V2.4.7 fixes the regression. Smoke-test FTPS post-flash; expect Heltec V2 to upload normally without panic.
+
+---
+
 ## V2.4.6
 
 **MQTT TLS to broker — three configurable trust modes.** Implements `mqtts://` transport for the publish-only MQTT client introduced in V2.4.2-V2.4.4. The previous releases were plain-MQTT-only (port 1883); this lands the long-deferred TLS support with a user-selectable trust model so users can match their broker setup (public-CA, self-signed, or trusted-LAN).

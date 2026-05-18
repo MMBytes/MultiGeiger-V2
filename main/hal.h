@@ -240,7 +240,12 @@
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
-    #define HAL_MULTIPAGE_ROTATION  1   // V2.3.29: 5-page display task (same as FeatherS3-D)
+    // V2.4.8: switched to radiation-only single page (HAL_MULTIPAGE_ROTATION=0)
+    // to match the Heltec V2 OLED layout, per user request 2026-05-18 after
+    // pairing a QT Py with an Adafruit 326 OLED (SSD1306 128x64 over STEMMA QT).
+    // The 5-page rotation is still available — flip back to 1 if you ever want
+    // Env / PM Mass / PM Number / Uploads / System rotation here instead.
+    #define HAL_MULTIPAGE_ROTATION  0   // V2.4.8: Heltec-style radiation-only single page
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as

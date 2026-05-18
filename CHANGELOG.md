@@ -15,6 +15,42 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.8
+
+**QT Py ESP32-PICO: radiation-only single display page** (matches Heltec V2 OLED layout). User paired a QT Py with an Adafruit 326 OLED (Monochrome 0.96" 128×64 SSD1306 STEMMA QT) and wants the Heltec-style radiation page rather than the 5-page rotation that's been the QT Py default since V2.3.29.
+
+### Zero new driver code
+
+The Adafruit 326 is an SSD1306 at I²C 0x3C — identical controller to the Heltec V2's onboard panel. `display.c`'s STEMMA-bus auto-probe (V2.3.29) already covers SSD1306-compatibles and just works when the panel is plugged in via Qwiic cable. Nothing to detect, no new driver, no new dependency.
+
+### One-line change in `hal.h`
+
+```c
+// QT Py branch
+- #define HAL_MULTIPAGE_ROTATION  1   // 5-page display task (same as FeatherS3-D)
++ #define HAL_MULTIPAGE_ROTATION  0   // V2.4.8: Heltec-style radiation-only single page
+```
+
+`HAL_MULTIPAGE_ROTATION=0` makes `main.c` call `display_running()` per TX cycle (line 413 in main.c) — the Heltec radiation layout: `Xs/m/h    <nSv/h>` header, big 5-digit CPM centred, status line at page 7. No display task spawned; no page rotation. The multi-page code stays compiled out via the existing `#if HAL_MULTIPAGE_ROTATION` guards in `display.c` (lines 526, 639, 685).
+
+### Why this matters
+
+QT Py deployments tend to be smaller / sealed-tube-style installations where the radiation reading is the only thing worth showing on a tiny panel. The 5-page rotation was inherited from the FeatherS3-D dust-sensor build context where there's much more to display (env / PM / noise / uploads / system). For radiation-only QT Py builds, the rotation just hides the one number you actually want.
+
+### Reverting if you change your mind
+
+Flip back to `HAL_MULTIPAGE_ROTATION 1` in `hal.h` and rebuild. The display_task code and per-page render functions are still in the binary (`#if`-gated, not deleted).
+
+### FeatherS3-D / Heltec / 4 MB Heltec — unchanged
+
+Only the QT Py overlay changed. FeatherS3-D keeps its 5-page rotation. Heltec was already on the radiation-only page (and unchanged since V2.0).
+
+### Other
+
+- New reference memory captured for the Adafruit 326 panel — see `reference_adafruit_326_oled_stemma.md` in the auto-memory store. Documents the chip, pinout, plug-and-play story, and the V2.4.8 ship.
+
+---
+
 ## V2.4.7
 
 **Hotfix — revert `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` on Heltec.** V2.4.5 enabled this option for ~15-20 KB of transient heap headroom during TLS handshakes. Bench testing of V2.4.6 (which carried the V2.4.5 change forward) revealed a regression: **every FTPS upload triggers a TLSF heap-corruption panic** on the Heltec V2.

@@ -793,8 +793,8 @@ static void render_oled_env(void) {
 static void render_oled_pm_mass(void) {
     oled_clear();
     s_cleared = false;
-    char line[16];
     if (s_snap.pm_valid) {
+        char line[16];
         snprintf(line, sizeof(line), "PM1.0%3d", (int)(s_snap.pm.pm1_0 + 0.5f));
         oled_draw_string_2x(0, 0, line);
         snprintf(line, sizeof(line), "PM2.5%3d", (int)(s_snap.pm.pm2_5 + 0.5f));
@@ -831,9 +831,9 @@ static void fmt_n_value(char *out, size_t outsz, float v) {
 static void render_oled_pm_number(void) {
     oled_clear();
     s_cleared = false;
-    char line[16];
-    char val[8];
     if (s_snap.pm_valid) {
+        char line[16];
+        char val[8];
         fmt_n_value(val, sizeof(val), s_snap.pm.nc0_5);
         snprintf(line, sizeof(line), "n0.5%s", val);
         oled_draw_string_2x(0, 0, line);

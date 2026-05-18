@@ -15,6 +15,30 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.10
+
+**Cppcheck hotfix** for V2.4.9 — three `variableScope` style warnings in `display.c` flagged by the CI cppcheck step (build CI exit 1, blocked future PR merges). Pure style fix; zero runtime behaviour change. Functionally identical binaries to V2.4.9.
+
+### Warnings fixed
+
+```
+display.c:796: char line[16];   // render_oled_pm_mass — moved inside if (s_snap.pm_valid)
+display.c:834: char line[16];   // render_oled_pm_number — moved inside if (s_snap.pm_valid)
+display.c:835: char val[8];     // render_oled_pm_number — moved inside if (s_snap.pm_valid)
+```
+
+In both `render_oled_pm_mass()` and `render_oled_pm_number()` the scratch buffers were only used in the `if (s_snap.pm_valid)` branch; the `else` branch passes string literals directly. Declarations moved inside the `if` block.
+
+### Why bump a version for this
+
+Build CI is treated as authoritative — a red main blocks the next PR. Bumping a tag (rather than just pushing to main untagged) keeps the rule "every tag = unique source state" intact, so `git checkout V2.4.X` always reproduces the exact binary in the corresponding release artefacts. The alternative (commit to main without bump) would leave the V2.4.9 tag pointing at the cppcheck-failing source forever.
+
+### Recommendation
+
+V2.4.10 is **not required to flash** if you're already on V2.4.9 — the binaries are functionally identical. Pull V2.4.10 into the next OTA window for cleanliness.
+
+---
+
 ## V2.4.9
 
 **Runtime-configurable display layout** — replaces the compile-time `HAL_MULTIPAGE_ROTATION` macro. New `display_mode` config field with three options: `auto` (default), `radiation` (single-page Heltec-style), `rotation` (5-page Env / PM / Number / Uploads / System). User picks via `/config` dropdown; resolution happens at `display_setup()` time.

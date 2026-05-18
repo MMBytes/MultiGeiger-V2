@@ -22,10 +22,6 @@
  *    HAL_HAS_ANTENNA_SWITCH  external u.FL antenna toggle in /config UI
  *    HAL_HAS_SPEAKER         speaker.c stubs out when 0 (small-board path)
  *    HAL_HAS_NEOPIXEL        neopixel.c init + tube-pulse hook gated on this
- *    HAL_MULTIPAGE_ROTATION  V2.3.29: 1 = display.c spawns the 5-page rotation
- *                            task and main.c feeds display_update_snapshot;
- *                            0 = legacy display_running per-TX-cycle path
- *                            (Geiger radiation page on Heltec)
  *    HAL_HAS_ALS             V2.3.29: 1 = onboard ALS-PT19 ambient-light sensor
  *                            on PIN_ALS (FeatherS3-D's IO4); als.c is active
  *                            and /status renders an ambient-light row. 0 elsewhere
@@ -54,7 +50,6 @@
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
-    #define HAL_MULTIPAGE_ROTATION  0   // Heltec keeps the radiation display_running() page
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
     // permanent heap allocation on the Heltec, sitting in internal SRAM
@@ -110,7 +105,6 @@
     // is silent — if no panel present, display.c stays dormant. Driver
     // is register-compatible with SSD1306.
     #define HAL_HAS_OLED            1   // External SSD1309 on STEMMA1 (optional — probe-detected)
-    #define HAL_MULTIPAGE_ROTATION  1   // V2.3.29: 5-page display task on Env / PM Mass / PM Number / Uploads / System
     #define HAL_HAS_ALS             1   // V2.3.29: onboard ALS-PT19 ambient-light sensor on PIN_ALS
     #define HAL_HAS_PSRAM           1   // 8 MB QSPI PSRAM
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
@@ -240,12 +234,11 @@
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
-    // V2.4.8: switched to radiation-only single page (HAL_MULTIPAGE_ROTATION=0)
-    // to match the Heltec V2 OLED layout, per user request 2026-05-18 after
-    // pairing a QT Py with an Adafruit 326 OLED (SSD1306 128x64 over STEMMA QT).
-    // The 5-page rotation is still available — flip back to 1 if you ever want
-    // Env / PM Mass / PM Number / Uploads / System rotation here instead.
-    #define HAL_MULTIPAGE_ROTATION  0   // V2.4.8: Heltec-style radiation-only single page
+    // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
+    // a QT Py + Adafruit 326 deployment. V2.4.9 removed HAL_MULTIPAGE_ROTATION
+    // entirely — page-layout selection is now runtime via `display_mode` in
+    // /config (auto / radiation / rotation). Auto on QT Py + SSD1306 still
+    // picks radiation (small panel → single page).
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as

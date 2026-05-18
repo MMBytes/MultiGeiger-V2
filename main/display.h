@@ -79,16 +79,43 @@ typedef struct {
 #define DSP_HV_OK        1
 #define DSP_HV_ERROR     2
 
+/** @brief V2.4.9: display layout mode enum. Mirrors the disp_mode field
+ *  in config_fields.def. The resolved mode (after auto resolution) drives
+ *  whether the multi-page rotation task is spawned at setup time.
+ */
+typedef enum {
+    DISPLAY_MODE_AUTO      = 0,  // pick based on sensor presence at boot
+    DISPLAY_MODE_RADIATION = 1,  // Heltec-style single page (display_running)
+    DISPLAY_MODE_ROTATION  = 2,  // 5-page rotation task (Env / PM / etc)
+} display_mode_t;
+
 /** @brief Initialise the OLED / SerLCD.
  *
  *  Pass show_display=false to keep the panel dark; the driver still
  *  initialises so set_status / display_running become safe no-ops.
  *  brightness_pct is applied via display_set_contrast() at the end of
  *  init — caller passes g_cfg.oled_brightness_pct.
+ *
+ *  V2.4.9: mode selects the page layout. DISPLAY_MODE_AUTO resolves at
+ *  setup time by querying env_sensor_present() / pm_sensor_present() /
+ *  noise_sensor_present() / als_present() / veml7700_present() — any
+ *  hit picks rotation, none picks radiation.
+ *
  *  Returns true if the panel answered probe; false otherwise, after which
  *  subsequent calls are no-ops.
  */
-bool display_setup(bool show_display, uint8_t brightness_pct);
+bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode);
+
+/** @brief V2.4.9: true if the multi-page rotation is active for this boot.
+ *  Resolved by display_setup(); use this in main.c::do_tx_cycle to decide
+ *  between display_running() (false) and display_update_snapshot() (true).
+ */
+bool display_is_multipage(void);
+
+/** @brief V2.4.9: human-readable description of the resolved mode, used
+ *  by /status. Always non-NULL.
+ */
+const char *display_mode_str(void);
 
 /** @brief V2.3.30: live-apply OLED contrast / SerLCD backlight brightness.
  *

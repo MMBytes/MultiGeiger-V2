@@ -403,15 +403,17 @@ static void do_tx_cycle(void) {
     int time_sec   = (int)(esp_timer_get_time() / 1000000LL);
     int rad_nsvph  = g_cfg.tube_enabled ? (int)(usvph * 1000.0f) : 0;
     int cpm_disp   = g_cfg.tube_enabled ? (int)cpm : 0;
-#if HAL_MULTIPAGE_ROTATION
-    // V2.3.29: multi-page display task owns the panel — radiation page
-    // is not part of the rotation set on these boards (FeatherS3-D
-    // dust deployment + QT Py). Suppress the radiation draw so the
-    // task's pages aren't briefly flashed-then-overwritten.
-    (void)time_sec; (void)rad_nsvph; (void)cpm_disp;
-#else
-    display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
-#endif
+    // V2.3.29 / V2.4.9: multi-page rotation owns the panel when active.
+    // Suppress the radiation-page draw to avoid a briefly-flashed page
+    // being overwritten by the next rotation tick. When rotation is OFF
+    // (single-page radiation mode), render the radiation page here per
+    // TX cycle. Decision was compile-time HAL_MULTIPAGE_ROTATION pre-
+    // V2.4.9; now runtime via display_is_multipage().
+    if (!display_is_multipage()) {
+        display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
+    } else {
+        (void)time_sec; (void)rad_nsvph; (void)cpm_disp;
+    }
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
@@ -498,26 +500,32 @@ static void do_tx_cycle(void) {
         }
     }
 
-#if HAL_MULTIPAGE_ROTATION
-    // V2.3.29: feed the multi-page display task with this cycle's sensor
-    // readings. The task wakes every 5 s, rotates through Env / PM Mass /
-    // PM Number / Uploads / System (skipping pages whose sensors aren't
-    // fitted), and renders independently. Dynamic data not in the
-    // snapshot (uptime, free heap, TX cycles, upload counters) is read
-    // live at render time so the relevant pages update every 5 s, not
-    // every 150 s.
-    display_snapshot_t snap = {
-        .env_valid   = bme_valid,
-        .env_t_c     = bme_t,
-        .env_h_pct   = bme_h,
-        .env_p_pa    = bme_p,
-        .pm_valid    = pm_valid,
-        .pm          = pm,
-        .noise_valid = noise_valid,
-        .noise       = noise,
-    };
-    display_update_snapshot(&snap);
-#endif
+    // V2.3.29 / V2.4.9: feed the multi-page display task with this
+    // cycle's sensor readings IF rotation is active. The task wakes
+    // every 5 s, rotates through Env / PM Mass / PM Number / Uploads /
+    // System (skipping pages whose sensors aren't fitted), and renders
+    // independently. Dynamic data not in the snapshot (uptime, free
+    // heap, TX cycles, upload counters) is read live at render time so
+    // the relevant pages update every 5 s, not every 150 s.
+    //
+    // V2.4.9 made the call runtime-gated (was compile-time
+    // HAL_MULTIPAGE_ROTATION). On radiation-only boots
+    // display_update_snapshot is a harmless write to a static struct
+    // that no reader consumes — but skipping it saves a few cycles per
+    // TX loop.
+    if (display_is_multipage()) {
+        display_snapshot_t snap = {
+            .env_valid   = bme_valid,
+            .env_t_c     = bme_t,
+            .env_h_pct   = bme_h,
+            .env_p_pa    = bme_p,
+            .pm_valid    = pm_valid,
+            .pm          = pm,
+            .noise_valid = noise_valid,
+            .noise       = noise,
+        };
+        display_update_snapshot(&snap);
+    }
 
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
@@ -676,7 +684,8 @@ void app_main(void) {
 
     // Display: probes both buses internally, marks bus 2 kept-alive
     // itself if it lands there.
-    display_setup(g_cfg.show_display, g_cfg.oled_brightness_pct);
+    display_setup(g_cfg.show_display, g_cfg.oled_brightness_pct,
+                  (display_mode_t)g_cfg.display_mode);
     display_boot_screen();
 
     // End-of-init: if the secondary bus was lazily enabled but no

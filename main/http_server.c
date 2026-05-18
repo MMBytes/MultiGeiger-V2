@@ -468,7 +468,12 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         "<b>Min free heap:</b> %lu bytes<br>"
         "<b>Max allocation:</b> %lu bytes<br>"
         "<b>NTP:</b> %s<br>"
-        "<b>AP SSID:</b> %s"
+        "<b>AP SSID:</b> %s<br>"
+        // V2.4.9: resolved display layout mode. Shows what display.c
+        // picked at boot (e.g. "auto (resolved: rotation)" or
+        // "radiation (forced)") so the user can confirm the runtime
+        // decision without digging into /log.
+        "<b>Display layout:</b> %s"
         "</div>",
         uptime_buf,
         reset_reason_str(esp_reset_reason()),
@@ -476,7 +481,8 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         (unsigned long)min_free,
         (unsigned long)max_alloc,
         ntp_line,
-        s_cfg->ap_name);
+        s_cfg->ap_name,
+        display_mode_str());
 }
 
 // --- Cycle block -------------------------------------------------------------
@@ -1210,6 +1216,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
         "Enable Display <span class=\"r\">*</span></label></div>"
+        // V2.4.9: display layout mode dropdown. AUTO uses panel-based rule
+        // (SerLCD or SSD1309 → rotation; SSD1306 → radiation). Explicit
+        // overrides bypass the auto rule entirely.
+        "<label>Display layout <span class=\"r\">*</span>"
+        "<select name=\"disp_mode\">"
+        "<option value=\"0\"%s>Auto (panel-based: small OLED &rarr; radiation, big OLED / SerLCD &rarr; rotation)</option>"
+        "<option value=\"1\"%s>Radiation only (Heltec-style single page)</option>"
+        "<option value=\"2\"%s>Rotation (Env / PM / Number / Uploads / System)</option>"
+        "</select></label>"
         "<label>Display brightness "
         "<select name=\"oled_bright\">%s</select>"
         " <small>(live — applies on Save without reboot)</small></label>"
@@ -1302,6 +1317,11 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
         s_cfg->show_display ? "checked" : "",
+        // V2.4.9: display layout mode dropdown (3 args — selected markers
+        // for the three options Auto/Radiation/Rotation).
+        s_cfg->display_mode == 0 ? " selected" : "",
+        s_cfg->display_mode == 1 ? " selected" : "",
+        s_cfg->display_mode == 2 ? " selected" : "",
         br_opts,
         e_ntp1, e_ntp2, e_ntp3, e_tz, e_ap,
         (unsigned long)s_cfg->tx_interval_ms);

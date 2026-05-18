@@ -15,6 +15,45 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.9
+
+**Runtime-configurable display layout** — replaces the compile-time `HAL_MULTIPAGE_ROTATION` macro. New `display_mode` config field with three options: `auto` (default), `radiation` (single-page Heltec-style), `rotation` (5-page Env / PM / Number / Uploads / System). User picks via `/config` dropdown; resolution happens at `display_setup()` time.
+
+### The auto rule (panel-based)
+
+| Backend / chip | Auto resolves to |
+|---|---|
+| SerLCD | rotation (4-line character LCD has room for multi-page content) |
+| Big OLED (SSD1309, 2.42") | rotation (Core Electronics CE09964 on FeatherS3-D) |
+| Small OLED (SSD1306, 0.96") | radiation (Heltec V2 onboard, Adafruit 326 on STEMMA QT) |
+
+The SSD1306-vs-SSD1309 distinction uses the per-board compile-time hint (`BOARD_FEATHERS3_D` ships with SSD1309; everything else with SSD1306) because the two controllers are register-compatible at the I²C level and don't expose a chip-ID register that reliably differs. The SerLCD discrimination is runtime via `s_backend == BACKEND_SERLCD`.
+
+### Edge case + escape hatch
+
+Plugging an Adafruit 326 (small SSD1306) into a FeatherS3-D's STEMMA1 in place of the SSD1309 would mis-auto-pick `rotation` because the per-board hint can't see the smaller panel. Workaround: select `radiation` explicitly in `/config` — explicit modes bypass the auto rule entirely.
+
+### What changed in the code
+
+- **`config_fields.def`** — new `X_U32(display_mode, "disp_mode", 0, 0, 2)` field
+- **`display.h`** — new `display_mode_t` enum + `display_setup()` signature gains `mode` parameter + new `display_is_multipage()` / `display_mode_str()` getters
+- **`display.c`** — auto resolution at `display_setup()`'s `task_spawn` label (after panel is known); all `#if HAL_MULTIPAGE_ROTATION` guards removed; multipage task always compiled-in, spawn decision now runtime
+- **`main.c`** — `display_setup()` call updated to pass `g_cfg.display_mode`; per-cycle radiation render and snapshot push gated by `display_is_multipage()` instead of `#if`
+- **`http_server.c`** — new `/config` dropdown row between "Enable Display" and "Display brightness"; `/status` System block gains a "Display layout" row showing the resolved mode (e.g. `auto (resolved: rotation)`)
+- **`hal.h`** — `HAL_MULTIPAGE_ROTATION` removed from all three board branches + the required-flags doc-comment list (now dead, replaced by runtime decision)
+
+### Migration notes
+
+- **Existing devices on V2.4.8 or earlier:** NVS `disp_mode` key won't exist → `config_load` falls back to compile-time default `0` (auto). FeatherS3-D continues to show rotation; Heltec V2 + QT Py continue to show radiation. No user action required.
+- **V2.4.8's QT Py hardcoding (radiation) is now redundant** — auto-mode delivers the same outcome based on the SSD1306 chip type. No behaviour change for users who never opened `/config`.
+- **Reboot-required** — display task lifecycle decision happens at `display_setup()` only. Field marked with red `*` in the form.
+
+### Binary size
+
+QT Py reabsorbs the ~3.8 KB of multipage code that V2.4.8 gated out (now compiled into all boards because the decision is runtime). Heltec binaries grow by ~5 KB similarly. Acceptable on all boards; far from any partition limit.
+
+---
+
 ## V2.4.8
 
 **QT Py ESP32-PICO: radiation-only single display page** (matches Heltec V2 OLED layout). User paired a QT Py with an Adafruit 326 OLED (Monochrome 0.96" 128×64 SSD1306 STEMMA QT) and wants the Heltec-style radiation page rather than the 5-page rotation that's been the QT Py default since V2.3.29.

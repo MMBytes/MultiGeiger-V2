@@ -85,23 +85,18 @@ static bool s_cleared = true;    // panel is blank (no running screen drawn)
 // exactly the brightness they already had.
 static uint8_t s_brightness_pct = 80;
 
-#if HAL_MULTIPAGE_ROTATION
 // V2.3.29: anti-burn-in by alternating SSD1306/9 invert mode at the start
-// of each new rotation (page index wraps to 0 in display_task). Each pixel
-// state holds for one rotation (~14–35 s depending on enabled page count),
-// then flips. Spreads on-time evenly across all pixels without a separate
-// burn-in timer.
-//
-// Initial value FALSE matches the post-init_cmds[] panel state (0xA6 =
-// normal — white text on black background). The first rotation skips the
-// toggle (`first_rotation` flag), so rotation 1 stays normal; rotation 2
-// toggles to inverted; rotation 3 back to normal; etc.
-//
-// Only declared when HAL_MULTIPAGE_ROTATION=1 — boards with single-page
-// displays (heltec_v2 / heltec_v2_4mb) never read this and would trip
-// -Wunused-variable otherwise.
+// of each new rotation. V2.4.9: declared unconditionally — multipage code
+// is now compiled into all boards (decision is runtime, not compile-time).
+// On non-rotation boots this static stays at its initial value FALSE and
+// the rotation task that reads it is never spawned.
 static bool s_oled_inverted = false;
-#endif
+
+// V2.4.9: runtime resolved display mode + multipage-active flag, set by
+// display_setup(). Read by display_is_multipage() / display_mode_str()
+// from any task context — written once at boot before any reader can run.
+static display_mode_t s_resolved_mode = DISPLAY_MODE_RADIATION;
+static bool           s_is_multipage  = false;
 
 static int s_status[DSP_STATUS_MAX] = { 0, 0, 0, 0, 0 };
 
@@ -347,14 +342,12 @@ static void redraw_status_line(void) {
 // Public API
 // ------------------------------------------------------------------
 
-#if HAL_MULTIPAGE_ROTATION
-// V2.3.29: forward declaration — the multi-page rotation task is defined
-// further down (after the OLED render functions and dispatcher) but
-// xTaskCreate'd inside display_setup() above its definition. Gated by
-// HAL_MULTIPAGE_ROTATION rather than BOARD_FEATHERS3_D so QT Py (which
-// also opts into the multi-page rotation per hal.h) compiles in too.
+// V2.3.29 / V2.4.9: forward declaration — the multi-page rotation task is
+// defined further down (after the OLED render functions and dispatcher) but
+// xTaskCreate'd inside display_setup() if the resolved mode is rotation.
+// V2.4.9 removed the HAL_MULTIPAGE_ROTATION compile-time gate; the task
+// function is always compiled in but only spawned when needed.
 static void display_task(void *arg);
-#endif
 
 // V2.3.29: bus 2 init moved to i2c_bus.c. display.c is now a pure
 // consumer — gets bus handles via i2c_bus_get_primary() and
@@ -452,7 +445,21 @@ static bool try_serlcd_on_bus(i2c_master_bus_handle_t bus, bool show_display,
     return true;
 }
 
-bool display_setup(bool show_display, uint8_t brightness_pct) {
+bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode) {
+    // V2.4.9: store the requested mode. The AUTO resolution happens AFTER
+    // the panel is detected (later in this function) because it depends on
+    // s_backend and on the per-board OLED chip hint. For explicit
+    // RADIATION / ROTATION we can set s_is_multipage immediately —
+    // AUTO is finalised at the task_spawn label below.
+    s_resolved_mode = mode;
+    if (mode == DISPLAY_MODE_RADIATION) {
+        s_is_multipage = false;
+    } else if (mode == DISPLAY_MODE_ROTATION) {
+        s_is_multipage = true;
+    }
+    // (AUTO case: s_is_multipage stays at its initial false and is
+    // overwritten at task_spawn once we know what panel we actually got.)
+
     // V2.3.29: auto-detect display across BOTH I²C buses. Probe primary
     // first since LDO2 is off until the secondary call enables it — lets
     // the dual-bus probe terminate quickly + cheaply if the display lives
@@ -523,14 +530,64 @@ bool display_setup(bool show_display, uint8_t brightness_pct) {
     return false;
 
 task_spawn:;
-#if HAL_MULTIPAGE_ROTATION
-    // Multi-page rotation task. 4 KB stack covers snprintf into char[16]
-    // buffers + i2c_master_transmit ~200 B worst-case. Priority 5 sits
-    // below WiFi/lwIP (~14) and TX worker (~10) so display rendering
-    // never starves networking.
-    xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+    // V2.4.9: finalise AUTO mode now that the panel has been detected.
+    // The rule is panel-based:
+    //   - SerLCD backend       → rotation (typical 20x4 char display has
+    //                            room for the multi-page content)
+    //   - Big OLED (SSD1309)   → rotation (per-board compile-time hint
+    //                            — BOARD_FEATHERS3_D ships with a 2.42"
+    //                            SSD1309 from Core Electronics)
+    //   - Small OLED (SSD1306) → radiation (Heltec onboard 0.96" or
+    //                            Adafruit 326 plugged into STEMMA QT)
+    //
+    // Caveat: SSD1306 and SSD1309 are register-compatible (we drive both
+    // with the same init sequence) and there's no reliable chip-ID
+    // register that differs. So the OLED size discrimination uses the
+    // compile-time per-board hint. The edge case — Adafruit 326 (small)
+    // plugged into a FeatherS3-D's STEMMA1 in place of the SSD1309 —
+    // would auto-pick rotation incorrectly; the user can override via
+    // display_mode = RADIATION in /config.
+    if (mode == DISPLAY_MODE_AUTO) {
+        bool resolved_multipage;
+        if (s_backend == BACKEND_SERLCD) {
+            resolved_multipage = true;
+        } else {
+#if defined(BOARD_FEATHERS3_D)
+            resolved_multipage = true;   // SSD1309 2.42" — big enough for rotation
+#else
+            resolved_multipage = false;  // SSD1306 0.96" — radiation single page
 #endif
+        }
+        s_is_multipage = resolved_multipage;
+    }
+    ESP_LOGI(TAG, "display mode: requested=%d resolved=%s",
+             (int)mode, display_mode_str());
+
+    // V2.3.29 / V2.4.9: Multi-page rotation task. 4 KB stack covers
+    // snprintf into char[16] buffers + i2c_master_transmit ~200 B worst-
+    // case. Priority 5 sits below WiFi/lwIP (~14) and TX worker (~10) so
+    // display rendering never starves networking. V2.4.9 made the spawn
+    // a runtime decision (s_is_multipage) instead of compile-time guard.
+    if (s_is_multipage) {
+        xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+    }
     return true;
+}
+
+// V2.4.9: query accessors for the resolved layout mode.
+bool display_is_multipage(void) {
+    return s_is_multipage;
+}
+
+const char *display_mode_str(void) {
+    switch (s_resolved_mode) {
+        case DISPLAY_MODE_AUTO:      return s_is_multipage
+                                          ? "auto (resolved: rotation)"
+                                          : "auto (resolved: radiation)";
+        case DISPLAY_MODE_RADIATION: return "radiation (forced)";
+        case DISPLAY_MODE_ROTATION:  return "rotation (forced)";
+        default:                     return "unknown";
+    }
 }
 
 void display_boot_screen(void) {
@@ -636,20 +693,18 @@ void display_set_contrast(uint8_t pct) {
 void display_set_status(int index, int value) {
     if (index < 0 || index >= DSP_STATUS_MAX) return;
     s_status[index] = value;
-#if HAL_MULTIPAGE_ROTATION
-    // V2.3.29 fix: on multi-page boards the display task owns the panel —
-    // the radiation-era status line at page 7 would overlay whichever page
-    // is currently rendered (PM10 bottom half, Pressure bottom half, etc).
-    // s_status[] is still updated above so any future backend that wants
-    // to surface status (e.g. SerLCD RGB backlight = green/red) can read it.
-    return;
-#else
-    // Heltec radiation-page path — status line lives on page 7 of the
+    // V2.3.29 / V2.4.9: on multi-page boots the display task owns the panel
+    // — the radiation-era status line at page 7 would overlay whichever
+    // page is currently rendered (PM10 bottom half, Pressure bottom half,
+    // etc), so skip the redraw. s_status[] is still updated above so any
+    // future backend that wants to surface status (e.g. SerLCD RGB
+    // backlight = green/red) can read it.
+    if (s_is_multipage) return;
+    // Single-page (radiation) path — status line lives on page 7 of the
     // running screen, redrawn every time a subsystem state changes.
     if (s_backend != BACKEND_OLED) return;
     if (!s_dev || !s_show || s_cleared) return;
     redraw_status_line();
-#endif
 }
 
 // ====================================================================
@@ -672,8 +727,11 @@ void display_set_status(int index, int value) {
 // black-on-white vs white-on-black — anti-burn-in without a separate
 // timer. First rotation keeps the boot-splash polarity (normal).
 //
-// Heltec continues to use display_running() with the radiation page
-// (display_task is FeatherS3-D-gated).
+// V2.4.9: previously gated by HAL_MULTIPAGE_ROTATION; now always compiled.
+// display_setup() resolves the mode at boot (auto vs explicit) and decides
+// whether to spawn display_task — see s_is_multipage. The task function and
+// per-page renderers below are dead code when not spawned (linker may DCE
+// some; ESP-IDF builds with -ffunction-sections + --gc-sections do this).
 // ====================================================================
 
 static display_snapshot_t s_snap = {0};
@@ -681,8 +739,6 @@ static display_snapshot_t s_snap = {0};
 void display_update_snapshot(const display_snapshot_t *snap) {
     if (snap) s_snap = *snap;
 }
-
-#if HAL_MULTIPAGE_ROTATION
 
 // V2.3.29: page dwell time. Set to 7 s after the 5 s initial setting
 // was reported as too quick to comfortably read each page on the bench
@@ -970,15 +1026,13 @@ static void display_task(void *arg) {
     }
 }
 
-#endif  // HAL_MULTIPAGE_ROTATION
-
 #else  // HAL_HAS_OLED
 
 // No-op stubs for boards without an onboard OLED. Same prototypes as above
 // so callers compile unchanged; display_setup() returning false signals that
 // no panel is fitted.
-bool display_setup(bool show_display, uint8_t brightness_pct) {
-    (void)show_display; (void)brightness_pct;
+bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode) {
+    (void)show_display; (void)brightness_pct; (void)mode;
     return false;
 }
 void display_boot_screen(void) {}
@@ -988,5 +1042,7 @@ void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
 }
 void display_set_status(int index, int value) { (void)index; (void)value; }
 void display_update_snapshot(const display_snapshot_t *snap) { (void)snap; }
+bool display_is_multipage(void) { return false; }
+const char *display_mode_str(void) { return "no display"; }
 
 #endif  // HAL_HAS_OLED

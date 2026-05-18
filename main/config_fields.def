@@ -131,6 +131,29 @@ X_BOOL(show_display,           "show_disp",  true)
 
 X_U8  (oled_brightness_pct,    "oled_bright", 80,      0,       100)
 
+// --- Display layout mode (V2.4.9) -------------------------------------------
+//
+// Runtime selector for the page layout shown on the panel:
+//   0 = auto      Pick at boot based on sensor presence. If any env / PM /
+//                 noise / lux sensor is detected → 5-page rotation. Otherwise
+//                 → Heltec-style radiation single page. Replaces the compile-
+//                 time HAL_MULTIPAGE_ROTATION macro that used to be hardcoded
+//                 per board in hal.h.
+//   1 = radiation Single page (time + nSv/h + big CPM + status line). Always
+//                 active regardless of sensors. The classic Heltec layout.
+//   2 = rotation  5-page rotation (Env / PM Mass / PM Number / Uploads /
+//                 System). Always active regardless of sensors. Pages with
+//                 no underlying sensor are still skipped at render time.
+//
+// Default 0 = auto: behaves like the old hardcoded HAL_MULTIPAGE_ROTATION on
+// the prod sensor stacks (FeatherS3-D with env+PM+noise = rotation; bare
+// Heltec / QT Py with no sensors = radiation) without anyone having to think
+// about it. Override only if you disagree with the auto-pick.
+//
+// Reboot-required — display task lifecycle decision happens at display_setup().
+
+X_U32 (display_mode,           "disp_mode",   0,        0,       2)
+
 // --- MQTT broker client (V2.4.2 Phase 1) ------------------------------------
 //
 // Generic MQTT 3.1.1 publish-only client. State is published as a single JSON

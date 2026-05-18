@@ -15,6 +15,61 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.11
+
+**Boot diagnostics + NTP-gated MQTT start** — two small, related quality-of-life tweaks that surface in the boot log.
+
+### 1. Boot-time config dump now covers V2.4.x additions
+
+The `config: ` block printed at boot was missing the fields added since V2.4.2. Three new lines now appear:
+
+```
+config:   display:          mode=0(auto)
+config:   mqtt:             enabled=1 broker=10.11.12.150:8883 user=geiger pw=<set>
+config:   mqtt:             topic_prefix=geiger ha_discovery=1
+config:   mqtt.tls:         enabled=1 mode=1(B:custom) ca=<set>
+```
+
+Covers:
+- `display_mode` (V2.4.9) — both numeric value and the auto/radiation/rotation legend.
+- MQTT broker / port / user / password / topic_prefix / ha_discovery (V2.4.2–V2.4.5).
+- MQTT TLS enable / mode / CA-set flag (V2.4.6) — mode prints as `0(A:bundle)` / `1(B:custom)` / `2(D:skip)` so the log is self-documenting without grepping `config_fields.def`.
+
+Passwords + the CA PEM body are masked the same way as the existing wifi/ftp/radmon credentials (`<set>` / `<empty>`).
+
+### 2. MQTT client deferred until NTP sync
+
+Pre-V2.4.11 `mqtt_init()` was called during the AP boot window, before any STA connection existed. The result was five `esp-tls: connect() error` / `select() timeout` cycles per boot (~25 s of log noise) until the AP window closed and the STA came up. Worse, on first boot without a battery-backed RTC the wall clock reads ~1970-01-01, which makes TLS cert validation fail with `NotBefore` errors — a different failure mode mixed in with the route-unreachable errors.
+
+V2.4.11 holds back the `mqtt_init()` call until `ntp_time_valid()` returns true (wall clock > 2025-01-01). New boot log shape:
+
+```
+v2_main: MQTT deferred until NTP sync (broker=10.11.12.150:8883)
+...
+ntp: sync OK: 2026-05-19T00:04:21 AEST
+v2_main: NTP synced — starting MQTT client
+mqtt: started — uri=mqtts://10.11.12.150:8883 tls_mode=B (custom CA cert) ...
+mqtt: CONNECTED to broker
+```
+
+Exception preserved: if MQTT is **disabled** or the broker field is empty, `mqtt_init()` is still called at boot so the existing `mqtt: disabled (...)` log line appears in the boot trace at the same point as before. The deferred-start path only kicks in when MQTT is configured.
+
+### Code changes
+
+- **`main/config.c`** — three new `ESP_LOGI` lines + small inline legend lookups for `display_mode` and `mqtt_tls_mode`.
+- **`main/main.c`** — new `mqtt_started` static flag; boot section split on `mqtt_enable` + `mqtt_broker[0]`; main loop polls `ntp_time_valid()` after `ntp_poll()` and fires `mqtt_init()` once.
+
+### Failure modes
+
+- **NTP never syncs** (network unreachable, all servers blocked) → MQTT never starts. Acceptable trade — without a clock TLS would fail anyway, and the FTPS uploads also fail in that state.
+- **`mqtt_init()` accidentally called twice** → existing guard at `mqtt.c:127` logs `init called twice — ignoring`; `mqtt_started` flag is belt-and-braces on top.
+
+### Recommendation
+
+V2.4.11 is **safe to flash** as a routine OTA update. No NVS schema changes, no config-form changes, behaviour change only at boot.
+
+---
+
 ## V2.4.10
 
 **Cppcheck hotfix** for V2.4.9 — three `variableScope` style warnings in `display.c` flagged by the CI cppcheck step (build CI exit 1, blocked future PR merges). Pure style fix; zero runtime behaviour change. Functionally identical binaries to V2.4.9.

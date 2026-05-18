@@ -79,6 +79,7 @@ static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 
 // --- NTP/TX state ---
 static bool     ntp_started = false;
+static bool     mqtt_started = false;   // V2.4.11: gated on NTP sync (see boot section)
 static uint32_t tx_cycles   = 0;
 
 // --- Cached last-cycle snapshot (for the status page) ---
@@ -766,7 +767,24 @@ void app_main(void) {
     log_ftp_init(g_chip_id, &g_cfg);
     // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.
     // Has to start AFTER http_server so failures don't block /config access.
-    mqtt_init(&g_cfg, g_chip_id);
+    //
+    // V2.4.11: deferred start — wait for NTP sync before calling mqtt_init().
+    // Two reasons: (1) connecting during the AP boot window has no route to
+    // the broker and just spams 5x ESP-TLS errors per 30s, (2) MQTT-TLS cert
+    // validation (NotBefore/NotAfter) needs a sane wall clock, which only
+    // NTP provides after first boot. Loop body below polls ntp_time_valid().
+    //
+    // Exception: if MQTT is disabled or broker is empty, still call mqtt_init
+    // now so the "disabled" log line appears in the boot trace — same boot
+    // diagnostics behaviour as before. mqtt_started flag prevents the loop
+    // from calling it a second time.
+    if (!g_cfg.mqtt_enable || g_cfg.mqtt_broker[0] == 0) {
+        mqtt_init(&g_cfg, g_chip_id);  // logs "disabled (...)" + returns
+        mqtt_started = true;
+    } else {
+        ESP_LOGI(TAG, "MQTT deferred until NTP sync (broker=%s:%lu)",
+                 g_cfg.mqtt_broker, (unsigned long)g_cfg.mqtt_port);
+    }
 
     ESP_LOGI(TAG, "AP up: SSID=%s auth=%d (2-min boot window)",
              (char *)apc.ap.ssid, apc.ap.authmode);
@@ -816,6 +834,18 @@ void app_main(void) {
         }
 
         ntp_poll();
+
+        // V2.4.11: now that we may have a sane clock, kick MQTT off the bench.
+        // ntp_time_valid() flips true once NTP sets the wall clock past
+        // 2025-01-01; on a cold boot that's strictly after the first SNTP
+        // exchange completes (no battery-backed RTC on ESP32). Calling
+        // mqtt_init() once is enough — the esp-mqtt client thereafter handles
+        // reconnect/backoff internally.
+        if (!mqtt_started && ntp_time_valid()) {
+            ESP_LOGI(TAG, "NTP synced — starting MQTT client");
+            mqtt_init(&g_cfg, g_chip_id);
+            mqtt_started = true;
+        }
 
         // End of boot AP window: stop the AP and switch to STA-only.
         // Radio is never shared — AP is fully down before STA starts.

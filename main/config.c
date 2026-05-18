@@ -159,6 +159,14 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d oled_brightness=%d%%",
              cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display,
              cfg->oled_brightness_pct);
+    // display_mode is configured here; resolved (auto→radiation/rotation)
+    // value gets logged separately by display_setup() after panel probe.
+    const char *disp_mode_str =
+        (cfg->display_mode == 0) ? "auto"      :
+        (cfg->display_mode == 1) ? "radiation" :
+        (cfg->display_mode == 2) ? "rotation"  : "?";
+    ESP_LOGI(TAG, "  display:          mode=%lu(%s)",
+             (unsigned long)cfg->display_mode, disp_mode_str);
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
@@ -166,6 +174,24 @@ void config_load(config_t *cfg) {
              MASK(cfg->osm_access_token));
     ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
              cfg->send_aqi, MASK(cfg->aqi_token));
+    ESP_LOGI(TAG, "  mqtt:             enabled=%d broker=%s:%lu user=%s pw=%s",
+             cfg->mqtt_enable,
+             cfg->mqtt_broker[0] ? cfg->mqtt_broker : "<empty>",
+             (unsigned long)cfg->mqtt_port,
+             cfg->mqtt_user[0] ? cfg->mqtt_user : "<empty>",
+             MASK(cfg->mqtt_password));
+    ESP_LOGI(TAG, "  mqtt:             topic_prefix=%s ha_discovery=%d",
+             cfg->mqtt_topic_prefix[0] ? cfg->mqtt_topic_prefix : "<empty>",
+             cfg->mqtt_ha_discovery);
+    // mqtt_tls_mode legend: 0=A Mozilla CA bundle / 1=B custom CA / 2=D skip-verify
+    const char *mqtt_tls_str =
+        (cfg->mqtt_tls_mode == 0) ? "A:bundle"  :
+        (cfg->mqtt_tls_mode == 1) ? "B:custom"  :
+        (cfg->mqtt_tls_mode == 2) ? "D:skip"    : "?";
+    ESP_LOGI(TAG, "  mqtt.tls:         enabled=%d mode=%lu(%s) ca=%s",
+             cfg->mqtt_tls_enable,
+             (unsigned long)cfg->mqtt_tls_mode, mqtt_tls_str,
+             cfg->mqtt_tls_ca[0] ? "<set>" : "<empty>");
     #undef MASK
 }
 

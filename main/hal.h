@@ -56,7 +56,14 @@
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_MULTIPAGE_ROTATION  0   // Heltec keeps the radiation display_running() page
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
-    #define HAL_LOG_RING_BYTES      (60 * 1024)  // Internal SRAM only — keep small
+    // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
+    // permanent heap allocation on the Heltec, sitting in internal SRAM
+    // forever. Dropping 15 KB gives that back to free heap (~140 KB → ~155 KB
+    // at boot) on top of the V2.4.5 mbedTLS dynamic-buffer transient win.
+    // /log scrollback shrinks proportionally (~500 lines → ~380 lines) —
+    // still plenty for diagnosing a TX cycle. FeatherS3-D / QT Py rings
+    // are in PSRAM and not affected.
+    #define HAL_LOG_RING_BYTES      (45 * 1024)  // Internal SRAM only — keep small
     // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
     // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient
     // demand ~99 KB) so internal-DRAM headroom matters. Realistic writes

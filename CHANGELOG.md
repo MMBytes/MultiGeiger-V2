@@ -15,6 +15,38 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.5
+
+**Heap headroom on the Heltec V2.** Two independent tweaks targeting the constrained-DRAM build. Lifetime min-free-heap on the Heltec V2 was sitting at ~5.6 KB during TLS-handshake transients (against ~100 KB idle) — close to the edge for future feature growth. This release lifts that floor by ~30 KB without changing any externally-visible behaviour.
+
+Also rewords the MQTT LWT description on `/config` (carried over from the post-V2.4.4 commit `e7e467f`) — plain-language explanation of what the broker-published "offline" message means for HA.
+
+### `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` (Heltec V2 only)
+
+mbedTLS now allocates the SSL IN/OUT record buffers on demand and frees the handshake scratch (~16 KB) once the handshake completes. Previously these sat in heap for the lifetime of every `mbedtls_ssl_context`, even between TX cycles.
+
+- **Heltec V2 transient gain: ~15-20 KB.** Directly addresses the 5.6 KB min-free-heap floor.
+- **Scope:** enabled in `sdkconfig.defaults.heltec_v2` and `.heltec_v2_4mb` overlays only — the FeatherS3-D / QT Py have abundant PSRAM heap (4+ MB free) and don't need to pay the per-record alloc/free CPU overhead this introduces.
+- **Cost:** small per-record alloc/free CPU overhead, ~4 KB flash. Long-standing IDF kconfig — documented in the "Minimizing RAM Usage" guide. Conservative enable: the more aggressive `DYNAMIC_FREE_CONFIG_DATA` / `DYNAMIC_FREE_CA_CERT` sub-options that interact with the cert bundle are left off.
+
+### `HAL_LOG_RING_BYTES` 60 KB → 45 KB (Heltec V2 only)
+
+The applog ring buffer is the largest single permanent heap allocation on the Heltec V2, living in internal SRAM for the device's lifetime. Trimming 15 KB returns that to free heap without meaningfully degrading the `/log` debug experience (~500 lines → ~380 lines of scrollback — still plenty for diagnosing a TX cycle). FeatherS3-D / QT Py rings live in PSRAM and are unaffected.
+
+### Net effect on Heltec V2
+
+| Metric | Before (V2.4.4) | After (V2.4.5, expected) |
+|---|---|---|
+| Free heap (idle) | ~102 KB | ~117 KB |
+| Min free heap (TLS-handshake transient) | ~5.6 KB | ~35-40 KB |
+| `/log` scrollback | ~500 lines | ~380 lines |
+
+### Other
+
+- LWT description on `/config` reworded to a plain-language explanation (carried from post-V2.4.4 commit `e7e467f`).
+
+---
+
 ## V2.4.4
 
 **MQTT — Phase 3 (UI integration).** Completes the V2.4.2 → V2.4.4 MQTT phased rollout. Adds `/config` form rows for every MQTT field + a `/status` row showing live broker state. No new MQTT functionality — purely makes the existing client configurable + observable through the web UI rather than requiring NVS-tool access.

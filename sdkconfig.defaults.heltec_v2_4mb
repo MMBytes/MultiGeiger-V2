@@ -23,3 +23,11 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # Override the shared partitions.csv with the 4 MB layout (factory + 1 OTA,
 # 1.875 MB each). Defined in partitions_4mb.csv at repo root.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# V2.4.5: mbedTLS dynamic buffer — same rationale as the genuine Heltec V2
+# overlay (sdkconfig.defaults.heltec_v2). Knock-off and genuine share the
+# same ESP32-D0WDQ6 silicon and ~140 KB of free internal DRAM; both need
+# the transient-handshake headroom. See heltec_v2 overlay for full comment.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA is not set
+# CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT is not set

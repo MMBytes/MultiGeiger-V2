@@ -48,6 +48,12 @@
 #define CFG_MQTT_PFX_MAX     31   // topic prefix — kept short, full topic is
                                   //   "<pfx>/<chip-id>/state" so MQTT 64-char
                                   //   single-level cap leaves room for both
+#define CFG_MQTT_CA_CERT_MAX 2400 // PEM-encoded CA cert for Mode B (custom CA).
+                                  //   Sized for typical RSA-4096 self-signed CA
+                                  //   (~2.2-2.6 KB PEM) with comfortable headroom.
+                                  //   Stored verbatim in NVS; URL-encoded form
+                                  //   POST stays well under the per-board form
+                                  //   buffer (HAL_CFG_FORM_BUF_SIZE in hal.h).
 
 typedef struct {
     // Struct members generated from the schema. See `config_fields.def`

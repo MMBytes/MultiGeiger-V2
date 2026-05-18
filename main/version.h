@@ -17,4 +17,4 @@
 // `set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS main/version.h)`
 // (see top-level CMakeLists.txt) so the `PROJECT_VER` substituted into
 // `esp_app_desc_t` always matches VERSION_STR on the next build.
-#define VERSION_STR "V2.4.5"
+#define VERSION_STR "V2.4.6"

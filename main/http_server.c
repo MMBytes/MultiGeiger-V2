@@ -659,19 +659,34 @@ static void format_mqtt(char *out, size_t sz) {
         ? s_cfg->mqtt_broker
         : "<i>(not set)</i>";
 
+    // V2.4.6: TLS status row. Compact one-liner — full config lives on /config.
+    const char *tls_html;
+    if (!s_cfg->mqtt_tls_enable) {
+        tls_html = "<span style='color:#888'>off (plain MQTT)</span>";
+    } else {
+        switch (s_cfg->mqtt_tls_mode) {
+            case 0:  tls_html = "<span style='color:#080'>on &mdash; Mode A (Mozilla CA bundle)</span>"; break;
+            case 1:  tls_html = "<span style='color:#080'>on &mdash; Mode B (custom CA cert)</span>";    break;
+            case 2:  tls_html = "<span style='color:#c80'>on &mdash; Mode D (skip verification)</span>"; break;
+            default: tls_html = "<span style='color:#c00'>on &mdash; unknown mode</span>";              break;
+        }
+    }
+
     snprintf(out, sz,
         "<div class=\"info\"><h3>MQTT</h3>"
         "<b>Broker:</b> %s:%lu<br>"
         "<b>State:</b> %s<br>"
         "<b>Publishes since boot:</b> %lu<br>"
         "<b>Topic prefix:</b> <code>%s</code><br>"
-        "<b>HA Discovery:</b> %s"
+        "<b>HA Discovery:</b> %s<br>"
+        "<b>TLS:</b> %s"
         "</div>",
         broker_html, (unsigned long)s_cfg->mqtt_port,
         state_html,
         (unsigned long)pubs,
         s_cfg->mqtt_topic_prefix[0] ? s_cfg->mqtt_topic_prefix : "<i>(empty)</i>",
-        s_cfg->mqtt_ha_discovery ? "enabled" : "disabled");
+        s_cfg->mqtt_ha_discovery ? "enabled" : "disabled",
+        tls_html);
 }
 
 // --- Uploads block -----------------------------------------------------------
@@ -951,7 +966,12 @@ fail:
 // the remaining budget; cut point varied per board because field lengths
 // varied). 16 KB gives ~8 KB headroom; truncation is now also logged at
 // ERROR level (see config_get) so any future near-miss is loud, not silent.
-#define CFG_FORM_BUF_SIZE 16384
+//
+// V2.4.6: per-board buffer size — moved to hal.h. Heltec V2 stays at 16 KB
+// (tight internal-DRAM budget), FeatherS3-D / QT Py bump to 32 KB to leave
+// room for the MQTT TLS PEM textarea + future config sections without
+// stressing heap on PSRAM-backed boards.
+#define CFG_FORM_BUF_SIZE HAL_CFG_FORM_BUF_SIZE
 
 static esp_err_t config_get(httpd_req_t *req) {
     log_access(req, "GET /config");
@@ -974,6 +994,17 @@ static esp_err_t config_get(httpd_req_t *req) {
     // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
     // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
     char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
+    // V2.4.6: MQTT TLS PEM cert. html_esc worst-case is ~6x for a textarea
+    // because every '<' becomes "&lt;" / '"' becomes "&quot;" / '&' becomes
+    // "&amp;" — but real PEM is mostly base64 alnum (no escaping needed) +
+    // line markers. 8 KB headroom over CFG_MQTT_CA_CERT_MAX=2400 covers
+    // even pathological inputs without truncation.
+    char *e_mca = malloc(8192);
+    if (!e_mca) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_OK;
+    }
     html_esc(s_cfg->wifi_ssid,     e_ssid, sizeof(e_ssid));
     html_esc(s_cfg->wifi_password, e_pw,   sizeof(e_pw));
     html_esc(s_chip_id,            e_chip, sizeof(e_chip));  // read-only display
@@ -997,6 +1028,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->mqtt_user,         e_muser, sizeof(e_muser));
     html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
     html_esc(s_cfg->mqtt_topic_prefix, e_mpfx,  sizeof(e_mpfx));
+    html_esc(s_cfg->mqtt_tls_ca,       e_mca,   8192);
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
     // (0 %) followed by 10 % through 100 % in 10 % steps. Builder keeps the
@@ -1151,6 +1183,24 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_ha\" %s> "
         "Publish Home Assistant Discovery payloads "
         "<span class=\"r\">*</span></label></div>"
+        // V2.4.6: MQTT TLS rows. Master enable + mode dropdown + CA textarea.
+        // PEM textarea is conditionally relevant (only Mode B uses it) but
+        // always rendered to keep the form layout stable across mode changes;
+        // an unused PEM is just dead bytes in NVS.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_tls\" %s> "
+        "Use TLS to broker (mqtts:// — change port to 8883 if applicable) "
+        "<span class=\"r\">*</span></label></div>"
+        "<label>TLS trust mode <span class=\"r\">*</span>"
+        "<select name=\"mqtt_tls_m\">"
+        "<option value=\"0\"%s>A &mdash; Mozilla CA bundle (Let&#39;s Encrypt etc.)</option>"
+        "<option value=\"1\"%s>B &mdash; Custom CA cert (paste PEM below)</option>"
+        "<option value=\"2\"%s>D &mdash; Skip server verification (LAN only!)</option>"
+        "</select></label>"
+        "<label>CA cert PEM (Mode B only) <span class=\"r\">*</span>"
+        "<textarea name=\"mqtt_tls_ca\" rows=\"8\" maxlength=\"2400\" "
+        "style=\"width:100%%;font-family:monospace;font-size:0.85em;box-sizing:border-box\" "
+        "placeholder=\"-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----\""
+        ">%s</textarea></label>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
@@ -1240,6 +1290,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_mpw,
         e_mpfx,
         s_cfg->mqtt_ha_discovery ? "checked" : "",
+        // V2.4.6: MQTT TLS row format args (5 in order: enable, then three
+        // <option selected> markers for the trust-mode dropdown 0/1/2, then
+        // the CA cert PEM body).
+        s_cfg->mqtt_tls_enable ? "checked" : "",
+        s_cfg->mqtt_tls_mode == 0 ? " selected" : "",
+        s_cfg->mqtt_tls_mode == 1 ? " selected" : "",
+        s_cfg->mqtt_tls_mode == 2 ? " selected" : "",
+        e_mca,
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
@@ -1263,6 +1321,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     set_security_headers(req);
     esp_err_t err = httpd_resp_send(req, body, n > 0 ? n : 0);
     free(body);
+    free(e_mca);
     return err;
 }
 
@@ -1285,10 +1344,16 @@ static esp_err_t config_post(httpd_req_t *req) {
 
     // V2.4.1 (C5): content_len is size_t in esp_http_server. Hold it
     // as size_t throughout to avoid silent narrowing on huge values.
-    // 4096 hard cap blocks abuse; recv loop uses size_t for position
+    // Hard cap blocks abuse; recv loop uses size_t for position
     // and the (signed) int return value of httpd_req_recv for error.
+    //
+    // V2.4.6: cap raised from 4096 to 12288 to fit the URL-encoded MQTT
+    // TLS CA cert (PEM up to CFG_MQTT_CA_CERT_MAX ≈ 2400 raw, ~5 KB
+    // URL-encoded) plus all other form fields (~5-6 KB). 12 KB sits well
+    // under both the 16 KB Heltec form buffer and the 32 KB PSRAM-board
+    // form buffer — POST and GET are separate transient allocations.
     size_t total = req->content_len;
-    if (total == 0 || total > 4096) {
+    if (total == 0 || total > 12288) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body size out of range");
         return ESP_OK;
     }

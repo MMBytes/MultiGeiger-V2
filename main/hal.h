@@ -64,6 +64,12 @@
     // still plenty for diagnosing a TX cycle. FeatherS3-D / QT Py rings
     // are in PSRAM and not affected.
     #define HAL_LOG_RING_BYTES      (45 * 1024)  // Internal SRAM only — keep small
+    // V2.4.6: /config form render buffer. 16 KB on Heltec (internal-DRAM-only,
+    // tight). FeatherS3-D / QT Py override to 32 KB to leave room for the
+    // V2.4.6 MQTT TLS PEM textarea on a future config push (PSRAM-backed
+    // boards can afford the transient). Bump cap on Heltec means a single
+    // CA cert + every other field still fits with ~5 KB of slack.
+    #define HAL_CFG_FORM_BUF_SIZE   (16 * 1024)
     // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
     // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient
     // demand ~99 KB) so internal-DRAM headroom matters. Realistic writes
@@ -116,6 +122,11 @@
     // V2.3.24: 16 KB snapshot scratch in PSRAM — negligible vs the 4 MB
     // PSRAM pool, and 2× the Heltec margin since the PSRAM cost is free.
     #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    // V2.4.6: 32 KB /config form render buffer. Doubles the Heltec budget
+    // because PSRAM (and ample internal-DRAM heap) makes the transient cost
+    // a non-issue here. Generous slack for future MQTT TLS PEM textareas
+    // and any further config sections.
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
     // PIN_ANTENNA_SELECT controls the onboard SPDT RF switch (NOT exposed as a
     // user header — this is an MCU↔switch trace internal to the FeatherS3-D).
     // Per the FeatherS3-D pinout silkscreen:
@@ -235,6 +246,9 @@
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
     // FeatherS3-D since the PSRAM cost is negligible.
     #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    // V2.4.6: 32 KB /config form render buffer. PSRAM-backed board — same
+    // generous bump as FeatherS3-D.
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
     // Geiger / HV pins — wired to QT Py A0/A1/A2 castellated pads. Same
     // function-per-position as feathers3_d so a wiring harness designed for

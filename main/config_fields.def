@@ -148,3 +148,24 @@ X_STR (mqtt_user,          CFG_USER_NAME_MAX + 1,  "mqtt_user",  "")
 X_STR (mqtt_password,      CFG_PASSWORD_MAX  + 1,  "mqtt_pw",    "")
 X_STR (mqtt_topic_prefix,  CFG_MQTT_PFX_MAX  + 1,  "mqtt_pfx",   "geiger")
 X_BOOL(mqtt_ha_discovery,      "mqtt_ha",     true)
+
+// --- MQTT TLS (V2.4.6) ------------------------------------------------------
+//
+// mqtt_tls_enable:  master switch. When on, broker URI flips to mqtts://
+//                   (default port stays 1883 unless user also bumps to 8883).
+// mqtt_tls_mode:    0 = A  Mozilla CA bundle (esp_crt_bundle_attach, reuses
+//                          the same bundle already enabled for HTTPS uploads)
+//                   1 = B  custom CA cert pasted into mqtt_tls_ca (PEM,
+//                          stored in NVS, used to verify broker chain)
+//                   2 = D  skip server verification entirely — TLS encryption
+//                          on the wire but anyone-on-LAN MITM-able. Convenient
+//                          for sealed-LAN home setups; do NOT use facing the
+//                          open internet.
+//                   (Mode C, fingerprint pin, was scoped out — adds custom
+//                   mbedtls verify-callback wiring for marginal value on a
+//                   LAN where rotating the cert means re-pasting anyway.)
+// mqtt_tls_ca:      PEM-encoded CA cert. Used only when mqtt_tls_mode == 1.
+
+X_BOOL(mqtt_tls_enable,        "mqtt_tls",    false)
+X_U32 (mqtt_tls_mode,          "mqtt_tls_m",  0,        0,       2)
+X_STR (mqtt_tls_ca,        CFG_MQTT_CA_CERT_MAX + 1, "mqtt_tls_ca", "")

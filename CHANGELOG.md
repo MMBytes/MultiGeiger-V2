@@ -15,6 +15,61 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.6
+
+**MQTT TLS to broker — three configurable trust modes.** Implements `mqtts://` transport for the publish-only MQTT client introduced in V2.4.2-V2.4.4. The previous releases were plain-MQTT-only (port 1883); this lands the long-deferred TLS support with a user-selectable trust model so users can match their broker setup (public-CA, self-signed, or trusted-LAN).
+
+### Trust modes
+
+| Mode | Use case | Wiring |
+|---|---|---|
+| **A — Mozilla CA bundle** (default) | Broker fronted by Let's Encrypt or another public CA | `verification.crt_bundle_attach = esp_crt_bundle_attach` (reuses the same bundle already baked in for HTTPS uploads) |
+| **B — Custom CA cert** | Self-signed Mosquitto (the common HA add-on case) | User pastes the broker's CA cert PEM into a new `/config` textarea; stored verbatim in NVS as `mqtt_tls_ca`; passed to esp-mqtt via `verification.certificate` |
+| **D — Skip server verification** | Trusted-LAN deployments where you want encryption-on-the-wire without cert plumbing | `verification.skip_cert_common_name_check = true`, no cert/bundle attached. TLS still negotiated (anyone-on-LAN-MITM remains a risk; do not use facing the open internet) |
+
+Mode C (server fingerprint pinning) was scoped out — added significant complexity (custom mbedTLS verify-callback wiring) for marginal LAN-broker value where rotating a cert means re-pasting either way.
+
+Defensive: if Mode B is selected but `mqtt_tls_ca` is empty, the client degrades to skip-verify (log warning) rather than connect-looping. The CSRF-protected `/config` POST is the only mutation path.
+
+### Config schema additions (V2.4.6 in `config_fields.def`)
+
+```c
+X_BOOL(mqtt_tls_enable,        "mqtt_tls",    false)
+X_U32 (mqtt_tls_mode,          "mqtt_tls_m",  0,        0,       2)   // 0=A, 1=B, 2=D
+X_STR (mqtt_tls_ca,        CFG_MQTT_CA_CERT_MAX + 1, "mqtt_tls_ca", "")
+```
+
+`CFG_MQTT_CA_CERT_MAX = 2400` — sized for typical RSA-4096 self-signed CA (~2.2-2.6 KB PEM) with comfortable headroom.
+
+### Form buffer — per-board sizing (`hal.h`)
+
+`CFG_FORM_BUF_SIZE` was previously a fixed 16 KB in `http_server.c`. Adding the PEM textarea pushed the worst-case rendered form length close to that limit. V2.4.6 moves it to `hal.h` as `HAL_CFG_FORM_BUF_SIZE` per-board:
+
+- **Heltec V2 / V2_4MB:** 16 KB (unchanged — tight internal-DRAM budget, the V2.4.5 dynamic-buffer + log-ring trims gave back enough headroom to absorb the new textarea)
+- **FeatherS3-D / QT Py ESP32-PICO:** 32 KB (PSRAM-backed; the transient cost is negligible there)
+
+POST body cap also raised from 4 KB → 12 KB to fit the URL-encoded PEM payload (~5 KB) plus all other form fields (~5-6 KB).
+
+### `/status` row
+
+New `<b>TLS:</b>` line in the existing MQTT block. Shows mode in plain language (`on — Mode B (custom CA cert)` / `off (plain MQTT)` etc.) so the trust posture is visible without opening `/config`.
+
+### Validation status
+
+Implementation complete + builds clean across all four boards. **End-to-end validation against a real broker is deferred** — user does not yet have Mosquitto/HA broker running; that landing will smoke-test all three modes. Code review confirms the esp-mqtt verification fields are the documented API for v6.0; the same `esp_crt_bundle_attach` pattern is in production use in `transmission.c` for HTTPS uploads since V2.3.x.
+
+### Files changed
+
+- `main/version.h` — V2.4.5 → V2.4.6
+- `main/config_fields.def` — 3 new MQTT TLS rows
+- `main/config.h` — `CFG_MQTT_CA_CERT_MAX` constant
+- `main/hal.h` — `HAL_CFG_FORM_BUF_SIZE` per board
+- `main/http_server.c` — form rows + format_mqtt TLS line + per-board buffer + POST cap bump
+- `main/mqtt.c` — `mqtts://` URI + verification switch on mode
+- `CHANGELOG.md` — this entry
+
+---
+
 ## V2.4.5
 
 **Heap headroom on the Heltec V2.** Two independent tweaks targeting the constrained-DRAM build. Lifetime min-free-heap on the Heltec V2 was sitting at ~5.6 KB during TLS-handshake transients (against ~100 KB idle) — close to the edge for future feature growth. This release lifts that floor by ~30 KB without changing any externally-visible behaviour.

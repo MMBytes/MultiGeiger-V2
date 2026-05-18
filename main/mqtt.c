@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -152,11 +153,13 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
              "%s/%s/availability", s_prefix, s_chip_id);
 
     // Build the broker URI. esp-mqtt accepts "mqtt://host:port" for plain
-    // TCP and "mqtts://host:port" for TLS. V2.4.2 is plain-TCP-only;
-    // mqtts:// support lands when we add a TLS toggle + cert handling
-    // (estimated +3 h, deferred until a user actually needs it).
-    char uri[16 + CFG_MQTT_HOST_MAX + 1 + 6];   // "mqtt://" + host + ":" + port
-    snprintf(uri, sizeof(uri), "mqtt://%s:%" PRIu32,
+    // TCP and "mqtts://host:port" for TLS — the scheme alone selects the
+    // transport. V2.4.6 adds the TLS path with three configurable trust modes
+    // (see config_fields.def for the enum).
+    const bool tls = cfg->mqtt_tls_enable;
+    char uri[16 + CFG_MQTT_HOST_MAX + 1 + 6];   // "mqtts://" + host + ":" + port
+    snprintf(uri, sizeof(uri), "%s%s:%" PRIu32,
+             tls ? "mqtts://" : "mqtt://",
              cfg->mqtt_broker, cfg->mqtt_port);
 
     esp_mqtt_client_config_t mc = { 0 };
@@ -171,6 +174,49 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     if (cfg->mqtt_user[0] != 0) {
         mc.credentials.username                  = cfg->mqtt_user;
         mc.credentials.authentication.password   = cfg->mqtt_password;
+    }
+
+    // V2.4.6: TLS trust-mode wiring. Only consulted when tls_enable is on.
+    // Modes — see config_fields.def for the canonical descriptions:
+    //   0 = A  Mozilla CA bundle (the same bundle already used for HTTPS
+    //          uploads; covers public CAs like Let's Encrypt)
+    //   1 = B  custom CA cert pasted by user (typical home Mosquitto with
+    //          a self-signed CA)
+    //   2 = D  skip server verification (TLS encrypts, doesn't authenticate
+    //          — for trusted-LAN deployments)
+    const char *tls_mode_str = "n/a";
+    if (tls) {
+        switch (cfg->mqtt_tls_mode) {
+            case 0:  // Mode A — Mozilla CA bundle
+                mc.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+                tls_mode_str = "A (Mozilla CA bundle)";
+                break;
+            case 1:  // Mode B — custom CA cert from NVS
+                if (cfg->mqtt_tls_ca[0] == 0) {
+                    ESP_LOGW(TAG, "TLS Mode B selected but mqtt_tls_ca is empty — "
+                                  "falling back to skip-verify so connect doesn't loop");
+                    mc.broker.verification.skip_cert_common_name_check = true;
+                    tls_mode_str = "B (no CA configured — degraded to skip-verify)";
+                } else {
+                    mc.broker.verification.certificate = cfg->mqtt_tls_ca;
+                    // certificate_len = 0 → esp-tls treats input as NUL-terminated
+                    // string and infers length, which is what we want for a PEM.
+                    tls_mode_str = "B (custom CA cert)";
+                }
+                break;
+            case 2:  // Mode D — skip server verification
+                mc.broker.verification.skip_cert_common_name_check = true;
+                tls_mode_str = "D (skip verification)";
+                break;
+            default:
+                // Schema bounds the field at [0,2] so we should never get here.
+                // Defensive: fall through to Mode A so connect succeeds.
+                ESP_LOGW(TAG, "unknown mqtt_tls_mode=%" PRIu32 " — using Mode A",
+                         cfg->mqtt_tls_mode);
+                mc.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+                tls_mode_str = "A (fallback from unknown mode)";
+                break;
+        }
     }
     // Client ID — broker enforces uniqueness, so embed the chip id. Mosquitto
     // and most brokers will boot a duplicate client ID, which would cause a
@@ -202,8 +248,8 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
         return;
     }
 
-    ESP_LOGI(TAG, "started — broker=%s port=%" PRIu32 " state=%s avail=%s",
-             cfg->mqtt_broker, cfg->mqtt_port, s_topic_state, s_topic_avail);
+    ESP_LOGI(TAG, "started — uri=%s tls_mode=%s state=%s avail=%s",
+             uri, tls_mode_str, s_topic_state, s_topic_avail);
 }
 
 // --- State publish ----------------------------------------------------------

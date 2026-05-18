@@ -58,8 +58,25 @@ bool env_sensor_present(void) {
            bme688_present() || bme280_present();
 }
 
+// V2.4.12: per-field driver-presence helpers. Match the union of chips
+// in env_sensor_read's cascade that can produce each measurement.
+bool env_t_present(void) {
+    return sht45_present() || bmp581_present() || bmp390_present() ||
+           bme688_present() || bme280_present();
+}
+
+bool env_h_present(void) {
+    return sht45_present() || bme688_present() || bme280_present();
+}
+
+bool env_p_present(void) {
+    return bmp581_present() || bmp390_present() ||
+           bme688_present() || bme280_present();
+}
+
 esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
                           float *pressure_pa,
+                          bool *out_have_t, bool *out_have_h, bool *out_have_p,
                           char *raw_log, size_t raw_log_cap) {
     float t = 0, h = 0, p = 0;
     bool  have_t = false, have_h = false, have_p = false;
@@ -159,11 +176,19 @@ esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
     }
     #undef RL
 
-    if (!have_t && !have_h && !have_p) return ESP_FAIL;
+    if (!have_t && !have_h && !have_p) {
+        if (out_have_t) *out_have_t = false;
+        if (out_have_h) *out_have_h = false;
+        if (out_have_p) *out_have_p = false;
+        return ESP_FAIL;
+    }
 
     if (temperature_c) *temperature_c = t;
     if (humidity_pct)  *humidity_pct  = h;
     if (pressure_pa)   *pressure_pa   = p;
+    if (out_have_t)    *out_have_t    = have_t;
+    if (out_have_h)    *out_have_h    = have_h;
+    if (out_have_p)    *out_have_p    = have_p;
     return ESP_OK;
 }
 

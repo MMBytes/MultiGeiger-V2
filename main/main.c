@@ -104,7 +104,10 @@ static uint32_t g_last_cpm        = 0;
 static float    g_last_usvph      = 0.0f;
 static uint32_t g_last_hv_pulses  = 0;
 static bool     g_last_hv_error   = false;
-static bool     g_last_bme_valid  = false;
+static bool     g_last_bme_valid  = false;   // OR of the three below
+static bool     g_last_bme_t_valid = false;   // V2.4.12
+static bool     g_last_bme_h_valid = false;   // V2.4.12
+static bool     g_last_bme_p_valid = false;   // V2.4.12
 static float    g_last_bme_t      = 0.0f;
 static float    g_last_bme_h      = 0.0f;
 static float    g_last_bme_p      = 0.0f;
@@ -128,6 +131,9 @@ void main_status_snapshot(main_status_t *out) {
     out->last_hv_pulses = g_last_hv_pulses;
     out->last_hv_error  = g_last_hv_error;
     out->have_env       = g_last_bme_valid;
+    out->have_env_t     = g_last_bme_t_valid;
+    out->have_env_h     = g_last_bme_h_valid;
+    out->have_env_p     = g_last_bme_p_valid;
     out->env_t          = g_last_bme_t;
     out->env_h          = g_last_bme_h;
     out->env_p          = g_last_bme_p;
@@ -418,12 +424,18 @@ static void do_tx_cycle(void) {
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
+    bool  have_t = false, have_h = false, have_p = false;
     if (env_sensor_present()) {
         // V2.3.26: per-sensor raw values logged alongside the fused result so
         // any divergence (flaky SHT45 silently failing → BMP390 fallback fills
         // T but not H, etc.) is immediately visible.
+        // V2.4.12: per-field validity (have_t/h/p) so the MQTT publish layer
+        // can suppress fields that this cycle didn't actually measure (e.g.
+        // SHT45-only setup has no pressure source — pre-V2.4.12 it published
+        // env_p=0.0 every cycle and HA showed a 0.00 hPa entity).
         char env_raw[160];
-        if (env_sensor_read(&bme_t, &bme_h, &bme_p, env_raw, sizeof(env_raw)) == ESP_OK) {
+        if (env_sensor_read(&bme_t, &bme_h, &bme_p, &have_t, &have_h, &have_p,
+                            env_raw, sizeof(env_raw)) == ESP_OK) {
             bme_valid = true;
             ESP_LOGI(TAG, "%s %s: T=%.2f°C  H=%.2f%%  P=%.2fhPa",
                      env_raw, env_sensor_name(), bme_t, bme_h, bme_p / 100.0f);
@@ -436,6 +448,9 @@ static void do_tx_cycle(void) {
     // Cache for /status. valid mirrors the local — false suppresses the env
     // block on the page until we have at least one good sample.
     g_last_bme_valid = bme_valid;
+    g_last_bme_t_valid = bme_valid && have_t;
+    g_last_bme_h_valid = bme_valid && have_h;
+    g_last_bme_p_valid = bme_valid && have_p;
     if (bme_valid) {
         g_last_bme_t = bme_t;
         g_last_bme_h = bme_h;
@@ -541,23 +556,32 @@ static void do_tx_cycle(void) {
         return;
     }
 
+    // V2.4.12: publish MQTT BEFORE handing off to tx_transmit. Both calls
+    // are non-blocking enqueues (mqtt → esp-mqtt task; tx_transmit → CPU1
+    // worker), so the two log streams race once both are queued. Pre-V2.4.12
+    // the order was tx → mqtt, which meant the "mqtt: publish ok" line
+    // landed in the middle of Madavi's TLS handshake log — visually
+    // confusing in /log. Calling mqtt_publish_state first gives the LAN
+    // broker a head start: the PUBACK typically lands before Madavi's first
+    // log line (~1.7 s for cert validation alone), so the boot/cycle trace
+    // reads cleanly as:
+    //   CYCLE #N → heap → mqtt publish ok → Sending to Madavi → ...
+    //
+    // Built from the g_last_* cache written at line ~385 via
+    // main_status_snapshot() so the JSON includes uptime / cycles /
+    // reconnects without re-reading state here.
+    {
+        main_status_t snap;
+        main_status_snapshot(&snap);
+        mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise);
+    }
+
     tx_context_t ctx;
     build_tx_context(&ctx, dt_ms, counts, hv_pulses, min_us, max_us,
                      bme_valid, bme_t, bme_h, bme_p,
                      pm_valid, &pm,
                      noise_valid, &noise);
     tx_transmit(&ctx);
-
-    // V2.4.2: MQTT publish of the same per-cycle sample. Non-blocking —
-    // silently drops if disabled or broker disconnected, so it can't
-    // disturb the existing TX path. Built from the just-written g_last_*
-    // cache via main_status_snapshot() so the JSON includes uptime / cycles
-    // / reconnects without re-reading state here.
-    {
-        main_status_t snap;
-        main_status_snapshot(&snap);
-        mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise);
-    }
 
     // Start the next LAeq window so the next cycle's read covers the full
     // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —
@@ -768,11 +792,20 @@ void app_main(void) {
     // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.
     // Has to start AFTER http_server so failures don't block /config access.
     //
-    // V2.4.11: deferred start — wait for NTP sync before calling mqtt_init().
-    // Two reasons: (1) connecting during the AP boot window has no route to
-    // the broker and just spams 5x ESP-TLS errors per 30s, (2) MQTT-TLS cert
-    // validation (NotBefore/NotAfter) needs a sane wall clock, which only
-    // NTP provides after first boot. Loop body below polls ntp_time_valid().
+    // V2.4.11: deferred start — wait until MQTT can plausibly succeed before
+    // calling mqtt_init(). Two preconditions must both hold:
+    //   (1) STA has an IP (n_got_ip > 0). The broker lives on the LAN; AP
+    //       mode has no route to it. Without this gate, MQTT spams ~5×
+    //       ESP-TLS "select() timeout" errors per 25 s for the whole 2-min
+    //       AP boot window.
+    //   (2) Wall clock is sane (ntp_time_valid()). TLS cert NotBefore/After
+    //       validation fails with a 1970 clock.
+    //
+    // V2.4.12 fix: the original V2.4.11 gated only on (2). ESP32's RTC
+    // survives soft reboots (OTA, watchdog, esp_restart), so after the first
+    // cold boot the clock is already past 2025 and ntp_time_valid() returns
+    // true immediately — defeating the gate. Adding (1) fixes both reboot
+    // modes: cold boot waits for SNTP, soft reboot waits for STA GOT_IP.
     //
     // Exception: if MQTT is disabled or broker is empty, still call mqtt_init
     // now so the "disabled" log line appears in the boot trace — same boot
@@ -782,7 +815,7 @@ void app_main(void) {
         mqtt_init(&g_cfg, g_chip_id);  // logs "disabled (...)" + returns
         mqtt_started = true;
     } else {
-        ESP_LOGI(TAG, "MQTT deferred until NTP sync (broker=%s:%lu)",
+        ESP_LOGI(TAG, "MQTT deferred until STA has IP + NTP synced (broker=%s:%lu)",
                  g_cfg.mqtt_broker, (unsigned long)g_cfg.mqtt_port);
     }
 
@@ -835,14 +868,15 @@ void app_main(void) {
 
         ntp_poll();
 
-        // V2.4.11: now that we may have a sane clock, kick MQTT off the bench.
-        // ntp_time_valid() flips true once NTP sets the wall clock past
-        // 2025-01-01; on a cold boot that's strictly after the first SNTP
-        // exchange completes (no battery-backed RTC on ESP32). Calling
-        // mqtt_init() once is enough — the esp-mqtt client thereafter handles
-        // reconnect/backoff internally.
-        if (!mqtt_started && ntp_time_valid()) {
-            ESP_LOGI(TAG, "NTP synced — starting MQTT client");
+        // V2.4.12: start MQTT only once both preconditions hold (see boot
+        // section comment above). n_got_ip>0 means STA has reached the LAN
+        // at least once (sticky — only ever increments); ntp_time_valid()
+        // means the wall clock is past 2025-01-01 (sane for TLS cert
+        // validation, whether from fresh SNTP or RTC carryover). Calling
+        // mqtt_init() once is enough — the esp-mqtt client thereafter
+        // handles reconnect/backoff internally.
+        if (!mqtt_started && n_got_ip > 0 && ntp_time_valid()) {
+            ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
             mqtt_started = true;
         }

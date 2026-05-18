@@ -43,6 +43,23 @@ esp_err_t env_sensor_init(i2c_master_bus_handle_t bus);
 /** @brief True if at least one sensor capable of temperature reading is present. */
 bool env_sensor_present(void);
 
+/** @brief Per-field driver-presence predicates.
+ *
+ *  V2.4.12: needed by MQTT HA Discovery so it can register the env_t /
+ *  env_h / env_p entities independently. Pre-V2.4.12 all three were gated
+ *  on `env_sensor_present()` (= "any env sensor"), which caused HA to
+ *  show a phantom 0.00 hPa pressure entity on SHT45-only setups (SHT45
+ *  has no pressure channel). Boot-time, fixed at driver-detect — does
+ *  not reflect per-cycle read failures.
+ *
+ *    env_t_present  → SHT45 || BMP581 || BMP390 || BME688 || BME280
+ *    env_h_present  → SHT45 || BME688 || BME280
+ *    env_p_present  → BMP581 || BMP390 || BME688 || BME280
+ */
+bool env_t_present(void);
+bool env_h_present(void);
+bool env_p_present(void);
+
 /** @brief Read one set of compensated measurements.
  *
  *  Any pointer may be NULL. Fills from the highest-accuracy source available:
@@ -53,6 +70,14 @@ bool env_sensor_present(void);
  *  Units: temperature °C, humidity %RH, pressure Pa.
  *  Returns ESP_OK on success; ESP_FAIL if no sensor is ready or read failed.
  *
+ *  V2.4.12: `have_t / have_h / have_p` (each NULL-able) report per-field
+ *  validity for THIS read — distinct from `env_*_present()` which reports
+ *  driver presence at boot. A SHT45-only setup that reads OK gives
+ *  have_t=have_h=true, have_p=false; a multi-chip setup where SHT45's H
+ *  read failed mid-cycle gives have_t=true, have_h=false, have_p=true.
+ *  Callers needing field-level publish gating (mqtt.c) use these instead
+ *  of the all-or-nothing return code.
+ *
  *  V2.3.26: optional `raw_log` buffer (NULL to skip) is filled with one comma-
  *  separated segment per present-and-called sensor, e.g.
  *    "SHT45: T=18.86°C  H=0.00%, BMP390: T=18.86°C P=1026.60hPa"
@@ -61,6 +86,7 @@ bool env_sensor_present(void);
  */
 esp_err_t env_sensor_read(float *temperature_c, float *humidity_pct,
                           float *pressure_pa,
+                          bool *have_t, bool *have_h, bool *have_p,
                           char *raw_log, size_t raw_log_cap);
 
 /** @brief Short human-readable label describing the active sensor combination.

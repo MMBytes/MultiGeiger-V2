@@ -15,6 +15,134 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.12
+
+**Three small follow-ups to V2.4.11's MQTT work**: start-gate fix, publish reorder, and per-field env-block gating.
+
+### 1. MQTT start gate fix
+
+V2.4.11's `ntp_time_valid()`-only gate didn't actually defer MQTT on soft reboots, because ESP32's RTC retains wall-clock time across `esp_restart` / OTA / watchdog. After the first cold boot, the clock is already past 2025-01-01 every subsequent boot, so `ntp_time_valid()` returns true ~1 second after `app_main` starts — well before WiFi STA has come up, while still in the 2-min AP boot window. Net result: MQTT fires immediately, spams five `esp-tls: select() timeout` cycles per 25 s for the whole AP window (the LAN broker is unreachable from AP mode), then finally connects when the STA finally gets an IP.
+
+Observed in the V2.4.11 boot log on `esp32-176432` (Heltec V2, soft-reboot after OTA):
+
+```
+21:48:37.686 v2_main: MQTT deferred until NTP sync (broker=10.11.12.150:8883)
+21:48:38.885 v2_main: NTP synced — starting MQTT client     <-- 1.2 s later, no STA yet
+21:48:48.905 esp-tls: [sock=57] select() timeout
+21:49:13.936 esp-tls: [sock=57] select() timeout
+21:49:38.965 esp-tls: [sock=57] select() timeout
+21:50:03.995 esp-tls: [sock=57] select() timeout
+21:50:29.025 esp-tls: [sock=57] select() timeout
+21:50:37.895 v2_main: AP window closed — stopping AP and switching to STA
+07:50:41.668 v2_main: GOT_IP #1: 10.11.12.197 ...           <-- 2 min wasted
+07:50:45.069 mqtt: CONNECTED to broker
+```
+
+### Fix
+
+Gate on **both** conditions, not just clock-sane:
+
+```c
+// main.c
+if (!mqtt_started && n_got_ip > 0 && ntp_time_valid()) {
+    ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
+    mqtt_init(&g_cfg, g_chip_id);
+    mqtt_started = true;
+}
+```
+
+- `n_got_ip > 0` — already maintained by `on_ip_event` at `main.c:285`. Sticky (only ever increments), exactly the "STA has reached the LAN at least once this boot" semantics we need.
+- `ntp_time_valid()` — kept as-is. RTC carryover after a soft reboot IS genuinely fine for TLS cert validation; the bug was using only this half of the gate, not the predicate itself.
+
+### Behaviour matrix
+
+| Scenario | `n_got_ip > 0` | `ntp_time_valid()` | Gate fires |
+|---|---|---|---|
+| Cold boot, AP window | false | false | waits |
+| Cold boot, STA up, pre-SNTP | true | false | waits |
+| Cold boot, STA up, SNTP done | true | true | ✅ ~4 s after STA GOT_IP |
+| Soft reboot, AP window | false | true (RTC) | **waits** (this was the V2.4.11 bug) |
+| Soft reboot, STA up | true | true | ✅ immediately on STA GOT_IP |
+
+### Code changes
+
+- **`main/main.c`** — `mqtt_started` poll-loop predicate gains the `n_got_ip > 0` clause; boot-section comment + log line updated to say "STA has IP + NTP synced" instead of just "NTP sync".
+
+No `ntp.c` / `ntp.h` changes. The other two `ntp_time_valid()` callers (`log_ftp.c:750`, `http_server.c:451`) want the "wall clock is sane right now" predicate regardless of source, which is correctly what `ntp_time_valid()` provides — RTC carryover is fine for those.
+
+### 2. MQTT publish reordered before tx_transmit
+
+Pre-V2.4.12 the per-cycle call order was `tx_transmit()` then `mqtt_publish_state()`. Both are non-blocking enqueues to different tasks (CPU1 worker vs esp-mqtt task), so the two log streams raced once both were queued. The MQTT publish — which talks to the LAN broker and ACKs in ~5 ms — would land in the middle of Madavi's TLS handshake log (~1.7 s for cert validation alone), producing visually confusing /log output:
+
+```
+tx: free heap before TX: 4308368 bytes / ...
+tx: Sending to Madavi (https)
+mqtt: publish ok: 110 bytes (#2)              <-- mid-Madavi
+esp-x509-crt-bundle: Certificate validated
+tx: Madavi: env rc=200 (tube disabled)
+tx: Madavi: ok (rc=200)
+```
+
+V2.4.12 swaps the call order. The on-LAN broker still wins the race almost every time, but now the call site reflects the intended log shape:
+
+```
+tx: free heap before TX: 4308368 bytes / ...
+mqtt: publish ok: 110 bytes (#2)              <-- clean header
+tx: Sending to Madavi (https)
+esp-x509-crt-bundle: Certificate validated
+tx: Madavi: env rc=200 (tube disabled)
+tx: Madavi: ok (rc=200)
+```
+
+No semantic change — same snapshot data (g_last_* is populated at `main.c:385`, well before either call), same non-blocking enqueue, same drop-on-disconnect behaviour. Pure log-clarity refactor.
+
+### 3. Per-field env-block gating in MQTT + HA Discovery
+
+`env_sensor_read()` was returning a single "any field valid" success flag, which mqtt.c and mqtt_discovery.c both treated as "publish/register all three of env_t, env_h, env_p." Result: any setup whose sensor cascade can't produce a full T+H+P trio published phantom zero values for the missing fields, and HA registered phantom entities for them.
+
+Concrete failure observed when only an SHT45 was connected (no Bosch pressure chip):
+
+```
+mqtt: publish ok: ... "env_t":18.60,"env_h":81.35,"env_p":0.0 ...
+```
+
+HA then created a Pressure entity displaying **0.00 hPa** every cycle forever.
+
+V2.3.29 had already fixed the same class of bug for Madavi (sentinel detection in `build_madavi_env_body`), but the MQTT path went in fresh in V2.4.2 and was never carried over.
+
+**Fix:**
+
+- `env_sensor_read()` API extended with three `bool *out_have_t/h/p` per-field validity out-params. The single existing caller (`main.c`) plumbs them through.
+- `env_sensor.h` adds three boot-time driver-presence helpers: `env_t_present()`, `env_h_present()`, `env_p_present()` — the union of cascade chips that can produce each measurement type.
+- `main_status_t` gains `have_env_t / have_env_h / have_env_p` alongside the existing `have_env` (which is now the OR of the three, kept for `http_server.c` and `transmission.c` callers that just need "render env block at all?").
+- `mqtt.c` gates each field independently: `if (st->have_env_t) APPEND(...)`, etc.
+- `mqtt_discovery.c` replaces the shared `env_present_` predicate on env_t/env_h/env_p with `env_t_present_` / `env_h_present_` / `env_p_present_`.
+
+**Behaviour matrix:**
+
+| Setup | env_t | env_h | env_p |
+|---|---|---|---|
+| SHT45 only | ✅ | ✅ | — (was 0.00 hPa entity) |
+| BMP581 only | ✅ | — (was 0.00 % entity) | ✅ |
+| SHT45 + BMP581 | ✅ | ✅ | ✅ |
+| Nothing | — | — | — |
+
+Pure HA-side observability fix; no upload-path behaviour change. Madavi/SC/OSM/aqi.eco still use the V2.3.29 value-sentinel logic and are unaffected.
+
+### Code changes (combined)
+
+- **`main/main.c`** — gate predicate gains `n_got_ip > 0` (fix 1); MQTT publish block moves above `tx_transmit()` call (fix 2); new `g_last_bme_{t,h,p}_valid` caches + populated from extended `env_sensor_read` (fix 3).
+- **`main/env_sensor.h` / `.c`** — new per-field driver-presence helpers; `env_sensor_read()` API gains three `bool *out_have_*` out-params.
+- **`main/main_status.h`** — new `have_env_t / have_env_h / have_env_p` fields; `have_env` documented as the OR.
+- **`main/mqtt.c`** — three-way per-field env gating.
+- **`main/mqtt_discovery.c`** — three per-field predicates wired into the env entity rows.
+
+### Recommendation
+
+V2.4.12 is **safe to flash** as a routine OTA update. Same scope-of-change as V2.4.11; no NVS / config-form / behaviour delta outside the boot window + log ordering + HA entity catalog (existing HA installs may need to manually delete the now-orphaned 0 hPa pressure / 0 %RH humidity entities on previously-misconfigured nodes — they'll just stop receiving updates, the entities themselves persist in HA until removed via UI).
+
+---
+
 ## V2.4.11
 
 **Boot diagnostics + NTP-gated MQTT start** — two small, related quality-of-life tweaks that surface in the boot log.

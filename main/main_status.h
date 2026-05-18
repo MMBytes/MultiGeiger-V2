@@ -27,7 +27,15 @@ typedef struct {
     float    last_usvph;      // dose rate from the last cycle
     uint32_t last_hv_pulses;  // cumulative HV recharge pulses
     bool     last_hv_error;   // true if HV cap never reached full in last cycle
-    bool     have_env;        // env-block fields below are valid
+    bool     have_env;        // OR of have_env_{t,h,p} — kept for callers
+                              //   that only care "is any env field valid"
+                              //   (http_server.c / transmission.c). New
+                              //   per-field callers (mqtt.c) use the three
+                              //   below to avoid e.g. publishing a phantom
+                              //   0 hPa pressure on SHT45-only setups.
+    bool     have_env_t;      // V2.4.12
+    bool     have_env_h;      // V2.4.12
+    bool     have_env_p;      // V2.4.12
     float    env_t;
     float    env_h;
     float    env_p;

@@ -305,11 +305,13 @@ void mqtt_publish_state(const main_status_t *st,
     }
 
     // Environment (BME280 / SHT45+BMP581 / etc.)
-    if (st->have_env) {
-        APPEND(",\"env_t\":%.2f",  st->env_t);
-        APPEND(",\"env_h\":%.2f",  st->env_h);
-        APPEND(",\"env_p\":%.1f",  st->env_p);    // Pa
-    }
+    // V2.4.12: per-field gating — pre-V2.4.12 used the single have_env
+    // flag for all three, which made SHT45-only setups publish env_p=0.0
+    // every cycle (SHT45 has no pressure channel). HA then showed a
+    // phantom 0.00 hPa entity.
+    if (st->have_env_t) APPEND(",\"env_t\":%.2f", st->env_t);
+    if (st->have_env_h) APPEND(",\"env_h\":%.2f", st->env_h);
+    if (st->have_env_p) APPEND(",\"env_p\":%.1f", st->env_p);    // Pa
 
     // Particulate matter — sample is per-cycle, passed by caller
     if (pm_valid && pm) {

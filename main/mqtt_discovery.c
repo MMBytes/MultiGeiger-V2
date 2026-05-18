@@ -45,7 +45,13 @@ static const char *TAG = "mqtt_disc";
 // just not function literals). The "always_present" stub also gives us
 // one consistent pattern for system-level fields (uptime, cycles).
 static bool always_present(void)         { return true; }
-static bool env_present_(void)           { return env_sensor_present(); }
+// V2.4.12: per-field env predicates so HA only registers entities for
+// fields that an actually-present chip can produce. Pre-V2.4.12 used
+// one shared env_present_() for env_t/env_h/env_p, which created a
+// phantom 0.00 hPa pressure entity on SHT45-only setups.
+static bool env_t_present_(void)         { return env_t_present(); }
+static bool env_h_present_(void)         { return env_h_present(); }
+static bool env_p_present_(void)         { return env_p_present(); }
 static bool pm_present_(void)            { return pm_sensor_present();  }
 static bool noise_present_(void)         { return noise_sensor_present(); }
 static bool any_light_present_(void)     { return veml7700_present() || als_present(); }
@@ -91,11 +97,13 @@ static const ha_entity_t ENTITIES[] = {
     { "hv_pulses",  "hv_pulses",  "HV pulses",       NULL,             NULL,    "total_increasing", "mdi:flash",         NULL, tube_enabled_ },
 
     // --- Environment (BME280 / SHT45+BMP581 / etc.) -----------------------
-    { "env_t",      "temperature","Temperature",     "temperature",    "°C",    "measurement",      NULL, NULL, env_present_ },
-    { "env_h",      "humidity",   "Humidity",        "humidity",       "%",     "measurement",      NULL, NULL, env_present_ },
+    // V2.4.12: each field gated on its own per-field predicate (e.g.
+    // SHT45-only setup → env_t + env_h registered, env_p skipped).
+    { "env_t",      "temperature","Temperature",     "temperature",    "°C",    "measurement",      NULL, NULL, env_t_present_ },
+    { "env_h",      "humidity",   "Humidity",        "humidity",       "%",     "measurement",      NULL, NULL, env_h_present_ },
     // env_p comes in as Pa from mqtt.c (raw BMP/BME register units).
     // Convert to hPa in the value template so HA charts look natural.
-    { "env_p",      "pressure",   "Pressure",        "atmospheric_pressure", "hPa", "measurement", NULL, "/100", env_present_ },
+    { "env_p",      "pressure",   "Pressure",        "atmospheric_pressure", "hPa", "measurement", NULL, "/100", env_p_present_ },
 
     // --- Particulate matter (SPS30) ---------------------------------------
     { "pm1",        "pm1",        "PM1",             "pm1",            "µg/m³", "measurement",      NULL, NULL, pm_present_ },

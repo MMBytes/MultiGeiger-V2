@@ -95,11 +95,19 @@ bool syslog_is_initialized(void) {
     return s_sock >= 0;
 }
 
-void syslog_emit(const char *line, size_t len) {
-    if (s_sock < 0 || s_in_emit) return;
-    if (!line || len == 0) return;
-
-    s_in_emit = true;
+// V2.4.16: build one RFC 3164 frame from an already-coalesced full line and
+// send it as a single UDP packet. Internal helper; the public entry-point
+// `syslog_emit()` below feeds full lines here after fragment accumulation.
+//
+// Static send buffer (not stack): applog_vprintf holds its mutex while
+// calling us, so this is single-threaded by construction. Pre-V2.4.16
+// this 600-byte buffer was on the stack — combined with config_get's
+// ~4 KB of local html_esc[] arrays + the per-frame ESP_LOG machinery,
+// it pushed the 8 KB httpd task over its stack limit, panicking on
+// /config (and intermittently /log) with `LoadStoreError` in
+// `vPortYieldFromInt`. Moving to BSS eliminates the stack contribution.
+static void emit_packet(const char *line, size_t len) {
+    static char s_emit_buf[600];
 
     // Severity from the ESP_LOG level prefix. ESP_LOG output looks like:
     //   "I (HH:MM:SS.mmm) tag: text\n"
@@ -125,8 +133,6 @@ void syslog_emit(const char *line, size_t len) {
         struct tm tm;
         localtime_r(&now, &tm);
         if (strftime(ts, sizeof(ts), "%b %e %H:%M:%S", &tm) == 0) {
-            // strftime overflow shouldn't happen with our format, but
-            // defensively fall back if it does.
             memcpy(ts, "Jan  1 00:00:00", 16);
         }
     } else {
@@ -137,20 +143,67 @@ void syslog_emit(const char *line, size_t len) {
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
         len--;
     }
-    if (len == 0) { s_in_emit = false; return; }
+    if (len == 0) return;
 
-    // RFC 3164 format: "<pri>TIMESTAMP HOSTNAME TAG: MSG". 600 bytes covers
-    // the longest realistic ESP_LOG line (~512 chars) plus the ~40-byte
-    // framing overhead.
-    char buf[600];
-    int n = snprintf(buf, sizeof(buf), "<%d>%s %s geiger: %.*s",
+    int n = snprintf(s_emit_buf, sizeof(s_emit_buf),
+                     "<%d>%s %s geiger: %.*s",
                      priority, ts, s_hostname, (int)len, line);
-    if (n > 0 && n < (int)sizeof(buf)) {
+    if (n > 0 && n < (int)sizeof(s_emit_buf)) {
         // MSG_DONTWAIT: non-blocking. If lwIP's TX queue is full we'd
-        // rather drop the packet than block applog (which holds its mutex
-        // while calling us). UDP send is normally sub-millisecond.
-        (void)sendto(s_sock, buf, (size_t)n, MSG_DONTWAIT,
+        // rather drop the packet than block applog (which holds its
+        // mutex while calling us). UDP send is normally sub-ms.
+        (void)sendto(s_sock, s_emit_buf, (size_t)n, MSG_DONTWAIT,
                      (struct sockaddr *)&s_addr, sizeof(s_addr));
+    }
+}
+
+void syslog_emit(const char *line, size_t len) {
+    if (s_sock < 0 || s_in_emit) return;
+    if (!line || len == 0) return;
+
+    s_in_emit = true;
+
+    // V2.4.16: ESP-IDF v6.0 splits each ESP_LOG into multiple vprintf
+    // calls — typically one for the prefix (`I (ts) tag: `), one for the
+    // user format body, and one for the trailing newline. Pre-V2.4.16
+    // we emitted one UDP packet per fragment, producing 2-3 syslog rows
+    // per logical log line (annoying on the server side).
+    //
+    // Now we accumulate fragments here and only emit a packet when we
+    // see end-of-line (`\n`). Accumulator is static (BSS), safe because
+    // applog_vprintf serialises all calls into us via its mutex.
+    //
+    // Sized for the worst realistic full line: ~50 B prefix + LOG_LINE_MAX
+    // body (256 B) + slack = 768 B. Pathological inputs (a single ESP_LOG
+    // fragment > 768 B) bypass the accumulator and emit standalone — see
+    // overflow branch below.
+    static char   s_accum[768];
+    static size_t s_accum_len = 0;
+
+    size_t remain = sizeof(s_accum) - s_accum_len;
+    if (len >= remain) {
+        // This fragment doesn't fit. Flush whatever's accumulated first;
+        // then handle the fragment in isolation.
+        if (s_accum_len > 0) {
+            emit_packet(s_accum, s_accum_len);
+            s_accum_len = 0;
+        }
+        if (len >= sizeof(s_accum)) {
+            // Pathological huge single fragment — emit standalone, no
+            // accumulation possible.
+            emit_packet(line, len);
+            s_in_emit = false;
+            return;
+        }
+        // Fragment fits in an empty buffer; fall through to memcpy below.
+    }
+    memcpy(s_accum + s_accum_len, line, len);
+    s_accum_len += len;
+
+    // End-of-line reached → flush.
+    if (s_accum[s_accum_len - 1] == '\n') {
+        emit_packet(s_accum, s_accum_len);
+        s_accum_len = 0;
     }
 
     s_in_emit = false;

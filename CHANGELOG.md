@@ -15,6 +15,81 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.16
+
+**Two V2.4.15 syslog issues fixed.** Both bugs were introduced together in V2.4.15.
+
+### Issue 1: `/config` page caused a hard PANIC
+
+#### Symptom
+
+Reported 2026-05-19 on esp32-5963724 + esp32-5965048 (both FeatherS3-D): with syslog enabled, loading `/config` in a browser caused an immediate reset with reason `PANIC`. Other pages worked fine. Disabling syslog avoided the panic.
+
+#### Confirmed via serial backtrace
+
+Serial capture on the Heltec V2 4MB bench (esp32-176432, also running V2.4.15) reproduced the same panic on `/config`:
+
+```
+Guru Meditation Error: Core 1 panic'ed (LoadStoreError). Exception was unhandled.
+PC      : 0x4008b14a   EXCVADDR: 0x400835c0   A1: 0x3ffe0770
+Backtrace: 0x4008b147 → 0x4008b004 → CORRUPTED
+```
+
+addr2line decoded all three frames into `vPortYieldFromInt`, `_frxt_int_exit`, `_frxt_int_enter` — FreeRTOS context-switch assembly. The classic Xtensa stack-overflow signature: a tick or yield interrupt fires while a task's stack is past its allocated boundary, and the context-save attempts to write registers into invalid memory.
+
+#### Root cause
+
+V2.4.15's `syslog_emit()` declared a 600-byte send buffer **on the stack**. The httpd task's 8 KB stack was already tight when rendering `/config` (which has the largest body builder in the firmware — ~14 KB HTML worst case, with ~4 KB of local `html_esc[]` arrays in `config_get`'s function frame). Every `ESP_LOG` call mid-rendering (e.g. `log_access(req, "GET /config")`) added another ~700 B of stack frame via `applog_vprintf` → `syslog_emit`. The combination pushed config_get's prologue past the 8 KB canary.
+
+#### Fix: move syslog_emit's buf to BSS
+
+```c
+// V2.4.15: char buf[600];                  ← stack, ~700 B per call
+// V2.4.16:
+static char s_emit_buf[600];                ← BSS, 0 stack pressure
+```
+
+`applog_vprintf` holds its mutex while calling syslog_emit, so concurrent emits are structurally impossible. The static is safe without its own lock. Cost: 600 B of permanent BSS. Benefit: zero stack contribution from the syslog forward path.
+
+**httpd stack remains at 8 KB** (an earlier draft of this hotfix bumped it to 12 KB defensively, but the static-buf fix alone restores pre-V2.4.15 stack usage and the +4 KB heap cost isn't justified on Heltec V2's tight budget).
+
+### Issue 2: every ESP_LOG produced 2-3 syslog packets
+
+#### Symptom
+
+The rsyslog server saw each logical log line split across multiple rows:
+
+```
+2026-05-19T22:03:54 MultiGeiger5965048 geiger: I (26-05-19 22:03:54.750) tx:
+2026-05-19T22:03:54 MultiGeiger5965048 geiger: sensor.community: ok (rc=201)
+```
+
+— annoying to grep, hard to scroll through.
+
+#### Root cause
+
+ESP-IDF v6.0's `esp_log_writev` calls our vprintf hook **multiple times per ESP_LOG**: once for the prefix (`I (timestamp) tag: `), once for the user format body, and once for the trailing `\n`. V2.4.15's `syslog_emit` sent one UDP packet per fragment, producing one syslog row per fragment.
+
+#### Fix: accumulate fragments, emit on newline
+
+`syslog_emit` now appends each fragment to a static 768-byte accumulator and only `sendto`s a UDP packet when the accumulator hits `\n`. Single-threaded by construction (applog_vprintf's mutex). Pathological inputs (single fragment > 768 B) bypass the accumulator and emit standalone.
+
+After: one syslog row per ESP_LOG call.
+
+### Recovery for V2.4.15 devices
+
+OTA from V2.4.15 → V2.4.16 works because the V2.4.13 OTA teardown path in `update_post` runs BEFORE the syslog forward gets a chance to fire on the new request — so even if you can't reach `/config` to disable syslog, you can still reach `/update` to push the V2.4.16 image. Just open `http://<device-ip>/update` directly, pick the new binary, click Upload. The teardown calls `syslog_stop()` (V2.4.15) and `mqtt_stop()` (V2.4.13) before the recv loop, leaving plenty of heap for OTA. USB cable reflash also works as a fallback.
+
+### Code changes
+
+- **`main/syslog.c`** — `syslog_emit` refactored: extracted RFC 3164 frame builder + sendto into a new internal `emit_packet()` helper; moved the 600-byte send buffer to static BSS; added 768-byte static accumulator for fragment coalescing.
+
+### Recommendation
+
+**Immediate flash recommended** for anyone running V2.4.15 with syslog enabled. V2.4.15 without syslog (the default for unconfigured devices) is unaffected — but everyone should flash to V2.4.16 to enable syslog safely going forward.
+
+---
+
 ## V2.4.15
 
 **UDP syslog client (RFC 3164) — opt-in per-line log shipping.**

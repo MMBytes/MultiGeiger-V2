@@ -55,6 +55,10 @@ static const char *s_prefix   = NULL;      // pointer borrowed from g_cfg
 static volatile bool s_connected = false;
 static volatile uint32_t s_publish_count = 0;
 static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_discovery
+// V2.4.13: sticky "init was called" flag, independent of s_client. Survives
+// the disabled-by-config no-op return so main.c's poll doesn't re-call init.
+// Cleared by mqtt_stop() so the poll re-arms after the OTA teardown.
+static bool s_initialized = false;
 
 // Topic scratch — built once at init from prefix + chip_id, reused for
 // every publish to avoid repeated snprintf cost in the hot path. Sized
@@ -127,6 +131,10 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
         ESP_LOGW(TAG, "init called twice — ignoring");
         return;
     }
+    // V2.4.13: set the sticky flag FIRST so disabled-by-config branches
+    // below still register as "initialized" — keeps main.c's poll from
+    // calling init in a loop when MQTT is intentionally off.
+    s_initialized = true;
     if (!cfg->mqtt_enable) {
         ESP_LOGI(TAG, "disabled (mqtt_enable=false)");
         return;
@@ -367,4 +375,34 @@ bool mqtt_is_connected(void) {
 
 uint32_t mqtt_publish_count(void) {
     return s_publish_count;
+}
+
+// V2.4.13: tear down the client to free TLS state — called by /update POST
+// handler before the OTA receive loop. Heap freed ≈ 18-25 KB on the Heltec
+// V2 (mbedTLS context + session ticket + read/write bufs); negligible on
+// FeatherS3-D, where heap was never tight to begin with. Idempotent.
+void mqtt_stop(void) {
+    if (!s_client) {
+        // Either never started (disabled by config) or already stopped.
+        // Reset the sticky flag anyway so main.c's poll will retry init —
+        // covers the "OTA failed after teardown, want MQTT back" case.
+        s_initialized = false;
+        s_connected   = false;
+        ESP_LOGI(TAG, "stop: no client to stop (already idle)");
+        return;
+    }
+    ESP_LOGI(TAG, "stopping client to free TLS state");
+    // esp_mqtt_client_stop sends a graceful DISCONNECT to the broker and
+    // joins the internal task. esp_mqtt_client_destroy frees the mbedTLS
+    // session, allocators, and the client struct itself.
+    esp_mqtt_client_stop(s_client);
+    esp_mqtt_client_destroy(s_client);
+    s_client      = NULL;
+    s_connected   = false;
+    s_initialized = false;
+    ESP_LOGI(TAG, "stop: client destroyed");
+}
+
+bool mqtt_is_initialized(void) {
+    return s_initialized;
 }

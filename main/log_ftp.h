@@ -49,3 +49,14 @@ typedef struct {
 
 /** @brief Read the current FTP stats snapshot. Safe from any task. */
 void log_ftp_get_stats(log_ftp_stats_t *out);
+
+/** @brief Pause scheduled + retry FTP uploads until next reboot.
+ *
+ *  V2.4.13: called by the OTA path before the receive-write loop so a
+ *  scheduled FTPS upload (which holds ~15-20 KB of mbedTLS state for the
+ *  duration of its connection) can't fire mid-OTA on the Heltec V2.
+ *  Effect lasts until reboot — on a successful OTA the new firmware
+ *  starts fresh; on a failed OTA the device must be rebooted to resume
+ *  FTPS, but the configuration in NVS is unchanged.
+ */
+void log_ftp_pause(void);

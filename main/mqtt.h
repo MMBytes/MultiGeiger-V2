@@ -47,8 +47,37 @@
  *  If MQTT is disabled or no broker is configured, returns immediately with
  *  no allocations. Otherwise creates the esp-mqtt client and starts the
  *  background connect task; logging shows progress.
+ *
+ *  V2.4.13: idempotent — safe to call after `mqtt_stop()` to re-init. Calls
+ *  after a successful first init (without an intervening stop) are no-ops.
  */
 void mqtt_init(const config_t *cfg, const char *chip_id);
+
+/** @brief Tear down the MQTT client and free its TLS session state.
+ *
+ *  V2.4.13: called by the OTA path before the receive-write loop to reclaim
+ *  ~18-25 KB of heap on the Heltec V2 (4MB), which otherwise runs at
+ *  min_free ~13 KB with MQTT TLS + esp_crt_bundle resident — not enough
+ *  headroom for esp_ota_write's scratch buffers (caused OTA OOM observed
+ *  2026-05-19 on esp32-176432). Idempotent; safe to call when MQTT was
+ *  never started or already stopped.
+ *
+ *  After this call, `mqtt_is_initialized()` returns false, so main.c's
+ *  poll loop will re-init MQTT on the next tick. On a successful OTA the
+ *  device reboots before that matters; on a failed OTA, MQTT comes back
+ *  within ~1 s.
+ */
+void mqtt_stop(void);
+
+/** @brief True if `mqtt_init()` has been called and not subsequently stopped.
+ *
+ *  V2.4.13: replaces the `mqtt_started` static flag previously held in
+ *  main.c — that flag couldn't see external `mqtt_stop()` calls, so after
+ *  the OTA teardown the main-loop re-init poll would never re-arm.
+ *  Returns true whether the init actually created a client or was a no-op
+ *  (disabled / empty broker) — semantics match the old main.c flag.
+ */
+bool mqtt_is_initialized(void);
 
 /** @brief Publish one snapshot of sensor state to `<prefix>/<chip>/state`.
  *

@@ -79,7 +79,11 @@ static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 
 // --- NTP/TX state ---
 static bool     ntp_started = false;
-static bool     mqtt_started = false;   // V2.4.11: gated on NTP sync (see boot section)
+// V2.4.13: mqtt-init tracking moved into mqtt.c (mqtt_is_initialized()).
+// The old static `mqtt_started` flag here was opaque to mqtt_stop(), so the
+// OTA teardown path couldn't signal "please re-init MQTT on next tick" — by
+// pulling the source of truth into mqtt.c, mqtt_stop() can flip it directly
+// and main.c's poll re-arms within ~1 s on a failed OTA.
 static uint32_t tx_cycles   = 0;
 
 // --- Cached last-cycle snapshot (for the status page) ---
@@ -809,11 +813,10 @@ void app_main(void) {
     //
     // Exception: if MQTT is disabled or broker is empty, still call mqtt_init
     // now so the "disabled" log line appears in the boot trace — same boot
-    // diagnostics behaviour as before. mqtt_started flag prevents the loop
-    // from calling it a second time.
+    // diagnostics behaviour as before. mqtt_is_initialized() prevents the
+    // loop from calling it a second time (sticky flag inside mqtt.c).
     if (!g_cfg.mqtt_enable || g_cfg.mqtt_broker[0] == 0) {
         mqtt_init(&g_cfg, g_chip_id);  // logs "disabled (...)" + returns
-        mqtt_started = true;
     } else {
         ESP_LOGI(TAG, "MQTT deferred until STA has IP + NTP synced (broker=%s:%lu)",
                  g_cfg.mqtt_broker, (unsigned long)g_cfg.mqtt_port);
@@ -872,13 +875,15 @@ void app_main(void) {
         // section comment above). n_got_ip>0 means STA has reached the LAN
         // at least once (sticky — only ever increments); ntp_time_valid()
         // means the wall clock is past 2025-01-01 (sane for TLS cert
-        // validation, whether from fresh SNTP or RTC carryover). Calling
-        // mqtt_init() once is enough — the esp-mqtt client thereafter
-        // handles reconnect/backoff internally.
-        if (!mqtt_started && n_got_ip > 0 && ntp_time_valid()) {
+        // validation, whether from fresh SNTP or RTC carryover).
+        // V2.4.13: source of truth moved to mqtt_is_initialized() so the
+        // /update OTA-teardown path can flip it back to false via mqtt_stop()
+        // and this poll will re-init MQTT on the next tick after a failed
+        // OTA. On a successful OTA the device reboots, so the re-init never
+        // runs — but the failure path is the one we care about for recovery.
+        if (!mqtt_is_initialized() && n_got_ip > 0 && ntp_time_valid()) {
             ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
-            mqtt_started = true;
         }
 
         // End of boot AP window: stop the AP and switch to STA-only.

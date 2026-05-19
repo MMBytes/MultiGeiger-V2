@@ -99,6 +99,10 @@ static const char     *s_chip_id        = "";
 static uint32_t        s_next_upload_ms = 0;   // set in log_ftp_init from cfg
 static int             s_retry_count    = 0;   // retries remaining (0 = none pending)
 static uint32_t        s_retry_ms       = 0;   // wall-clock ms for next retry
+// V2.4.13: set by log_ftp_pause() before OTA so an in-window scheduled
+// upload can't fire mid-flash. Survives until reboot — both successful OTA
+// (new firmware boots fresh) and failed OTA (user reboots manually) reset.
+static bool            s_paused         = false;
 
 // Public stats — populated at end of each upload attempt by the main task
 // (FTPS runs on main, see [[feedback_main_task_runs_ftps_not_worker.md]]);
@@ -125,6 +129,17 @@ void log_ftp_get_stats(log_ftp_stats_t *out) {
     out->last_bytes  = s_last_bytes;
     portEXIT_CRITICAL(&s_stats_mux);
     out->next_due_ms = s_next_upload_ms;   // u32 — torn-tolerant, no lock
+}
+
+// V2.4.13: see header for rationale. One-line setter, no locking required —
+// log_ftp_loop runs on the main task and only reads this flag; the only
+// other writer is the explicit /update POST handler, also on a writer task
+// (httpd worker) — but the flag is one byte, torn-tolerant on Xtensa, and
+// a missed tick at the boundary just means one extra log_ftp_loop iteration
+// before the pause takes effect (which is harmless given the 1 s loop).
+void log_ftp_pause(void) {
+    s_paused = true;
+    ESP_LOGI(TAG, "paused — no scheduled uploads until reboot");
 }
 
 static bool wifi_up_ftp(void) {
@@ -1136,6 +1151,14 @@ void log_ftp_loop(uint32_t now_ms) {
                          (int32_t)(now_ms - s_retry_ms) >= 0);
 
     if (!is_scheduled && !is_retry) return;
+
+    // V2.4.13: paused by OTA teardown — drop the scheduled/retry attempt
+    // silently. No state changes (next_upload_ms / retry_count untouched)
+    // so on a failed OTA + manual reboot, the schedule resumes naturally.
+    if (s_paused) {
+        ESP_LOGD(TAG, "skip: paused (OTA teardown)");
+        return;
+    }
 
     // Don't run while the TX worker is busy — FTP + TLS POSTs competing for
     // the WiFi link and heap have been observed to overlap cleanly, but a

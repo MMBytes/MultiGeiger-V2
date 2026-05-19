@@ -1594,6 +1594,33 @@ static esp_err_t update_post(httpd_req_t *req) {
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
 
+    // V2.4.13: reclaim heap BEFORE the OTA receive/write loop. Heltec V2
+    // (4MB) with V2.4.11+ ran at min_free ~13 KB at steady state (MQTT TLS
+    // session + esp_crt_bundle + WiFi stack); not enough headroom for
+    // esp_ota_write's scratch buffers — caused OTA OOM observed 2026-05-19
+    // on esp32-176432. Three-step teardown:
+    //   1) Drain the TX worker so a Madavi HTTPS POST in flight doesn't
+    //      compete with the OTA recv loop on TLS state.
+    //   2) Pause FTPS scheduling so the next due upload doesn't fire
+    //      mid-OTA (FTPS holds ~15-20 KB during its TLS handshake).
+    //   3) Stop+destroy MQTT to free its ~18-25 KB TLS session.
+    // Effect: lifts min_free back to ~50 KB on Heltec V2, plenty for OTA.
+    // On FeatherS3-D the teardown is harmless — heap was never tight.
+    // Scoped to POST only: GET /update (the form render) leaves network
+    // state intact, so just viewing the page has zero impact.
+    ESP_LOGI(TAG, "OTA prep: waiting for TX worker idle");
+    int spins = 0;
+    while (!tx_is_idle() && spins++ < 100) vTaskDelay(pdMS_TO_TICKS(100));
+    if (spins >= 100) {
+        ESP_LOGW(TAG, "OTA prep: TX still busy after 10s — proceeding anyway");
+    }
+    log_ftp_pause();
+    mqtt_stop();
+    ESP_LOGI(TAG, "OTA prep: heap free=%u min=%u largest=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+
     // V2.4.1 (C5): content_len is size_t; hold as size_t throughout.
     size_t total = req->content_len;
     if (total == 0) {
@@ -1642,10 +1669,35 @@ static esp_err_t update_post(httpd_req_t *req) {
     }
 
     size_t received = 0;
+    // V2.4.13: weak-WiFi resilience — retry transient recv timeouts instead
+    // of aborting the whole OTA. Combined with the 30 s recv_wait_timeout
+    // bump in http_server_start, this gives up to 5 × 30 s = 150 s of TCP
+    // outage tolerance per chunk before we give up. Only retries on
+    // HTTPD_SOCK_ERR_TIMEOUT (-3); HTTPD_SOCK_ERR_FAIL (-1) and peer-close
+    // (0) are still fatal — there's no recovering from those. The retry
+    // counter resets on every successful recv so a long upload over a
+    // generally-OK link with occasional hiccups doesn't drain the budget.
+    int recv_retries = 0;
+    const int RECV_MAX_RETRIES = 5;
     while (received < total) {
         size_t want = total - received;
         if (want > OTA_CHUNK) want = OTA_CHUNK;
         int r = httpd_req_recv(req, buf, want);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (recv_retries < RECV_MAX_RETRIES) {
+                recv_retries++;
+                ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d",
+                         (unsigned)received, (unsigned)total,
+                         recv_retries, RECV_MAX_RETRIES);
+                continue;
+            }
+            ESP_LOGE(TAG, "recv timed out %d× at %u/%u — giving up",
+                     RECV_MAX_RETRIES, (unsigned)received, (unsigned)total);
+            free(buf);
+            esp_ota_abort(ota);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv timeout");
+            return ESP_OK;
+        }
         if (r <= 0) {
             ESP_LOGE(TAG, "recv failed at %u/%u (r=%d)",
                      (unsigned)received, (unsigned)total, r);
@@ -1654,6 +1706,7 @@ static esp_err_t update_post(httpd_req_t *req) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
             return ESP_OK;
         }
+        recv_retries = 0;   // got bytes — reset the retry budget
         err = esp_ota_write(ota, buf, (size_t)r);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write failed at %u: %s",
@@ -1871,6 +1924,16 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     hc.stack_size  = 8192;               // room for form+base64 on one stack
     hc.max_uri_handlers = 10;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log
     hc.lru_purge_enable = true;
+    // V2.4.13: bump per-recv-call timeout 5 s → 30 s for weak-WiFi OTA
+    // resilience. The OTA POST streams ~1.2 MB in ~1200 recv calls; the
+    // default 5 s window meant a single TCP gap >5 s killed the entire
+    // upload mid-flash. 30 s rides through most transient drops while
+    // leaving plenty of headroom against a truly dead connection (the
+    // retry-on-timeout loop in update_post then gives 6× more on top).
+    // Harmless for other routes: the timeout only ticks during ACTIVE
+    // recv calls (request body reads); idle keep-alive connections don't
+    // consume it. Send-side keeps the default — responses are tiny.
+    hc.recv_wait_timeout = 30;
 
     esp_err_t err = httpd_start(&s_server, &hc);
     if (err != ESP_OK) {

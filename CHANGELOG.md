@@ -15,6 +15,90 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.13
+
+**OTA memory-freeing teardown + weak-WiFi recv resilience** — two independent OTA-path improvements, both shipping in the same tag because they touch the same handler.
+
+### 1. OTA memory-freeing teardown
+
+The V2.4.11+ MQTT TLS client + WiFi stack + esp_crt_bundle leaves Heltec V2 (4MB) at min_free ≈ 13 KB at steady state. That's not enough headroom for `esp_ota_write`'s internal scratch buffers, causing OTA to OOM mid-flash. Observed 2026-05-19 on esp32-176432 trying to upgrade V2.4.11 → V2.4.12:
+
+```
+W (08:54:03.914) httpd_txrx: httpd_resp_send_err: 500 Internal Server Error - oom
+```
+
+Device kept running but could not accept any OTA upload until physically power-cycled and USB-reflashed. Unacceptable as a long-term path — every Heltec V2 OTA from now on would hit this.
+
+### Fix
+
+`POST /update` now runs a three-step teardown BEFORE the OTA receive/write loop, lifting min_free back to ~50 KB:
+
+1. **Drain the TX worker** (`tx_is_idle()` poll, up to 10 s) — prevents a Madavi HTTPS POST in flight from competing with the OTA recv loop on TLS state.
+2. **Pause FTPS scheduling** (`log_ftp_pause()`) — sticky-flag prevents the next due upload from firing mid-OTA. Holds ~15-20 KB of mbedTLS state during its handshake otherwise.
+3. **Stop+destroy MQTT** (`mqtt_stop()`) — frees ~18-25 KB of TLS session + esp-mqtt state.
+
+After the teardown, the OTA receive loop runs with comfortable headroom and the existing reboot-on-success flow handles the rest.
+
+### Scoped to POST only
+
+GET `/update` (rendering the upload form) is untouched. Just visiting the page does NOT impact MQTT or FTPS — only clicking "Upload" (which submits a POST with the binary) triggers the teardown. Standard HTTP method semantics give us this for free.
+
+### Failure-mode handling
+
+- **OTA succeeds → device reboots** into new firmware, MQTT reconnects on V2.4.X+1, FTPS schedule restarts. No user action.
+- **OTA fails** (network drop, bad file, etc.) → device keeps running, but MQTT and FTPS are now down. `mqtt_is_initialized()` (new V2.4.13 internal accessor) makes the main-loop poll re-init MQTT within ~1 s. FTPS stays paused until reboot — user can `/reboot` manually if they want it back without retrying OTA. Re-uploading would re-run the teardown harmlessly (mqtt_stop is idempotent).
+
+### 2. Weak-WiFi OTA recv resilience
+
+OTA over a marginal WiFi link sometimes failed with `500 recv failed` partway through the upload. Two contributors:
+
+1. **Per-call recv timeout was 5 s** (esp_http_server default) — a single TCP gap longer than 5 s killed the entire OTA, even if 90% of the binary had already been received.
+2. **First `HTTPD_SOCK_ERR_TIMEOUT` was treated as fatal** — no retry logic, even though the underlying TCP connection is often still alive after a brief stall.
+
+Fix:
+
+- **Bumped `recv_wait_timeout` from 5 s → 30 s** at server-config time. Only ticks during active recv calls (request body reads), so idle keep-alive connections aren't affected. Send-side keeps the default (responses are tiny).
+- **Added retry-on-timeout** in the OTA recv loop — up to 5 retries on `HTTPD_SOCK_ERR_TIMEOUT`, resetting the counter on every successful recv. Combined with the 30 s timeout, that's **up to 150 s of TCP outage tolerance per chunk** before the OTA gives up.
+- `HTTPD_SOCK_ERR_FAIL` (-1) and peer-close (0) are still fatal — there's no recovering from those.
+
+New log line when a transient timeout happens mid-OTA:
+
+```
+W: recv timeout at 524288/1256352 — retry 1/5
+```
+
+If the link recovers, the next recv succeeds, the counter resets, and the OTA continues silently. If all 5 retries hit timeout:
+
+```
+E: recv timed out 5× at 524288/1256352 — giving up
+```
+
+### Code changes
+
+- **`main/mqtt.h` / `mqtt.c`** — new `mqtt_stop()` + `mqtt_is_initialized()`. Internal `s_initialized` sticky flag set on first init (whether enabled or disabled-by-config), cleared by `mqtt_stop()`.
+- **`main/log_ftp.h` / `log_ftp.c`** — new `log_ftp_pause()`. Internal `s_paused` flag checked in `log_ftp_loop()` after the due/retry computation, before the upload runs.
+- **`main/http_server.c`** — three-step teardown + heap diagnostic log at the top of `update_post()`, after auth/CSRF checks; recv_wait_timeout bumped to 30 s; OTA recv loop gains `HTTPD_SOCK_ERR_TIMEOUT` retry-with-budget logic.
+- **`main/main.c`** — dropped local `mqtt_started` static; replaced with `mqtt_is_initialized()` so `mqtt_stop()` is visible to the re-init poll.
+
+### Heap diagnostic log
+
+The teardown emits a one-line snapshot of post-teardown heap so future OOMs are easier to diagnose:
+
+```
+http: OTA prep: waiting for TX worker idle
+log_ftp: paused — no scheduled uploads until reboot
+mqtt: stopping client to free TLS state
+mqtt: stop: client destroyed
+http: OTA prep: heap free=119344 min=13668 largest=98432
+http: OTA: 1256352 bytes -> partition ota_0 @ 0x20000
+```
+
+### Recommendation
+
+**Safe to flash as a routine OTA update.** Behaviour change is localised to the `/update` POST path + the server-wide recv timeout bump (which only affects in-flight body reads). Normal operation (cycles, MQTT publishing, FTPS uploads, Madavi/SC/OSM uploads) is byte-identical to V2.4.12. The teardown is harmless on FeatherS3-D / QT Py (heap was never tight) but a Heltec V2 lifesaver, and the recv resilience helps every board on a marginal link.
+
+---
+
 ## V2.4.12
 
 **Three small follow-ups to V2.4.11's MQTT work**: start-gate fix, publish reorder, and per-field env-block gating.

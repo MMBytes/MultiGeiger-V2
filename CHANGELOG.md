@@ -15,6 +15,76 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.14
+
+**Extend the V2.4.13 OTA-teardown pattern to FTPS uploads.** Same fix, different trigger — stop MQTT before the upload to free its TLS session state.
+
+### Observation
+
+Production logs from both Heltec V2 boards on V2.4.13 (2026-05-19 evening soak) showed the FTPS upload was the dominant heap consumer:
+
+```
+esp32-176432 (4MB) cycle #6:
+  Pre-upload:  free=68500 min_free=15572 largest=59392
+  Post-upload: free=68288 min_free=1112  largest=59392   <-- 14 KB peak dip
+```
+
+```
+esp32-12276328 (8MB) cycle #30 (FTPS server-side stall):
+  Pre-upload:  free=68340 min_free=17080
+  → 32 s TLS stall, write got 4096/43186 bytes through
+  → PSA preemptive reset
+  Post-upload: free=68876 min_free=3600
+  → mqtt: errno=11 (EAGAIN), DISCONNECTED
+  → 30 min of cascading MQTT handshake failures (-0x2700)
+```
+
+Even on successful uploads the min_free briefly dipped into single-digit-KB territory — one bad allocation away from OOM. On failed uploads (server stall) the MQTT TLS write paths hit EAGAIN as the kernel ran out of buffers, taking MQTT down with the FTPS attempt.
+
+### Fix
+
+In `log_ftp_loop`, right before `do_ftp_upload()`:
+
+```c
+bool mqtt_was_running = mqtt_is_initialized();
+if (mqtt_was_running) {
+    ESP_LOGI(TAG, "FTPS prep: stopping MQTT to free TLS state");
+    mqtt_stop();
+}
+bool ok = do_ftp_upload();
+```
+
+Main loop poll (`!mqtt_is_initialized() && n_got_ip > 0 && ntp_time_valid()`) re-inits MQTT within ~1 s of FTPS completion.
+
+### Expected impact on Heltec V2
+
+- min_free during FTPS upload: **~1 KB → ~40 KB**
+- MQTT keep-alive failures during FTPS: **eliminated**
+- MQTT cascading reconnect storms after failed FTPS: **eliminated**
+
+### HA / broker behaviour during the FTPS window
+
+`mqtt_stop()` sends a clean MQTT DISCONNECT packet, so the broker does NOT fire LWT (LWT only fires on abrupt disconnect / keep-alive timeout). The retained "online" availability message stays in place. HA sees the device as online continuously; subscribers just miss state publishes for the 5–30 s upload window (acceptable on a 150 s TX cadence). After upload, mqtt_init() reconnects, publishes "online" again (idempotent — same retained value), and republishes HA Discovery configs (idempotent — broker stores latest retained).
+
+### Frequency / retry interaction
+
+FTPS schedule is 15 min by default (configurable). On failure, V2.3.15's 4-retry sequence ~3 min apart applies. Each retry teardown-and-restart-MQTT cycle:
+
+- ~3-5 s of MQTT publish silence per FTPS attempt
+- Worst case (1 + 4 retries = 5 attempts): 25 s cumulative MQTT silence over 15 min — still well below the 60 s keep-alive
+
+For users who find this objectionable on FeatherS3-D (where the teardown isn't load-bearing), a future tag could heap-gate the teardown. Skipping for now — keeping the code path uniform across boards.
+
+### Code changes
+
+- **`main/log_ftp.c`** — `#include "mqtt.h"`; ~10 LOC teardown block before the `do_ftp_upload()` call. No other changes.
+
+### Recommendation
+
+**Safe to flash as a routine OTA update.** Behaviour change is localised to FTPS upload start. No NVS / config-form / per-cycle TX path delta.
+
+---
+
 ## V2.4.13
 
 **OTA memory-freeing teardown + weak-WiFi recv resilience** — two independent OTA-path improvements, both shipping in the same tag because they touch the same handler.

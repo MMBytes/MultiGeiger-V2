@@ -50,6 +50,7 @@
 // for the nuclear-reset path when slot exhaustion persists.
 
 #include "applog.h"
+#include "mqtt.h"          // V2.4.14: mqtt_stop()/mqtt_is_initialized() for FTPS heap teardown
 #include "ntp.h"
 #include "transmission.h"
 #include "util.h"
@@ -1180,6 +1181,30 @@ void log_ftp_loop(uint32_t now_ms) {
     } else {
         ESP_LOGI(TAG, "FTP: retry %d/%d",
                  FTP_RETRY_COUNT - s_retry_count + 1, FTP_RETRY_COUNT);
+    }
+
+    // V2.4.14: tear down MQTT before the FTPS upload to free its TLS state
+    // (~18-25 KB on Heltec V2). Without this, the FTPS handshake + MQTT
+    // session compete for ~13 KB of headroom, with observed min_free
+    // dropping to 1.1 KB during the upload peak (esp32-176432 2026-05-19).
+    // Even when FTPS succeeds, MQTT keep-alives can fail with errno=11
+    // (EAGAIN — kernel buffer exhaustion) mid-upload, manifesting as
+    // "No PING_RESP" disconnects 4 min later.
+    //
+    // mqtt_stop() is a clean DISCONNECT (LWT does NOT fire — broker
+    // keeps the retained "online" availability), and main.c's main-loop
+    // poll re-inits MQTT within ~1 s of FTPS completion. HA sees no
+    // availability flap; subscribers may miss state publishes for the
+    // 5-30 s upload window which is acceptable for a 150 s TX cadence.
+    //
+    // Same pattern as V2.4.13's OTA teardown but gated on FTPS start
+    // instead of POST /update. Heltec V2 lifts min_free during upload
+    // from ~1 KB to ~40 KB; FeatherS3-D / QT Py the teardown is harmless
+    // overhead (heap was never tight).
+    bool mqtt_was_running = mqtt_is_initialized();
+    if (mqtt_was_running) {
+        ESP_LOGI(TAG, "FTPS prep: stopping MQTT to free TLS state");
+        mqtt_stop();
     }
 
     bool ok = do_ftp_upload();

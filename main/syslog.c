@@ -59,7 +59,7 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // shot at init — if the server IP changes the user must reboot. This
     // matches the FTPS / Madavi behaviour for symmetry.
     if (inet_aton(host, &s_addr.sin_addr) == 0) {
-        struct hostent *he = gethostbyname(host);
+        const struct hostent *he = gethostbyname(host);
         if (!he || he->h_length <= 0 || !he->h_addr) {
             ESP_LOGE(TAG, "resolve failed: %s", host);
             close(sock);

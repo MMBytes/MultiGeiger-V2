@@ -33,6 +33,7 @@
 #include "neopixel.h"
 #include "ntp.h"
 #include "speaker.h"
+#include "syslog.h"
 #include "transmission.h"
 #include "tube.h"
 #include "util.h"
@@ -884,6 +885,22 @@ void app_main(void) {
         if (!mqtt_is_initialized() && n_got_ip > 0 && ntp_time_valid()) {
             ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
+        }
+
+        // V2.4.15: bring up syslog UDP client once STA has IP. No NTP gate
+        // (we don't need a synced clock — rsyslog uses receive time as a
+        // fallback when our timestamp is missing/wrong, and a sane device
+        // clock is best-effort polish in the message). syslog_init is a
+        // no-op when syslog_enable=false or syslog_host is empty.
+        // syslog_is_initialized() flips true only on successful socket
+        // open, so the poll naturally retries if the first attempt failed
+        // (e.g. DNS not ready) on subsequent ticks.
+        if (g_cfg.syslog_enable && g_cfg.syslog_host[0] &&
+            !syslog_is_initialized() && n_got_ip > 0) {
+            ESP_LOGI(TAG, "STA has IP — starting syslog UDP client");
+            syslog_init(g_cfg.syslog_host,
+                        (uint16_t)g_cfg.syslog_port,
+                        g_cfg.wifi_hostname);
         }
 
         // End of boot AP window: stop the AP and switch to STA-only.

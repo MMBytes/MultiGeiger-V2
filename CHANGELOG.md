@@ -15,6 +15,72 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.15
+
+**UDP syslog client (RFC 3164) — opt-in per-line log shipping.**
+
+Every ESP_LOG line emitted after STA connect is now optionally forwarded as a UDP syslog packet to a LAN syslog server (rsyslog / syslog-ng). Cheapest log-shipping path on the firmware:
+
+- **0 KB persistent heap** — one UDP socket, no TLS, no retry buffers, no per-connection state
+- **~50-100 µs CPU per line** — non-blocking `sendto()` with `MSG_DONTWAIT`
+- **No broker / no server software outside what's already installed on the Pi** — rsyslog ships with Raspberry Pi OS
+
+Pairs with [[reference_syslog_pi_setup]] (~10 lines of rsyslog config on the Pi: enable `imudp` module, route by `$hostname startswith "MultiGeiger"` to a dynaFile per-device).
+
+### What it ships
+
+Every line that goes through `applog_vprintf` — i.e., every `ESP_LOGI/W/E/D/V` call. Severity is parsed from the formatted output's level prefix ('E' → error, 'W' → warning, 'D'/'V' → debug, else info). Facility hardcoded to local0 (16). Timestamp included if the device's wall clock is post-NTP-or-RTC-carryover; rsyslog re-stamps from receive-time either way.
+
+### Boot-time logs not shipped
+
+`syslog_init()` runs from the main-loop poll once `n_got_ip > 0`. Anything emitted before STA connect (boot config dump, sensor probes, WiFi events) is captured in the applog ring + UART but NOT in syslog. View it via `/log` after the device comes up. Same constraint as MQTT.
+
+### Config fields
+
+- `syslog_enable` — master switch, off by default (opt-in)
+- `syslog_host` — server FQDN or IPv4 (empty also disables defensively)
+- `syslog_port` — UDP port, default 514
+
+New `/config` section under "Syslog (UDP)" with the three fields. Schema-driven POST handling — no per-field plumbing.
+
+### Per-board impact
+
+| Board | Heap impact when disabled | Heap impact when enabled (idle) | Heap impact during emit |
+|---|---|---|---|
+| Heltec V2 | 0 KB | ~1 KB lwIP socket | ~0 KB (mbuf cycles through stack) |
+| Heltec V2 4MB | 0 KB | ~1 KB | ~0 KB |
+| FeatherS3-D | 0 KB | ~1 KB | ~0 KB |
+| QT Py | 0 KB | ~1 KB | ~0 KB |
+
+### How rsyslog differentiates clients
+
+- `$fromhost-ip` — every UDP packet has the sender's IP
+- `$hostname` — the firmware embeds the device's WiFi hostname (e.g., `MultiGeiger176432`) in the RFC 3164 header
+- `$programname` — always `"geiger"`
+
+The example rsyslog config in the new memory uses `$hostname startswith "MultiGeiger"` and a dynaFile template `/var/log/geiger/%HOSTNAME%.log` to give each device its own log file.
+
+### Teardown integration
+
+`syslog_stop()` is called from the V2.4.13 OTA teardown alongside `mqtt_stop()`. Frees the UDP socket (~1 KB) — small absolute saving but consistent with the teardown pattern. NOT called from V2.4.14's FTPS teardown — losing syslog visibility during FTPS is worse than the ~1 KB heap recovery.
+
+### Code changes
+
+- **`main/syslog.h` / `syslog.c`** (NEW) — ~140 LOC. Public surface: `syslog_init`, `syslog_stop`, `syslog_is_initialized`, `syslog_emit`. Re-entrancy guard (`s_in_emit` flag) and a deliberate "never ESP_LOG from emit path" rule prevent vprintf recursion through applog's mutex.
+- **`main/applog.c`** — one new call (`syslog_emit(line, len)`) right after `ring_append()`. `#include "syslog.h"`.
+- **`main/main.c`** — new poll branch alongside the MQTT one, gated on `n_got_ip > 0` (no NTP gate — rsyslog tolerates missing timestamps). `#include "syslog.h"`.
+- **`main/http_server.c`** — new "Syslog (UDP)" form section + format args + `syslog_stop()` in the OTA teardown. `#include "syslog.h"`.
+- **`main/config.c`** — boot dump gets a `syslog:` line under the existing mqtt rows.
+- **`main/config.h`** — `CFG_SYSLOG_HOST_MAX = 63`.
+- **`main/config_fields.def`** — three new schema entries: `syslog_enable`/`syslog_host`/`syslog_port`. POST handling auto-generated.
+- **`main/CMakeLists.txt`** — adds `syslog.c` to SRCS.
+
+### Recommendation
+
+**Opt-in, safe to flash as a routine OTA update.** Off by default — devices already on V2.4.14 with no config change show identical behaviour after upgrade. Enable per-device via `/config` once the rsyslog receiver is set up.
+
+---
+
 ## V2.4.14
 
 **Extend the V2.4.13 OTA-teardown pattern to FTPS uploads.** Same fix, different trigger — stop MQTT before the upload to free its TLS session state.

@@ -192,6 +192,10 @@ void config_load(config_t *cfg) {
              cfg->mqtt_tls_enable,
              (unsigned long)cfg->mqtt_tls_mode, mqtt_tls_str,
              cfg->mqtt_tls_ca[0] ? "<set>" : "<empty>");
+    ESP_LOGI(TAG, "  syslog:           enabled=%d host=%s port=%lu",
+             cfg->syslog_enable,
+             cfg->syslog_host[0] ? cfg->syslog_host : "<empty>",
+             (unsigned long)cfg->syslog_port);
     #undef MASK
 }
 

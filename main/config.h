@@ -54,6 +54,7 @@
                                   //   Stored verbatim in NVS; URL-encoded form
                                   //   POST stays well under the per-board form
                                   //   buffer (HAL_CFG_FORM_BUF_SIZE in hal.h).
+#define CFG_SYSLOG_HOST_MAX  63   // syslog server FQDN / IPv4 — RFC 1123 cap
 
 typedef struct {
     // Struct members generated from the schema. See `config_fields.def`

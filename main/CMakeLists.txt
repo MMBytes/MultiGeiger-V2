@@ -20,6 +20,7 @@ idf_component_register(
         "noise_sensor.c"
         "dnms.c"
         "applog.c"
+        "syslog.c"
         "log_ftp.c"
         "mqtt.c"
         "mqtt_discovery.c"

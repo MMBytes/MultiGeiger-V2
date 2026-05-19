@@ -39,6 +39,7 @@
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 #include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
+#include "syslog.h"            // V2.4.15: tear down UDP socket in OTA teardown
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 
 static const char *TAG = "http";
@@ -1000,6 +1001,8 @@ static esp_err_t config_get(httpd_req_t *req) {
     // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
     // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
     char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
+    // V2.4.15: syslog host esc buffer. CFG_SYSLOG_HOST_MAX=63 × 4 = ~256.
+    char e_slh[256];
     // V2.4.6: MQTT TLS PEM cert. html_esc worst-case is ~6x for a textarea
     // because every '<' becomes "&lt;" / '"' becomes "&quot;" / '&' becomes
     // "&amp;" — but real PEM is mostly base64 alnum (no escaping needed) +
@@ -1035,6 +1038,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
     html_esc(s_cfg->mqtt_topic_prefix, e_mpfx,  sizeof(e_mpfx));
     html_esc(s_cfg->mqtt_tls_ca,       e_mca,   8192);
+    html_esc(s_cfg->syslog_host,       e_slh,   sizeof(e_slh));
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
     // (0 %) followed by 10 % through 100 % in 10 % steps. Builder keeps the
@@ -1207,6 +1211,23 @@ static esp_err_t config_get(httpd_req_t *req) {
         "style=\"width:100%%;font-family:monospace;font-size:0.85em;box-sizing:border-box\" "
         "placeholder=\"-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----\""
         ">%s</textarea></label>"
+        // V2.4.15: UDP syslog client. Plaintext UDP — LAN-only. rsyslog on
+        // the broker host (or any syslog receiver) catches every ESP_LOG
+        // line emitted after STA connect. Boot logs stay in the on-device
+        // ring buffer (visible via /log). See [[reference_syslog_pi_setup]].
+        "<h3>Syslog (UDP)</h3>"
+        "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">"
+        "Per-line UDP shipping (RFC 3164) of every device log entry to a LAN "
+        "syslog server (e.g. <code>rsyslog</code> on the same Pi running the "
+        "MQTT broker). Plaintext — for trusted-LAN use only. Tiny heap "
+        "footprint (~0 KB persistent) and zero retry/buffer state, making it "
+        "the cheapest log-shipping path on Heltec V2.</p>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"syslog_en\" %s> "
+        "Enable syslog forwarding <span class=\"r\">*</span></label></div>"
+        "<label>Syslog server host (or IP) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"syslog_h\" value=\"%s\" maxlength=\"63\"></label>"
+        "<label>Syslog UDP port <span class=\"r\">*</span>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"syslog_p\" value=\"%lu\"></label>"
         "<h3>Tick, LED and display</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
@@ -1313,6 +1334,10 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->mqtt_tls_mode == 1 ? " selected" : "",
         s_cfg->mqtt_tls_mode == 2 ? " selected" : "",
         e_mca,
+        // V2.4.15: syslog row format args (3 in order: enable / host / port).
+        s_cfg->syslog_enable ? "checked" : "",
+        e_slh,
+        (unsigned long)s_cfg->syslog_port,
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
         s_cfg->play_sound   ? "checked" : "",
@@ -1616,6 +1641,7 @@ static esp_err_t update_post(httpd_req_t *req) {
     }
     log_ftp_pause();
     mqtt_stop();
+    syslog_stop();   // V2.4.15: close UDP socket too (small but consistent)
     ESP_LOGI(TAG, "OTA prep: heap free=%u min=%u largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),

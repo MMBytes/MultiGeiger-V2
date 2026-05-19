@@ -1,5 +1,6 @@
 #include "applog.h"
 #include "hal.h"
+#include "syslog.h"   // V2.4.15: per-line UDP forward in applog_vprintf
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -180,7 +181,15 @@ static int applog_vprintf(const char *fmt, va_list args) {
         rewrite_boot_ts(line, sizeof(line));
         if (!is_excluded(line)) {
             size_t len = strlen(line);
-            if (len > 0) ring_append(line, len);
+            if (len > 0) {
+                ring_append(line, len);
+                // V2.4.15: also ship to UDP syslog (no-op if disabled or
+                // pre-init). Inside applog's mutex but harmless — sendto
+                // is non-blocking (MSG_DONTWAIT) and syslog_emit's own
+                // s_in_emit guard plus its NEVER-calling-ESP_LOG rule
+                // prevent any re-entry into vprintf.
+                syslog_emit(line, len);
+            }
         }
     }
 

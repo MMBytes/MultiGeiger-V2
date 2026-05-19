@@ -70,6 +70,22 @@ void main_request_restart(void) {
     xEventGroupSetBits(s_events, EV_RESTART);
 }
 
+// V2.4.17: sticky flag set by the OTA POST teardown path. When true, the
+// main-loop poll skips MQTT and syslog re-init — without this the poll
+// re-inits both within ~1 s of mqtt_stop()/syslog_stop(), undoing the
+// V2.4.13 OTA teardown during the bulk of the OTA receive loop.
+// V2.4.14's FTPS teardown deliberately does NOT set this — that path
+// wants MQTT to auto-restart after the upload completes.
+static volatile bool g_services_suspended = false;
+
+void main_suspend_services(void) {
+    g_services_suspended = true;
+}
+
+bool main_services_suspended(void) {
+    return g_services_suspended;
+}
+
 // --- Soak diagnostics (carried over) ---
 static int64_t  t_attempt_start_us = 0;
 static int64_t  t_sta_connected_us = 0;
@@ -882,7 +898,11 @@ void app_main(void) {
         // and this poll will re-init MQTT on the next tick after a failed
         // OTA. On a successful OTA the device reboots, so the re-init never
         // runs — but the failure path is the one we care about for recovery.
-        if (!mqtt_is_initialized() && n_got_ip > 0 && ntp_time_valid()) {
+        // V2.4.17: skip re-init if the OTA teardown set the suspended flag.
+        // Without this, an OTA in progress would see MQTT/syslog re-init
+        // ~1 s after the teardown, defeating the V2.4.13 heap-freeing intent.
+        if (!mqtt_is_initialized() && !main_services_suspended() &&
+            n_got_ip > 0 && ntp_time_valid()) {
             ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
         }
@@ -895,8 +915,11 @@ void app_main(void) {
         // syslog_is_initialized() flips true only on successful socket
         // open, so the poll naturally retries if the first attempt failed
         // (e.g. DNS not ready) on subsequent ticks.
+        // V2.4.17: same suspension gate as MQTT above — OTA teardown stays
+        // sticky until reboot.
         if (g_cfg.syslog_enable && g_cfg.syslog_host[0] &&
-            !syslog_is_initialized() && n_got_ip > 0) {
+            !syslog_is_initialized() && !main_services_suspended() &&
+            n_got_ip > 0) {
             ESP_LOGI(TAG, "STA has IP — starting syslog UDP client");
             syslog_init(g_cfg.syslog_host,
                         (uint16_t)g_cfg.syslog_port,

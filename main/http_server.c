@@ -1642,6 +1642,13 @@ static esp_err_t update_post(httpd_req_t *req) {
     log_ftp_pause();
     mqtt_stop();
     syslog_stop();   // V2.4.15: close UDP socket too (small but consistent)
+    // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
+    // this the poll re-armed both within ~1 s of the stops above, undoing
+    // the V2.4.13 heap-freeing intent during the bulk of the OTA write.
+    // log_ftp_pause is already sticky; MQTT and syslog needed the equivalent
+    // gate. Flag is set-only — device reboots on OTA success; on failure,
+    // user must manually /reboot to restore services.
+    main_suspend_services();
     ESP_LOGI(TAG, "OTA prep: heap free=%u min=%u largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),

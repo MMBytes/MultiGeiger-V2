@@ -63,3 +63,29 @@ void main_status_snapshot(main_status_t *out);
  *  flag cannot be cleared (the only way out is the reboot).
  */
 void main_request_restart(void);
+
+/** @brief Sticky "stop re-arming MQTT and syslog clients" flag.
+ *
+ *  V2.4.17: the V2.4.13 OTA teardown path calls `mqtt_stop()` /
+ *  `syslog_stop()` before the OTA receive loop to free heap. Without
+ *  this flag the main-loop poll re-inits both within ~1 s — undoing
+ *  the teardown during the bulk of the OTA write. Observed 2026-05-19:
+ *  esp32-176432 V2.4.16 → V2.4.16 OTA logged `mqtt: CONNECTED` ~6 s
+ *  after `mqtt: stop`, while the OTA recv loop was still running.
+ *
+ *  Setting this flag tells the main-loop poll to skip re-init for both
+ *  MQTT and syslog until reboot. On successful OTA the device reboots
+ *  immediately, so services come back fresh on the new firmware. On
+ *  failed OTA the user must manually `/reboot` to restore them —
+ *  matching `log_ftp_pause()`'s already-sticky semantics.
+ *
+ *  Deliberately NOT called by V2.4.14's FTPS teardown — that path
+ *  wants MQTT to auto-restart between FTPS uploads so per-cycle
+ *  publishes resume.
+ *
+ *  Idempotent. Once set, cannot be cleared (only path out is reboot).
+ */
+void main_suspend_services(void);
+
+/** @brief Read the V2.4.17 services-suspended flag. */
+bool main_services_suspended(void);

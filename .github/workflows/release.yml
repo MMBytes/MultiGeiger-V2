@@ -40,8 +40,73 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # V2.4.17: cppcheck runs FIRST as a hard gate before the build matrix and
+  # release-creation job. Pre-V2.4.17, cppcheck only ran inside `build.yml`
+  # (triggered by the commit push), and `release.yml` (triggered by the tag
+  # push on the same commit) ran in parallel — so a tag push could publish
+  # a release even if the same commit's cppcheck job had failed (observed
+  # V2.4.15 → V2.4.15-with-cppcheck-warning shipped). Mirroring the job
+  # from build.yml here makes release.yml self-contained.
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install cppcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
+
+      - name: Run cppcheck on main/
+        # Keep flags + suppressions in sync with build.yml's cppcheck step.
+        # If you tune one, tune the other — they should be identical so
+        # commit-push runs and tag-push runs evaluate the same baseline.
+        run: |
+          set +e
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=unusedStructMember \
+            --suppress=internalAstError \
+            --suppress=unknownMacro \
+            --error-exitcode=1 \
+            --quiet \
+            --std=c11 \
+            -DESP_PLATFORM=1 \
+            -DBOARD_HELTEC_V2=1 \
+            -I main \
+            main/ 2>&1 | tee cppcheck.out
+          RC=${PIPESTATUS[0]}
+          {
+            echo "## cppcheck findings"
+            if [ -s cppcheck.out ]; then
+              echo '```'
+              cat cppcheck.out
+              echo '```'
+            else
+              echo "_(clean — no findings at warning/style/performance/portability levels)_"
+            fi
+            echo ""
+            echo "cppcheck exit code: $RC (0=clean)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC
+
+      - name: Upload cppcheck output as artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cppcheck-${{ github.sha }}
+          path: cppcheck.out
+          if-no-files-found: ignore
+          retention-days: 14
+
   build:
     name: build / ${{ matrix.board }}
+    needs: cppcheck    # V2.4.17: hard gate — no builds run on a dirty cppcheck.
     runs-on: ubuntu-latest
     strategy:
       # Keep all boards building even if one fails so the user can see the

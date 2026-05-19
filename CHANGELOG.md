@@ -15,6 +15,93 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.17
+
+**Two fixes:** OTA teardown stays sticky during the receive loop; CI cppcheck is now a hard gate before release publish.
+
+### 1. OTA teardown was undone within ~1 s of completion
+
+Observed 2026-05-19 on esp32-176432 V2.4.16 → V2.4.16 OTA. The teardown in `update_post` correctly stopped MQTT + syslog + paused FTPS at `22:53:29.499`. But the main-loop poll re-armed both within seconds:
+
+```
+22:53:29.523 mqtt: stop: client destroyed
+22:53:31.260 syslog: started — ...        ← back after 1.7 s
+22:53:35.184 mqtt: CONNECTED to broker     ← back after 5.6 s
+22:53:49.340 esp_image: segment 0: ...     ← bulk of OTA recv was here
+22:53:51.343 OTA written (1260256 bytes) — restart flagged
+```
+
+So during the ~20 s OTA receive/write loop, MQTT and syslog were running again — defeating V2.4.13's intent of freeing ~25 KB of TLS state for esp_ota_write's scratch buffers. The OTA succeeded anyway because heap state at the buffer-alloc moments happened to be OK, but the teardown was effectively theatrical.
+
+#### Root cause
+
+`mqtt_stop()` and `syslog_stop()` were designed as **transient** stops — main.c's poll loop deliberately re-inits both when their initialized-state flips false. The auto-restart was a V2.4.13 feature so that if an OTA *fails*, services come back automatically.
+
+For the OTA *success path* we want services to stay stopped until the device reboots. `log_ftp_pause()` already had this sticky semantic via its `s_paused` flag — MQTT and syslog needed the equivalent.
+
+#### Fix
+
+Added `main_suspend_services()` / `main_services_suspended()` in `main.c`:
+
+```c
+static volatile bool g_services_suspended = false;
+
+void main_suspend_services(void) { g_services_suspended = true; }
+bool main_services_suspended(void) { return g_services_suspended; }
+```
+
+Both auto-restart polls now check the flag:
+
+```c
+if (!mqtt_is_initialized() && !main_services_suspended() && ...) mqtt_init(...);
+if (!syslog_is_initialized() && !main_services_suspended() && ...) syslog_init(...);
+```
+
+`update_post` calls it right after the existing teardown:
+
+```c
+log_ftp_pause();
+mqtt_stop();
+syslog_stop();
+main_suspend_services();   // NEW — sticky until reboot
+```
+
+On OTA success the device reboots, services come back fresh on the new firmware. On OTA failure, services stay down until manual `/reboot` — matching `log_ftp_pause()`'s existing semantics.
+
+**V2.4.14's FTPS teardown deliberately does NOT call `main_suspend_services()`** — that path wants MQTT to auto-restart between FTPS uploads so per-cycle publishes resume on the next cadence.
+
+### 2. CI: cppcheck is now a hard gate inside release.yml
+
+#### Problem
+
+Pre-V2.4.17, `build.yml` (triggered by commit push) and `release.yml` (triggered by tag push) ran in parallel on a tag-push event. `build.yml` has a `cppcheck` job; `release.yml` did not. So `release.yml` could publish a release even if `build.yml`'s cppcheck failed on the same commit.
+
+Observed during the V2.4.15 ship: cppcheck flagged a `constVariablePointer` style warning in `syslog.c::gethostbyname`, the build workflow went red, but the release workflow already published V2.4.15 successfully. The follow-up `const` fix shipped as a no-tag commit.
+
+#### Fix
+
+Added a `cppcheck` job at the top of `release.yml`, mirroring `build.yml`'s flags and suppressions exactly. The `build` matrix job now has `needs: cppcheck` so no board build runs on a dirty cppcheck. The release-creation job already has `needs: build`, so it inherits the gate transitively.
+
+If cppcheck fails on a tag push:
+- The tag exists on the remote (no way to retract from CI)
+- No release is created
+- Recovery: fix the cppcheck issue, force-tag back to the new commit (or just bump to the next version)
+
+Note: `build.yml`'s `host-test` (with valgrind) is **not** mirrored into `release.yml` — leaving that as a future enhancement. The release path now has cppcheck + build + version-string verification gates, which covers the common-case static issues.
+
+### Code changes
+
+- **`main/main.c`** — new `g_services_suspended` static + `main_suspend_services()` / `main_services_suspended()` functions; both poll-loop re-init conditions gated on the new flag.
+- **`main/main_status.h`** — declarations for the two new functions.
+- **`main/http_server.c`** — one new call `main_suspend_services();` in `update_post` right after the existing teardown.
+- **`.github/workflows/release.yml`** — new `cppcheck` job at the top; `build` job gains `needs: cppcheck`.
+
+### Recommendation
+
+**Safe to flash as a routine OTA update.** Behaviour change is localized to the OTA POST path (services now actually stay down during the OTA receive/write loop, as V2.4.13 originally intended). Other code paths unchanged.
+
+---
+
 ## V2.4.16
 
 **Two V2.4.15 syslog issues fixed.** Both bugs were introduced together in V2.4.15.

@@ -19,6 +19,7 @@
 #include "als.h"
 #include "veml7700.h"
 #include "applog.h"
+#include "coredump.h"
 #include "hal.h"
 #include "env_sensor.h"
 #include "i2c_bus.h"            // V2.3.29: bus lifecycle (replaces env_sensor_get_i2c_bus)
@@ -626,6 +627,13 @@ void app_main(void) {
     // partition lines further down. BOARD_NAME comes from hal.h
     // (one of "heltec_v2", "heltec_v2_4mb", "feathers3_d").
     ESP_LOGI(TAG, "BOARD: %s", BOARD_NAME);
+
+    // V2.4.18: probe the coredump partition. Logs whether a previous
+    // panic left a dump and parses the summary for cheap status-page
+    // reads. Runs BEFORE WiFi/HTTP/sensors so the boot log line lands
+    // in /log + syslog (once syslog is up later) regardless of how the
+    // operator inspects the device.
+    coredump_init();
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

@@ -15,6 +15,99 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.18
+
+**Panic dumps are now recoverable over the air.** Enables ESP-IDF's coredump-to-flash, exposes the dump via `GET /coredump.elf`, and surfaces an inline summary (panicking task name + PC) on the status page so you can see at a glance whether a deployed sensor has a backtrace waiting to be downloaded.
+
+### Motivation
+
+2026-05-20 morning: esp32-5963724 (bench FeatherS3-D) syslog showed a clean `mqtt: CONNECTED` at 10:14:04, then ~3.5 minutes of silence before the post-reboot resume. Status page reported `Reset reason: PANIC`. That's all we had — no backtrace, no exception cause, no task name. The panic handler had printed it to UART, but no serial logger was running.
+
+For deployed sensors (sealed enclosure, no USB), this is a permanent diagnostic blind spot. ESP-IDF's existing coredump-to-flash + `esp_core_dump_get_summary()` API fixes it cleanly — pay the one-time cable-reflash to add the partition, and every future panic is recoverable over the air, forever.
+
+### What changed
+
+#### Partition layout (CABLE REFLASH REQUIRED ONCE)
+
+Added a 64 KB `coredump` partition at the tail of both `partitions.csv` (8 MB / 16 MB layout) and `partitions_4mb.csv` (4 MB Heltec knock-offs). NVS stays at `0x9000` unchanged, so user config + WiFi creds survive the migration *as long as you do NOT `erase_flash` first* — just write the new merged-bin image at `0x0`. Same constraint that applied to V2.3.16's 4 MB factory-removal.
+
+| Board | Flash chip | Free tail after | Coredump partition |
+|---|---|---|---|
+| FeatherS3-D | 16 MB | ~9.8 MB still spare | 0x620000 + 64 KB |
+| Heltec 8 MB | 8 MB | 1.825 MB still spare | 0x620000 + 64 KB |
+| Heltec 4 MB | 4 MB | 64 KB still spare | 0x3E0000 + 64 KB |
+
+#### sdkconfig
+
+All four per-board sdkconfigs flip `CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y` → `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` with ELF format + CRC32 checksum + `CHECK_BOOT=y` (invalidates corrupted dumps automatically).
+
+#### New `main/coredump.c` + `main/coredump.h`
+
+Lifecycle:
+
+- `coredump_init()` runs once at boot (right after `applog_init()`). Probes the partition via `esp_core_dump_image_check()`, calls `esp_core_dump_get_summary()` + `esp_core_dump_get_panic_reason()`, caches the task name + exception PC + reason string in static BSS (~230 bytes).
+- `coredump_have_dump()` / `coredump_get_size()` / `coredump_get_summary_html()` — cheap status-page reads.
+- `coredump_stream_to_http()` — reads the partition in 4 KB chunks and streams via `httpd_resp_send_chunk()`, stopping at the dump's actual size (not the full 64 KB partition).
+- `coredump_erase()` — wraps `esp_core_dump_image_erase()` and clears the cache.
+
+The one-time 700 B `malloc(esp_core_dump_summary_t)` at boot is freed within `coredump_init()`. Steady-state heap delta is zero.
+
+#### Status page
+
+New row in the System block:
+
+- **No dump:** `Core dump: none`
+- **Dump present:** `Core dump: yes · 38240 bytes · task=mqtt_task PC=0x400d12a4 · Guru Meditation Error: Core 1 panic'ed (LoadStoreError) · [download .elf] [erase]`
+
+The "download .elf" link points at `/coredump.elf`. The "erase" button POSTs to `/coredump_erase` (CSRF + basic-auth gated) and redirects back to `/`.
+
+#### Two new HTTP endpoints
+
+- **`GET /coredump.elf`** — basic-auth gated. Sets `Content-Disposition: attachment; filename="coredump_<chip-id>.elf"` and streams the partition bytes. The filename includes the chip-id so multi-device captures don't collide on your download folder.
+- **`POST /coredump_erase`** — basic-auth + CSRF (Origin header) gated, like `/config`, `/update`, `/reboot`. Erases the partition and returns `303 See Other → /`.
+
+### Off-device decode
+
+Once downloaded, decode with the ESP-IDF coredump tool:
+
+```bash
+espcoredump.py info_corefile -t elf -c coredump_esp32-5963724.elf build_feathers3_d/geiger_v2.elf
+```
+
+The same ELF used for the build is needed — keep a copy alongside the released binaries (GitHub release artefacts already include `geiger_v2.elf` per board). Output shows the panic exception, the full backtrace of the crashing task, and stack snapshots of every other task at the moment of the panic.
+
+### Deployment
+
+Per-device migration is a one-time event:
+
+1. Build V2.4.18 for the board (`_build.cmd <board>`).
+2. Cable-flash the merged-bin image at `0x0` (do NOT `erase_flash` first — preserves NVS).
+3. Subsequent OTAs work normally; every future panic is recoverable via `GET /coredump.elf`.
+
+The three currently-deployed sensors (Heltec V2 bench, FeatherS3-D bench, FeatherS3-D prod at Oatlands) all need the one-time cable flash. After that the coredump partition stays put forever — no further partition-table changes anticipated.
+
+### RAM cost
+
+| Cost | Amount | Notes |
+|---|---|---|
+| Static BSS (coredump.c cache) | ~230 bytes | always present |
+| Heap at boot | 700 bytes transient | malloc → free within `coredump_init()` |
+| Stack on `/status` render | +800 bytes | `cd_summary[320]` + `cd_line[480]` locals in `format_system` — peak chain still ~3 KB of the httpd task's 8 KB stack |
+| IDF coredump component | ~0 steady-state | panic-handler-only writers, no background tasks |
+
+Heltec 4 MB min_free headroom impact: ~1.7 %.
+
+### Files touched
+
+- `partitions.csv`, `partitions_4mb.csv` — new `coredump` partition row + header doc
+- `sdkconfig.feathers3_d`, `sdkconfig.heltec_v2`, `sdkconfig.heltec_v2_4mb`, `sdkconfig.adafruit_qtpy_esp32_pico` — `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` + dependent options
+- `main/coredump.c` + `main/coredump.h` — new module (~210 LOC)
+- `main/CMakeLists.txt` — add `coredump.c` to SRCS, `espcoredump` to REQUIRES
+- `main/main.c` — include `coredump.h`, call `coredump_init()` after `applog_init()`
+- `main/http_server.c` — include `coredump.h`, new "Core dump" row in `format_system()`, `coredump_get` + `coredump_erase_post` handlers, register the two routes, bump `max_uri_handlers` 10 → 12
+
+---
+
 ## V2.4.17
 
 **Two fixes:** OTA teardown stays sticky during the receive loop; CI cppcheck is now a hard gate before release publish.

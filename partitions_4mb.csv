@@ -29,9 +29,18 @@
 # running pre-V2.3.16-pre3 4 MB layout cannot OTA into this layout — they
 # must be erased + cable-flashed with the merged image.
 #
+# V2.4.18 added the 64 KB `coredump` partition at 0x3E0000. Same constraint
+# applies again: pre-V2.4.18 devices must be CABLE-RE-FLASHED once to pick
+# up the new layout. App slots stay at the same offsets (0x20000 + 0x200000)
+# so this re-flash is a one-time event; subsequent OTAs proceed as normal,
+# and panic dumps are recoverable over the air via `GET /coredump.elf`.
+# Total used after V2.4.18: 0x3F0000; 64 KB still reserved at the tail
+# (0x3F0000–0x400000) for future use.
+#
 # Name,     Type, SubType, Offset,   Size,      Flags
 nvs,        data, nvs,     0x9000,   0x6000,
 otadata,    data, ota,     0xf000,   0x2000,
 phy_init,   data, phy,     0x11000,  0x1000,
 ota_0,      app,  ota_0,   0x20000,  0x1E0000,
 ota_1,      app,  ota_1,   0x200000, 0x1E0000,
+coredump,   data, coredump,0x3E0000, 0x10000,

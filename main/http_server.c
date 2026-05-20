@@ -27,6 +27,7 @@
 
 #include "version.h"
 #include "applog.h"
+#include "coredump.h"          // V2.4.18: panic dump availability + summary + /coredump.elf
 #include "hal.h"
 #include "pm_sensor.h"
 #include "env_sensor.h"
@@ -461,10 +462,42 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");
     }
 
+    // V2.4.18: core dump line. Three render modes:
+    //   - no dump:  "none"
+    //   - dump:     "yes &middot; <SZ> bytes &middot; task=<NAME> PC=0x...
+    //                <reason> [download] [erase]"
+    // The download link is always shown when a dump exists; the erase
+    // button submits via a tiny form to /coredump_erase (CSRF-checked
+    // POST) and reloads.
+    char cd_summary[320];
+    coredump_get_summary_html(cd_summary, sizeof(cd_summary));
+    // Sized for literal-format (~225 B) + cd_summary worst case (320 B)
+    // + NUL. Compile-time -Wformat-truncation catches under-sizing.
+    char cd_line[640] = "";
+    if (coredump_have_dump()) {
+        // Inline form for the erase button keeps the System block
+        // self-contained — no JS, no separate page. The hidden submit
+        // POSTs to /coredump_erase with same-origin so the CSRF check
+        // succeeds; basic-auth is auto-attached by the browser since
+        // the user already authenticated for /status.
+        snprintf(cd_line, sizeof(cd_line),
+            "<b>Core dump:</b> %s &middot; "
+            "<a href=\"/coredump.elf\">download .elf</a> &middot; "
+            "<form method=\"POST\" action=\"/coredump_erase\" "
+            "style=\"display:inline\" "
+            "onsubmit=\"return confirm('Erase core dump?');\">"
+            "<button type=\"submit\">erase</button></form><br>",
+            cd_summary);
+    } else {
+        snprintf(cd_line, sizeof(cd_line),
+                 "<b>Core dump:</b> %s<br>", cd_summary);
+    }
+
     snprintf(out, sz,
         "<div class=\"info\"><h3>System</h3>"
         "<b>Uptime:</b> %s<br>"
         "<b>Reset reason:</b> %s<br>"
+        "%s"                                  // core-dump line (V2.4.18)
         "<b>Free heap:</b> %lu bytes<br>"
         "<b>Min free heap:</b> %lu bytes<br>"
         "<b>Max allocation:</b> %lu bytes<br>"
@@ -478,6 +511,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         "</div>",
         uptime_buf,
         reset_reason_str(esp_reset_reason()),
+        cd_line,
         (unsigned long)free_heap,
         (unsigned long)min_free,
         (unsigned long)max_alloc,
@@ -1551,6 +1585,71 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
 }
 
+// --- GET /coredump.elf (download dump) + POST /coredump_erase (clear) -------
+//
+// V2.4.18: panic-dump retrieval over the air. Pairs with the 64 KB
+// `coredump` partition added to partitions.csv / partitions_4mb.csv and
+// with CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y. ESP-IDF writes the dump
+// during the panic handler; this endpoint streams the partition bytes
+// out so the operator can decode them off-device with:
+//   espcoredump.py info_corefile -t elf -c oatlands.elf build_<board>/geiger_v2.elf
+//
+// Both endpoints are basic-auth gated. The GET is not CSRF-checked (it's
+// idempotent, read-only); the POST erase is CSRF-checked like /config,
+// /update, /reboot.
+//
+// Why a dedicated endpoint and not just GET /partition?: we need to stop
+// at the actual dump SIZE (from esp_core_dump_image_get), not the full
+// 64 KB partition — otherwise the client downloads 64 KB of mostly 0xFF.
+// And we need the content-type / disposition headers so browsers
+// download-as-file rather than try to render.
+
+static esp_err_t coredump_get(httpd_req_t *req) {
+    log_access(req, "GET /coredump.elf");
+    if (!check_auth(req)) return ESP_OK;
+    if (!coredump_have_dump()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No core dump present");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/octet-stream");
+    // Filename baked from chip-id so multi-device captures don't collide
+    // on the operator's download folder. ASCII only — Content-Disposition
+    // RFC 6266 quoted-string with non-ASCII would need RFC 5987 encoding.
+    char disp[96];
+    snprintf(disp, sizeof(disp),
+             "attachment; filename=\"coredump_%s.elf\"",
+             s_chip_id[0] ? s_chip_id : "device");
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+    esp_err_t r = coredump_stream_to_http(req);
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "/coredump.elf stream failed: %s", esp_err_to_name(r));
+        // httpd has already started the response — there's no clean way
+        // to send_err at this point. Return ESP_OK so the framework
+        // tears the response down without complaining.
+        return ESP_OK;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t coredump_erase_post(httpd_req_t *req) {
+    log_access(req, "POST /coredump_erase");
+    if (!check_auth(req)) return ESP_OK;
+    if (!check_same_origin(req)) return ESP_OK;
+    esp_err_t r = coredump_erase();
+    if (r != ESP_OK) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "erase failed: %s", esp_err_to_name(r));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, msg);
+        return ESP_OK;
+    }
+    // Redirect back to status. 303 See Other is the right code for
+    // POST→GET redirection per RFC 7231 §6.4.4.
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/");
+    set_security_headers(req);
+    return httpd_resp_send(req, NULL, 0);
+}
+
 // --- GET /update (upload form) ----------------------------------------------
 // Uses XHR to POST the raw .bin as the request body (Content-Type:
 // application/octet-stream). Avoids multipart parsing on the device.
@@ -1955,7 +2054,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers = 10;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log
+    hc.max_uri_handlers = 12;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase
     hc.lru_purge_enable = true;
     // V2.4.13: bump per-recv-call timeout 5 s → 30 s for weak-WiFi OTA
     // resilience. The OTA POST streams ~1.2 MB in ~1200 recv calls; the
@@ -1999,6 +2098,12 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     static const httpd_uri_t uri_log_get = {
         .uri = "/log", .method = HTTP_GET, .handler = log_get,
     };
+    static const httpd_uri_t uri_coredump_get = {
+        .uri = "/coredump.elf", .method = HTTP_GET, .handler = coredump_get,
+    };
+    static const httpd_uri_t uri_coredump_erase = {
+        .uri = "/coredump_erase", .method = HTTP_POST, .handler = coredump_erase_post,
+    };
     httpd_register_uri_handler(s_server, &uri_favicon);
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_config_get);
@@ -2007,5 +2112,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_update_post);
     httpd_register_uri_handler(s_server, &uri_reboot_post);
     httpd_register_uri_handler(s_server, &uri_log_get);
-    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log)");
+    httpd_register_uri_handler(s_server, &uri_coredump_get);
+    httpd_register_uri_handler(s_server, &uri_coredump_erase);
+    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /coredump.elf /coredump_erase)");
 }

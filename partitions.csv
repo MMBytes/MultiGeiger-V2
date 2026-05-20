@@ -4,7 +4,16 @@
 # V2.1.17 leaves comfortable headroom for ongoing growth: env sensor drivers
 # (BME280 / BME688 / BMP390 / SHT45), OLED, HTTP server (/config + /update +
 # /log), FTPS upload, Mozilla CA bundle, OTA, future TLS/sensor/web additions.
-# Tail at 0x620000–0x800000 (1.9 MB) reserved for future spiffs/littlefs.
+#
+# V2.4.18: added 64 KB `coredump` partition at the tail. ESP-IDF panic
+# handler writes the panicking task's register state + stack snapshot here
+# on reboot; recoverable OVER-THE-AIR via `GET /coredump.elf` (no USB
+# needed once flashed). One-time cable reflash required for currently-
+# deployed devices because partition layout changed (esp_ota only updates
+# the app, not the partition table itself) — same constraint that applied
+# to V2.3.16's 4 MB factory-removal. NVS stays at 0x9000 unchanged so user
+# config + WiFi creds survive the merged-bin flash (do NOT erase_flash).
+# Tail at 0x630000–0x800000 (1.825 MB) still reserved for future spiffs/littlefs.
 #
 # Name,     Type, SubType, Offset,   Size,      Flags
 nvs,        data, nvs,     0x9000,   0x6000,
@@ -13,3 +22,4 @@ phy_init,   data, phy,     0x11000,  0x1000,
 factory,    app,  factory, 0x20000,  0x200000,
 ota_0,      app,  ota_0,   0x220000, 0x200000,
 ota_1,      app,  ota_1,   0x420000, 0x200000,
+coredump,   data, coredump,0x620000, 0x10000,

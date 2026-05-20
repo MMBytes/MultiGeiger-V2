@@ -21,6 +21,7 @@ idf_component_register(
         "dnms.c"
         "applog.c"
         "syslog.c"
+        "coredump.c"
         "log_ftp.c"
         "mqtt.c"
         "mqtt_discovery.c"
@@ -49,6 +50,7 @@ idf_component_register(
         app_update
         esp_partition
         spi_flash
+        espcoredump            # V2.4.18: panic dump to flash, read via /coredump.elf
         # NOTE: `mqtt` is NOT listed here — V2.4.2's MQTT client
         # (`mqtt_client.h` in main/mqtt.c) ships via the IDF Component
         # Manager as `espressif/mqtt`, declared in main/idf_component.yml.

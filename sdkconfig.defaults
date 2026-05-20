@@ -137,3 +137,27 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
 # FeatherS3-D and QT Py have abundant PSRAM heap so the per-record
 # alloc/free CPU overhead isn't worth paying there; only the Heltec's
 # tight internal-DRAM budget actually benefits.
+
+# V2.4.18: enable ESP-IDF core dump to flash for over-the-air panic
+# recovery. Pairs with the 64 KB `coredump` partition row added to
+# partitions.csv and partitions_4mb.csv, and with the new
+# main/coredump.c module + GET /coredump.elf endpoint. On panic, IDF
+# writes the panicking task's register state + every other task's
+# stack snapshot into the partition before reboot. After reboot,
+# coredump_init() probes the partition, parses the summary, and
+# surfaces "task=<NAME> PC=0x...." on the status page. Operator
+# downloads the raw .elf, decodes off-device with
+# `espcoredump.py info_corefile -t elf -c dump.elf build_<board>/geiger_v2.elf`.
+# ELF format (BIN is legacy, harder to decode). CRC32 checksum (SHA256
+# is for secure-boot setups we don't use).
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+# CONFIG_ESP_COREDUMP_ENABLE_TO_UART is not set
+# CONFIG_ESP_COREDUMP_ENABLE_TO_NONE is not set
+CONFIG_ESP_COREDUMP_ENABLE=y
+CONFIG_ESP_COREDUMP_LOGS=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+# CONFIG_ESP_COREDUMP_DATA_FORMAT_BIN is not set
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+# CONFIG_ESP_COREDUMP_CHECKSUM_SHA256 is not set
+CONFIG_ESP_COREDUMP_CHECK_BOOT=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64

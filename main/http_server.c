@@ -1706,6 +1706,11 @@ static esp_err_t update_get(httpd_req_t *req) {
         "progress{width:100%;height:1.4em;margin-top:1em}"
         "#msg{margin-top:1em;white-space:pre-wrap}</style>"
         "</head><body><h1>Firmware update</h1>"
+        // Compile-time string-literal concatenation — VERSION_STR is a
+        // #define so the version is baked into this static page at build
+        // time. Zero runtime cost. version.h's include here means a tag
+        // bump auto-rebuilds this TU.
+        "<p><b>Current firmware:</b> <code>" VERSION_STR "</code></p>"
         "<p>Select a firmware .bin for " UPLOAD_PROMPT_BOARD ".</p>"
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"

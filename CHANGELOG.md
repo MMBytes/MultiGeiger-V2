@@ -15,6 +15,46 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.22
+
+**Codebase-wide audit of the V2.4.20 stack-overflow class of bug — moves ~7.4 KB of httpd-task stack buffers to BSS.** Same proven pattern (V2.4.16 syslog → V2.4.20 applog → this), expanded to every large stack allocation on the 8 KB httpd task's path.
+
+### Motivation
+
+V2.4.20's hotfix freed 1 KB from `applog_vprintf` after a httpd stack overflow corrupted the task TCB and triggered a FreeRTOS assertion. That fix kept the immediate symptom (V2.4.19 `/config` from an unauth client) from recurring, but the underlying fragility — large stack allocations on a single 8 KB task — remained latent in other code paths. A codebase audit identified ~7.4 KB of stack buffers that should have been BSS from the start.
+
+### What changed
+
+All in `main/http_server.c`. All static-ified — `esp_http_server` runs one task processing URI handlers serially via `select()`, so re-entry is structurally impossible and the static buffers are race-free.
+
+#### `config_get` — ~4.3 KB freed
+
+The ~25 HTML-escape buffers used to render the `/config` form (e_ssid, e_pw, e_chip, e_ru, e_rp, e_ntp1/2/3, e_ap, e_tz, e_apn, e_host, e_fhost, e_fuser, e_fpw, e_fpath, e_osm, e_osm_tok, e_aqi, e_mhost, e_muser, e_mpw, e_mpfx, e_slh) plus `br_opts[512]`. All simultaneously in scope before `config_get` finishes the form composition. Total ~4.3 KB consumed over half the httpd task's 8 KB budget every authenticated `/config` render. Worked today because V2.4.20 had just freed up 1 KB, but the headroom was thin — any new caller on the path would have re-tripped the same overflow.
+
+#### `/` status handler — 1.6 KB freed
+
+`buf[1600]` shared chunked-render scratch (`http_server.c:951`). Single buffer reused across all status blocks via `httpd_resp_send_chunk` between block fills. Single function, single thread.
+
+#### `format_system` — 0.96 KB freed
+
+`cd_summary[320]` + `cd_line[640]` used to render the V2.4.18 coredump status row. Called from the `/` handler, so previously stacked with the `buf[1600]` above on every `/status` render — adjacent allocations consuming ~2.6 KB of the 8 KB.
+
+### Not changed
+
+- OTA error `msg[128/256/384]` buffers in `update_post` (lines 1799, 1928, 1972). Only one in scope at a time, all triggered on rare error paths. Total budget impact negligible.
+- TX worker's `body[1280/1600/1700]` in `send_madavi` / `send_osm` / `send_aqi`. TX task has 16 KB stack (`TX_TASK_STACK_BYTES`); each function uses ~1.5 KB body + url + TLS handshake stack (~6 KB) — sits comfortably within budget.
+- main task's `log_ftp.c` arrays + `mqtt.c::buf[512]`. Main task has 16 KB stack.
+
+### Files touched
+
+- `main/http_server.c`: 4 edits adding `static` to 28 array declarations + 3 WHY comment blocks
+- `main/version.h`: V2.4.21 → V2.4.22
+- `CHANGELOG.md`: this entry
+
+BSS cost ~7.4 KB once, replacing ~7.4 KB off every httpd handler invocation. No partition change, no `sdkconfig` change. Drop-in OTA upgrade from V2.4.21.
+
+---
+
 ## V2.4.21
 
 **Hotfix for openSenseMap auth-token format.** OSM's ingest endpoint wants the raw token in the `Authorization` header — NOT `Bearer <token>` as V2.3.16 shipped speculatively. Confirmed 2026-05-21 by direct A/B curl against the user's real auth-enabled box: raw token → `HTTP 201 Created`, `Bearer <token>` → `HTTP 401 "Box access token not valid!"`.

@@ -469,11 +469,17 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
     // The download link is always shown when a dump exists; the erase
     // button submits via a tiny form to /coredump_erase (CSRF-checked
     // POST) and reloads.
-    char cd_summary[320];
+    // V2.4.22: cd_summary[320] + cd_line[640] = ~960 B moved from stack
+    // to BSS. Same V2.4.20 fix pattern — large buffers on the httpd task's
+    // 8 KB stack are fragile, and format_system is called from the `/`
+    // handler which already pays the static-ified buf[1600] tax. Safe
+    // because esp_http_server uses a single thread (httpd_thread runs all
+    // URI handlers serially via select), so format_system is never
+    // re-entered. Both branches of the if/else below always populate
+    // cd_line before it's read, so no per-call zero-init needed.
+    static char cd_summary[320];
     coredump_get_summary_html(cd_summary, sizeof(cd_summary));
-    // Sized for literal-format (~225 B) + cd_summary worst case (320 B)
-    // + NUL. Compile-time -Wformat-truncation catches under-sizing.
-    char cd_line[640] = "";
+    static char cd_line[640];
     if (coredump_have_dump()) {
         // Inline form for the erase button keeps the System block
         // self-contained — no JS, no separate page. The hidden submit
@@ -946,9 +952,15 @@ static esp_err_t status_get(httpd_req_t *req) {
     // Single shared scratch buffer reused across all blocks. Sized for the
     // worst-case block (uploads with 5 enabled targets ≈ 1.4 KB). Stream each
     // chunk via httpd chunked transfer-encoding — same pattern V2.3.17 used
-    // for /log to avoid heap-pressure transient peaks. Total stack footprint
-    // for this handler is buf + a few small locals (≈1.6 KB).
-    char buf[1600];
+    // for /log to avoid heap-pressure transient peaks.
+    //
+    // V2.4.22: moved from stack to BSS. 1.6 KB on the httpd task's 8 KB
+    // stack stacks with config_get's escape buffers and format_system's
+    // cd_summary/cd_line on adjacent /status renders. Safe because
+    // esp_http_server uses a single thread (httpd_thread runs all URI
+    // handlers serially), so this handler is never re-entered; the entire
+    // function fills buf then sends each block before next overwrite.
+    static char buf[1600];
     int64_t       now_us    = esp_timer_get_time();
     unsigned long uptime_s  = (unsigned long)(now_us / 1000000LL);
     unsigned long uptime_ms = (unsigned long)(now_us / 1000LL);
@@ -1025,18 +1037,27 @@ static esp_err_t config_get(httpd_req_t *req) {
     }
 
     // Escape every string field for safe use in value="..." attributes.
-    char e_ssid[96], e_pw[192], e_chip[96], e_ru[96], e_rp[192];
-    char e_ntp1[192], e_ntp2[192], e_ntp3[192], e_ap[96];
-    char e_tz[160];
-    char e_apn[96], e_host[96];
-    char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
-    char e_osm[80], e_osm_tok[160], e_aqi[160];
+    //
+    // V2.4.22: all e_* arrays moved from stack to BSS — collectively
+    // ~4.3 KB, over half the httpd task's 8 KB stack budget when
+    // simultaneously in scope. Same V2.4.20 fix pattern. Safe because
+    // esp_http_server uses a single thread (httpd_thread runs all URI
+    // handlers serially via select), so config_get is never re-entered.
+    // Each html_esc() call below fully overwrites its target buffer
+    // before any reader (the final big snprintf) sees it. BSS cost
+    // ~4.3 KB once, replacing 4.3 KB off every config_get invocation.
+    static char e_ssid[96], e_pw[192], e_chip[96], e_ru[96], e_rp[192];
+    static char e_ntp1[192], e_ntp2[192], e_ntp3[192], e_ap[96];
+    static char e_tz[160];
+    static char e_apn[96], e_host[96];
+    static char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
+    static char e_osm[80], e_osm_tok[160], e_aqi[160];
     // V2.4.4: MQTT fields. e_mhost generously sized — html_esc 4x worst case
     // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
     // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
-    char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
+    static char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
     // V2.4.15: syslog host esc buffer. CFG_SYSLOG_HOST_MAX=63 × 4 = ~256.
-    char e_slh[256];
+    static char e_slh[256];
     // V2.4.6: MQTT TLS PEM cert. html_esc worst-case is ~6x for a textarea
     // because every '<' becomes "&lt;" / '"' becomes "&quot;" / '&' becomes
     // "&amp;" — but real PEM is mostly base64 alnum (no escaping needed) +
@@ -1080,7 +1101,8 @@ static esp_err_t config_get(httpd_req_t *req) {
     // vs "" args). V2.3.32: added OFF entry — turns the SerLCD backlight
     // fully dark (panel pixels still drawn but invisible) and powers the
     // OLED panel down via 0xAE (zero-current state). See display_set_contrast.
-    char br_opts[512];
+    // V2.4.22: br_opts also static — same justification as the e_* block above.
+    static char br_opts[512];
     int br_n = 0;
     br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
                      "<option value=\"0\"%s>OFF</option>",

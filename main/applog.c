@@ -172,7 +172,19 @@ static int applog_vprintf(const char *fmt, va_list args) {
     int rc = vprintf(fmt, args_echo);
     va_end(args_echo);
 
-    char line[LOG_LINE_MAX];
+    // V2.4.20: line[] moved from stack to BSS. Same V2.4.16 fix pattern
+    // as syslog_emit's buf[600]: a kilobyte of stack inside a logger that
+    // any task can call from any code path is fragile, and the httpd
+    // task's 8 KB stack is the tightest budget in the system. Concrete
+    // failure case: 2026-05-21 V2.4.19 GET /config from an unauth client
+    // → check_auth's locals (~250 B) + the vprintf/bufio/console_write/
+    // usb_serial_jtag_write chain stacked on top of this 1 KB buffer ran
+    // the httpd stack past its limit; corruption landed on the TCB and
+    // FreeRTOS's `xTaskPriorityDisinherit` assertion (uxMutexesHeld == 0)
+    // fired. Safe to move to BSS because s_mtx (taken above, released
+    // below at the end of this function) serialises all callers — only
+    // one task ever touches line at a time.
+    static char line[LOG_LINE_MAX];
     int n = vsnprintf(line, sizeof(line), fmt, args);
     if (n > 0) {
         if (n >= (int)sizeof(line)) n = sizeof(line) - 1;

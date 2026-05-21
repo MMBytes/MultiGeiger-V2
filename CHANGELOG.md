@@ -15,6 +15,68 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.20
+
+**Hotfix for V2.4.19 httpd stack overflow on `/config` from an unauth client.** Same class of bug V2.4.16 fixed for `syslog_emit`'s 600 B stack buffer — `applog_vprintf`'s `line[1024]` had been on the stack since the module was written. Moved to BSS (protected by the existing `s_mtx`, taken before the buffer is touched and released after).
+
+### Symptom
+
+V2.4.19 on a freshly-erased FeatherS3-D, AP-mode, browse to `http://192.168.4.1/config` without credentials → assert + reboot:
+
+```
+http: GET /config from ::FFFF:192.168.4.2
+http: auth failed for /config from ::FFFF:192.168.4.2
+
+assert failed: xTaskPriorityDisinherit tasks.c:5157 (pxTCB->uxMutexesHeld)
+```
+
+Backtrace (addr2line):
+
+```
+panic_abort → esp_system_abort → __assert_func
+  ← xTaskPriorityDisinherit              (uxMutexesHeld == 0)
+  ← prvCopyDataToQueue / xQueueGenericSend / xQueueGiveMutexRecursive
+  ← _lock_release_recursive
+  ← usb_serial_jtag_write                (vfs_calls.c:74)
+  ← bufio_write / vfprintf / vprintf
+  ← applog_vprintf @ applog.c:172        (the vprintf at the top of the function)
+  ← esp_log_va / esp_log
+  ← check_auth @ http_server.c:135       (ESP_LOGW("auth failed for ..."))
+  ← config_get @ http_server.c:1019
+  ← httpd_thread (stack: 8 KB)
+```
+
+Coredump confirmed the crashing TCB's stack pointer was invalid (0x80376ec4 — way above DRAM range 0x3fc...), meaning the httpd task's stack had overflowed into its own TCB. The FreeRTOS assertion fired on garbage `uxMutexesHeld` data.
+
+### Why V2.4.18 didn't show it but V2.4.19 did
+
+V2.4.18 had the same 1 KB stack allocation, but V2.4.19's added code paths (`net_arp.c` + `periodic.c`) shifted the linker layout enough to move the httpd task's TCB into the corruption zone. V2.4.18 was probably overflowing too but the corruption was landing on benign neighbour memory (no assertion). Either way, the 1 KB-on-stack-in-a-logger was a latent bug; this version fixes it.
+
+### What changed
+
+One-line semantic change in `main/applog.c::applog_vprintf()`:
+
+```c
+- char line[LOG_LINE_MAX];                     // 1024 B on stack per call
++ static char line[LOG_LINE_MAX];              // V2.4.20: BSS, protected by s_mtx
+```
+
+Plus a fat comment block explaining the why + the V2.4.16 precedent. Safe because:
+
+- `s_mtx` is taken at line 166 and released at line 196 — the entire `line[]` usage window is inside the critical section. Only one task touches `line` at a time.
+- Same proven pattern as `syslog_emit`'s `s_emit_buf[600]` (V2.4.16) — that fix has been stable in production since 2026-05-18.
+- BSS cost: 1024 bytes once, replacing 1024 bytes off every httpd / TX worker / main / etc. stack frame on every log call.
+
+### Files touched
+
+- `main/applog.c` (~14 LOC delta: `static` keyword + a 12-line WHY comment block)
+- `main/version.h`: V2.4.19 → V2.4.20
+- `CHANGELOG.md`: this entry
+
+No partition change. No `sdkconfig` change. Drop-in OTA upgrade from V2.4.19, V2.4.18, or earlier post-coredump-migration builds.
+
+---
+
 ## V2.4.19
 
 **Gratuitous ARP after every WiFi reconnect + a 24h safety-net.** Closes the failure mode where a sensor's MQTT loop gets permanently stuck in `esp-tls: select() timeout` retries after a WiFi roam, because the upstream AP/mesh bridge's CAM entry for the sensor's MAC has aged out and re-learned the wrong forwarding path.

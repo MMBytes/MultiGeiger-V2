@@ -32,7 +32,9 @@
 #include "main_status.h"
 #include "mqtt.h"
 #include "neopixel.h"
+#include "net_arp.h"            // V2.4.19: gratuitous ARP after WiFi reconnect
 #include "ntp.h"
+#include "periodic.h"           // V2.4.19: 24h housekeeping (PSA refresh + safety-net ARP)
 #include "speaker.h"
 #include "syslog.h"
 #include "transmission.h"
@@ -94,6 +96,12 @@ static int64_t  t_last_got_ip_us   = 0;
 static uint32_t n_attempts = 0, n_connects = 0, n_got_ip = 0, n_disconnects = 0;
 static uint32_t last_disconnect_reason = 0;
 static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
+
+// V2.4.19: set in the main loop when EV_GOT_IP fires; cleared after the
+// post-reconnect gratuitous ARP is actually sent. Decoupled from the
+// event so we can defer the ARP send to a tick when tx_is_idle() — see
+// the bottom of the main loop for the consumer and the rationale.
+static bool s_arp_after_reconnect_pending = false;
 
 // --- NTP/TX state ---
 static bool     ntp_started = false;
@@ -882,6 +890,11 @@ void app_main(void) {
                           g_cfg.tz_posix);
                 ntp_started = true;
             }
+            // V2.4.19: queue a gratuitous ARP for the next idle tick so the
+            // upstream AP / mesh bridge learns this sensor's MAC on the
+            // fresh association. The actual send is deferred — see the
+            // consumer at the bottom of this loop for the why.
+            s_arp_after_reconnect_pending = true;
         }
         if (bits & EV_DISCONNECTED) {
             if (!g_sta_connect_allowed) {
@@ -999,6 +1012,37 @@ void app_main(void) {
             next_tx = xTaskGetTickCount() + tx_interval;
         }
 
-        log_ftp_loop((uint32_t)(esp_timer_get_time() / 1000));
+        {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            periodic_loop(now_ms);       // V2.4.19: 24h PSA refresh + safety-net ARP
+            log_ftp_loop(now_ms);
+        }
+
+        // V2.4.19: deferred gratuitous ARP after each WiFi reconnect.
+        //
+        // The `s_arp_after_reconnect_pending` flag is set in the
+        // `bits & EV_GOT_IP` block above on every GOT_IP event. We fire
+        // the ARP from here (rather than inline at the event) for two
+        // reasons:
+        //   1. tx_is_idle() gating: the TX worker on CPU1 may be mid-
+        //      handshake with Madavi/sensor.community; deferring lets
+        //      us coalesce with the worker's natural idle window.
+        //   2. Settling time: lwIP itself emits one gratuitous ARP on
+        //      GOT_IP. Firing ours on a later tick (1 s typical) gives
+        //      the upstream AP a second, well-separated chance to learn
+        //      the path — more useful than two back-to-back ARPs that
+        //      could both be lost in the same airtime collision.
+        //
+        // FTP gating is structural — log_ftp_loop runs on this main
+        // task; if FTP were uploading, this line wouldn't have been
+        // reached.
+        //
+        // The 24h safety-net ARP (for sensors that go days without a
+        // reconnect) is piggy-backed on the PSA crypto refresh in
+        // log_ftp.c — same TX-idle gate, no extra timer.
+        if (s_arp_after_reconnect_pending && wifi_up() && tx_is_idle()) {
+            net_arp_send_gratuitous();
+            s_arp_after_reconnect_pending = false;
+        }
     }
 }

@@ -54,7 +54,16 @@ typedef enum {
 } display_backend_t;
 static display_backend_t s_backend = BACKEND_NONE;
 
-#define SSD1306_ADDR    0x3C   // shared 0x3C 7-bit address — SSD1306 + SSD1309
+// SSD1306 datasheet defines exactly two slave addresses, selected by the
+// SA0 pin (sometimes exposed as a solder jumper). 0x3C is the default on
+// Heltec WiFi Kit 32 V2 onboard, the Core Electronics CE09964 SSD1309
+// breakout, and Adafruit 326 STEMMA QT OLED out-of-the-box. 0x3D is
+// reachable on Adafruit 326 (and most other Adafruit/SparkFun OLEDs) by
+// closing a solder jumper on the back of the breakout — some board
+// revisions ship with that jumper closed. V2.4.19 probes both so a
+// 0x3D-strapped unit doesn't silently look like a missing display.
+#define SSD1306_ADDR        0x3C
+#define SSD1306_ADDR_ALT    0x3D
 // Per-board chip identifier for boot log accuracy. Both controllers respond
 // to the SSD1306 init sequence (register-compatible), but the silicon
 // actually present differs and the log should reflect that.
@@ -358,11 +367,18 @@ static void display_task(void *arg);
 // only fires before the SECONDARY probe — bus 1 has been powered since
 // boot, by display_setup time the SerLCD has had hundreds of ms to wake.
 
-// Try the OLED on the given bus. Returns true and binds s_dev on success.
+// Try the OLED on the given bus. Returns true and binds s_dev on success,
+// writing the actual 7-bit address it bound (0x3C or 0x3D) into *addr_out.
 // The reset-pulse block is compile-gated by PIN_OLED_RST (Heltec only);
-// fires every time we try OLED on a bus, but on FeatherS3-D / QT Py the
-// whole block is compiled out so this is a single i2c_master_probe call.
-static bool try_oled_on_bus(i2c_master_bus_handle_t bus) {
+// fires once per call (i.e. once per bus), then the address probe loop
+// runs. On FeatherS3-D / QT Py the reset block compiles out and this is
+// just up to two i2c_master_probe calls.
+//
+// V2.4.19: probe both 0x3C and 0x3D. Adafruit 326 (and most STEMMA QT
+// OLED breakouts) have a solder jumper to switch addresses; some board
+// revisions ship with the jumper closed at 0x3D. Pre-V2.4.19 those units
+// silently looked like "no display present".
+static bool try_oled_on_bus(i2c_master_bus_handle_t bus, uint8_t *addr_out) {
 #ifdef PIN_OLED_RST
     // Heltec onboard SSD1306 reset line (GPIO 16). FeatherS3-D / QT Py
     // external 4-pin breakouts have no reset line and PIN_OLED_RST stays
@@ -375,21 +391,29 @@ static bool try_oled_on_bus(i2c_master_bus_handle_t bus) {
     gpio_set_level(PIN_OLED_RST, 1); vTaskDelay(pdMS_TO_TICKS(10));
 #endif
 
-    if (i2c_master_probe(bus, SSD1306_ADDR, 100) != ESP_OK) return false;
+    // Try the default address first — most parts answer here and the
+    // alternate is only used when a solder jumper has been closed.
+    static const uint8_t candidates[] = { SSD1306_ADDR, SSD1306_ADDR_ALT };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        uint8_t addr = candidates[i];
+        if (i2c_master_probe(bus, addr, 100) != ESP_OK) continue;
 
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = SSD1306_ADDR,
-        .scl_speed_hz    = 400000,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "i2c_master_bus_add_device failed: %s",
-                 esp_err_to_name(err));
-        s_dev = NULL;
-        return false;
+        i2c_device_config_t devcfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address  = addr,
+            .scl_speed_hz    = 400000,
+        };
+        esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "i2c_master_bus_add_device(0x%02X) failed: %s",
+                     addr, esp_err_to_name(err));
+            s_dev = NULL;
+            continue;     // try the next candidate
+        }
+        if (addr_out) *addr_out = addr;
+        return true;
     }
-    return true;
+    return false;
 }
 
 // Apply the SSD1306/9 init sequence. Caller must have just bound s_dev
@@ -484,15 +508,18 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
                  bus_label, show_display, brightness_pct);
         goto task_spawn;
     }
-    if (try_oled_on_bus(bus)) {
-        apply_oled_init_sequence();
-        s_show    = show_display;
-        s_backend = BACKEND_OLED;
-        display_set_contrast(brightness_pct);
-        ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
-                 OLED_CHIP_NAME, SSD1306_ADDR, bus_label,
-                 show_display, brightness_pct);
-        goto task_spawn;
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
     }
 
     // --- Fall through to secondary bus ---------------------------------
@@ -514,16 +541,19 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
                  bus_label, show_display, brightness_pct);
         goto task_spawn;
     }
-    if (try_oled_on_bus(bus)) {
-        apply_oled_init_sequence();
-        s_show    = show_display;
-        s_backend = BACKEND_OLED;
-        display_set_contrast(brightness_pct);
-        i2c_bus_secondary_keep_alive();
-        ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
-                 OLED_CHIP_NAME, SSD1306_ADDR, bus_label,
-                 show_display, brightness_pct);
-        goto task_spawn;
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            i2c_bus_secondary_keep_alive();
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
     }
 
     ESP_LOGW(TAG, "no display found on STEMMA1 or STEMMA2 — display disabled");

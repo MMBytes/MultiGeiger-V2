@@ -23,6 +23,8 @@ idf_component_register(
         "syslog.c"
         "coredump.c"
         "log_ftp.c"
+        "net_arp.c"
+        "periodic.c"
         "mqtt.c"
         "mqtt_discovery.c"
         "speaker.c"

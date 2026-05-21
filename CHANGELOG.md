@@ -15,6 +15,63 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.19
+
+**Gratuitous ARP after every WiFi reconnect + a 24h safety-net.** Closes the failure mode where a sensor's MQTT loop gets permanently stuck in `esp-tls: select() timeout` retries after a WiFi roam, because the upstream AP/mesh bridge's CAM entry for the sensor's MAC has aged out and re-learned the wrong forwarding path.
+
+### Motivation
+
+2026-05-21 incident on bench sensor esp32-5963724 @10.11.12.193. WiFi dropped overnight at `19:32:11` with `reason=34`, sensor reconnected cleanly within 13 s with a fresh DHCP lease. Madavi HTTPS uploads continued to succeed every 150 s for the next ~14 h. But MQTT to the LAN broker at `10.11.12.150:8883` was stuck in an endless retry loop — `sock=N select() timeout` every 20-25 s, surviving the FTP-time MQTT teardown+restart at `09:14:14` unchanged.
+
+Diagnosis via `tcpdump` on the broker showed the sensor's SYNs arriving and the broker's SYN-ACKs leaving within 100 µs — but the sensor's repeated SYNs all carried the same TCP sequence number, proving the SYN-ACKs never reached the sensor's radio. `ping`, `curl`, all broker-initiated traffic to the sensor was 100 % loss while the broker's ARP cache showed the correct sensor MAC as REACHABLE.
+
+Broker and sensor were on different APs in the same mesh SSID (Pi on BSSID `46:78:95:83:d3:34` ch 10, sensor on BSSID `42:78:95:83:d2:80` ch 2). The mesh's per-AP bridge forwarding table for the sensor's MAC had aged out during the long idle gap before the WiFi drop and re-learned wrong after the roam — blackholing every frame the broker addressed to the sensor. Fix at the time was a soft reboot of the sensor (the resulting re-association burst retrained every bridge); the underlying mesh behaviour is upstream of firmware. Full post-mortem in `[[reference_mqtt_one_way_loss_after_wifi_roam]]`.
+
+### What changed
+
+New `main/net_arp.c` + `main/net_arp.h` — single function `net_arp_send_gratuitous()` that calls `etharp_gratuitous()` on the STA netif under `LOCK_TCPIP_CORE`. Cost = one 60-byte ARP broadcast on-air, single µs-level lwIP call. Module is tiny on purpose — shared by the two call sites without coupling them.
+
+Two call sites:
+
+1. **After each WiFi reconnect** (`main/main.c`, in the main loop's `bits & EV_GOT_IP` block). On every GOT_IP event a `s_arp_after_reconnect_pending` flag is set; the actual send is deferred to a later tick when `tx_is_idle()` AND `wifi_up()` hold. The deferral matters for two reasons:
+   - lwIP already emits one gratuitous ARP on GOT_IP automatically. Firing ours on the very next tick (1 s typical) gives the upstream AP a second, well-separated chance to learn the path — better than two back-to-back ARPs that could both vanish in the same airtime collision.
+   - The TX worker (CPU1) may be mid-handshake with Madavi/sensor.community; deferring coalesces with the worker's natural idle window.
+
+2. **24h safety-net** (`main/log_ftp.c`, piggy-backed on the existing PSA crypto refresh). One call site, runs on the same 24h schedule with the same `tx_is_idle()` gate. Catches the rare case where a sensor holds a single WiFi association for days without a reconnect — the per-reconnect ARP wouldn't fire and the bridge entry could age out anyway.
+
+**FTP gating is structural for both call sites.** Both run on the main task, where FTP also runs blocking. No `log_ftp_is_idle()` API added — would just be extra surface area for the same guarantee.
+
+Default lwIP behaviour is to emit a single gratuitous ARP on `GOT_IP` only. That's hours-to-days apart on a stable link, far longer than any sane bridge aging timer (typically 5 min). V2.4.19 doesn't try to match the aging timer with periodic ARPs — instead, the reconnect-driven fire addresses the failure-mode that actually broke things (path stale across a WiFi drop), and the 24h fire covers the never-reconnects edge case.
+
+### Not changed
+
+- No firmware-side detection or recovery for an *already-broken* bridge path. If a sensor is in the stuck state at the moment V2.4.19 boots, the first WiFi reconnect (or the 24h safety-net fire) should retrain the bridges and let MQTT recover automatically — but if a path is broken hard (mesh node down), a manual `/reboot` or AP power-cycle is still the fix.
+- No periodic 5-min ARP cadence. Considered and rejected — chatty for a problem that's really about reconnect-induced path confusion, not slow bridge aging.
+- Option B from the analysis (auto-reconnect WiFi after N consecutive MQTT timeouts) deliberately deferred — false-positive risk during legitimate broker downtime causes unnecessary WiFi flap. Revisit if the same stuck-bridge symptom repeats with V2.4.19's prevention in place.
+
+### Files touched
+
+- `main/net_arp.c` + `main/net_arp.h` (NEW, ~60 LOC combined): shared gratuitous-ARP helper
+- `main/periodic.c` + `main/periodic.h` (NEW, ~115 LOC combined): main-task periodic housekeeping. Hosts the 24h PSA refresh (extracted from `log_ftp.c::log_ftp_loop()`) and the 24h safety-net ARP. New module exists because the chores aren't conceptually owned by any single feature — pre-V2.4.19 they squatted in `log_ftp.c` for convenience, which made them undiscoverable by file name.
+- `main/main.c` (~10 LOC delta): include, EV_GOT_IP-driven flag, deferred-fire block, `periodic_loop()` call in the main tick
+- `main/log_ftp.c`: deleted the ~40-LOC PSA-refresh-plus-comment block from the top of `log_ftp_loop()`; added 3-LOC `log_ftp_note_psa_refreshed()` export so `periodic.c` can reset the FTP-side consecutive-OOM streak counter after a successful refresh (preserves the pre-V2.4.19 "healthy refresh blesses the OOM streak" behaviour exactly). The FTP-failure-driven PSA refresh in the upload-error-recovery path stays in `log_ftp.c` because it's intrinsically tied to FTP upload state.
+- `main/log_ftp.h`: doc + declaration for `log_ftp_note_psa_refreshed()`
+- `main/CMakeLists.txt`: `net_arp.c` + `periodic.c` added to SRCS
+- `main/version.h`: V2.4.18 → V2.4.19
+- `CHANGELOG.md`: this entry
+
+No partition layout change. No `sdkconfig` change. Drop-in OTA upgrade across all 4 board targets.
+
+### Display detection — probe 0x3D as well as 0x3C
+
+`display.c::try_oled_on_bus()` now probes both standard SSD1306 slave addresses (0x3C default + 0x3D alternate via SA0). Adafruit 326 STEMMA QT OLED, SparkFun and most other I²C OLED breakouts have a solder jumper on the back that flips the SA0 line — some board revisions ship with the jumper closed at 0x3D. Pre-V2.4.19 firmware probed 0x3C only, so those units silently reported "no display found on STEMMA1 or STEMMA2 — display disabled" with no further diagnostic.
+
+The boot log line now shows the actual address the panel was bound at (`display backend: SSD1309 at 0x3D on STEMMA1 ...`), so you can read it back from `/log` and confirm which jumper position the breakout came from. The reset-pulse block on Heltec runs once per call (before the probe loop), not once per candidate — same behaviour as before for the onboard panel.
+
+`s_dev` is bound with the working address baked into the I²C device handle, so all subsequent display I/O routes correctly with no further code changes. SSD1306 / SSD1309 are register-compatible in the init sequence and bitmap path we use, so no per-chip branching needed beyond the address.
+
+---
+
 ## V2.4.18
 
 **Panic dumps are now recoverable over the air.** Enables ESP-IDF's coredump-to-flash, exposes the dump via `GET /coredump.elf`, and surfaces an inline summary (panicking task name + PC) on the status page so you can see at a glance whether a deployed sensor has a backtrace waiting to be downloaded.

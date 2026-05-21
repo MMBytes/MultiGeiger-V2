@@ -60,3 +60,16 @@ void log_ftp_get_stats(log_ftp_stats_t *out);
  *  FTPS, but the configuration in NVS is unchanged.
  */
 void log_ftp_pause(void);
+
+/** @brief Clear the FTP-side consecutive-PSA-OOM streak counter.
+ *
+ *  V2.4.19: called by `periodic.c` after a successful 24h PSA refresh
+ *  so the FTP upload code's failure-driven OOM watcher starts each
+ *  24h window from a clean slate. Pre-V2.4.19 the reset was inlined
+ *  next to the refresh; extracting it preserves behaviour exactly
+ *  without exposing the static counter itself.
+ *
+ *  Safe to call from any task — touches a single int, torn-tolerant
+ *  on the 32-bit Xtensa core.
+ */
+void log_ftp_note_psa_refreshed(void);

@@ -143,6 +143,12 @@ void log_ftp_pause(void) {
     ESP_LOGI(TAG, "paused — no scheduled uploads until reboot");
 }
 
+// V2.4.19: exported so the extracted periodic.c can reset the FTP-side
+// PSA-OOM streak after a successful 24h refresh. See log_ftp.h doc.
+void log_ftp_note_psa_refreshed(void) {
+    s_consecutive_psa_oom = 0;
+}
+
 static bool wifi_up_ftp(void) {
     wifi_ap_record_t ap;
     return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
@@ -1101,49 +1107,15 @@ void log_ftp_init(const char *chip_id, const config_t *cfg) {
 }
 
 void log_ftp_loop(uint32_t now_ms) {
-    // V2.3.23: scheduled PSA crypto refresh (independent of FTP being enabled).
-    // Slow heap fragmentation accumulates across hundreds of TLS handshakes
-    // (HTTPS + FTPS combined) — observed in production V2.3.22 soak with
-    // min_free dropping ~14 KB/h before stabilising. Calling
-    // mbedtls_psa_crypto_free() + psa_crypto_init() returns the entire PSA
-    // slot pool to empty, giving the heap allocator a chance to recompact.
-    // Cost: ~20-50 ms extra latency on the next TLS handshake (key material
-    // re-derived on first use). Sensor / WiFi / HTTP server unaffected.
+    // V2.4.19: the 24h PSA crypto refresh (V2.3.23) + 24h gratuitous
+    // ARP safety-net (V2.4.19) that used to live here as the first
+    // block of this function moved to `periodic.c`. Both run on the
+    // main task too and behaviour is preserved exactly. main.c calls
+    // periodic_loop() immediately before log_ftp_loop() each tick.
     //
-    // Gating: tx_is_idle() makes sure no HTTPS handshake is mid-flight on
-    // the worker (CPU1) — calling psa_crypto_free during one would corrupt
-    // its state. FTPS is structurally safe: this code runs on the main task,
-    // and FTPS upload (do_ftp_upload) also runs on the main task — they
-    // can't overlap because the main task is single-threaded. If the worker
-    // is busy when we'd fire, we just defer to the next tick (1 s) and
-    // eventually hit an idle window between cycles (TX cycle is ~10 s
-    // active out of every 150 s).
-    //
-    // 24h interval is comfortably below any conceivable fragmentation
-    // accumulation rate; if min_free ever shows linear-not-stabilising
-    // drop on overnight soaks, drop to 12 h or add a heap-threshold trigger
-    // alongside this time-based one.
-    {
-        static uint32_t s_last_psa_refresh_ms = 0;
-        const uint32_t  PSA_REFRESH_INTERVAL_MS = 24UL * 60 * 60 * 1000;   // 24h
-        if ((int32_t)(now_ms - s_last_psa_refresh_ms) >= (int32_t)PSA_REFRESH_INTERVAL_MS) {
-            if (tx_is_idle()) {
-                ESP_LOGI(TAG, "PSA crypto subsystem refresh (24h scheduled)");
-                mbedtls_psa_crypto_free();
-                psa_status_t ps = psa_crypto_init();
-                if (ps == PSA_SUCCESS) {
-                    ESP_LOGI(TAG, "psa_crypto_init: ok");
-                    s_consecutive_psa_oom = 0;   // start fresh on the OOM counter too
-                } else {
-                    ESP_LOGE(TAG, "psa_crypto_init failed: %d (PSA in unknown state)",
-                             (int)ps);
-                }
-                s_last_psa_refresh_ms = now_ms;
-            }
-            // else: TX worker busy — try again on next loop tick (1 s).
-            // No timestamp update so we keep retrying until idle.
-        }
-    }
+    // The FTP-failure-driven PSA refresh below (post-upload error
+    // recovery) stays here because it's intrinsically tied to FTP
+    // upload state.
 
     if (!s_cfg || !s_cfg->ftp_enabled) return;
 

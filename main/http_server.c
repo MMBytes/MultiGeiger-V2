@@ -2083,6 +2083,16 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     hc.stack_size  = 8192;               // room for form+base64 on one stack
     hc.max_uri_handlers = 12;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase
     hc.lru_purge_enable = true;
+    // CRITICAL — DO NOT change esp_http_server's threading model without
+    // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
+    // We rely on the IDF default that ONE httpd thread processes all
+    // URI handlers serially via select(). Several handlers (status_get,
+    // config_get, format_system, applog_vprintf) hold large `static`
+    // scratch buffers that are race-free ONLY under that assumption. If
+    // a future IDF release introduces per-connection worker threads — or
+    // we ever set HTTPD_DEFAULT_CONFIG flags that spawn them — every one
+    // of those statics needs to become a mutex-guarded shared buffer or
+    // a per-handler heap alloc. See V2.4.22 CHANGELOG for the audit list.
     // V2.4.13: bump per-recv-call timeout 5 s → 30 s for weak-WiFi OTA
     // resilience. The OTA POST streams ~1.2 MB in ~1200 recv calls; the
     // default 5 s window meant a single TCP gap >5 s killed the entire

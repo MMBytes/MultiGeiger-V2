@@ -29,6 +29,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
 
@@ -55,6 +56,23 @@ static const char *s_prefix   = NULL;      // pointer borrowed from g_cfg
 static volatile bool s_connected = false;
 static volatile uint32_t s_publish_count = 0;
 static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_discovery
+
+// Future-V2.4.23: serialises s_client lifecycle against publish_state.
+//
+// The race: mqtt_publish_state() reads s_client, checks non-NULL + connected,
+// then calls esp_mqtt_client_publish(s_client, ...). If mqtt_stop() runs on
+// another task (httpd, during OTA teardown) between the check and the use,
+// it calls esp_mqtt_client_destroy(s_client) and sets s_client=NULL — the
+// publish then dereferences a destroyed handle (use-after-free). In practice
+// the window is microseconds and the OTA teardown path is rare, so the race
+// has never been observed — but it's not strictly synchronised.
+//
+// Fix: a single mutex serialises {init, stop, publish_state}. Created lazily
+// in mqtt_init() — applog_init runs before mqtt_init in app_main so there's
+// no ordering concern with our other early-boot mutexes. We do NOT take this
+// mutex in mqtt_is_initialized / mqtt_is_connected / mqtt_publish_count
+// because those are single-word reads, torn-tolerant on 32-bit Xtensa.
+static SemaphoreHandle_t s_state_mux = NULL;
 // V2.4.13: sticky "init was called" flag, independent of s_client. Survives
 // the disabled-by-config no-op return so main.c's poll doesn't re-call init.
 // Cleared by mqtt_stop() so the poll re-arms after the OTA teardown.
@@ -127,6 +145,16 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
 // --- Public API -------------------------------------------------------------
 
 void mqtt_init(const config_t *cfg, const char *chip_id) {
+    // Lazy mutex creation. Runs once on first mqtt_init (cold boot)
+    // or after a deliberate mqtt_stop (re-init never destroys the mux).
+    if (!s_state_mux) {
+        s_state_mux = xSemaphoreCreateMutex();
+        if (!s_state_mux) {
+            ESP_LOGE(TAG, "xSemaphoreCreateMutex failed — TOCTOU race not guarded");
+            // Fall through — pre-mux behaviour is what we had before;
+            // failing init entirely would be worse than carrying on.
+        }
+    }
     if (s_client) {
         ESP_LOGW(TAG, "init called twice — ignoring");
         return;
@@ -233,8 +261,12 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     snprintf(client_id, sizeof(client_id), "geiger_%s", s_chip_id);
     mc.credentials.client_id            = client_id;
 
+    // Take the state mux around s_client assignment so a concurrent
+    // publish_state on another task can't read a half-initialised client.
+    if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
     s_client = esp_mqtt_client_init(&mc);
     if (!s_client) {
+        if (s_state_mux) xSemaphoreGive(s_state_mux);
         ESP_LOGE(TAG, "esp_mqtt_client_init failed");
         return;
     }
@@ -245,6 +277,7 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
         ESP_LOGE(TAG, "register_event failed: %s", esp_err_to_name(r));
         esp_mqtt_client_destroy(s_client);
         s_client = NULL;
+        if (s_state_mux) xSemaphoreGive(s_state_mux);
         return;
     }
 
@@ -253,8 +286,10 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
         ESP_LOGE(TAG, "client_start failed: %s", esp_err_to_name(r));
         esp_mqtt_client_destroy(s_client);
         s_client = NULL;
+        if (s_state_mux) xSemaphoreGive(s_state_mux);
         return;
     }
+    if (s_state_mux) xSemaphoreGive(s_state_mux);
 
     ESP_LOGI(TAG, "started — uri=%s tls_mode=%s state=%s avail=%s",
              uri, tls_mode_str, s_topic_state, s_topic_avail);
@@ -279,9 +314,18 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
 void mqtt_publish_state(const main_status_t *st,
                         bool pm_valid, const pm_sample_t *pm,
                         bool noise_valid, const noise_sample_t *noise) {
+    // Hold s_state_mux from the s_client check all the way through the
+    // esp_mqtt_client_publish call. Keeps mqtt_stop() (called by OTA
+    // teardown on the httpd task) from destroying the handle between
+    // our NULL-check and the publish — the original TOCTOU described
+    // in the V2.4.22 audit. esp_mqtt_client_publish is a non-blocking
+    // enqueue per IDF docs (returns immediately, internal task does
+    // the network I/O) so holding a mutex across it is safe.
+    if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
     if (!s_client || !s_connected) {
         ESP_LOGD(TAG, "publish skipped (client=%p connected=%d)",
                  s_client, s_connected);
+        if (s_state_mux) xSemaphoreGive(s_state_mux);
         return;
     }
 
@@ -367,6 +411,7 @@ void mqtt_publish_state(const main_status_t *st,
         s_publish_count++;
         ESP_LOGI(TAG, "publish ok: %d bytes (#%" PRIu32 ")", n, s_publish_count);
     }
+    if (s_state_mux) xSemaphoreGive(s_state_mux);
 }
 
 bool mqtt_is_connected(void) {
@@ -382,6 +427,11 @@ uint32_t mqtt_publish_count(void) {
 // V2 (mbedTLS context + session ticket + read/write bufs); negligible on
 // FeatherS3-D, where heap was never tight to begin with. Idempotent.
 void mqtt_stop(void) {
+    // Take s_state_mux for the entire teardown so a concurrent publish_state
+    // (main task during a TX cycle) finishes its in-flight enqueue before
+    // we destroy the handle. See the s_state_mux declaration above for the
+    // race we're guarding against.
+    if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
     if (!s_client) {
         // Either never started (disabled by config) or already stopped.
         // Reset the sticky flag anyway so main.c's poll will retry init —
@@ -389,6 +439,7 @@ void mqtt_stop(void) {
         s_initialized = false;
         s_connected   = false;
         ESP_LOGI(TAG, "stop: no client to stop (already idle)");
+        if (s_state_mux) xSemaphoreGive(s_state_mux);
         return;
     }
     ESP_LOGI(TAG, "stopping client to free TLS state");
@@ -401,6 +452,7 @@ void mqtt_stop(void) {
     s_connected   = false;
     s_initialized = false;
     ESP_LOGI(TAG, "stop: client destroyed");
+    if (s_state_mux) xSemaphoreGive(s_state_mux);
 }
 
 bool mqtt_is_initialized(void) {

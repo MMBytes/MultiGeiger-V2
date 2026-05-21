@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>   // PRIu64 for the reconnect counters
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -93,7 +94,13 @@ bool main_services_suspended(void) {
 static int64_t  t_attempt_start_us = 0;
 static int64_t  t_sta_connected_us = 0;
 static int64_t  t_last_got_ip_us   = 0;
-static uint32_t n_attempts = 0, n_connects = 0, n_got_ip = 0, n_disconnects = 0;
+// Future-V2.4.23: uint32_t → uint64_t. Was uint32_t which wraps at 4.3 B —
+// theoretically reachable on a node with marginal WiFi over years. Wrap was
+// harmless (display rolls over) but the audit flagged it as "do once". 64 bits
+// gives 584 million years of headroom at 1 ns increments; zero perf cost.
+// `main_status_t.reconnects` stays uint32_t (consumers don't care about
+// post-wrap precision) — truncating cast on assignment.
+static uint64_t n_attempts = 0, n_connects = 0, n_got_ip = 0, n_disconnects = 0;
 static uint32_t last_disconnect_reason = 0;
 static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 
@@ -171,7 +178,7 @@ void main_status_snapshot(main_status_t *out) {
     out->last_cycle_at  = g_last_cycle_at;
     portEXIT_CRITICAL(&g_last_cycle_at_mux);
     out->last_cycle_ms  = g_last_cycle_ms;
-    out->reconnects     = n_disconnects;
+    out->reconnects     = (uint32_t)n_disconnects;   // truncating cast — see counter decl
 }
 
 // V2.3.29: per-target enable accessor used by the multi-page display
@@ -271,7 +278,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_AP);
         } else {
             mark_attempt();
-            ESP_LOGI(TAG, "STA_START, calling connect (attempt #%lu)", (unsigned long)n_attempts);
+            ESP_LOGI(TAG, "STA_START, calling connect (attempt #%" PRIu64 ")", n_attempts);
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_CONNECTING);
             esp_wifi_connect();
         }
@@ -281,8 +288,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         t_sta_connected_us = esp_timer_get_time();
         last_assoc_s = (t_sta_connected_us - t_attempt_start_us) / 1e6f;
         n_connects++;
-        ESP_LOGI(TAG, "STA_CONNECTED #%lu: ch=%d auth=%d bssid=" MACSTR " assoc=%.3fs",
-                 (unsigned long)n_connects, e->channel, e->authmode,
+        ESP_LOGI(TAG, "STA_CONNECTED #%" PRIu64 ": ch=%d auth=%d bssid=" MACSTR " assoc=%.3fs",
+                 n_connects, e->channel, e->authmode,
                  MAC2STR(e->bssid), last_assoc_s);
         break;
     }
@@ -290,8 +297,8 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
         last_disconnect_reason = e->reason;
         n_disconnects++;
-        ESP_LOGW(TAG, "STA_DISCONNECTED #%lu: reason=%d",
-                 (unsigned long)n_disconnects, e->reason);
+        ESP_LOGW(TAG, "STA_DISCONNECTED #%" PRIu64 ": reason=%d",
+                 n_disconnects, e->reason);
         display_set_status(DSP_STATUS_WIFI, DSP_WIFI_ERROR);
         xEventGroupSetBits(s_events, EV_DISCONNECTED);
         break;
@@ -322,9 +329,9 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     esp_netif_dns_info_t d1 = { 0 }, d2 = { 0 };
     esp_netif_get_dns_info(e->esp_netif, ESP_NETIF_DNS_MAIN,   &d1);
     esp_netif_get_dns_info(e->esp_netif, ESP_NETIF_DNS_BACKUP, &d2);
-    ESP_LOGI(TAG, "GOT_IP #%lu: " IPSTR " gw=" IPSTR
+    ESP_LOGI(TAG, "GOT_IP #%" PRIu64 ": " IPSTR " gw=" IPSTR
              " dns=" IPSTR " dns2=" IPSTR " dhcp=%.3fs",
-             (unsigned long)n_got_ip, IP2STR(&e->ip_info.ip),
+             n_got_ip, IP2STR(&e->ip_info.ip),
              IP2STR(&e->ip_info.gw),
              IP2STR(&d1.ip.u_addr.ip4), IP2STR(&d2.ip.u_addr.ip4),
              last_dhcp_s);
@@ -902,7 +909,7 @@ void app_main(void) {
             }
             vTaskDelay(pdMS_TO_TICKS(500));
             mark_attempt();
-            ESP_LOGI(TAG, "retry connect (attempt #%lu)", (unsigned long)n_attempts);
+            ESP_LOGI(TAG, "retry connect (attempt #%" PRIu64 ")", n_attempts);
             esp_wifi_connect();
             continue;
         }

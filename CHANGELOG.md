@@ -15,6 +15,46 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.23
+
+**Audit follow-up release — closes the remaining items flagged in the 2026-05-21 codebase audit.** Five small changes bundled. No partition change. Drop-in OTA from V2.4.22.
+
+### 1. `/update` page shows current firmware version (committed 2026-05-21 ahead of tag)
+
+Adds `**Current firmware:** V2.4.23` under the heading on the OTA upload page so operators can verify before uploading that they aren't OTA-ing the same version onto itself. Compile-time string-literal concatenation with `VERSION_STR` — zero runtime cost, baked into the static page literal.
+
+### 2. MQTT publish-state TOCTOU race fix (`mqtt.c`)
+
+`mqtt_publish_state()` previously did `if (!s_client || !s_connected) return; ... esp_mqtt_client_publish(s_client, ...)`. If `mqtt_stop()` ran on the httpd task (OTA teardown) between the check and the publish, the handle could be destroyed mid-call (use-after-free of the IDF mqtt-client struct). Window was microseconds and never observed in production, but not strictly synchronised.
+
+Fix: new `s_state_mux` FreeRTOS mutex serialises `mqtt_init` / `mqtt_stop` / `mqtt_publish_state`. The mutex is created lazily on first `mqtt_init` and held across the check-and-publish in publish_state, around the destroy in stop, and around the handle assignment in init. `esp_mqtt_client_publish` is a non-blocking enqueue per IDF docs (returns after putting the message on its internal queue), so holding a mutex across it is safe — no risk of starving the IDF event task. Falls back gracefully to pre-fix behaviour if mutex creation fails at boot (logs a warning, doesn't crash).
+
+`mqtt_is_initialized` / `mqtt_is_connected` / `mqtt_publish_count` deliberately stay lock-free — they're single-word reads, torn-tolerant on 32-bit Xtensa.
+
+### 3. Document the single-httpd-task assumption (`http_server.c`)
+
+10-line comment block above the `httpd_config_t` setup spelling out the invariant V2.4.20 + V2.4.22's static buffers depend on: ONE httpd thread processing all URI handlers serially via `select()`. The comment names the affected functions (`status_get`, `config_get`, `format_system`, `applog_vprintf`) and the recovery path (revert the V2.4.22 statics to mutex-guarded shared or per-handler heap allocs) if anyone ever bumps `max_open_sockets` past 1 AND a future IDF release introduces per-connection worker threads. Pure documentation — no runtime change.
+
+### 4. Reconnect counters → `uint64_t` (`main.c`)
+
+`n_attempts`, `n_connects`, `n_got_ip`, `n_disconnects` were `uint32_t` which wraps at 4.3 B. At one reconnect per minute (worst-case marginal-WiFi node) wrap is ~34.5 days; at realistic rates (1/day) it's millions of years. Either way, wrap was harmless (display rolls to 0). Switched to `uint64_t` to eliminate the conceptual wrap entirely — 584 million years of headroom, zero perf cost on 32-bit Xtensa (just two-word stores instead of one). `main_status_t.reconnects` stays `uint32_t` with a truncating cast at assignment time (the status-page consumer doesn't care about post-2^32 precision). `<inttypes.h>` added; four `%lu` + `(unsigned long)` cast sites converted to `%" PRIu64 "`.
+
+### 5. Documented the `log_ftp_note_psa_refreshed()` cross-module coupling pattern (memory only — `reference_periodic_module.md`)
+
+V2.4.19's tiny export pattern works for one caller (periodic.c → log_ftp.c) but does not scale past one. The memory note records the scaling limit (refactor at N=3 callers, lift the OOM counter into a shared `psa_health.{c,h}` module) and the deliberate 2026-05-22 decision to keep the V2.4.19 form for now since there's only one consumer. No code change this release.
+
+### Files touched
+
+- `main/mqtt.c` (+52 LOC: mutex declaration with comment, three take/give pairs across init/stop/publish_state)
+- `main/main.c` (+/- ~17 LOC: counter type change, inttypes include, four format-specifier conversions, truncating cast)
+- `main/http_server.c` (+10 LOC: single-task-assumption comment; +5 LOC from 2026-05-21: /update version display)
+- `main/version.h`: V2.4.22 → V2.4.23
+- `CHANGELOG.md`: this entry
+
+No partition change. No `sdkconfig` change. Drop-in OTA upgrade across all 4 board targets.
+
+---
+
 ## V2.4.22
 
 **Codebase-wide audit of the V2.4.20 stack-overflow class of bug — moves ~7.4 KB of httpd-task stack buffers to BSS.** Same proven pattern (V2.4.16 syslog → V2.4.20 applog → this), expanded to every large stack allocation on the 8 KB httpd task's path.

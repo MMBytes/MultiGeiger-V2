@@ -15,6 +15,68 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.21
+
+**Hotfix for openSenseMap auth-token format.** OSM's ingest endpoint wants the raw token in the `Authorization` header — NOT `Bearer <token>` as V2.3.16 shipped speculatively. Confirmed 2026-05-21 by direct A/B curl against the user's real auth-enabled box: raw token → `HTTP 201 Created`, `Bearer <token>` → `HTTP 401 "Box access token not valid!"`.
+
+### Symptom user reported
+
+User enabled "access token required" on their `Dusty-Feather` box on openSenseMap.org and pasted the 64-char token into `/config` → Save (no restart). Every subsequent OSM upload then failed with:
+
+```
+W (...) HTTP_CLIENT: This request requires authentication, but does not provide header information for that
+E (...) HTTP_CLIENT: Error response
+W (...) tx: openSenseMap perform error: ESP_ERR_NOT_SUPPORTED
+W (...) tx: openSenseMap rc=-1 (retry 1/4)
+```
+
+(Madavi, sensor.community, aqi.eco, FTPS, MQTT — all other targets continued working normally.)
+
+### Why the firmware log message was misleading
+
+The `HTTP_CLIENT: This request requires authentication, but does not provide header information for that` line is **not** "we forgot to send the header" — it's IDF's `esp_http_client.c:1966` auth-retry handler logging: "I got a 401 back and looked for a `WWW-Authenticate` response header so I'd know which scheme to retry with (Basic / Digest), didn't find one, returning `ESP_ERR_NOT_SUPPORTED`". OSM's 401 response is a JSON body (`{"code":"Unauthorized","message":"Box access token not valid!"}`) with no `WWW-Authenticate` header, so IDF's auth-retry logic gives up with that misleading log. The firmware WAS sending the `Bearer <token>` header all along — it just was the wrong format for OSM.
+
+### Diagnosis path
+
+Direct curl against `https://ingress.opensensemap.org/boxes/<BOX_ID>/data?luftdaten=1` with the user's real token, comparing auth header formats:
+
+| `Authorization:` value | Result |
+|---|---|
+| `Bearer <64-hex>` (current firmware format) | 401 + `"Box access token not valid!"` |
+| `<64-hex>` (raw) | 422 → 201 (422 when sensor IDs don't match box's mapping; 201 when they do) |
+| `X-ApiKey: <64-hex>` (alternate header name) | 401 |
+| `?accessToken=<64-hex>` (query param) | 401 |
+
+201 with raw token confirms OSM accepts it; 401 with Bearer confirms OSM rejects it. The 422 vs 401 split is the diagnostic that auth IS validated before body content checks — 422 means "auth OK, body unprocessable".
+
+### What changed
+
+One-character-class change in `main/transmission.c::send_osm()`:
+
+```c
+- if (have_token) snprintf(authz, sizeof(authz), "Bearer %s", c->osm_access_token);
++ if (have_token) snprintf(authz, sizeof(authz), "%s", c->osm_access_token);
+```
+
+Plus a fat WHY comment block above so the next reader doesn't re-add the `Bearer ` prefix thinking it's "standard practice".
+
+### Backward compatibility
+
+- Boxes WITHOUT auth required (every existing deployment until today): user leaves token field empty → `have_token == false` → no `Authorization` header sent at all. Unchanged from V2.4.20.
+- Boxes WITH auth required: user pastes token into `/config` → raw token in `Authorization` header → OSM accepts. Fixed by this release.
+
+No checkbox or extra config field needed. The presence/absence of the token IS the gate.
+
+### Files touched
+
+- `main/transmission.c` (+15 LOC: 1-character format-string change, +13 lines of WHY comment)
+- `main/version.h`: V2.4.20 → V2.4.21
+- `CHANGELOG.md`: this entry
+
+No partition change. No `sdkconfig` change. Drop-in OTA upgrade across all 4 board targets.
+
+---
+
 ## V2.4.20
 
 **Hotfix for V2.4.19 httpd stack overflow on `/config` from an unauth client.** Same class of bug V2.4.16 fixed for `syslog_emit`'s 600 B stack buffer — `applog_vprintf`'s `line[1024]` had been on the stack since the module was written. Moved to BSS (protected by the existing `s_mtx`, taken before the buffer is touched and released after).

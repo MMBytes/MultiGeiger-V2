@@ -870,16 +870,31 @@ static int send_osm(const tx_context_t *c) {
     char body[1600];
     build_luftdaten_body(c, body, sizeof(body), false);
 
-    // V2.3.16: optional Bearer-token auth. The OSM Luftdaten path
-    // historically accepted unauthenticated POSTs; their dashboard now lets
-    // box owners opt-in to require an Authorization header per box. Build a
-    // small client wrapper here so we can attach the header on the per-cycle
-    // client (do_request's fixed signature doesn't take an auth header). When
-    // the token is empty the Authorization header is never sent — keeps
-    // backward compat with unauthenticated boxes.
+    // V2.3.16: optional token auth. The OSM Luftdaten path historically
+    // accepted unauthenticated POSTs; their dashboard now lets box owners
+    // opt-in to require an Authorization header per box. Build a small
+    // client wrapper here so we can attach the header on the per-cycle
+    // client (do_request's fixed signature doesn't take an auth header).
+    // When the token is empty the Authorization header is never sent —
+    // keeps backward compat with unauthenticated boxes.
+    //
+    // V2.4.21: send the token RAW, NOT prefixed with "Bearer ". OSM's
+    // ingest endpoint at https://ingress.opensensemap.org/boxes/.../data
+    // wants the bare token in the Authorization header — `Bearer <token>`
+    // gets 401 "Box access token not valid!". Confirmed 2026-05-21 via
+    // direct curl A/B test against a real auth-enabled box: raw token →
+    // 201 Created, "Bearer <token>" → 401. V2.3.16 added this feature
+    // speculatively with the Bearer prefix and was never tested against
+    // an auth-required box until now. Note: IDF's `esp_http_client` logs
+    // a confusing "This request requires authentication, but does not
+    // provide header information for that" warning on any 401 that lacks
+    // a `WWW-Authenticate` response header — that's an IDF auth-retry
+    // handler quirk (`esp_http_client.c:1966`), not "we forgot to send
+    // the header". OSM was receiving our header all along; it just had
+    // the wrong format.
     bool have_token = c->osm_access_token && c->osm_access_token[0];
     char authz[80];
-    if (have_token) snprintf(authz, sizeof(authz), "Bearer %s", c->osm_access_token);
+    if (have_token) snprintf(authz, sizeof(authz), "%s", c->osm_access_token);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;

@@ -89,3 +89,32 @@ void main_suspend_services(void);
 
 /** @brief Read the V2.4.17 services-suspended flag. */
 bool main_services_suspended(void);
+
+/** @brief V2.4.24: mark the start of an OTA receive-and-write window.
+ *
+ *  Called by `/update`'s POST handler immediately after auth/CSRF pass,
+ *  cleared by `main_ota_end()` before returning. While the flag is set,
+ *  the main loop's scheduled TX cycle is skipped — frees the WiFi link
+ *  for the OTA upload, which is otherwise sharing airtime with
+ *  Madavi / sensor.community / Radmon HTTPS POSTs every 2 minutes.
+ *
+ *  Unlike `main_suspend_services` this flag is NOT sticky — it's
+ *  explicitly cleared on every return path of update_post (success and
+ *  failure). A failed OTA leaves the sensor functional; TX resumes
+ *  immediately on the next main-loop tick after the OTA gives up.
+ *
+ *  Discovered as a cause of slow / failing OTAs on marginal WiFi after
+ *  the 2026-05-22 failed-update log review on a V2.4.22 FeatherS3-D —
+ *  CYCLE #220 + #221 (and their Madavi/SC/Radmon TLS handshakes) both
+ *  fired during the OTA recv-retry window. Not the root cause of that
+ *  particular failure (client-side WiFi flake was), but strict
+ *  improvement for every OTA on every device.
+ */
+void main_ota_begin(void);
+
+/** @brief Pair with `main_ota_begin()` — clears the OTA-in-progress flag.
+ *  Call before every return path in the OTA POST handler. */
+void main_ota_end(void);
+
+/** @brief Read the V2.4.24 OTA-in-progress flag. */
+bool main_ota_in_progress(void);

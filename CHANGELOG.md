@@ -15,6 +15,50 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.24
+
+**OTA receives a clear WiFi link.** Scheduled TX cycles (Madavi / sensor.community / Radmon HTTPS POSTs every 2 minutes) now skip while an OTA upload is in progress. The OTA gets the full WiFi airtime to itself instead of competing with three TLS handshakes per cycle. Non-sticky — TX resumes immediately on the next main-loop tick after OTA completes or aborts.
+
+### Motivation
+
+2026-05-22 log review of a failed V2.4.22 → V2.4.23 OTA on a FeatherS3-D revealed two scheduled TX cycles (CYCLE #220, #221) firing during the OTA's recv-retry window. The actual root cause of that particular failure was client-side WiFi flakiness (browser stalled after sending 1 MSS), not airtime competition — but the TX cycles eating ~10 s of airtime + 3 TLS handshakes every 2 minutes during a sensitive upload was a real latent issue. Strict improvement on every OTA on every board, particularly on marginal WiFi.
+
+The V2.4.13 teardown already drains the in-flight TX worker before starting the OTA recv loop, but does nothing about NEW cycles that fire during the upload. V2.4.24 closes that gap.
+
+### What changed
+
+New non-sticky flag pair in `main.c`:
+
+```c
+void main_ota_begin(void);    // set
+void main_ota_end(void);      // clear
+bool main_ota_in_progress(void);
+```
+
+(Declared in `main_status.h` alongside the existing `main_services_suspended` pattern. Deliberately a separate flag — `main_services_suspended` is sticky-until-reboot because MQTT/syslog re-init mid-OTA would defeat the heap-teardown intent; TX cycle skipping wants the opposite semantics, resuming immediately after a failed OTA so the sensor's primary purpose isn't tank by a single bad upload.)
+
+Wired in:
+
+- `http_server.c::update_post` split into a thin wrapper + `update_post_inner`. The wrapper does auth + CSRF + `main_ota_begin()` + calls inner + `main_ota_end()` + returns. This avoids touching every one of update_post's ~17 internal return paths.
+- `main.c` main loop's TX-cycle scheduler now wraps `do_tx_cycle()` in `if (!main_ota_in_progress())`. Deliberately does NOT advance `next_tx` when skipped — the deferred cycle fires immediately on resume rather than waiting another `tx_interval`.
+
+### Why this was discussed but not bundled
+
+- **Surface OTA progress on `/status`** — considered, REJECTED. `esp_http_server` is single-threaded, so a concurrent GET / from a monitoring client would sit in the accept queue unread until OTA completes. Worse: if we worked around the threading constraint, the polling itself would consume the airtime the OTA needs. Browser-side `<progress>` element (already wired in `/update` page) is the right monitoring story.
+- **Hard total OTA timeout** — defensive but adds another knob. Current per-recv 5×30s timeout already bounds individual stalls. Leaving the wall-clock total open lets a genuinely slow upload over a weak link still succeed if it makes steady progress.
+
+### Files touched
+
+- `main/main.c` (+22 LOC): flag + 3 trivial accessors + 5-LOC gate in TX scheduler with explanatory comment
+- `main/main_status.h` (+27 LOC): 3 function decls with WHY doc
+- `main/http_server.c` (+13 LOC): wrapper + forward decl + rename of body to update_post_inner
+- `main/version.h`: V2.4.23 → V2.4.24
+- `CHANGELOG.md`: this entry
+
+No partition change. No `sdkconfig` change. Drop-in OTA upgrade across all 4 board targets.
+
+---
+
 ## V2.4.23
 
 **Audit follow-up release — closes the remaining items flagged in the 2026-05-21 codebase audit.** Five small changes bundled. No partition change. Drop-in OTA from V2.4.22.

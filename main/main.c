@@ -90,6 +90,24 @@ bool main_services_suspended(void) {
     return g_services_suspended;
 }
 
+// V2.4.24: OTA-in-progress flag. Non-sticky (unlike g_services_suspended).
+// Set on entry to update_post, cleared on every return path. Read by the
+// main loop's TX-cycle scheduler to skip do_tx_cycle while an OTA upload
+// is consuming the WiFi link.
+static volatile bool g_ota_in_progress = false;
+
+void main_ota_begin(void) {
+    g_ota_in_progress = true;
+}
+
+void main_ota_end(void) {
+    g_ota_in_progress = false;
+}
+
+bool main_ota_in_progress(void) {
+    return g_ota_in_progress;
+}
+
 // --- Soak diagnostics (carried over) ---
 static int64_t  t_attempt_start_us = 0;
 static int64_t  t_sta_connected_us = 0;
@@ -1015,8 +1033,18 @@ void app_main(void) {
                 defer_logged = true;
             }
         } else if (xTaskGetTickCount() >= next_tx) {
-            do_tx_cycle();
-            next_tx = xTaskGetTickCount() + tx_interval;
+            // V2.4.24: skip the scheduled TX cycle while an OTA upload is
+            // in progress — frees WiFi airtime for the OTA POST instead
+            // of competing with it via three TLS handshakes to Madavi /
+            // sensor.community / Radmon. Non-sticky: as soon as
+            // update_post returns (success or failure), the next main
+            // tick fires the deferred TX cycle. We deliberately do NOT
+            // advance next_tx in the skip case so the cycle fires
+            // immediately on resume rather than after a fresh tx_interval.
+            if (!main_ota_in_progress()) {
+                do_tx_cycle();
+                next_tx = xTaskGetTickCount() + tx_interval;
+            }
         }
 
         {

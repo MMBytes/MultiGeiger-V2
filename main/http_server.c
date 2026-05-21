@@ -1740,11 +1740,26 @@ static esp_err_t update_get(httpd_req_t *req) {
 
 #define OTA_CHUNK 1024
 
+// V2.4.24: split the auth + flag-management front-end into a thin wrapper
+// so the ~250-line body doesn't have to set/clear main_ota_in_progress
+// at every one of its ~17 return paths. The wrapper sets the flag once
+// after auth/CSRF pass, calls the inner function, and clears the flag
+// before returning regardless of inner's outcome. See main_status.h
+// main_ota_begin() doc for the WHY (gates the main loop's TX-cycle
+// scheduler so OTA gets the WiFi airtime to itself).
+static esp_err_t update_post_inner(httpd_req_t *req);
+
 static esp_err_t update_post(httpd_req_t *req) {
     log_access(req, "POST /update");
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
+    main_ota_begin();
+    esp_err_t result = update_post_inner(req);
+    main_ota_end();
+    return result;
+}
 
+static esp_err_t update_post_inner(httpd_req_t *req) {
     // V2.4.13: reclaim heap BEFORE the OTA receive/write loop. Heltec V2
     // (4MB) with V2.4.11+ ran at min_free ~13 KB at steady state (MQTT TLS
     // session + esp_crt_bundle + WiFi stack); not enough headroom for

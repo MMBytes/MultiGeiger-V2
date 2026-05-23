@@ -30,7 +30,7 @@ Accumulating for the next tag. Bump + ship when ready.
 
 3. **IDF v6.0 kconfig drift cleanup**:
    - `CONFIG_SPIRAM_MODE_OCTAL` (v5.x name) → `CONFIG_SPIRAM_MODE_OCT` (v6.0 name) in the XIAO overlay. The old name was silently ignored, so the XIAO was actually falling back to QUAD mode — would have crashed at bootloader-level PSRAM init on real hardware.
-   - Removed `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF/_BIN` and `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32/_SHA256` from the base `sdkconfig.defaults` — these symbols were removed in IDF v6.0 (ELF + CRC32 are now implicit and the only options). Pure noise cleanup that had been there since the v5→v6 migration.
+   - Removed `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF/_BIN` and `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32/_SHA256` from the base `sdkconfig.defaults`. Honest history: these were added in **V2.4.18** (the coredump feature commit), not pre-v5→v6 leftovers — I copy-pasted them from v5.x reference docs without realising v6.0 had removed them. In v6.0 the four symbols have no `config` declaration anywhere in IDF (verified against `components/espcoredump/Kconfig`); they're only referenced via `select`/`if` inside `ESP_COREDUMP_ENABLE`, which unconditionally selects ELF + SHA256. The `core_dump_sha.c` source file is the only checksum implementation present in v6.0 — `core_dump_crc.c` and `core_dump_bin.c` were removed by Espressif. So V2.4.18–V2.4.24 were **always running on SHA256+ELF** despite the sdkconfig saying CRC32; the four lines have been generating "unknown kconfig symbol" warnings on every build for 7 releases. Pure noise cleanup, no functional change in V2.4.25.
 
 ### Migration note for QT Py PICO users with existing hardware
 

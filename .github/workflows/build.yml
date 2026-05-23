@@ -168,6 +168,7 @@ jobs:
           - heltec_v2_4mb
           - feathers3_d
           - adafruit_qtpy_esp32_pico
+          - seeed_xiao_esp32s3
 
     steps:
       - name: Checkout
@@ -179,7 +180,8 @@ jobs:
           esp_idf_version: v6.0
           # Determine target chip from BOARD (mirrors CMakeLists.txt's
           # IDF_TARGET selection — kept in sync manually).
-          target: ${{ startsWith(matrix.board, 'heltec_v2') && 'esp32' || (matrix.board == 'feathers3_d' && 'esp32s3' || 'esp32') }}
+          # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.
+          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
           path: '.'
           # idf.py invocation — same form as local _build.cmd. Build dir
           # is per-board so multiple jobs on the same runner (if matrix

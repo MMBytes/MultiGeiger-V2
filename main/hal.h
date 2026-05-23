@@ -289,6 +289,74 @@
     //   IO12  MTDI strap (DANGEROUS — pulling HIGH at boot bricks flash boot until power-cycle)
     //   IO15  MTDO strap (silences boot log if LOW at boot — annoying but recoverable)
 
+#elif defined(BOARD_SEEED_XIAO_ESP32S3)
+
+    // Seeed Studio XIAO ESP32-S3 (SKU 113991054). ESP32-S3 LX7 dual-core with
+    // 8 MB QSPI flash + 8 MB OPI (octal-mode) PSRAM. Tiny 21×17.5 mm form
+    // factor, USB-C native, 11 castellated GPIO pads + Type-C, no onboard
+    // sensors / display / NeoPixel.
+    //
+    // INTENDED USE: I²C-only sensor host. This board is NOT wired for a
+    // Geiger tube — the Geiger pin macros below point at the first three
+    // broken-out pads (D0/D1/D2) only because the HAL contract requires
+    // them; leaving the corresponding signals unconnected is fine. The
+    // firmware boots, joins WiFi, probes the I²C bus on D4/D5 for any
+    // env / PM / noise / display sensor, and reports CPM=0 / no HV pulses
+    // throughout. Disable the Geiger upload targets in /config to avoid
+    // posting CPM=0 readings to public servers.
+    //
+    // GPIO numbers verified against the official Seeed wiki:
+    //   https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
+    #define BOARD_NAME              "seeed_xiao_esp32s3"
+    #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
+    #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
+    #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
+    #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
+    #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on standard XIAO ESP32-S3)
+    #define HAL_HAS_SPEAKER         0   // Not used — I²C-only sensor host context
+    #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
+    #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
+    #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
+    // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
+    // FeatherS3-D / QT Py since the PSRAM cost is negligible.
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    // V2.4.6: 32 KB /config form render buffer — PSRAM-backed board.
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
+
+    // Geiger pins — PLACEHOLDER. The XIAO ESP32-S3 in this context is an
+    // I²C sensor host; nothing is wired to these pads. The macros must
+    // resolve for the build to succeed, so they point at the first three
+    // free GPIOs (D0/D1/D2 = ADC1-capable, interrupt-capable, non-strap).
+    //
+    // Position    XIAO pad    GPIO    Notes
+    // --------    --------    ----    -----------------------------------
+    // (cap-full)  D0          1       ADC1_CH0, TOUCH1
+    // (pulse-in)  D1          2       ADC1_CH1, TOUCH2
+    // (HV gate)   D2          3       ADC1_CH2, TOUCH3
+    #define PIN_HV_CAP_FULL_INPUT    1
+    #define PIN_GMC_COUNT_INPUT      2
+    #define PIN_HV_FET_OUTPUT        3
+
+    // No piezo, no user LED, no NeoPixel — all stubs above.
+    // PIN_SPEAKER_P / PIN_SPEAKER_N / PIN_LED_BUILTIN intentionally undefined.
+
+    // I²C bus — default XIAO pinout: D4 = SDA = GPIO5, D5 = SCL = GPIO6.
+    // External sensor breakouts (env / PM / noise / display) attach here via
+    // the 4-pin header (3V3 / GND / SDA / SCL) or jumper wires. The XIAO has
+    // no STEMMA QT / Qwiic connector — wire your own.
+    #define PIN_I2C_SDA              5
+    #define PIN_I2C_SCL              6
+
+    // RESERVED / strap pins — never repurpose:
+    //   GPIO0   BOOT button (strap)
+    //   GPIO45  flash voltage select (strap)
+    //   GPIO46  boot mode (strap)
+    //   GPIO19/20  native USB D-/D+ (USB-Serial-JTAG)
+    //   GPIO26-32, 33-37  internal flash / PSRAM (not broken out)
+    //   GPIO43/44  default UART0 TX/RX (D6/D7 on header — re-purposable
+    //              post-boot but UART0 console is disabled in our sdkconfig
+    //              in favour of USB-Serial-JTAG, so they're free)
+
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 via CMake."
 #endif

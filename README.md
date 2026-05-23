@@ -23,7 +23,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 
 ## Supported hardware
 
-### Boards (four build targets)
+### Boards (five build targets)
 
 | Build target | MCU / module | Flash | Notes |
 |---|---|---|---|
@@ -31,8 +31,9 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 | `heltec_v2_4mb` | Heltec WiFi Kit 32 V2 clone | 4 MB | Same module silicon, smaller flash. Tight on heap during OTA — see V2.4.13 teardown logic in `main.c`. |
 | `feathers3_d` | Unexpected Maker FeatherS3 with display (ESP32-S3) | 8 MB | Two STEMMA QT connectors (STEMMA1 on IO8/IO9, STEMMA2 LDO-gated on IO15/IO16). External I²C OLED via STEMMA. |
 | `adafruit_qtpy_esp32_pico` | Adafruit QT Py ESP32-PICO | 8 MB | Compact form factor. Optional NeoPixel tick on pulse. |
+| `seeed_xiao_esp32s3` | Seeed Studio XIAO ESP32-S3 | 8 MB | Tiny 21×17.5 mm I²C-only sensor host — Geiger tube not wired. Disable Geiger upload targets in `/config` to avoid posting CPM=0 readings. |
 
-Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All four boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map.
+Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map.
 
 ### Geiger tube
 

@@ -1,0 +1,35 @@
+# ============================================================================
+# Seeed Studio XIAO ESP32-S3 overlay — ESP32-S3 LX7 dual-core, 8 MB QSPI
+# flash + 8 MB OPI (octal-mode) PSRAM, native USB-C (no UART bridge).
+#
+# Used as an I²C-only sensor host — Geiger hardware not wired. Pin map and
+# feature flags live in main/hal.h under BOARD_SEEED_XIAO_ESP32S3.
+#
+# Critical difference from FeatherS3-D overlay: PSRAM is OCTAL mode
+# (CONFIG_SPIRAM_MODE_OCTAL=y) — FeatherS3-D uses CONFIG_SPIRAM_MODE_QUAD=y.
+# Using the wrong mode on either board crashes during PSRAM init at boot.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 8 MB flash. Standard partitions.csv (factory + ota_0 + ota_1, 2 MB each)
+# fits trivially.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# OPI PSRAM at 80 MHz. Per the XIAO ESP32-S3 datasheet, the in-package
+# 8 MB PSRAM uses octal interface (not quad like FeatherS3-D). The other
+# SPIRAM_* knobs mirror the FeatherS3-D overlay — same heap-spill policy.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCTAL=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=40960
+
+# Console / flashing path: USB-Serial-JTAG (S3 built-in, no TinyUSB needed).
+# `printf` and `ESP_LOGx` go to USB-C; `idf.py flash` uses the same port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# UART0 (GPIO43/44 = D6/D7 on header) left disabled as a console — keeps
+# those pads available for user expansion (UART devices, GPIO, etc.).

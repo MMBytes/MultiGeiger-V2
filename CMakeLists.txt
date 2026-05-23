@@ -4,9 +4,11 @@ cmake_minimum_required(VERSION 3.16)
 # Board selector — one codebase, multiple binaries.
 #
 # Pick a board by passing -DBOARD=<name> to idf.py:
-#     idf.py -DBOARD=heltec_v2      build   (genuine Heltec WiFi Kit 32 V2, 8 MB)
-#     idf.py -DBOARD=heltec_v2_4mb  build   (knock-off variant with 4 MB flash)
-#     idf.py -DBOARD=feathers3_d    build   (UM FeatherS3-D, ESP32-S3 + PSRAM)
+#     idf.py -DBOARD=heltec_v2             build   (genuine Heltec WiFi Kit 32 V2, 8 MB)
+#     idf.py -DBOARD=heltec_v2_4mb         build   (knock-off variant with 4 MB flash)
+#     idf.py -DBOARD=feathers3_d           build   (UM FeatherS3-D, ESP32-S3 + 8 MB QSPI PSRAM)
+#     idf.py -DBOARD=adafruit_qtpy_esp32_pico  build (ESP32-PICO SiP, 2 MB QSPI PSRAM)
+#     idf.py -DBOARD=seeed_xiao_esp32s3    build   (Seeed XIAO ESP32-S3, 8 MB OPI PSRAM — I²C sensor host)
 #
 # Each board pins its own IDF chip target and pulls a board-specific
 # sdkconfig.defaults overlay on top of the shared base.
@@ -14,7 +16,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -39,8 +41,16 @@ elseif(BOARD STREQUAL "adafruit_qtpy_esp32_pico")
     set(IDF_TARGET "esp32" CACHE STRING "")
     add_compile_definitions(BOARD_ADAFRUIT_QTPY_ESP32_PICO=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.adafruit_qtpy_esp32_pico")
+elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
+    # Seeed Studio XIAO ESP32-S3 (SKU 113991054). ESP32-S3 LX7 dual-core, 8 MB
+    # QSPI flash + 8 MB OPI (octal-mode) PSRAM, native USB-C. Intended as an
+    # I²C-only sensor host — Geiger tube not wired. See hal.h block under
+    # BOARD_SEEED_XIAO_ESP32S3 for pin map and the "intended use" rationale.
+    set(IDF_TARGET "esp32s3" CACHE STRING "")
+    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.seeed_xiao_esp32s3")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

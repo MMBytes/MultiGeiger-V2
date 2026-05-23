@@ -118,6 +118,7 @@ jobs:
           - heltec_v2_4mb
           - feathers3_d
           - adafruit_qtpy_esp32_pico
+          - seeed_xiao_esp32s3
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -130,10 +131,9 @@ jobs:
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v6.0
-          # Mirrors CMakeLists.txt's IDF_TARGET selection. Heltec V2 +
-          # heltec_v2_4mb + QT Py PICO are all original ESP32; FeatherS3-D
-          # is ESP32-S3.
-          target: ${{ startsWith(matrix.board, 'heltec_v2') && 'esp32' || (matrix.board == 'feathers3_d' && 'esp32s3' || 'esp32') }}
+          # Mirrors CMakeLists.txt's IDF_TARGET selection.
+          # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.
+          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
           path: '.'
           # Two-step: build, then merge-bin with the same -o filename the
           # local _merge.cmd uses so paths are predictable across local

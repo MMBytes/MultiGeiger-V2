@@ -208,7 +208,33 @@ partitions.csv              factory + dual-OTA (2 MB each) + coredump (64 KB) on
 partitions_4mb.csv          tighter layout for heltec_v2_4mb
 sdkconfig.defaults.<board>  per-board IDF configuration
 CHANGELOG.md                per-release WHAT/WHY notes
+
+Hardware/                   PCB design files (KiCad)
+  Revision_B/               current production PCB
+    geiger.kicad_pro / .kicad_pcb / .kicad_sch
+                            KiCad 8 project sources
+    0_Custom_Library.pretty / geiger.pretty
+                            custom symbol + footprint libraries
+    3d-Files/               3D STEP models for non-trivial parts
+    Deliverables/
+      Gerber Files/         fab-ready Gerbers
+      Pick And Place Files/ assembly CSVs
+      BOM/                  bill of materials
+      Schematic/            schematic PDF
+      Renderings/           3D rendered previews
+      Supporting Files/     STEP export
 ```
+
+## PCB design files
+
+The current production PCB (Revision B) is included in the [`Hardware/Revision_B/`](Hardware/Revision_B/) directory as a complete KiCad 8 project, plus fabrication-ready Gerbers, pick-and-place CSVs, schematic PDF, BOM, and 3D STEP exports under `Deliverables/`.
+
+- **Browse the schematic**: [`Hardware/Revision_B/Deliverables/Schematic/geiger.pdf`](Hardware/Revision_B/Deliverables/Schematic/geiger.pdf)
+- **3D renderings**: [`Hardware/Revision_B/Deliverables/Renderings/`](Hardware/Revision_B/Deliverables/Renderings/)
+- **Re-fabricate at JLCPCB or similar**: upload the Gerbers + PnP CSV from `Deliverables/` directly, or open the `.kicad_pro` to regenerate
+- **License**: same GPL-3.0-or-later as the firmware
+
+The PCB hosts a FeatherS3-D module. Si22G tube; full BOM uses metal-film resistors and polypropylene HV capacitors throughout — see the BOM CSV and schematic for the parts list.
 
 ## Documentation
 

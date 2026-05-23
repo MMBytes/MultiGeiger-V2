@@ -1,5 +1,5 @@
-# Release workflow — fire on tag push, build all 4 boards, create the
-# GitHub Release with all 20 artefacts attached.
+# Release workflow — fire on tag push, build all 5 boards, create the
+# GitHub Release with all 25 artefacts attached.
 #
 # Trigger:
 #   git tag V2.4.2 && git push --tags
@@ -7,12 +7,12 @@
 #   Actions tab → "release" → "Run workflow" → enter the existing tag
 #
 # What happens:
-#   1. build matrix (4 boards in parallel via espressif/esp-idf-ci-action)
+#   1. build matrix (5 boards in parallel via espressif/esp-idf-ci-action)
 #      compiles + runs `idf.py merge-bin` + stages the 5 board-suffixed
 #      artefacts (geiger_v2_<board>.bin, geiger_v2_merged_<board>.bin,
 #      bootloader_<board>.bin, partition-table_<board>.bin,
 #      ota_data_initial_<board>.bin) per the V2.2.0+ convention.
-#   2. release job downloads all 20 artefacts, extracts the matching
+#   2. release job downloads all 25 artefacts, extracts the matching
 #      section from CHANGELOG.md for the tag, creates the GitHub Release.
 #
 # Pre-flight check: don't push the tag until `build.yml` is green on the
@@ -20,8 +20,9 @@
 # tag exists with no release — recoverable by deleting the tag, fixing,
 # re-pushing.
 #
-# Replaces the previous manual ceremony (4 local `_build.cmd` invocations
-# + 4 `_merge.cmd` + 20-file `gh release create`). Added post-V2.4.1.
+# Replaces the previous manual ceremony (per-board `_build.cmd`
+# invocations + `_merge.cmd` + N-file `gh release create`). Added
+# post-V2.4.1.
 
 name: release
 
@@ -221,16 +222,22 @@ jobs:
           # All 4 jobs' stages collapse into one flat artefacts/ dir.
           merge-multiple: true
 
-      - name: Verify 20 artefacts present
+      - name: Verify all artefacts present
         run: |
           set -e
+          # KEEP IN SYNC with the build matrix at the top of this file.
+          # Each board contributes exactly 5 .bin files: geiger_v2, _merged,
+          # bootloader, partition-table, ota_data_initial. When adding or
+          # removing a board, update EXPECTED_BOARDS below to match.
+          EXPECTED_BOARDS=5
+          EXPECTED=$(( EXPECTED_BOARDS * 5 ))
           COUNT=$(find artefacts -maxdepth 1 -type f -name '*.bin' | wc -l)
-          if [ "$COUNT" != "20" ]; then
-            echo "::error::expected 20 .bin artefacts, found $COUNT"
+          if [ "$COUNT" != "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED .bin artefacts ($EXPECTED_BOARDS boards × 5 per board), found $COUNT — update EXPECTED_BOARDS in release.yml if the matrix changed"
             ls -la artefacts/
             exit 1
           fi
-          echo "::notice::20 artefacts staged"
+          echo "::notice::$EXPECTED artefacts staged"
           ls -la artefacts/
 
       - name: Extract release notes from CHANGELOG.md

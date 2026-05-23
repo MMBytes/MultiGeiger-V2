@@ -1,0 +1,5 @@
+# KiCad regenerable / auto-saved files
+**/fp-info-cache
+**/*.bak
+**/*-backups/
+**/*.kicad_prl

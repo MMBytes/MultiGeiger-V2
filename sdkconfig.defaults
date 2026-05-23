@@ -155,9 +155,10 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # CONFIG_ESP_COREDUMP_ENABLE_TO_NONE is not set
 CONFIG_ESP_COREDUMP_ENABLE=y
 CONFIG_ESP_COREDUMP_LOGS=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
-# CONFIG_ESP_COREDUMP_DATA_FORMAT_BIN is not set
-CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
-# CONFIG_ESP_COREDUMP_CHECKSUM_SHA256 is not set
+# V6.0 migration note: CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF / _BIN and
+# CONFIG_ESP_COREDUMP_CHECKSUM_CRC32 / _SHA256 were removed in IDF v6.0.
+# ELF format + CRC32 checksum are now the implicit (and only) options.
+# Setting the old symbols printed "unknown kconfig symbol" warnings on
+# every build; removing them is the right cleanup.
 CONFIG_ESP_COREDUMP_CHECK_BOOT=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64

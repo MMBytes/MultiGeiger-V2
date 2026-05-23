@@ -6,8 +6,10 @@
 # feature flags live in main/hal.h under BOARD_SEEED_XIAO_ESP32S3.
 #
 # Critical difference from FeatherS3-D overlay: PSRAM is OCTAL mode
-# (CONFIG_SPIRAM_MODE_OCTAL=y) — FeatherS3-D uses CONFIG_SPIRAM_MODE_QUAD=y.
+# (CONFIG_SPIRAM_MODE_OCT=y) — FeatherS3-D uses CONFIG_SPIRAM_MODE_QUAD=y.
 # Using the wrong mode on either board crashes during PSRAM init at boot.
+# NOTE: the symbol name changed in IDF v6.0 — it was SPIRAM_MODE_OCTAL in
+# v5.x, now SPIRAM_MODE_OCT. v5-era assignments are silently dropped.
 # ============================================================================
 
 CONFIG_IDF_TARGET="esp32s3"
@@ -21,7 +23,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 # 8 MB PSRAM uses octal interface (not quad like FeatherS3-D). The other
 # SPIRAM_* knobs mirror the FeatherS3-D overlay — same heap-spill policy.
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCTAL=y
+CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384

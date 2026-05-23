@@ -213,11 +213,16 @@
     //
     // Pin budget: too tight to keep the speaker (only 4 of A0..A5 exist on
     // the QT Py form factor, A3 is a strapping pin we'd rather avoid for
-    // outputs). HAL_HAS_SPEAKER=0 stubs speaker.c entirely. Geiger uses A0/
-    // A1/A2 only; env sensor plugs into the STEMMA QT connector (no pad
-    // cost — uses the secondary I²C bus IO22/IO19 routed to the connector).
-    // Visible feedback comes from the onboard NeoPixel via neopixel.c
-    // (HAL_HAS_NEOPIXEL=1) flashing red on each Geiger pulse.
+    // outputs). HAL_HAS_SPEAKER=0 stubs speaker.c entirely. Geiger uses A0
+    // / A1 / SCK — V2.4.25 moved HV_FET off A2 onto SCK to enable a single
+    // shared PCB design that hosts EITHER this board OR the Seeed XIAO
+    // ESP32-S3. A2 strap-clashes on the XIAO (GPIO 3 = USB-Serial-JTAG
+    // selector); SCK is strap-free on both boards. See the BOARD_SEEED_
+    // XIAO_ESP32S3 block below for the matching XIAO pin map. Env sensor
+    // plugs into the STEMMA QT connector (no pad cost — uses the secondary
+    // I²C bus IO22/IO19 routed to the connector). Visible feedback comes
+    // from the onboard NeoPixel via neopixel.c (HAL_HAS_NEOPIXEL=1)
+    // flashing red on each Geiger pulse.
     //
     // GPIO numbers verified against
     // github.com/espressif/arduino-esp32 variants/adafruit_qtpy_esp32/pins_arduino.h
@@ -248,19 +253,22 @@
     // generous bump as FeatherS3-D.
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
-    // Geiger / HV pins — wired to QT Py A0/A1/A2 castellated pads. Same
-    // function-per-position as feathers3_d so a wiring harness designed for
-    // the Feather form factor can drop onto the QT Py by re-mapping only the
-    // GPIO numbers (positions A3/A4/A5 don't exist on this small board).
+    // Geiger / HV pins — wired to QT Py A0 / A1 / SCK castellated pads.
+    // V2.4.25 moved HV_FET from A2 to SCK so this PCB design ALSO drops
+    // onto the Seeed XIAO ESP32-S3 (same form factor; A0/A1/SCK are the
+    // only three pads strap-free on BOTH boards). HV_FET on SCK lives on
+    // the opposite long edge of the board from the sensitive GMC_COUNT
+    // input — physical separation reduces switching-noise coupling into
+    // the pulse pickup. A2 + A3 are now free for future analog use.
     //
     // Position    QT Py ESP32-PICO    Notes
     // --------    ----------------    ------------------------------------
-    // A0          GPIO 26             RTC, DAC2, ADC2 — robust output
+    // A0          GPIO 26             RTC, DAC2, ADC2 — interrupt-capable
     // A1          GPIO 25             RTC, DAC1, ADC2 — interrupt-capable
-    // A2          GPIO 27             RTC, ADC2, touch — interrupt-capable
+    // SCK         GPIO 14             ADC2, touch — LEDC PWM capable, non-strap
     #define PIN_HV_CAP_FULL_INPUT   26   // A0  — comparator interrupt (digital)
     #define PIN_GMC_COUNT_INPUT     25   // A1  — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT       27   // A2  — HV MOSFET gate (LEDC PWM via gptimer)
+    #define PIN_HV_FET_OUTPUT       14   // SCK — HV MOSFET gate (LEDC PWM via gptimer)
 
     // No piezo — HAL_HAS_SPEAKER=0 above stubs the entire speaker path.
     // PIN_SPEAKER_P / PIN_SPEAKER_N intentionally undefined.
@@ -293,17 +301,20 @@
 
     // Seeed Studio XIAO ESP32-S3 (SKU 113991054). ESP32-S3 LX7 dual-core with
     // 8 MB QSPI flash + 8 MB OPI (octal-mode) PSRAM. Tiny 21×17.5 mm form
-    // factor, USB-C native, 11 castellated GPIO pads + Type-C, no onboard
-    // sensors / display / NeoPixel.
+    // factor (same as Adafruit QT Py), USB-C native, 11 castellated GPIO
+    // pads + Type-C, no onboard sensors / display / NeoPixel.
     //
-    // INTENDED USE: I²C-only sensor host. This board is NOT wired for a
-    // Geiger tube — the Geiger pin macros below point at the first three
-    // broken-out pads (D0/D1/D2) only because the HAL contract requires
-    // them; leaving the corresponding signals unconnected is fine. The
-    // firmware boots, joins WiFi, probes the I²C bus on D4/D5 for any
-    // env / PM / noise / display sensor, and reports CPM=0 / no HV pulses
+    // V2.4.25: Geiger pins now match QT Py ESP32-PICO so a single shared
+    // PCB design can host EITHER board. The chosen trio (A0 / A1 / SCK)
+    // is the only set of three pads that is strap-free on BOTH boards —
+    // see the BOARD_ADAFRUIT_QTPY_ESP32_PICO block above for the matching
+    // pin map and the strap analysis behind the choice.
+    //
+    // The XIAO is also fine as an I²C-only sensor host (no Geiger tube
+    // wired) — the firmware boots, joins WiFi, probes the I²C bus on
+    // D4/D5 for any env / PM / noise / display sensor, and reports CPM=0
     // throughout. Disable the Geiger upload targets in /config to avoid
-    // posting CPM=0 readings to public servers.
+    // posting CPM=0 readings to public servers in that configuration.
     //
     // GPIO numbers verified against the official Seeed wiki:
     //   https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
@@ -313,7 +324,7 @@
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on standard XIAO ESP32-S3)
-    #define HAL_HAS_SPEAKER         0   // Not used — I²C-only sensor host context
+    #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
@@ -323,19 +334,23 @@
     // V2.4.6: 32 KB /config form render buffer — PSRAM-backed board.
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
-    // Geiger pins — PLACEHOLDER. The XIAO ESP32-S3 in this context is an
-    // I²C sensor host; nothing is wired to these pads. The macros must
-    // resolve for the build to succeed, so they point at the first three
-    // free GPIOs (D0/D1/D2 = ADC1-capable, interrupt-capable, non-strap).
+    // Geiger / HV pins — wired to XIAO D0 / D1 / D8 castellated pads, which
+    // physically align with A0 / A1 / SCK on the QT Py PICO footprint.
+    // V2.4.25 chose this trio specifically because:
+    //   * D0 (GPIO 1) and D1 (GPIO 2) are strap-free on the S3 (avoids the
+    //     GPIO 3 USB-Serial-JTAG selector that lurks under D2)
+    //   * D8 (GPIO 7) is also strap-free AND lives on the opposite long
+    //     edge from D0/D1 — physical separation from the switching HV_FET
+    //     output keeps GMC pulse pickup quieter
     //
     // Position    XIAO pad    GPIO    Notes
     // --------    --------    ----    -----------------------------------
-    // (cap-full)  D0          1       ADC1_CH0, TOUCH1
-    // (pulse-in)  D1          2       ADC1_CH1, TOUCH2
-    // (HV gate)   D2          3       ADC1_CH2, TOUCH3
-    #define PIN_HV_CAP_FULL_INPUT    1
-    #define PIN_GMC_COUNT_INPUT      2
-    #define PIN_HV_FET_OUTPUT        3
+    // A0          D0          1       ADC1_CH0, TOUCH1, interrupt-capable
+    // A1          D1          2       ADC1_CH1, TOUCH2, interrupt-capable
+    // SCK         D8          7       ADC1_CH6, TOUCH7, LEDC PWM-capable
+    #define PIN_HV_CAP_FULL_INPUT    1   // D0  ≡ A0 — comparator interrupt
+    #define PIN_GMC_COUNT_INPUT      2   // D1  ≡ A1 — Geiger pulse interrupt
+    #define PIN_HV_FET_OUTPUT        7   // D8  ≡ SCK — HV MOSFET gate (LEDC PWM)
 
     // No piezo, no user LED, no NeoPixel — all stubs above.
     // PIN_SPEAKER_P / PIN_SPEAKER_N / PIN_LED_BUILTIN intentionally undefined.

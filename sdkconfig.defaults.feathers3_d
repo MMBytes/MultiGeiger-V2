@@ -10,8 +10,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 # QSPI PSRAM at 80 MHz. Quad mode per the product page; flip to
-# CONFIG_SPIRAM_MODE_OCTAL=y if a future revision uses octal-mode silicon.
-# Verified once chip-info boot line reports the package on first boot.
+# CONFIG_SPIRAM_MODE_OCT=y if a future revision uses octal-mode silicon
+# (the XIAO ESP32-S3 overlay does exactly this — same chip, different
+# PSRAM interface). Verified once chip-info boot line reports the package.
+# NOTE: IDF v6.0 renamed this symbol from SPIRAM_MODE_OCTAL → MODE_OCT.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_QUAD=y
 CONFIG_SPIRAM_SPEED_80M=y

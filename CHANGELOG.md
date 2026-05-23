@@ -15,6 +15,37 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.25
+
+**Shared-PCB pin map for QT Py PICO + XIAO ESP32-S3, plus the v6.0 kconfig drift fixes from earlier in the day.** Three things in one tag — pure config / pin-map changes, no behavioural code touched.
+
+### What changed
+
+1. **New `seeed_xiao_esp32s3` board target** (5th build target). ESP32-S3 LX7, 8 MB flash, 8 MB OPI PSRAM, native USB-C. CI matrix in both `build.yml` and `release.yml` now covers it; release artefacts ship for all 5 boards.
+
+2. **QT Py PICO and XIAO ESP32-S3 now share a single Geiger pin map**: A0 / A1 / SCK (HV_CAP_FULL / GMC_COUNT / HV_FET). A0+A1 are the only two pads strap-free on both boards; SCK is the third strap-free pad and lives on the opposite long edge of the board, which physically separates the switching HV_FET output from the sensitive GMC pulse pickup. One PCB design can host either board.
+
+   - PICO: HV_FET moved from A2 (GPIO 27) → SCK (GPIO 14). A2 and A3 now free for future analog use.
+   - XIAO: Geiger pins moved from D0/D1/D2 placeholders → D0/D1/D8 (= A0/A1/SCK). D2 was unsafe anyway (GPIO 3 is the USB-Serial-JTAG selector strap on S3).
+
+3. **IDF v6.0 kconfig drift cleanup**:
+   - `CONFIG_SPIRAM_MODE_OCTAL` (v5.x name) → `CONFIG_SPIRAM_MODE_OCT` (v6.0 name) in the XIAO overlay. The old name was silently ignored, so the XIAO was actually falling back to QUAD mode — would have crashed at bootloader-level PSRAM init on real hardware.
+   - Removed `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF/_BIN` and `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32/_SHA256` from the base `sdkconfig.defaults` — these symbols were removed in IDF v6.0 (ELF + CRC32 are now implicit and the only options). Pure noise cleanup that had been there since the v5→v6 migration.
+
+### Migration note for QT Py PICO users with existing hardware
+
+If you have a QT Py PICO with a Geiger PCB wired for the old A0/A1/A2 pin map (HV_FET on A2 = GPIO 27): **do NOT OTA to V2.4.25** until you've rewired HV_FET from A2 to SCK. The firmware will drive GPIO 14 (SCK) for HV PWM and ignore GPIO 27 — your tube won't bias. There is no production QT Py + Geiger deployment in the field (the PICO target was always experimental), so this is purely a heads-up for any bench builds. The FeatherS3-D and Heltec V2 pin maps are unchanged.
+
+### Files touched
+
+- `main/hal.h` — both BOARD_ADAFRUIT_QTPY_ESP32_PICO and BOARD_SEEED_XIAO_ESP32S3 blocks (pin map + comment rewrite)
+- `main/version.h` — V2.4.24 → V2.4.25
+- `README.md` — boards table entry for XIAO updated to reflect new shared-PCB story
+- `sdkconfig.defaults.seeed_xiao_esp32s3` — MODE_OCTAL → MODE_OCT
+- `sdkconfig.defaults` — removed 4 deprecated COREDUMP symbols
+
+---
+
 ## V2.4.24
 
 **OTA receives a clear WiFi link.** Scheduled TX cycles (Madavi / sensor.community / Radmon HTTPS POSTs every 2 minutes) now skip while an OTA upload is in progress. The OTA gets the full WiFi airtime to itself instead of competing with three TLS handshakes per cycle. Non-sticky — TX resumes immediately on the next main-loop tick after OTA completes or aborts.

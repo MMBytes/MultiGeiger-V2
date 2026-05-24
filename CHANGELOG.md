@@ -15,6 +15,51 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.26
+
+**Richer MQTT state — system diagnostics for every board, per-target upload counters for PSRAM boards.** One bigger JSON per existing TX cycle, no new timers, no extra publishes. HA Discovery advertises the new entities automatically; existing entities and state-topic shape are unchanged so HA setups need no manual reconfiguration.
+
+### What changed
+
+**All boards (Heltec V2 included)** — `geiger/<id>/state` JSON gains six system fields:
+
+- `ip` (string, "10.11.12.198")
+- `rssi` (dBm)
+- `heap_free`, `heap_min`, `heap_max_alloc` (bytes)
+- `reset_reason` (string: "POWER_ON" / "PANIC" / "TASK_WDT" / etc. — same enum the /status page already shows)
+
+HA discovers all six as `entity_category: diagnostic`, so they land under the device card's Diagnostics panel instead of cluttering dashboards. RSSI gets `device_class: signal_strength`; heap fields get `device_class: data_size`.
+
+JSON growth per cycle: ~120-130 bytes on Heltec (~120 B current → ~250 B). Negligible airtime impact.
+
+**PSRAM boards only** (FeatherS3-D, QT Py PICO, XIAO ESP32-S3 — gated on a new `MQTT_RICH_STATE` CMake compile flag) — additional per-target upload-stats fields, only for targets actually enabled in cfg:
+
+- `<target>_ok` / `<target>_att` / `<target>_rc` / `<target>_breaker` for each of madavi / sc / radmon / osm / aqi
+- `ftp_ok` / `ftp_bytes` / `ftp_age_s` if `ftp_enabled`
+
+These are primary entities (not diagnostic) so they show on dashboards — `*_ok` and `*_att` are HA `total_increasing` counters suitable for long-term statistics, `*_rc` and `*_breaker` are `measurement` snapshots. Same accessors the `/status` page already uses (`tx_get_stats`, `log_ftp_get_stats`) — no new counters, no new state, just exposed through MQTT.
+
+### Why gated on a build flag
+
+JSON growth on a fully-loaded FeatherS3-D (PM + DNMS + light + 5 upload targets + FTPS) lands around 940 bytes, vs ~615 bytes if Heltec got the upload stats too. The Heltec V2 has historically been heap-tight (see V2.4.13 and V2.4.22 stack-pressure audits), so the per-cycle stack buffer was bumped from 512 → 768 bytes on Heltec and 512 → 1280 bytes on PSRAM boards. Splitting it this way costs Heltec only what's most valuable for in-the-field debugging (RSSI, heap, reset reason) while letting PSRAM boards carry the full operational picture.
+
+### Files touched
+
+- `CMakeLists.txt` — `MQTT_RICH_STATE=1` compile def added to the three PSRAM-board branches
+- `main/sysinfo.h` — new header, holds `reset_reason_str()` (extracted from http_server.c so mqtt.c can reuse the same enum→string map)
+- `main/http_server.c` — drops its local copy of `reset_reason_str()`, includes `sysinfo.h`
+- `main/mqtt.c` — new system-stats block (always), new upload-stats block (`#ifdef MQTT_RICH_STATE`), bumped JSON buffer
+- `main/mqtt_discovery.c` — six new diagnostic entities + 23 new primary entities under the ifdef, new `entity_cat` field on `ha_entity_t`, new `mqtt_discovery_set_upload_flags()` setter
+- `main/version.h` — V2.4.25 → V2.4.26
+
+### Notes
+
+- **HA migration: nothing to do.** Existing entities keep their `uniq_id` and JSON keys; new entities are added automatically when HA receives the new discovery payloads on next sensor reconnect.
+- **Heltec /status page unchanged** — the existing Uploads block already shows the same per-target stats in HTML; this release just makes them visible via MQTT on the boards that have heap budget for the JSON growth.
+- **Field naming**: short keys (`madavi_ok` not `madavi.ok`) keep HA `value_template` expressions trivial (`{{ value_json.madavi_ok }}`) and avoid HA's nested-object handling, matching the rest of the JSON.
+
+---
+
 ## V2.4.25
 
 **Shared-PCB pin map for QT Py PICO + XIAO ESP32-S3, plus the v6.0 kconfig drift fixes from earlier in the day.** Three things in one tag — pure config / pin-map changes, no behavioural code touched.

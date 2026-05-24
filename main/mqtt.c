@@ -24,17 +24,26 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/ip4_addr.h"
 #include "mqtt_client.h"
 
 #include "als.h"
+#include "log_ftp.h"
 #include "mqtt_discovery.h"
+#include "sysinfo.h"
+#include "transmission.h"
 #include "veml7700.h"
 #include "version.h"
 
@@ -42,6 +51,10 @@
 // tube-enabled predicate without exposing cfg through the discovery
 // public API. Declared local so other modules can't accidentally use it.
 extern void mqtt_discovery_set_tube_enabled(bool enabled);
+#ifdef MQTT_RICH_STATE
+extern void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
+                                            bool osm, bool aqi, bool ftp);
+#endif
 
 static const char *TAG = "mqtt";
 
@@ -56,6 +69,19 @@ static const char *s_prefix   = NULL;      // pointer borrowed from g_cfg
 static volatile bool s_connected = false;
 static volatile uint32_t s_publish_count = 0;
 static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_discovery
+
+// V2.4.26: cached upload-target enables so the rich-state JSON only emits
+// per-target stat blocks for targets actually configured. Captured at init
+// (and again on /config Save → mqtt_init re-entry path) so the publish hot
+// path doesn't need to reach into the global cfg.
+#ifdef MQTT_RICH_STATE
+static bool s_send_madavi  = false;
+static bool s_send_sensorc = false;
+static bool s_send_radmon  = false;
+static bool s_send_osm     = false;
+static bool s_send_aqi     = false;
+static bool s_ftp_enabled  = false;
+#endif
 
 // Future-V2.4.23: serialises s_client lifecycle against publish_state.
 //
@@ -178,6 +204,20 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     // Seed the tube-enabled predicate in mqtt_discovery so its entity
     // gate function can run without reaching into main.c's cfg singleton.
     mqtt_discovery_set_tube_enabled(cfg->tube_enabled);
+#ifdef MQTT_RICH_STATE
+    // V2.4.26: cache upload-target enables for the rich-state JSON. Same
+    // pattern as tube_enabled — pulled out of cfg here so the publish hot
+    // path doesn't need to reach into main.c's cfg singleton, and so the
+    // /config Save path's mqtt_stop + mqtt_init cycle re-reads them.
+    s_send_madavi  = cfg->send_madavi;
+    s_send_sensorc = cfg->send_sensorc;
+    s_send_radmon  = cfg->send_radmon;
+    s_send_osm     = cfg->send_osm;
+    s_send_aqi     = cfg->send_aqi;
+    s_ftp_enabled  = cfg->ftp_enabled;
+    mqtt_discovery_set_upload_flags(s_send_madavi, s_send_sensorc, s_send_radmon,
+                                    s_send_osm, s_send_aqi, s_ftp_enabled);
+#endif
 
     // Pre-build the per-device topic strings so the publish path doesn't
     // re-snprintf every cycle. snprintf return ignored — the buffers are
@@ -329,7 +369,18 @@ void mqtt_publish_state(const main_status_t *st,
         return;
     }
 
-    char buf[512];
+    // V2.4.26 buffer sizing:
+    //   - Base 768 B covers all sensor blocks + the always-on system block
+    //     (worst case ~365 B on Heltec, ~580 B on FeatherS3-D PM+DNMS).
+    //   - +512 B under MQTT_RICH_STATE for the per-target upload stats
+    //     (5 targets × 4 fields ≈ 315 B + FTPS ≈ 60 B + slack).
+    // Stack-allocated — cycle task has 4 KB+ stack per existing config, so
+    // 1280 B on PSRAM boards / 768 B on Heltec both fit with headroom.
+#ifdef MQTT_RICH_STATE
+    char buf[1280];
+#else
+    char buf[768];
+#endif
     int n = 0;
     int rem;
 #define APPEND(...)                                                  \
@@ -399,6 +450,69 @@ void mqtt_publish_state(const main_status_t *st,
     if (have_lux) {
         APPEND(",\"lux\":%.1f", lux);
     }
+
+    // --- V2.4.26: system stats (all boards) -------------------------------
+    // RSSI + IP from the WiFi STA netif. Both ~free to read (cached by the
+    // wifi/netif drivers). IP is emitted as a string for HA-readability.
+    {
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            APPEND(",\"rssi\":%d", (int)ap.rssi);
+        }
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) {
+            esp_netif_ip_info_t ip = { 0 };
+            if (esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr != 0) {
+                char ip_s[16];
+                esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
+                APPEND(",\"ip\":\"%s\"", ip_s);
+            }
+        }
+        APPEND(",\"heap_free\":%" PRIu32,      esp_get_free_heap_size());
+        APPEND(",\"heap_min\":%" PRIu32,       esp_get_minimum_free_heap_size());
+        APPEND(",\"heap_max_alloc\":%" PRIu32, (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        APPEND(",\"reset_reason\":\"%s\"",     reset_reason_str(esp_reset_reason()));
+    }
+
+#ifdef MQTT_RICH_STATE
+    // --- V2.4.26: per-target upload stats (PSRAM boards only) -------------
+    // Mirror of the /status page's Uploads block — same accessors, same
+    // gating on cfg.send_*. Per-target keys use the same short names used
+    // by HA Discovery so val_tpl resolves trivially.
+    static const struct {
+        tx_target_id_t  id;
+        const bool     *enabled;
+        const char     *key;     // JSON field prefix, e.g. "madavi"
+    } UL_TARGETS[] = {
+        { TX_TARGET_MADAVI,  &s_send_madavi,  "madavi" },
+        { TX_TARGET_SENSORC, &s_send_sensorc, "sc"     },
+        { TX_TARGET_RADMON,  &s_send_radmon,  "radmon" },
+        { TX_TARGET_OSM,     &s_send_osm,     "osm"    },
+        { TX_TARGET_AQI,     &s_send_aqi,     "aqi"    },
+    };
+    for (size_t i = 0; i < sizeof(UL_TARGETS)/sizeof(UL_TARGETS[0]); i++) {
+        if (!*UL_TARGETS[i].enabled) continue;
+        tx_target_stats_t s;
+        tx_get_stats(UL_TARGETS[i].id, &s);
+        const char *k = UL_TARGETS[i].key;
+        APPEND(",\"%s_ok\":%" PRIu32,  k, s.succeeded);
+        APPEND(",\"%s_att\":%" PRIu32, k, s.attempted);
+        APPEND(",\"%s_rc\":%d",        k, s.last_rc);
+        APPEND(",\"%s_breaker\":%d",   k, s.breaker_open_cycles);
+    }
+    if (s_ftp_enabled) {
+        log_ftp_stats_t f;
+        log_ftp_get_stats(&f);
+        APPEND(",\"ftp_ok\":%s",       f.have_last && f.last_ok ? "true" : "false");
+        APPEND(",\"ftp_bytes\":%" PRIu32, f.last_bytes);
+        int64_t age_s = 0;
+        if (f.have_last && f.last_at > 0) {
+            time_t now = time(NULL);
+            if (now > (time_t)f.last_at) age_s = (int64_t)now - f.last_at;
+        }
+        APPEND(",\"ftp_age_s\":%" PRId64, age_s);
+    }
+#endif
 
     APPEND("}");
 #undef APPEND

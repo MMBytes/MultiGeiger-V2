@@ -62,6 +62,25 @@ static bool any_light_present_(void)     { return veml7700_present() || als_pres
 static bool s_tube_enabled = false;
 static bool tube_enabled_(void)          { return s_tube_enabled; }
 
+#ifdef MQTT_RICH_STATE
+// V2.4.26: per-target upload entities ride on cached cfg.send_* flags
+// seeded by mqtt_discovery_set_upload_flags() at init. Same pattern as
+// s_tube_enabled — keeps presence predicates as plain function pointers
+// so the ENTITIES[] table stays a const struct.
+static bool s_send_madavi_  = false;
+static bool s_send_sensorc_ = false;
+static bool s_send_radmon_  = false;
+static bool s_send_osm_     = false;
+static bool s_send_aqi_     = false;
+static bool s_ftp_enabled_  = false;
+static bool send_madavi_present_(void)   { return s_send_madavi_; }
+static bool send_sensorc_present_(void)  { return s_send_sensorc_; }
+static bool send_radmon_present_(void)   { return s_send_radmon_; }
+static bool send_osm_present_(void)      { return s_send_osm_; }
+static bool send_aqi_present_(void)      { return s_send_aqi_; }
+static bool ftp_present_(void)           { return s_ftp_enabled_; }
+#endif
+
 // --- Entity catalog ---------------------------------------------------------
 //
 // Each row defines one HA sensor entity. Fields kept terse so the table
@@ -83,49 +102,97 @@ typedef struct {
     const char *icon;                // mdi:* or NULL
     const char *value_template_xform; // optional Jinja transform, e.g. "/100" for Pa→hPa
     bool      (*present_fn)(void);
+    const char *entity_cat;          // V2.4.26: "diagnostic" hides from default UI; NULL = primary
 } ha_entity_t;
 
 static const ha_entity_t ENTITIES[] = {
     // --- System (always present) -------------------------------------------
-    { "cycles",     "cycles",     "TX cycles",       NULL,             NULL,    "total_increasing", "mdi:counter",       NULL, always_present },
-    { "reconnects", "reconnects", "WiFi reconnects", NULL,             NULL,    "total_increasing", "mdi:wifi-refresh",  NULL, always_present },
-    { "uptime_ms",  "uptime",     "Uptime",          "duration",       "ms",    "measurement",      "mdi:timer-outline", NULL, always_present },
+    { "cycles",     "cycles",     "TX cycles",       NULL,             NULL,    "total_increasing", "mdi:counter",       NULL, always_present, NULL },
+    { "reconnects", "reconnects", "WiFi reconnects", NULL,             NULL,    "total_increasing", "mdi:wifi-refresh",  NULL, always_present, NULL },
+    { "uptime_ms",  "uptime",     "Uptime",          "duration",       "ms",    "measurement",      "mdi:timer-outline", NULL, always_present, NULL },
 
     // --- Geiger tube -------------------------------------------------------
-    { "cpm",        "cpm",        "CPM",             NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_ },
-    { "usvph",      "dose_rate",  "Dose rate",       NULL,             "µSv/h", "measurement",      "mdi:radioactive",   NULL, tube_enabled_ },
-    { "hv_pulses",  "hv_pulses",  "HV pulses",       NULL,             NULL,    "total_increasing", "mdi:flash",         NULL, tube_enabled_ },
+    { "cpm",        "cpm",        "CPM",             NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
+    { "usvph",      "dose_rate",  "Dose rate",       NULL,             "µSv/h", "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
+    { "hv_pulses",  "hv_pulses",  "HV pulses",       NULL,             NULL,    "total_increasing", "mdi:flash",         NULL, tube_enabled_, NULL },
 
     // --- Environment (BME280 / SHT45+BMP581 / etc.) -----------------------
     // V2.4.12: each field gated on its own per-field predicate (e.g.
     // SHT45-only setup → env_t + env_h registered, env_p skipped).
-    { "env_t",      "temperature","Temperature",     "temperature",    "°C",    "measurement",      NULL, NULL, env_t_present_ },
-    { "env_h",      "humidity",   "Humidity",        "humidity",       "%",     "measurement",      NULL, NULL, env_h_present_ },
+    { "env_t",      "temperature","Temperature",     "temperature",    "°C",    "measurement",      NULL, NULL, env_t_present_, NULL },
+    { "env_h",      "humidity",   "Humidity",        "humidity",       "%",     "measurement",      NULL, NULL, env_h_present_, NULL },
     // env_p comes in as Pa from mqtt.c (raw BMP/BME register units).
     // Convert to hPa in the value template so HA charts look natural.
-    { "env_p",      "pressure",   "Pressure",        "atmospheric_pressure", "hPa", "measurement", NULL, "/100", env_p_present_ },
+    { "env_p",      "pressure",   "Pressure",        "atmospheric_pressure", "hPa", "measurement", NULL, "/100", env_p_present_, NULL },
 
     // --- Particulate matter (SPS30) ---------------------------------------
-    { "pm1",        "pm1",        "PM1",             "pm1",            "µg/m³", "measurement",      NULL, NULL, pm_present_ },
-    { "pm25",       "pm25",       "PM2.5",           "pm25",           "µg/m³", "measurement",      NULL, NULL, pm_present_ },
+    { "pm1",        "pm1",        "PM1",             "pm1",            "µg/m³", "measurement",      NULL, NULL, pm_present_, NULL },
+    { "pm25",       "pm25",       "PM2.5",           "pm25",           "µg/m³", "measurement",      NULL, NULL, pm_present_, NULL },
     // PM4 has no HA device_class — use a generic icon.
-    { "pm4",        "pm4",        "PM4",             NULL,             "µg/m³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "pm10",       "pm10",       "PM10",            "pm10",           "µg/m³", "measurement",      NULL, NULL, pm_present_ },
+    { "pm4",        "pm4",        "PM4",             NULL,             "µg/m³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "pm10",       "pm10",       "PM10",            "pm10",           "µg/m³", "measurement",      NULL, NULL, pm_present_, NULL },
     // Number concentrations — no HA class. Shown as "particles/cm³".
-    { "nc05",       "nc_05",      "NC 0.5 µm",       NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "nc1",        "nc_1",       "NC 1 µm",         NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "nc25",       "nc_25",      "NC 2.5 µm",       NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "nc4",        "nc_4",       "NC 4 µm",         NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "nc10",       "nc_10",      "NC 10 µm",        NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_ },
-    { "ps_typ",     "ps_typ",     "Typical size",    NULL,             "µm",    "measurement",      "mdi:ruler",         NULL, pm_present_ },
+    { "nc05",       "nc_05",      "NC 0.5 µm",       NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "nc1",        "nc_1",       "NC 1 µm",         NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "nc25",       "nc_25",      "NC 2.5 µm",       NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "nc4",        "nc_4",       "NC 4 µm",         NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "nc10",       "nc_10",      "NC 10 µm",        NULL,             "1/cm³", "measurement",      "mdi:blur",          NULL, pm_present_, NULL },
+    { "ps_typ",     "ps_typ",     "Typical size",    NULL,             "µm",    "measurement",      "mdi:ruler",         NULL, pm_present_, NULL },
 
     // --- Noise (DNMS) -----------------------------------------------------
-    { "noise_laeq", "noise_laeq", "Sound LAeq",      "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_ },
-    { "noise_min",  "noise_min",  "Sound min",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_ },
-    { "noise_max",  "noise_max",  "Sound max",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_ },
+    { "noise_laeq", "noise_laeq", "Sound LAeq",      "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
+    { "noise_min",  "noise_min",  "Sound min",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
+    { "noise_max",  "noise_max",  "Sound max",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
 
     // --- Ambient light (VEML7700 OR ALS-PT19) -----------------------------
-    { "lux",        "lux",        "Illuminance",     "illuminance",    "lx",    "measurement",      NULL, NULL, any_light_present_ },
+    { "lux",        "lux",        "Illuminance",     "illuminance",    "lx",    "measurement",      NULL, NULL, any_light_present_, NULL },
+
+    // --- V2.4.26: System diagnostics (all boards) --------------------------
+    // All marked entity_category=diagnostic so HA tucks them under the
+    // device card's "Diagnostics" panel instead of cluttering dashboards.
+    { "ip",            "ip",            "IP address",     NULL,              NULL,  NULL,          "mdi:ip-network",     NULL, always_present, "diagnostic" },
+    { "rssi",          "rssi",          "WiFi RSSI",      "signal_strength", "dBm", "measurement", NULL,                 NULL, always_present, "diagnostic" },
+    { "heap_free",     "heap_free",     "Heap free",      "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
+    { "heap_min",      "heap_min",      "Heap min free",  "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
+    { "heap_max_alloc","heap_max_alloc","Heap max alloc", "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
+    { "reset_reason",  "reset_reason",  "Reset reason",   NULL,              NULL,  NULL,          "mdi:restart-alert",  NULL, always_present, "diagnostic" },
+
+#ifdef MQTT_RICH_STATE
+    // --- V2.4.26: Per-target upload counters (PSRAM boards only) ----------
+    // Primary entities (no diagnostic category) — user can graph success
+    // rates / alert on _err climbing. Counters use total_increasing so HA's
+    // long-term statistics track them as monotonic; rc/breaker are
+    // measurement (last-value snapshots).
+    { "madavi_ok",      "madavi_ok",      "Madavi OK",      NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_madavi_present_,  NULL },
+    { "madavi_att",     "madavi_att",     "Madavi attempts",NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_madavi_present_,  NULL },
+    { "madavi_rc",      "madavi_rc",      "Madavi last rc", NULL, NULL, "measurement",      "mdi:counter",          NULL, send_madavi_present_,  NULL },
+    { "madavi_breaker", "madavi_breaker", "Madavi breaker", NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_madavi_present_,  NULL },
+
+    { "sc_ok",          "sc_ok",          "SC OK",          NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_sensorc_present_, NULL },
+    { "sc_att",         "sc_att",         "SC attempts",    NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_sensorc_present_, NULL },
+    { "sc_rc",          "sc_rc",          "SC last rc",     NULL, NULL, "measurement",      "mdi:counter",          NULL, send_sensorc_present_, NULL },
+    { "sc_breaker",     "sc_breaker",     "SC breaker",     NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_sensorc_present_, NULL },
+
+    { "radmon_ok",      "radmon_ok",      "Radmon OK",      NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_radmon_present_,  NULL },
+    { "radmon_att",     "radmon_att",     "Radmon attempts",NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_radmon_present_,  NULL },
+    { "radmon_rc",      "radmon_rc",      "Radmon last rc", NULL, NULL, "measurement",      "mdi:counter",          NULL, send_radmon_present_,  NULL },
+    { "radmon_breaker", "radmon_breaker", "Radmon breaker", NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_radmon_present_,  NULL },
+
+    { "osm_ok",         "osm_ok",         "OSM OK",         NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_osm_present_,     NULL },
+    { "osm_att",        "osm_att",        "OSM attempts",   NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_osm_present_,     NULL },
+    { "osm_rc",         "osm_rc",         "OSM last rc",    NULL, NULL, "measurement",      "mdi:counter",          NULL, send_osm_present_,     NULL },
+    { "osm_breaker",    "osm_breaker",    "OSM breaker",    NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_osm_present_,     NULL },
+
+    { "aqi_ok",         "aqi_ok",         "AQI.eco OK",     NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_aqi_present_,     NULL },
+    { "aqi_att",        "aqi_att",        "AQI.eco att",    NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_aqi_present_,     NULL },
+    { "aqi_rc",         "aqi_rc",         "AQI.eco last rc",NULL, NULL, "measurement",      "mdi:counter",          NULL, send_aqi_present_,     NULL },
+    { "aqi_breaker",    "aqi_breaker",    "AQI.eco breaker",NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_aqi_present_,     NULL },
+
+    // --- V2.4.26: FTPS log upload (PSRAM boards only) ---------------------
+    { "ftp_ok",     "ftp_ok",    "FTP last OK",     NULL,        NULL, NULL,          "mdi:check-circle",      NULL, ftp_present_, NULL },
+    { "ftp_bytes",  "ftp_bytes", "FTP last bytes",  "data_size", "B",  "measurement", "mdi:file-upload",       NULL, ftp_present_, NULL },
+    { "ftp_age_s",  "ftp_age_s", "FTP last age",    "duration",  "s",  "measurement", "mdi:clock-outline",     NULL, ftp_present_, NULL },
+#endif
 };
 
 #define N_ENTITIES (sizeof(ENTITIES) / sizeof(ENTITIES[0]))
@@ -177,6 +244,9 @@ static int build_payload(char *buf, size_t bufsz,
     }
     if (e->icon) {
         APPEND(",\"ic\":\"%s\"", e->icon);
+    }
+    if (e->entity_cat) {
+        APPEND(",\"ent_cat\":\"%s\"", e->entity_cat);
     }
     // Device block — groups all entities under one HA device card.
     // `mf` (manufacturer), `mdl` (model), `sw` (sw_version), `ids`
@@ -241,3 +311,19 @@ void mqtt_discovery_set_tube_enabled(bool enabled);
 void mqtt_discovery_set_tube_enabled(bool enabled) {
     s_tube_enabled = enabled;
 }
+
+#ifdef MQTT_RICH_STATE
+// V2.4.26: companion to set_tube_enabled — seeds the per-target upload
+// predicates so the entity catalog knows which targets to advertise.
+void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
+                                     bool osm, bool aqi, bool ftp);
+void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
+                                     bool osm, bool aqi, bool ftp) {
+    s_send_madavi_  = madavi;
+    s_send_sensorc_ = sensorc;
+    s_send_radmon_  = radmon;
+    s_send_osm_     = osm;
+    s_send_aqi_     = aqi;
+    s_ftp_enabled_  = ftp;
+}
+#endif

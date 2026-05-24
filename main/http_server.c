@@ -41,6 +41,7 @@
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 #include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
 #include "syslog.h"            // V2.4.15: tear down UDP socket in OTA teardown
+#include "sysinfo.h"           // V2.4.26: reset_reason_str (also used by mqtt.c)
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 
 static const char *TAG = "http";
@@ -407,22 +408,6 @@ static void format_device(char *out, size_t sz) {
 
 // --- System block ------------------------------------------------------------
 // Uptime, reset reason, heap, NTP last-sync.
-static const char *reset_reason_str(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON:   return "POWER_ON";
-        case ESP_RST_EXT:       return "EXT_PIN";
-        case ESP_RST_SW:        return "SOFT (esp_restart)";
-        case ESP_RST_PANIC:     return "PANIC";
-        case ESP_RST_INT_WDT:   return "INT_WDT";
-        case ESP_RST_TASK_WDT:  return "TASK_WDT";
-        case ESP_RST_WDT:       return "OTHER_WDT";
-        case ESP_RST_DEEPSLEEP: return "DEEP_SLEEP_WAKE";
-        case ESP_RST_BROWNOUT:  return "BROWNOUT";
-        case ESP_RST_SDIO:      return "SDIO";
-        default:                return "UNKNOWN";
-    }
-}
-
 static void format_ago(int64_t now_unix, int64_t past_unix, char *out, size_t sz) {
     if (past_unix <= 0 || now_unix < past_unix) { snprintf(out, sz, "never"); return; }
     long s = (long)(now_unix - past_unix);

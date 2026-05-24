@@ -25,7 +25,14 @@ typedef struct {
     uint32_t last_dt_ms;      // wall-clock duration of the last cycle
     uint32_t last_cpm;        // GM counts-per-minute from the last cycle
     float    last_usvph;      // dose rate from the last cycle
-    uint32_t last_hv_pulses;  // cumulative HV recharge pulses
+    uint32_t last_hv_pulses;        // cumulative HV recharge pulses since boot
+                                    //   (HA total_increasing semantic — MQTT publishes this raw)
+    uint32_t last_hv_pulses_delta;  // V2.4.27: HV recharge pulses THIS cycle only.
+                                    //   Matches the V1.x firmware's per-cycle semantic
+                                    //   for the field named `hv_pulses` in
+                                    //   sensor.community / Madavi / Radmon CSV
+                                    //   archives. Status page and legacy HTTPS
+                                    //   uploads use this; MQTT keeps cumulative.
     bool     last_hv_error;   // true if HV cap never reached full in last cycle
     bool     have_env;        // OR of have_env_{t,h,p} — kept for callers
                               //   that only care "is any env field valid"

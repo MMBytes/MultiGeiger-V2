@@ -553,10 +553,14 @@ static void format_radiation(char *out, size_t sz) {
     main_status_snapshot(&st);
 
     // HV pulses per minute over the last cycle window. dt_ms == 0 means no
-    // cycle has run yet; show a dash so we don't divide by zero.
+    // cycle has run yet; show a dash so we don't divide by zero. V2.4.27:
+    // uses `last_hv_pulses_delta` (per-cycle) instead of `last_hv_pulses`
+    // (cumulative-since-boot) — the previous form divided the cumulative
+    // counter by one cycle's duration, producing a number that grew
+    // unboundedly with uptime instead of the intended pulses/min rate.
     char hv_line[64];
     if (st.last_dt_ms > 0) {
-        float hv_per_min = (float)st.last_hv_pulses * 60000.0f / (float)st.last_dt_ms;
+        float hv_per_min = (float)st.last_hv_pulses_delta * 60000.0f / (float)st.last_dt_ms;
         snprintf(hv_line, sizeof(hv_line), "%.1f / min  (cumulative %lu)",
                  hv_per_min, (unsigned long)st.last_hv_pulses);
     } else {

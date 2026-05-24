@@ -157,7 +157,8 @@ static uint32_t g_last_dt_ms      = 0;
 static uint32_t g_last_counts     = 0;
 static uint32_t g_last_cpm        = 0;
 static float    g_last_usvph      = 0.0f;
-static uint32_t g_last_hv_pulses  = 0;
+static uint32_t g_last_hv_pulses        = 0;   // cumulative since boot (MQTT)
+static uint32_t g_last_hv_pulses_delta  = 0;   // V2.4.27: per-cycle delta (status + legacy HTTPS)
 static bool     g_last_hv_error   = false;
 static bool     g_last_bme_valid  = false;   // OR of the three below
 static bool     g_last_bme_t_valid = false;   // V2.4.12
@@ -183,7 +184,8 @@ void main_status_snapshot(main_status_t *out) {
     out->last_dt_ms     = g_last_dt_ms;
     out->last_cpm       = g_last_cpm;
     out->last_usvph     = g_last_usvph;
-    out->last_hv_pulses = g_last_hv_pulses;
+    out->last_hv_pulses       = g_last_hv_pulses;
+    out->last_hv_pulses_delta = g_last_hv_pulses_delta;
     out->last_hv_error  = g_last_hv_error;
     out->have_env       = g_last_bme_valid;
     out->have_env_t     = g_last_bme_t_valid;
@@ -420,6 +422,19 @@ static void do_tx_cycle(void) {
     bool hv_error;
     tube_read(&counts, &dt_ms, &min_us, &max_us, &hv_pulses, &hv_error);
 
+    // V2.4.27: hv_pulses returned by tube_read() is cumulative-since-boot
+    // (see tube.h). Derive the per-cycle delta here so the legacy HTTPS
+    // upload paths (sensor.community / Madavi / Radmon) carry the same
+    // semantic as the V1.x firmware did — V1.x's transmit() function
+    // computed `delta = current - last; last = current;` before sending.
+    // The V2.0 rewrite uploaded the cumulative value raw, which broke
+    // historical CSV-archive analyses (radiation.txt). MQTT keeps
+    // publishing the cumulative value because HA expects
+    // `total_increasing` semantic on this entity.
+    static uint32_t s_last_uploaded_hv_pulses = 0;
+    uint32_t hv_pulses_delta = hv_pulses - s_last_uploaded_hv_pulses;
+    s_last_uploaded_hv_pulses = hv_pulses;
+
     float cps = (dt_ms > 0) ? (counts * 1000.0f / dt_ms) : 0.0f;
     float usvph = cps * SI22G_CPS_TO_USVPH;
     uint32_t cpm = (dt_ms > 0) ? (uint32_t)(((uint64_t)counts * 60000ULL) / dt_ms) : 0;
@@ -431,10 +446,10 @@ static void do_tx_cycle(void) {
     // readable on PM-only deployments.
     if (g_cfg.tube_enabled) {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
-                 "hv_pulses=%lu hv_err=%d min_us=%lu max_us=%lu rssi=%ddBm",
+                 "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu rssi=%ddBm",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms,
                  (unsigned long)counts, (unsigned long)cpm, usvph,
-                 (unsigned long)hv_pulses, hv_error,
+                 (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
                  (unsigned long)max_us, rssi);
     } else {
@@ -447,7 +462,8 @@ static void do_tx_cycle(void) {
     g_last_counts    = counts;
     g_last_cpm       = cpm;
     g_last_usvph     = usvph;
-    g_last_hv_pulses = hv_pulses;
+    g_last_hv_pulses       = hv_pulses;        // cumulative — MQTT
+    g_last_hv_pulses_delta = hv_pulses_delta;  // per-cycle — status page + HTTPS uploads
     g_last_hv_error  = hv_error;
     // V2.4.1 (B1): 64-bit store on a 32-bit core isn't atomic — wrap to
     // pair with the spinlock'd read in main_status_last_cycle_at.
@@ -631,8 +647,11 @@ static void do_tx_cycle(void) {
         mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise);
     }
 
+    // V2.4.27: hv_pulses_delta (not cumulative) — see comment in do_tx_cycle
+    // above. The legacy CSV archives (sensor.community / Madavi / Radmon)
+    // expect per-cycle delta, matching V1.x firmware behaviour.
     tx_context_t ctx;
-    build_tx_context(&ctx, dt_ms, counts, hv_pulses, min_us, max_us,
+    build_tx_context(&ctx, dt_ms, counts, hv_pulses_delta, min_us, max_us,
                      bme_valid, bme_t, bme_h, bme_p,
                      pm_valid, &pm,
                      noise_valid, &noise);

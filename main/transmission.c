@@ -289,31 +289,19 @@ static esp_http_client_handle_t open_push_client(const char *url, bool use_insec
 }
 
 // --- Madavi -----------------------------------------------------------------
-// Up to two POSTs over one keep-alive TLS session:
-//   1. Geiger body (Si22G_* + signal) — only when tube_enabled.
-//   2. Environmental body — only when env or PM sensor data is available.
-//      Combines BME280_* (T/H/P), SPS30_* (PM mass + number conc + size),
-//      and the Geiger pulse stats (samples / min_micro / max_micro) on the
-//      back of which the Madavi side writes the pulse-stats RRDs.
-// Madavi routes by field-name prefix (not X-PIN), so combining BME + PM in
-// one body is the canonical form (matches dusty-code's approach).
-
-static void build_madavi_geiger_body(const tx_context_t *c, char *buf, size_t cap) {
-    snprintf(buf, cap,
-        "{\n"
-        " \"software_version\": \"%s\",\n"
-        " \"sensordatavalues\": [\n"
-        "  {\"value_type\": \"Si22G_counts_per_minute\", \"value\": \"%lu\"},\n"
-        "  {\"value_type\": \"Si22G_hv_pulses\", \"value\": \"%lu\"},\n"
-        "  {\"value_type\": \"Si22G_counts\", \"value\": \"%lu\"},\n"
-        "  {\"value_type\": \"Si22G_sample_time_ms\", \"value\": \"%lu\"},\n"
-        "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
-        " ]\n}",
-        c->sw_version,
-        (unsigned long)c->cpm, (unsigned long)c->hv_pulses,
-        (unsigned long)c->gm_counts, (unsigned long)c->dt_ms,
-        (int)c->rssi);
-}
+// Single POST per cycle carrying everything Madavi's value_type whitelist
+// recognises: BME280_* (T/H/P), SPS30_* aliased as SDS_* (PM), DNMS_noise_*
+// (noise — actually outside the whitelist but harmless extras), pulse stats
+// (samples / min_micro / max_micro) and signal (RSSI). Madavi routes by
+// field-name prefix (not X-PIN), so a single combined body is the canonical
+// form (matches dusty-code's approach).
+//
+// V2.4.27: removed the dedicated "geiger" body. It only carried Si22G_*
+// fields, none of which appear in Madavi's hardcoded value_type whitelist
+// (see [[reference_madavi]] — Madavi knows DHT/HTU21D/BME280/BMP/SDS/PMS/HPM/
+// PPD42NS/GPS only). Every Si22G_* field was silently dropped at the server,
+// making the POST pure wasted bandwidth + TLS overhead. The pulse stats and
+// signal that DO get graphed are emitted in the env body below.
 
 // Build the Madavi "environmental" body (renamed from thp). Combines every
 // non-radiation source into one POST, plus pulse-stats and signal at the end.
@@ -449,8 +437,12 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
 }
 
 static int send_madavi(const tx_context_t *c) {
-    bool have_env = c->bme_valid || c->pm_valid || c->noise_valid;
-    if (!c->tube_enabled && !have_env) return 0;
+    // V2.4.27: single combined POST. Skip the cycle entirely when there's
+    // nothing Madavi can graph. With the tube enabled the env body always
+    // carries pulse stats + signal, so tube-only Heltec V2 still uploads
+    // something useful.
+    bool have_payload = c->bme_valid || c->pm_valid || c->noise_valid || c->tube_enabled;
+    if (!have_payload) return 0;
 
     const char *url = c->madavi.use_https ? c->madavi.url_https : c->madavi.url_http;
     esp_http_client_handle_t client =
@@ -463,35 +455,12 @@ static int send_madavi(const tx_context_t *c) {
     // Body buffer sized for the worst case: BME (3 fields) + SPS30 (10 fields)
     // + pulse stats (3 fields) + signal + boilerplate. ~1200 bytes is generous.
     char body[1280];
-
-    int rc_g = 0;
-    if (c->tube_enabled) {
-        build_madavi_geiger_body(c, body, sizeof(body));
-        rc_g = post_with_retry(client, "Madavi", "geiger", NULL, body);
-    }
-
-    // Environmental POST — runs whenever any non-radiation source is live.
-    // Skipped when the geiger POST failed at transport level so we don't pile
-    // a second POST onto an already-broken TLS session.
-    int rc_e = 0;
-    if (have_env && (!c->tube_enabled || rc_g > 0)) {
-        build_madavi_env_body(c, body, sizeof(body));
-        rc_e = post_with_retry(client, "Madavi", "env", NULL, body);
-    }
+    build_madavi_env_body(c, body, sizeof(body));
+    int rc = post_with_retry(client, "Madavi", "env", NULL, body);
 
     esp_http_client_cleanup(client);
-
-    if (c->tube_enabled && have_env) {
-        ESP_LOGI(TAG, "Madavi: geiger rc=%d, env rc=%d", rc_g, rc_e);
-        if (rc_g == 200 && rc_e == 200) return 200;
-        return (rc_g != 200) ? rc_g : rc_e;
-    }
-    if (c->tube_enabled) {
-        ESP_LOGI(TAG, "Madavi: geiger rc=%d (tube only)", rc_g);
-        return rc_g;
-    }
-    ESP_LOGI(TAG, "Madavi: env rc=%d (tube disabled)", rc_e);
-    return rc_e;
+    ESP_LOGI(TAG, "Madavi: rc=%d", rc);
+    return rc;
 }
 
 // --- sensor.community -------------------------------------------------------

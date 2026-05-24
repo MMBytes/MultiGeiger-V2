@@ -15,6 +15,54 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.27
+
+**Restore the V1.x per-cycle semantic for `hv_pulses` in legacy HTTPS uploads + status page, and stop POSTing the Madavi-rejected radiation body.** Two unrelated cleanups bundled because both touch the legacy-HTTPS upload path.
+
+### What changed (`hv_pulses` semantic)
+
+Two related fixes, both single-line in effect:
+
+1. **Legacy HTTPS upload body** (`transmission.c` via `main.c`): the `hv_pulses` value POSTed to sensor.community / Madavi / Radmon now carries the **per-cycle delta**, matching V1.x firmware (where `multigeiger.ino` computed `delta = current - last; last = current;` at upload time). The V2.0 rewrite uploaded the cumulative-since-boot counter raw, so the published value grew unboundedly with uptime instead of representing "pulses needed this cycle". Sensor.community / Madavi / Radmon CSV archives produced under V2.0-V2.4.26 carry the cumulative semantic and need re-interpretation; from V2.4.27 onward the field is consistent with the pre-V2 historical baseline (~18-63 per cycle for a healthy Si22G + Rev B HV section).
+
+2. **`/status` page "HV pulses" rate display** (`http_server.c`): the "X / min" figure now computes `delta_this_cycle * 60000 / dt_ms` instead of `cumulative * 60000 / dt_ms`. The previous form divided a monotonic counter by a one-cycle duration, producing a number that grew unboundedly with uptime.
+
+3. **CYCLE log line** now shows both: `hv_pulses=<delta> (cum=<cumulative>) ...` so the firmware's serial trace exposes both quantities at a glance.
+
+### What did NOT change
+
+- **MQTT `hv_pulses` field** keeps publishing the cumulative-since-boot value. HA Discovery declares it as `device_class: total_increasing` (`mqtt_discovery.c:117`), which is the correct semantic for that consumer. Long-term-statistics graphs in HA will keep working.
+- **No hardware behaviour change.** The HV regulation itself, the ISR pulse counting, and the tube operating point are all unchanged. The Rev B PCB is fine; this was purely a published-field semantic mismatch.
+
+### How it slipped in
+
+`Git_Repository_Geiger/multigeiger/multigeiger.ino:150` (V1.x): the delta computation lived in `publish()` / `transmit()`, called once per upload cycle. The V2.0 rewrite moved the cumulative ISR counter into a `tube_read()` accessor (`tube.h:39` — "cumulative HV charge pulses since boot") and the new `main.c::do_tx_cycle()` passed the cumulative value through to `transmission.c` without ever taking a difference. The field name `hv_pulses` was preserved, the unit silently changed. Lesson saved to memory as `[[feedback_check_field_semantics_across_firmware_versions]]`.
+
+### Diagnostic context (2026-05-24)
+
+Detected when comparing recent sensor.community CSV downloads (`hv_pulses` reaching 40,000 per row) against `radiation.txt` baselines (which documented monthly averages of 18-63 per cycle through March 2026 from V1.x firmware). The carbon→metal-film theory for the +30% CPM step on Rev B remains correct and unrelated to this fix. The 100 CPM spike on 23/05 is statistical Poisson noise (~1.8σ on the daily mean), not a hardware event.
+
+### What changed (Madavi: drop the radiation POST)
+
+`send_madavi()` previously issued two POSTs per cycle: a dedicated "geiger" body with `Si22G_counts_per_minute` / `Si22G_hv_pulses` / `Si22G_counts` / `Si22G_sample_time_ms` / `signal`, then the environmental body. **Madavi's hardcoded `value_type` whitelist (`api-rrd.madavi.de/data.php`) recognises DHT / HTU21D / BME280 / BMP / BMP280 / DS18B20 / SDS011 / PMS / HPM / PPD42NS / GPS only** — every `Si22G_*` field has been silently dropped at the server for the entire lifetime of V2 (see `[[reference_madavi]]`). The "geiger" POST was therefore pure wasted bandwidth + TLS handshake overhead + RTT for zero stored data.
+
+V2.4.27 removes the geiger body entirely. The environmental body still goes (and still carries `samples` / `min_micro` / `max_micro` / `signal` when the tube is enabled — all whitelisted by Madavi), so tube-only Heltec V2 deployments keep uploading the information Madavi can actually graph.
+
+**Side effects:**
+- ~1 POST/cycle saved across all 5 boards on the Madavi path. Per-cycle airtime + heap usage drops by roughly half on the Madavi side.
+- The legacy "Madavi: geiger rc=X, env rc=Y" log line shortens to "Madavi: rc=X" (one POST = one rc).
+- No HA / MQTT / sensor.community / Radmon / openSenseMap / aqi.eco behaviour change. Si22G radiation data still flows to sensor.community (X-PIN 19) and Radmon as before.
+
+### Files touched
+
+- `main/main.c` — track `g_last_hv_pulses_delta`, compute it in `do_tx_cycle()` via a function-static `s_last_uploaded_hv_pulses`, pass delta to `build_tx_context()`, update CYCLE log line
+- `main/main_status.h` — new `last_hv_pulses_delta` field in `main_status_t`
+- `main/http_server.c` — use `last_hv_pulses_delta` in the per-minute rate calc
+- `main/transmission.c` — remove `build_madavi_geiger_body()` and the dedicated POST that called it; collapse `send_madavi()` to a single env-body POST
+- `main/version.h` — V2.4.26 → V2.4.27
+
+---
+
 ## V2.4.26
 
 **Richer MQTT state — system diagnostics for every board, per-target upload counters for PSRAM boards.** One bigger JSON per existing TX cycle, no new timers, no extra publishes. HA Discovery advertises the new entities automatically; existing entities and state-topic shape are unchanged so HA setups need no manual reconfiguration.

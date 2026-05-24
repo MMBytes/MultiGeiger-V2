@@ -66,7 +66,7 @@ A rising `i2c_err` paired with stable `reset_reason` = bus or sensor problem (ca
 
 ### Notes
 
-- First cycle after boot increments the counter once via `noise_sensor_read()` returning ESP_FAIL on first call (integration window hasn't completed yet). Cosmetic. The 1-count baseline is expected and stable thereafter on a healthy board.
+- **DNMS-equipped nodes only**: on first boot, `noise_sensor_read()` *may* return ESP_FAIL if the LAeq integration window (~150 s, started by `noise_sensor_init()`) hasn't quite finalised by the time the first TX cycle runs — a millisecond-level race. If it loses the race, the counter ticks once at the first cycle and is stable afterwards. Nodes without DNMS attached (e.g. the Oatlands SPS30+SHT45+BMP581 dust node) skip the call entirely and start the counter at 0.
 - All sensor drivers in V2.4.x use the new IDF v6.0 I²C master driver (`i2c_master.h`) — no v4.x legacy paths involved.
 
 ---

@@ -156,6 +156,8 @@ static const ha_entity_t ENTITIES[] = {
     { "heap_min",      "heap_min",      "Heap min free",  "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "heap_max_alloc","heap_max_alloc","Heap max alloc", "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "reset_reason",  "reset_reason",  "Reset reason",   NULL,              NULL,  NULL,          "mdi:restart-alert",  NULL, always_present, "diagnostic" },
+    // V2.4.28: I²C sensor-read-error counter — diagnostic, cumulative.
+    { "i2c_err",       "i2c_err",       "I2C errors",     NULL,              NULL,  "total_increasing", "mdi:bus-alert", NULL, always_present, "diagnostic" },
 
 #ifdef MQTT_RICH_STATE
     // --- V2.4.26: Per-target upload counters (PSRAM boards only) ----------

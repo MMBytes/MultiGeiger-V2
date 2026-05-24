@@ -49,6 +49,7 @@ typedef struct {
     int64_t  last_cycle_at;   // unix epoch when the last cycle finished (0 = never)
     uint32_t last_cycle_ms;   // monotonic uptime ms at last cycle (0 = never)
     uint32_t reconnects;      // WiFi STA reconnect count since boot
+    uint32_t i2c_errors;      // V2.4.28: cumulative I²C sensor read failures
 } main_status_t;
 
 /** @brief Snapshot the cached last-cycle state into `out`.

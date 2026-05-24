@@ -15,6 +15,62 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.28
+
+**I²C sensor-read-error counter — cheapest possible observability for bus / supply health.** Surfaces in three places: CYCLE log line (lands in /log via applog), /status System block, MQTT diagnostic entity.
+
+### What it does
+
+Adds a single global atomic counter (`main/diag.c`) that increments once per failed top-level sensor read in `do_tx_cycle`. Failure call sites covered:
+
+- `env_sensor_read()` — env cascade (BME280 / BMP581 / SHT45 / BMP390 / BME688)
+- `pm_sensor_read()` — SPS30 over I²C
+- `noise_sensor_read()` — DNMS over I²C
+
+The counter is cumulative since boot; only way to reset is reboot (matches `reconnects` and the per-target upload counters). One increment per failed read, not per failed underlying I²C transaction — keeps the signal interpretable.
+
+### Where it shows up
+
+| Surface | Form |
+|---|---|
+| Serial / applog `/log` | `i2c_err=<N>` appended to the existing `CYCLE #...` line |
+| `/status` page | "I²C errors: N since boot" in the System block |
+| MQTT `state` JSON | `"i2c_err": N` always (alongside `cycles`, `reconnects`) — adds 17 B per cycle on Heltec; well under the existing buffer |
+| HA Discovery | `<chip>_i2c_err` entity, `device_class: total_increasing`, `entity_category: diagnostic`, icon `mdi:bus-alert` |
+
+### Why this and not VBUS / fuel-gauge measurement
+
+V2.4.27 left the question "could a marginal supply be causing the +30% CPM / odd spikes?" The first guess was a MAX17048 fuel gauge driver + VBUS-present digital read, both of which got dropped after talking through the actual hardware:
+
+- **MAX17048 fuel gauge** — measures battery cell voltage. Without a LiPo attached (current Oatlands deployment), both VCELL and SoC report ~0 / 0 %. No signal, just clutter on HA. Dropped.
+- **GPIO 34 VBUS-present** — digital line, not analog (ESP32-S3 ADCs only exist on GPIO 1-20). Without a battery, the firmware can't run with USB unplugged, so this would publish a constant `1` forever. Dropped.
+- **Precise 5 V / 3.3 V measurement** — neither rail has an exposed sense pin on the FeatherS3-D. Would require external resistor divider mod to a free ADC1 pin (GPIO 6 = A4 is the only candidate). Not in scope.
+
+What IS observable without hardware mods:
+- **Brownout-grade 3.3 V dips** → `reset_reason: BROWNOUT` (already in MQTT since V2.4.26)
+- **Sub-brownout I²C reliability degradation** → the new counter (this release)
+- **WiFi stack stress** → `reconnects` (already exposed)
+
+A rising `i2c_err` paired with stable `reset_reason` = bus or sensor problem (cable, contamination, marginal pull-ups). A rising `i2c_err` paired with periodic `BROWNOUT` resets = supply problem.
+
+### Files touched
+
+- `main/diag.c` + `main/diag.h` — new module, atomic counter
+- `main/main.c` — include `diag.h`, increment on three sensor read failures, snapshot counter into `main_status_t`, log on CYCLE line
+- `main/main_status.h` — new `i2c_errors` field
+- `main/http_server.c` — render "I²C errors: N since boot" in the System block
+- `main/mqtt.c` — emit `"i2c_err": N` in the state JSON
+- `main/mqtt_discovery.c` — add the diagnostic entity
+- `main/CMakeLists.txt` — add `diag.c` to SRCS
+- `main/version.h` — V2.4.27 → V2.4.28
+
+### Notes
+
+- First cycle after boot increments the counter once via `noise_sensor_read()` returning ESP_FAIL on first call (integration window hasn't completed yet). Cosmetic. The 1-count baseline is expected and stable thereafter on a healthy board.
+- All sensor drivers in V2.4.x use the new IDF v6.0 I²C master driver (`i2c_master.h`) — no v4.x legacy paths involved.
+
+---
+
 ## V2.4.27
 
 **Restore the V1.x per-cycle semantic for `hv_pulses` in legacy HTTPS uploads + status page, and stop POSTing the Madavi-rejected radiation body.** Two unrelated cleanups bundled because both touch the legacy-HTTPS upload path.

@@ -484,6 +484,14 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
                  "<b>Core dump:</b> %s<br>", cd_summary);
     }
 
+    // V2.4.28: I²C sensor-read-error counter. Climbs when env / PM / noise /
+    // light reads fail at the top-level call site in do_tx_cycle. A
+    // monotonically rising value points at marginal supply, flaky bus, or
+    // a failing sensor — pair it with `reset_reason: BROWNOUT` to confirm
+    // power vs bus suspicion.
+    main_status_t st;
+    main_status_snapshot(&st);
+
     snprintf(out, sz,
         "<div class=\"info\"><h3>System</h3>"
         "<b>Uptime:</b> %s<br>"
@@ -492,6 +500,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         "<b>Free heap:</b> %lu bytes<br>"
         "<b>Min free heap:</b> %lu bytes<br>"
         "<b>Max allocation:</b> %lu bytes<br>"
+        "<b>I²C errors:</b> %lu since boot<br>"
         "<b>NTP:</b> %s<br>"
         "<b>AP SSID:</b> %s<br>"
         // V2.4.9: resolved display layout mode. Shows what display.c
@@ -506,6 +515,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         (unsigned long)free_heap,
         (unsigned long)min_free,
         (unsigned long)max_alloc,
+        (unsigned long)st.i2c_errors,
         ntp_line,
         s_cfg->ap_name,
         display_mode_str());

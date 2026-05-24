@@ -396,6 +396,7 @@ void mqtt_publish_state(const main_status_t *st,
     APPEND(",\"uptime_ms\":%" PRIu32, st->last_cycle_ms);
     APPEND(",\"cycles\":%" PRIu32,    st->cycles);
     APPEND(",\"reconnects\":%" PRIu32, st->reconnects);
+    APPEND(",\"i2c_err\":%" PRIu32,   st->i2c_errors);   // V2.4.28
 
     // Radiation block — only when there's a real reading. Suppressing
     // the keys (rather than emitting zero) lets HA show the entity as

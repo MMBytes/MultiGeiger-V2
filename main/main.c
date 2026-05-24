@@ -27,6 +27,7 @@
 #include "pm_sensor.h"
 #include "noise_sensor.h"
 #include "config.h"
+#include "diag.h"               // V2.4.28: I²C sensor-read-error counter
 #include "display.h"
 #include "http_server.h"
 #include "log_ftp.h"
@@ -199,6 +200,7 @@ void main_status_snapshot(main_status_t *out) {
     portEXIT_CRITICAL(&g_last_cycle_at_mux);
     out->last_cycle_ms  = g_last_cycle_ms;
     out->reconnects     = (uint32_t)n_disconnects;   // truncating cast — see counter decl
+    out->i2c_errors     = diag_i2c_errors();         // V2.4.28
 }
 
 // V2.3.29: per-target enable accessor used by the multi-page display
@@ -444,17 +446,20 @@ static void do_tx_cycle(void) {
     // Two CYCLE log line shapes — the long one (Geiger active) carries radiation
     // metrics, the short one (tube disabled) keeps just dt + rssi so logs stay
     // readable on PM-only deployments.
+    uint32_t i2c_errs = diag_i2c_errors();   // V2.4.28: cumulative since boot
     if (g_cfg.tube_enabled) {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
-                 "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu rssi=%ddBm",
+                 "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu "
+                 "rssi=%ddBm i2c_err=%lu",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms,
                  (unsigned long)counts, (unsigned long)cpm, usvph,
                  (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
-                 (unsigned long)max_us, rssi);
+                 (unsigned long)max_us, rssi, (unsigned long)i2c_errs);
     } else {
-        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm",
-                 (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi);
+        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu",
+                 (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,
+                 (unsigned long)i2c_errs);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.
@@ -513,6 +518,7 @@ static void do_tx_cycle(void) {
             env_sensor_heat_periodic((uint32_t)(esp_timer_get_time() / 1000), bme_h);
         } else {
             ESP_LOGW(TAG, "%s: read failed (%s)", env_sensor_name(), env_raw);
+            diag_i2c_error_inc();   // V2.4.28
         }
     }
 
@@ -547,6 +553,7 @@ static void do_tx_cycle(void) {
                      pm.typ_size_um);
         } else {
             ESP_LOGW(TAG, "%s: read failed", pm_sensor_name());
+            diag_i2c_error_inc();   // V2.4.28
         }
 
         // Refresh device-status bits — fan / laser self-diagnosis. ESP_LOGE
@@ -584,6 +591,10 @@ static void do_tx_cycle(void) {
         } else {
             ESP_LOGW(TAG, "%s: read failed (or first cycle still integrating)",
                      noise_sensor_name());
+            diag_i2c_error_inc();   // V2.4.28 — note: first-cycle integration
+                                    // returns ESP_FAIL, so the first cycle
+                                    // increments once on every boot. Stable
+                                    // afterward.
         }
     }
 

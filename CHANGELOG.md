@@ -15,6 +15,26 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.29
+
+**Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from coredump on esp32-5965048 (Oatlands prod, V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.
+
+### Root cause
+
+Three call sites called `time(NULL)` inside a `portENTER_CRITICAL` spinlock section. Critical sections disable interrupts and make `xPortCanYield()` return false. When `time()` internally acquires `s_time_lock` via `_lock_acquire`, the IDF lock code sees "ISR context", uses `xSemaphoreTakeFromISR` instead of `xSemaphoreTake`, and if the lock is held by another task at that instant → `abort()`. A race condition: only triggers when `s_time_lock` is contended at the exact microsecond.
+
+### Fix
+
+Hoist `time(NULL)` above the critical section in all three sites:
+
+- `transmission.c:record_outcome()` — **crash site** (V2.4.1+)
+- `log_ftp.c:log_ftp_loop()` FTP stats update (V2.4.1+)
+- `main.c:do_tx_cycle()` cycle-at timestamp (V2.4.1+)
+
+The timestamp is captured before the spinlock, then the pre-computed value is stored inside the critical section. No semantic change — the few-microsecond difference between sampling `time()` before vs inside the lock is irrelevant for a 150s cycle.
+
+---
+
 ## V2.4.28
 
 **I²C sensor-read-error counter — cheapest possible observability for bus / supply health.** Surfaces in three places: CYCLE log line (lands in /log via applog), /status System block, MQTT diagnostic entity.

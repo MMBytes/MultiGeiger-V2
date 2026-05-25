@@ -94,11 +94,12 @@ void tx_get_stats(tx_target_id_t id, tx_target_stats_t *out) {
 // window that was always present pre-V2.4.1. `ok` should be true iff the
 // caller's target-specific success-code check (200 / 201 / both) matched.
 static void record_outcome(tx_target_id_t id, int rc, bool ok) {
+    int64_t now = (int64_t)time(NULL);
     portENTER_CRITICAL(&s_stats_mux);
     s_stats[id].attempted++;
     if (ok) s_stats[id].succeeded++;
     s_stats[id].last_rc = rc;
-    s_stats[id].last_at = (int64_t)time(NULL);
+    s_stats[id].last_at = now;
     portEXIT_CRITICAL(&s_stats_mux);
 }
 

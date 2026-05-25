@@ -1027,10 +1027,11 @@ done:
     // doesn't blank the previous-good byte count visible on /. V2.4.1 (B1):
     // wrap the group write to pair with the spinlock'd read in
     // log_ftp_get_stats — int64_t s_last_at needs cross-task atomicity.
+    int64_t now = (int64_t)time(NULL);
     portENTER_CRITICAL(&s_stats_mux);
     s_have_last = true;
     s_last_ok   = ok;
-    s_last_at   = (int64_t)time(NULL);
+    s_last_at   = now;
     if (ok) s_last_bytes = (uint32_t)body_len;
     portEXIT_CRITICAL(&s_stats_mux);
 

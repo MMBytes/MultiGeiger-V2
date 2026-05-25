@@ -472,8 +472,9 @@ static void do_tx_cycle(void) {
     g_last_hv_error  = hv_error;
     // V2.4.1 (B1): 64-bit store on a 32-bit core isn't atomic — wrap to
     // pair with the spinlock'd read in main_status_last_cycle_at.
+    int64_t cycle_at = (int64_t)time(NULL);
     portENTER_CRITICAL(&g_last_cycle_at_mux);
-    g_last_cycle_at  = (int64_t)time(NULL);
+    g_last_cycle_at  = cycle_at;
     portEXIT_CRITICAL(&g_last_cycle_at_mux);
     g_last_cycle_ms  = (uint32_t)(esp_timer_get_time() / 1000LL);
 

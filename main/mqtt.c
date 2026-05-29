@@ -242,6 +242,17 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     mc.broker.address.uri               = uri;
     mc.session.keepalive                = 60;       // seconds
     mc.session.disable_clean_session    = false;    // start fresh each session
+    // V2.4.30: slow esp-mqtt's blind auto-reconnect from the 10 s default to
+    // 30 s. During a WiFi outage (router reboot) the client otherwise fires a
+    // fresh TCP+TLS connect every ~10-15 s — each fails fast with
+    // ENETUNREACH but still builds/tears an esp-tls context, churning heap
+    // (negligible on PSRAM boards, real fragmentation pressure on the Heltec
+    // V2's tight heap — see [[reference_heltec_v2_heap_oom_and_ota_teardown]]).
+    // Recovery latency is NOT affected: mqtt_kick_reconnect() forces an
+    // immediate reconnect from main.c's GOT_IP handler the instant STA
+    // re-associates, so this slower timer only governs the broker-down-but-
+    // WiFi-up case (e.g. broker host reboot), where 30 s is fine.
+    mc.network.reconnect_timeout_ms     = 30000;
     mc.session.last_will.topic          = s_topic_avail;
     mc.session.last_will.msg            = "offline";
     mc.session.last_will.msg_len        = 7;
@@ -535,6 +546,26 @@ bool mqtt_is_connected(void) {
 
 uint32_t mqtt_publish_count(void) {
     return s_publish_count;
+}
+
+// V2.4.30: force an immediate reconnect attempt. Called from main.c's GOT_IP
+// handler so a WiFi re-association (router reboot, channel hop, roam)
+// reconnects MQTT promptly instead of idling up to reconnect_timeout_ms (30 s)
+// for esp-mqtt's internal retry timer to fire. Without this, after a router
+// reboot STA can hold a valid IP for ~10 s while the broker connection sits
+// dormant (observed 2026-05-29: GOT_IP at 00:18:59, MQTT reconnect at 00:19:10).
+//
+// esp_mqtt_client_reconnect() returns ESP_FAIL when the client is already
+// connected/connecting (its "invalid state") — exactly when we want to do
+// nothing — so we gate on s_connected and don't bother checking the return.
+// Mux-guarded against mqtt_stop()'s teardown for the same TOCTOU reason as
+// mqtt_publish_state (s_client could be destroyed between the check and use).
+void mqtt_kick_reconnect(void) {
+    if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
+    if (s_client && !s_connected) {
+        esp_mqtt_client_reconnect(s_client);
+    }
+    if (s_state_mux) xSemaphoreGive(s_state_mux);
 }
 
 // V2.4.13: tear down the client to free TLS state — called by /update POST

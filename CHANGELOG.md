@@ -15,6 +15,21 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.30
+
+**MQTT reconnect handling on WiFi recovery.** Prompted by a router-reboot trace (2026-05-29) on esp32-5965048: STA dropped at 00:16:54 and recovered at 00:18:40, but MQTT didn't reconnect until 00:19:10 — ~10 s after `GOT_IP` — and esp-mqtt fired 8 blind TCP+TLS connect attempts during the outage, each failing fast with `ENETUNREACH` but still building/tearing an esp-tls context.
+
+### Changes
+
+- **`mqtt_kick_reconnect()`** — new API called from main.c's `EV_GOT_IP` handler. Forces an immediate `esp_mqtt_client_reconnect()` on every (re)association instead of waiting for esp-mqtt's internal retry timer. No-op when the client is uninitialised (first boot, before `mqtt_init`) or already connected. Mux-guarded against the OTA-teardown TOCTOU like `mqtt_publish_state`/`mqtt_stop`.
+- **`reconnect_timeout_ms` 10 s → 30 s** — slows the blind auto-reconnect cadence during an outage to cut esp-tls context churn (negligible on PSRAM boards; real fragmentation pressure on the Heltec V2's tight heap). Recovery latency is unaffected because the `GOT_IP` kick owns it; the slow timer only governs the broker-down-but-WiFi-up case (e.g. broker host reboot), where 30 s is fine.
+
+### Not changed (deliberately)
+
+Did **not** tear down the MQTT client on `STA_DISCONNECTED` — that's heavier (`esp_mqtt_client_stop` joins the task) and a WiFi flap would stop/start it repeatedly, fighting esp-mqtt's tested reconnect logic. The publish path is already double-guarded (TX cycle returns on `!wifi_up()`; `mqtt_publish_state` bails on `!s_connected`), so no publish-side wrapper was needed.
+
+---
+
 ## V2.4.29
 
 **Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from coredump on esp32-5965048 (Oatlands prod, V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.

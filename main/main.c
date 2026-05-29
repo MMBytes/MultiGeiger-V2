@@ -951,6 +951,13 @@ void app_main(void) {
             // fresh association. The actual send is deferred — see the
             // consumer at the bottom of this loop for the why.
             s_arp_after_reconnect_pending = true;
+            // V2.4.30: nudge esp-mqtt to reconnect immediately on this
+            // (re)association instead of waiting up to reconnect_timeout_ms
+            // (30 s) for its internal retry timer. No-op on the first GOT_IP
+            // (client not yet inited — mqtt_init runs later this iteration)
+            // and when already connected. Closes the ~10 s tail-lag seen
+            // after a router reboot where STA held an IP but MQTT sat idle.
+            mqtt_kick_reconnect();
         }
         if (bits & EV_DISCONNECTED) {
             if (!g_sta_connect_allowed) {

@@ -105,3 +105,12 @@ bool mqtt_is_connected(void);
  *  was queued (publishes dropped because broker disconnected don't count).
  */
 uint32_t mqtt_publish_count(void);
+
+/** @brief Force an immediate MQTT reconnect attempt (V2.4.30).
+ *
+ *  Call from the WiFi GOT_IP handler so a re-association reconnects MQTT at
+ *  once rather than waiting for esp-mqtt's internal retry timer (30 s, see
+ *  reconnect_timeout_ms in mqtt_init). No-op when MQTT is uninitialised
+ *  (first boot, before mqtt_init) or already connected. Safe from any task.
+ */
+void mqtt_kick_reconnect(void);

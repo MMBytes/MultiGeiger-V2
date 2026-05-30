@@ -15,6 +15,25 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.31
+
+**Fix: the 24h PSA crypto refresh broke the live MQTT connection.** Diagnosed 2026-05-30 from three serial logs (esp32-5963724 + esp32-5965048). Once per 24h `periodic_loop()` runs `mbedtls_psa_crypto_free()` + `psa_crypto_init()` to defragment the heap by emptying the PSA key-slot pool — but it did so **while the persistent MQTT client's TLS session was still live.** In mbedTLS 4.x / IDF 6 the MQTT session's AES-GCM record keys live in PSA slots, so freeing the pool invalidated them and the next MQTT TLS write failed.
+
+### Root cause
+
+The PSA-refresh safety gate (`tx_is_idle()`) only accounts for the **transient** HTTPS/FTPS handshakes on the TX worker. The **persistent** MQTT TLS connection (added V2.4.2) holds PSA slots full-time and the gate never saw it. Symptom: immediately after `psa_crypto_init: ok`, the next MQTT op failed `esp-tls-mbedtls: write error :-0x0084` — a keepalive ping (`mqtt_client: Error sending ping` → `DISCONNECTED`, on its own, before any FTP) or, on FTP nodes, the FTP-prep DISCONNECT (`errno=128`). The subsequent `mqtt_stop()` then blocked the main task ~4.5 s (vs ~18 ms when no refresh coincided). Earlier this was misattributed to a "benign already-dead idle socket" during FTP teardown — wrong: normal FTP uploads with no PSA refresh tear MQTT down cleanly; only the upload coinciding with the refresh errored.
+
+### Changes
+
+- **`periodic.c`** — stop the MQTT client (`mqtt_stop()`, guarded by `mqtt_is_initialized()`) **before** `mbedtls_psa_crypto_free()`, so its DISCONNECT goes out over still-valid crypto. main.c's "STA has IP + clock sane → starting MQTT client" poll re-inits it on the next tick (the same restart path FTP relies on); FTP-prep's own `mqtt_is_initialized()` guard then sees it already down and skips its stop → one clean bounce.
+- **Bonus** — this also makes the defrag actually reclaim MQTT's PSA slots. Previously the live session held its slots across the refresh, so the pool never fully emptied, partly defeating the chore's purpose.
+
+### Scope
+
+Affects every board running MQTT (all current targets). The break failed *safe* (PSA returns an invalid-handle error, no crash / use-after-free) and MQTT auto-recovered, so no data was lost — but it flapped availability + re-ran HA discovery every 24h and blocked the main task during the dirty stop. No behaviour change on the once-daily window beyond a clean MQTT bounce instead of a dirty one.
+
+---
+
 ## V2.4.30
 
 **MQTT reconnect handling on WiFi recovery.** Prompted by a router-reboot trace (2026-05-29) on esp32-5965048: STA dropped at 00:16:54 and recovered at 00:18:40, but MQTT didn't reconnect until 00:19:10 — ~10 s after `GOT_IP` — and esp-mqtt fired 8 blind TCP+TLS connect attempts during the outage, each failing fast with `ENETUNREACH` but still building/tearing an esp-tls context.

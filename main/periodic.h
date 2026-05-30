@@ -17,6 +17,10 @@
  *     + `psa_crypto_init()` to return the slot pool to empty.
  *     Compensates for slow heap fragmentation across hundreds of TLS
  *     handshakes (V2.3.23). Independent of FTP being enabled.
+ *     V2.4.31: stops the persistent MQTT client first — its TLS session's
+ *     keys live in PSA slots, so freeing the pool out from under a live
+ *     MQTT connection broke it every 24h. The main loop re-inits MQTT on
+ *     the next tick.
  *  2. **24h gratuitous ARP safety-net** — `net_arp_send_gratuitous()`
  *     so that sensors which never reconnect for days still keep
  *     upstream AP/mesh bridge forwarding tables warm. The per-
@@ -25,7 +29,9 @@
  *  Both chores share the same 24h cadence and the same `tx_is_idle()`
  *  gate. The TX-worker idle check matters because:
  *    - `mbedtls_psa_crypto_free()` would corrupt an in-flight HTTPS
- *      handshake's state.
+ *      handshake's state. (The *persistent* MQTT TLS session is a
+ *      separate case the idle gate can't see — V2.4.31 handles it by
+ *      stopping MQTT before the free; see periodic.c.)
  *    - The ARP itself is safe to fire concurrently but the user's
  *      explicit preference (2026-05-21) is to avoid sharing airtime
  *      with TX/FTP activity.

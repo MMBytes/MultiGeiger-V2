@@ -19,6 +19,7 @@
 #include "log_ftp.h"           // log_ftp_note_psa_refreshed (resets FTP-side OOM counter)
 #include "net_arp.h"           // net_arp_send_gratuitous
 #include "transmission.h"      // tx_is_idle
+#include "mqtt.h"              // mqtt_is_initialized / mqtt_stop (V2.4.31)
 
 static const char *TAG = "periodic";
 
@@ -62,6 +63,32 @@ void periodic_loop(uint32_t now_ms) {
         // TX worker busy — try again on next loop tick (1 s). No
         // timestamp update so we keep retrying until idle.
         return;
+    }
+
+    // V2.4.31: stop the persistent MQTT client BEFORE freeing PSA.
+    //
+    // The tx_is_idle() gate above only covers the *transient* HTTPS/FTPS
+    // handshakes on the worker. The MQTT client (V2.4.2+) holds a
+    // *persistent* TLS session whose AES-GCM record keys live in PSA key
+    // slots — `mbedtls_psa_crypto_free()` invalidates them, so the next
+    // MQTT TLS write (a keepalive ping, or the FTP-prep DISCONNECT) fails
+    // `-0x0084` and the live connection breaks. Symptom before this fix
+    // (diagnosed 2026-05-30 from three serial logs, esp32-5963724 +
+    // 5965048): every 24h the refresh was immediately followed by
+    // `mqtt_client: Error sending ping` / `DISCONNECTED`, then a ~4.5 s
+    // blocking `mqtt_stop()`. See [[reference_mqtt_ha_integration]].
+    //
+    // Stopping MQTT first sends a clean DISCONNECT over still-valid crypto;
+    // main.c's "STA has IP + clock sane → starting MQTT client" poll
+    // re-inits it on the next tick (the same path FTP relies on). FTP-prep's
+    // own `mqtt_is_initialized()` guard then sees it already down and skips
+    // its stop, so it's a single clean bounce. Bonus: this actually releases
+    // MQTT's PSA slots, so the free now empties the pool — previously the
+    // live session held its slots across the refresh, partly defeating the
+    // defrag this whole chore exists for.
+    if (mqtt_is_initialized()) {
+        ESP_LOGI(TAG, "PSA refresh: stopping MQTT first (its TLS keys live in PSA slots)");
+        mqtt_stop();
     }
 
     ESP_LOGI(TAG, "PSA crypto subsystem refresh (24h scheduled)");

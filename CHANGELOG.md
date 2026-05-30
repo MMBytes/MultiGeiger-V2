@@ -15,6 +15,12 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.2
+
+**Grow the MQTT rich-state JSON buffer 1280 → 1664 B.** The rich-state publish buffer was sized at V2.4.26 for **5** upload targets, but has since grown: V2.4.33 added 3 internal/DMA heap fields, and V2.5.1 added **GMC + ThingSpeak (now 7 targets × 4 fields ≈ 560 B of upload stats)**. Worst case on a fully-loaded FeatherS3-D (tube + env + PM + DNMS + lux + all 7 upload targets + FTP, with uint32-max counters) is ~1.27 KB — at the old 1280 B ceiling. `APPEND()` truncates safely (no overflow/crash), but a truncated JSON fails Home Assistant's parse for that publish, briefly dropping the entity. Bumped to 1664 B to restore the original ~380 B slack. PSRAM/rich-state boards only; the Heltec base buffer (768 B, no upload stats / heap split) is unchanged. Stack-allocated; the cycle task has 4 KB+ stack.
+
+---
+
 ## V2.5.1
 
 **New upload targets: GMCMap (gmcmap.com) and ThingSpeak.** Two community/generic radiation outputs modelled on ESPGeiger's `GMC` and `Thingspeak` modules, wired into the existing TX-target framework (per-cycle dispatch, retry, circuit breaker, status page, MQTT/HA).

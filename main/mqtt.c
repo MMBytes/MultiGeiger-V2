@@ -386,15 +386,20 @@ void mqtt_publish_state(const main_status_t *st,
         return;
     }
 
-    // V2.4.26 buffer sizing:
+    // Buffer sizing (V2.4.26 base; rich grown V2.5.2):
     //   - Base 768 B covers all sensor blocks + the always-on system block
     //     (worst case ~365 B on Heltec, ~580 B on FeatherS3-D PM+DNMS).
-    //   - +512 B under MQTT_RICH_STATE for the per-target upload stats
-    //     (5 targets × 4 fields ≈ 315 B + FTPS ≈ 60 B + slack).
-    // Stack-allocated — cycle task has 4 KB+ stack per existing config, so
-    // 1280 B on PSRAM boards / 768 B on Heltec both fit with headroom.
+    //   - Rich (MQTT_RICH_STATE) adds the per-target upload stats + V2.4.33's
+    //     3 internal/DMA heap fields. Worst case on a fully-loaded FeatherS3-D
+    //     (tube + env + PM + DNMS + lux + ALL 7 upload targets + FTP, uint32-max
+    //     counters) ≈ 1.27 KB — which the old 1280 B sized to (5 targets) could
+    //     truncate. V2.5.1 added GMC + ThingSpeak (7 targets × 4 fields ≈ 560 B
+    //     of upload stats). Bumped 1280 → 1664 B to restore the original ~380 B
+    //     slack. APPEND() truncates safely (no overflow), but a truncated JSON
+    //     fails HA's parse for that publish — so keep real headroom here.
+    // Stack-allocated — cycle task has 4 KB+ stack, so 1664 / 768 B both fit.
 #ifdef MQTT_RICH_STATE
-    char buf[1280];
+    char buf[1664];   // 7 upload targets + heap split + all sensors + FTP
 #else
     char buf[768];
 #endif

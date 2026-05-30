@@ -15,6 +15,21 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.32
+
+**Diagnose long-uptime OTA-upload stalls + give the OTA prep enough time to wait out a TX retry storm.** Background: on 2026-05-30, esp32-5965048 (dust node, ~56 h uptime) failed every OTA — the 1.3 MB upload stalled after exactly one TCP window (`8640`/`11520` B) while all outbound HTTPS kept working and the heap looked healthy. **A reboot fixed it**, proving the cause is *accumulated runtime state in the net stack*, not config/RF/mesh. The "healthy heap" was misleading: `esp_get_free_heap_size()` is PSRAM-dominated, but WiFi + lwIP RX buffers live in **internal/DMA-capable RAM**, so a drain there is invisible in the numbers we log.
+
+### Changes
+
+- **Tier-1 net-stack instrumentation** — new `diag_log_heap(where)` logs the heap split by capability: `INTERNAL free/largest/min` and `DMA free/largest`. Called **per-cycle** (right after the existing `free heap before TX` line) and **at OTA-prep** (the failure moment, before the service teardown). The per-cycle line lands in `/log` → the hourly FTP upload, so we get the full multi-day time series into the next stall and can see *which* bucket drains (internal/DMA RAM, vs. needing Tier-2 `LWIP_STATS` per-pool counts). Read all three counters — stable free + falling largest/min = fragmentation, not a leak.
+- **OTA-prep "wait for TX idle" 10 s → 60 s** — a sensor.community/openSenseMap retry storm is up to 4 × ~15 s ≈ 60 s. The old 10 s budget guaranteed `OTA prep: TX still busy after 10s — proceeding anyway`, so the OTA write contended with an in-flight TLS upload (observed 2026-05-30, 16:07). 60 s covers the worst-case retry run so the OTA almost always starts on a quiet radio.
+
+### Notes
+
+Diagnostic + robustness only — no behaviour change to the data path. Workaround for the underlying stall remains **reboot-before-OTA** until the drained pool is identified from the Tier-1 data; Tier-2 (`CONFIG_LWIP_STATS`/`MEMP_STATS` per-pool) is the planned follow-up if the capability split alone doesn't pin it.
+
+---
+
 ## V2.4.31
 
 **Fix: the 24h PSA crypto refresh broke the live MQTT connection.** Diagnosed 2026-05-30 from three serial logs (esp32-5963724 + esp32-5965048). Once per 24h `periodic_loop()` runs `mbedtls_psa_crypto_free()` + `psa_crypto_init()` to defragment the heap by emptying the PSA key-slot pool — but it did so **while the persistent MQTT client's TLS session was still live.** In mbedTLS 4.x / IDF 6 the MQTT session's AES-GCM record keys live in PSA slots, so freeing the pool invalidated them and the next MQTT TLS write failed.

@@ -27,6 +27,7 @@
 
 #include "version.h"
 #include "applog.h"
+#include "diag.h"              // V2.4.32: diag_log_heap (net-RAM split at OTA-prep)
 #include "coredump.h"          // V2.4.18: panic dump availability + summary + /coredump.elf
 #include "hal.h"
 #include "pm_sensor.h"
@@ -1773,11 +1774,22 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // On FeatherS3-D the teardown is harmless — heap was never tight.
     // Scoped to POST only: GET /update (the form render) leaves network
     // state intact, so just viewing the page has zero impact.
-    ESP_LOGI(TAG, "OTA prep: waiting for TX worker idle");
+    // V2.4.32: snapshot the net-stack RAM split at OTA start — this is the
+    // failure moment for the long-uptime inbound-stall (esp32-5965048,
+    // 2026-05-30). Logged before the teardown below so we capture the degraded
+    // state with WiFi / MQTT / FTP still up.
+    diag_log_heap("OTA prep");
+
+    // V2.4.32: wait up to 60s (was 10s) for the TX worker to go idle. A
+    // sensor.community / openSenseMap retry storm is up to 4 × ~15s ≈ 60s, so a
+    // 10s budget guaranteed we'd "proceed anyway" mid-storm and let the OTA
+    // write contend with an in-flight TLS upload. 60s covers the worst-case
+    // retry run so the OTA almost always starts on a quiet radio.
+    ESP_LOGI(TAG, "OTA prep: waiting for TX worker idle (up to 60s)");
     int spins = 0;
-    while (!tx_is_idle() && spins++ < 100) vTaskDelay(pdMS_TO_TICKS(100));
-    if (spins >= 100) {
-        ESP_LOGW(TAG, "OTA prep: TX still busy after 10s — proceeding anyway");
+    while (!tx_is_idle() && spins++ < 600) vTaskDelay(pdMS_TO_TICKS(100));
+    if (spins >= 600) {
+        ESP_LOGW(TAG, "OTA prep: TX still busy after 60s — proceeding anyway");
     }
     log_ftp_pause();
     mqtt_stop();

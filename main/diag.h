@@ -37,3 +37,14 @@ void diag_i2c_error_inc(void);
 
 /** @brief Read the current I²C sensor-read-error count. Safe from any task. */
 uint32_t diag_i2c_errors(void);
+
+/** @brief Log internal/DMA-capable RAM free/largest/min at a labelled point.
+ *
+ *  V2.4.32 Tier-1 net-stack instrumentation. WiFi + lwIP RX buffers live in
+ *  INTERNAL (DMA) RAM, NOT the PSRAM that dominates esp_get_free_heap_size();
+ *  a multi-day drain there starves sustained inbound TCP (OTA-upload stalls)
+ *  while the total "free heap" stays flat and hides it. Call per-cycle and at
+ *  OTA-prep so the /log → FTP time series shows which capability bucket drains
+ *  over uptime. `where` is a short context label (e.g. "per-cycle", "OTA prep").
+ */
+void diag_log_heap(const char *where);

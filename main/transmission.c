@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -995,6 +996,10 @@ static void tx_run(tx_context_t *c) {
     // (which the FTPS pre/post heap log already covers).
     ESP_LOGI(TAG, "free heap before TX: %lu bytes / min_free=%lu / max_alloc=%lu bytes",
              (unsigned long)free_heap, (unsigned long)min_free, (unsigned long)max_alloc);
+    // V2.4.32: the line above is PSRAM-dominated; the net stack lives in
+    // internal/DMA RAM. Log the capability split each cycle so the multi-day
+    // /log → FTP trail exposes any internal/DMA drain (suspected OTA-stall cause).
+    diag_log_heap("per-cycle");
 
     // Madavi and sensor.community accept a mix of radiation + env (THP) + PM +
     // noise payloads, so they're called whenever ANY source is live. Radmon is

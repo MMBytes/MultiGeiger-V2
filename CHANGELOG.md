@@ -15,6 +15,22 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.4.33
+
+**Publish the internal/DMA-RAM split to MQTT so Home Assistant can graph the long-uptime net-stack drain.** Follow-on to V2.4.32: the per-cycle `diag_log_heap()` lands in `/log` → FTP, which means watching the multi-day trend meant pulling and diffing log files. The MQTT rich state already published `heap_free` / `heap_min` / `heap_max_alloc` — but those are the **PSRAM-dominated totals**, i.e. the same misleading numbers that hid the problem. This adds the gauge that matters.
+
+### Changes
+
+- **Three new rich-state fields** (`mqtt.c`): `heap_int_free`, `heap_int_largest`, `heap_dma_largest` (`heap_caps_*` for `MALLOC_CAP_INTERNAL` / `MALLOC_CAP_DMA`), emitted next to the existing `heap_*` totals.
+- **Three HA discovery entities** (`mqtt_discovery.c`): "Heap internal free / internal largest / DMA largest", `data_size`/`B`/`measurement` (so HA keeps long-term statistics), diagnostic category — same shape as the existing heap entities.
+- **Gated `MQTT_RICH_STATE` (PSRAM boards only).** On the Heltec (no PSRAM) the total heap *is* the internal heap, so the existing `heap_free`/`heap_max_alloc` already serve as the internal gauge there — the split would only duplicate them. The split is informative exactly where total ≠ internal, which is the rich-state boards.
+
+### Why
+
+`heap_int_largest` is the high-value one — the contiguous-block ceiling on internal/DMA RAM is what a sustained inbound TLS/OTA receive needs, and a shrinking `largest` over days is the fragmentation signature behind the OTA-upload stalls (see V2.4.32 / the long-uptime OTA-stall investigation). Graphing it in HA — with an optional alert when it drops below ~40 KB — catches a node *before* its OTA starts failing, instead of after. Diagnostic/observability only; no data-path change. Adds ~72 B to the rich-state JSON (well within the 1280 B buffer; observed publish ~676 → ~748 B).
+
+---
+
 ## V2.4.32
 
 **Diagnose long-uptime OTA-upload stalls + give the OTA prep enough time to wait out a TX retry storm.** Background: on 2026-05-30, esp32-5965048 (dust node, ~56 h uptime) failed every OTA — the 1.3 MB upload stalled after exactly one TCP window (`8640`/`11520` B) while all outbound HTTPS kept working and the heap looked healthy. **A reboot fixed it**, proving the cause is *accumulated runtime state in the net stack*, not config/RF/mesh. The "healthy heap" was misleading: `esp_get_free_heap_size()` is PSRAM-dominated, but WiFi + lwIP RX buffers live in **internal/DMA-capable RAM**, so a drain there is invisible in the numbers we log.

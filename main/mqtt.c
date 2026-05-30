@@ -483,6 +483,19 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"heap_free\":%" PRIu32,      esp_get_free_heap_size());
         APPEND(",\"heap_min\":%" PRIu32,       esp_get_minimum_free_heap_size());
         APPEND(",\"heap_max_alloc\":%" PRIu32, (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#ifdef MQTT_RICH_STATE
+        // V2.4.33: internal/DMA-RAM split — PSRAM (rich-state) boards only.
+        // The heap_* above are PSRAM-dominated totals; WiFi + lwIP RX buffers
+        // live in INTERNAL/DMA RAM, so the contiguous-block ceiling THERE (not
+        // the ~4 MB total) is what gates a sustained inbound TLS/OTA receive.
+        // Publishing it lets HA graph the multi-day internal/DMA drain that is
+        // the suspected long-uptime OTA-stall cause (mirror of diag_log_heap()).
+        // On Heltec (no PSRAM) total==internal, so these would just duplicate
+        // heap_free/heap_max_alloc — hence rich-state-only.
+        APPEND(",\"heap_int_free\":%" PRIu32,    (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        APPEND(",\"heap_int_largest\":%" PRIu32, (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        APPEND(",\"heap_dma_largest\":%" PRIu32, (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+#endif
         APPEND(",\"reset_reason\":\"%s\"",     reset_reason_str(esp_reset_reason()));
     }
 

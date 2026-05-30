@@ -155,6 +155,15 @@ static const ha_entity_t ENTITIES[] = {
     { "heap_free",     "heap_free",     "Heap free",      "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "heap_min",      "heap_min",      "Heap min free",  "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "heap_max_alloc","heap_max_alloc","Heap max alloc", "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
+#ifdef MQTT_RICH_STATE
+    // V2.4.33: internal/DMA-RAM split (PSRAM boards only — see mqtt.c). The
+    // heap_* above are PSRAM totals; these expose the internal/DMA pool that
+    // actually gates sustained inbound TLS/OTA, so HA graphs the multi-day
+    // drain. measurement state-class → HA keeps long-term statistics.
+    { "heap_int_free",    "heap_int_free",    "Heap internal free",    "data_size", "B", "measurement", "mdi:memory", NULL, always_present, "diagnostic" },
+    { "heap_int_largest", "heap_int_largest", "Heap internal largest", "data_size", "B", "measurement", "mdi:memory", NULL, always_present, "diagnostic" },
+    { "heap_dma_largest", "heap_dma_largest", "Heap DMA largest",      "data_size", "B", "measurement", "mdi:memory", NULL, always_present, "diagnostic" },
+#endif
     { "reset_reason",  "reset_reason",  "Reset reason",   NULL,              NULL,  NULL,          "mdi:restart-alert",  NULL, always_present, "diagnostic" },
     // V2.4.28: I²C sensor-read-error counter — diagnostic, cumulative.
     { "i2c_err",       "i2c_err",       "I2C errors",     NULL,              NULL,  "total_increasing", "mdi:bus-alert", NULL, always_present, "diagnostic" },

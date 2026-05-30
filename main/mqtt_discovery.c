@@ -72,12 +72,16 @@ static bool s_send_sensorc_ = false;
 static bool s_send_radmon_  = false;
 static bool s_send_osm_     = false;
 static bool s_send_aqi_     = false;
+static bool s_send_gmc_        = false;
+static bool s_send_thingspeak_ = false;
 static bool s_ftp_enabled_  = false;
 static bool send_madavi_present_(void)   { return s_send_madavi_; }
 static bool send_sensorc_present_(void)  { return s_send_sensorc_; }
 static bool send_radmon_present_(void)   { return s_send_radmon_; }
 static bool send_osm_present_(void)      { return s_send_osm_; }
 static bool send_aqi_present_(void)      { return s_send_aqi_; }
+static bool send_gmc_present_(void)        { return s_send_gmc_; }
+static bool send_thingspeak_present_(void) { return s_send_thingspeak_; }
 static bool ftp_present_(void)           { return s_ftp_enabled_; }
 #endif
 
@@ -198,6 +202,16 @@ static const ha_entity_t ENTITIES[] = {
     { "aqi_att",        "aqi_att",        "AQI.eco att",    NULL, NULL, "total_increasing", "mdi:cloud-upload",     NULL, send_aqi_present_,     NULL },
     { "aqi_rc",         "aqi_rc",         "AQI.eco last rc",NULL, NULL, "measurement",      "mdi:counter",          NULL, send_aqi_present_,     NULL },
     { "aqi_breaker",    "aqi_breaker",    "AQI.eco breaker",NULL, NULL, "measurement",      "mdi:fuse",             NULL, send_aqi_present_,     NULL },
+
+    // V2.5.1: GMCMap + ThingSpeak upload counters (PSRAM/rich-state only).
+    { "gmc_ok",         "gmc_ok",         "GMC OK",            NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_gmc_present_,        NULL },
+    { "gmc_att",        "gmc_att",        "GMC att",           NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_gmc_present_,        NULL },
+    { "gmc_rc",         "gmc_rc",         "GMC last rc",       NULL, NULL, "measurement",      "mdi:counter",      NULL, send_gmc_present_,        NULL },
+    { "gmc_breaker",    "gmc_breaker",    "GMC breaker",       NULL, NULL, "measurement",      "mdi:fuse",         NULL, send_gmc_present_,        NULL },
+    { "ts_ok",          "ts_ok",          "ThingSpeak OK",     NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_thingspeak_present_, NULL },
+    { "ts_att",         "ts_att",         "ThingSpeak att",    NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_thingspeak_present_, NULL },
+    { "ts_rc",          "ts_rc",          "ThingSpeak last rc",NULL, NULL, "measurement",      "mdi:counter",      NULL, send_thingspeak_present_, NULL },
+    { "ts_breaker",     "ts_breaker",     "ThingSpeak breaker",NULL, NULL, "measurement",      "mdi:fuse",         NULL, send_thingspeak_present_, NULL },
 
     // --- V2.4.26: FTPS log upload (PSRAM boards only) ---------------------
     { "ftp_ok",     "ftp_ok",    "FTP last OK",     NULL,        NULL, NULL,          "mdi:check-circle",      NULL, ftp_present_, NULL },
@@ -327,14 +341,18 @@ void mqtt_discovery_set_tube_enabled(bool enabled) {
 // V2.4.26: companion to set_tube_enabled — seeds the per-target upload
 // predicates so the entity catalog knows which targets to advertise.
 void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
-                                     bool osm, bool aqi, bool ftp);
+                                     bool osm, bool aqi, bool gmc,
+                                     bool thingspeak, bool ftp);
 void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
-                                     bool osm, bool aqi, bool ftp) {
+                                     bool osm, bool aqi, bool gmc,
+                                     bool thingspeak, bool ftp) {
     s_send_madavi_  = madavi;
     s_send_sensorc_ = sensorc;
     s_send_radmon_  = radmon;
     s_send_osm_     = osm;
     s_send_aqi_     = aqi;
+    s_send_gmc_        = gmc;
+    s_send_thingspeak_ = thingspeak;
     s_ftp_enabled_  = ftp;
 }
 #endif

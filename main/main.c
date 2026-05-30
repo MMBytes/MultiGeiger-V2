@@ -417,6 +417,15 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->send_aqi         = g_cfg.send_aqi;
     ctx->aqi_use_insecure = false;
     ctx->aqi_token        = g_cfg.aqi_token;
+
+    // V2.5.1: GMCMap (HTTP-only) + ThingSpeak (HTTPS-capable).
+    tx_target_configure(&ctx->gmc, TX_TARGET_GMC, g_cfg.send_gmc, false);
+    ctx->gmc_account_id = g_cfg.gmc_account_id;
+    ctx->gmc_geiger_id  = g_cfg.gmc_geiger_id;
+
+    tx_target_configure(&ctx->thingspeak, TX_TARGET_THINGSPEAK,
+                        g_cfg.send_thingspeak, g_cfg.thingspeak_https);
+    ctx->thingspeak_api_key = g_cfg.thingspeak_api_key;
 }
 
 static void do_tx_cycle(void) {

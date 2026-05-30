@@ -40,7 +40,8 @@ static const char *TAG = "tx";
 static tx_target_stats_t s_stats[TX_TARGET_COUNT] = {0};
 static portMUX_TYPE      s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_target_names[TX_TARGET_COUNT] = {
-    "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco"
+    "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco",
+    "GMC", "ThingSpeak"
 };
 
 const char *tx_target_name(tx_target_id_t id) {
@@ -65,6 +66,9 @@ static const struct {
                             "https://radmon.org/radmon.php" },
     [TX_TARGET_OSM]     = { NULL, NULL },   // dynamic — see send_osm()
     [TX_TARGET_AQI]     = { NULL, NULL },   // dynamic — see send_aqi()
+    [TX_TARGET_GMC]     = { "http://www.gmcmap.com/log2.asp", NULL },  // HTTP-only
+    [TX_TARGET_THINGSPEAK] = { "http://api.thingspeak.com/update",
+                               "https://api.thingspeak.com/update" },
 };
 
 void tx_target_configure(tx_target_t *out, tx_target_id_t id,
@@ -685,6 +689,92 @@ static int send_radmon(const tx_context_t *c) {
     return -1;
 }
 
+// --- GMCMap (gmcmap.com / GQ Electronics) -----------------------------------
+// GET /log2.asp?AID=&GID=&CPM=&ACPM=&uSV=  — radiation community map.
+// HTTP-only (gmcmap has no TLS). Success = HTTP 200 + body contains "OK";
+// "ERR1" = account ID not found, "ERR2" = counter ID not found. V2.5.1.
+//
+// Current-values-only mapping (no rolling windows in this firmware): CPM and
+// ACPM both carry the per-cycle CPM; uSV is the per-cycle dose derived from it.
+static int send_gmc(const tx_context_t *c) {
+    if (!c->gmc_account_id[0] || !c->gmc_geiger_id[0]) {
+        ESP_LOGW(TAG, "GMC: account/counter ID empty, skipping.");
+        return -3;
+    }
+    float usv = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH;   // µSv/h
+    char url[256];
+    snprintf(url, sizeof(url),
+             "%s?AID=%s&GID=%s&CPM=%lu&ACPM=%lu&uSV=%.4f",
+             c->gmc.url_http, c->gmc_account_id, c->gmc_geiger_id,
+             (unsigned long)c->cpm, (unsigned long)c->cpm, (double)usv);
+
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
+        if (!wifi_up()) return -2;
+        char buf[RESP_BUF_SIZE];
+        resp_ctx_t resp = { .buf = buf, .cap = sizeof(buf), .len = 0 };
+        buf[0] = 0;
+        int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
+                            &resp, c->gmc.use_insecure);
+        if (rc == 200) {
+            if (strstr(buf, "OK")) return 200;
+            if (strstr(buf, "ERR1"))      ESP_LOGW(TAG, "GMC: account ID not found");
+            else if (strstr(buf, "ERR2")) ESP_LOGW(TAG, "GMC: counter ID not found");
+            else                          ESP_LOGW(TAG, "GMC rejected: %s", buf);
+            return -1;
+        }
+        if (rc > 0 && rc != 408 && rc < 500) return rc;  // 4xx — don't retry
+        ESP_LOGW(TAG, "GMC rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    return -1;
+}
+
+// --- ThingSpeak -------------------------------------------------------------
+// GET /update?api_key=&field1=CPM&field2=uSv&field3=CPM&field4=CPM
+//   [&field5=T&field6=H&field7=P]  — generic time-series. HTTPS supported.
+// Success = HTTP 200 + body != "0" (ThingSpeak returns the new entry id, 0 on
+// reject — rate limit or bad key). field3/4 carry current CPM (no windows). V2.5.1.
+static int send_thingspeak(const tx_context_t *c) {
+    if (!c->thingspeak_api_key[0]) {
+        ESP_LOGW(TAG, "ThingSpeak: API key empty, skipping.");
+        return -3;
+    }
+    const char *base = c->thingspeak.use_https ? c->thingspeak.url_https
+                                               : c->thingspeak.url_http;
+    float usv = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH;   // µSv/h
+    char url[320];
+    int n = snprintf(url, sizeof(url),
+             "%s?api_key=%s&field1=%lu&field2=%.4f&field3=%lu&field4=%lu",
+             base, c->thingspeak_api_key,
+             (unsigned long)c->cpm, (double)usv,
+             (unsigned long)c->cpm, (unsigned long)c->cpm);
+    // Optional env fields (matches ESPGeiger field5/6/7 = temp/humidity/pressure).
+    if (c->bme_valid && n > 0 && n < (int)sizeof(url)) {
+        snprintf(url + n, sizeof(url) - n,
+                 "&field5=%.2f&field6=%.2f&field7=%.1f",
+                 (double)c->bme_temperature_c, (double)c->bme_humidity_pct,
+                 (double)(c->bme_pressure_pa / 100.0f));   // Pa → hPa
+    }
+
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
+        if (!wifi_up()) return -2;
+        char buf[RESP_BUF_SIZE];
+        resp_ctx_t resp = { .buf = buf, .cap = sizeof(buf), .len = 0 };
+        buf[0] = 0;
+        int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
+                            &resp, c->thingspeak.use_insecure);
+        if (rc == 200) {
+            if (buf[0] && strcmp(buf, "0") != 0) return 200;
+            ESP_LOGW(TAG, "ThingSpeak rejected (entry id 0 — rate limit or bad key)");
+            return -1;
+        }
+        if (rc > 0 && rc != 408 && rc < 500) return rc;
+        ESP_LOGW(TAG, "ThingSpeak rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    return -1;
+}
+
 // --- Combined Luftdaten body (used by openSenseMap + aqi.eco) ---------------
 // Both targets accept a Luftdaten-style sensordatavalues array. openSenseMap
 // gets the full sensor bundle (Si22G_* radiation, BME280_* T/H/P, SPS30_* PM,
@@ -986,6 +1076,10 @@ static void tx_run(tx_context_t *c) {
     static int osm_fail_streak     = 0;
     // cppcheck-suppress variableScope
     static int aqi_fail_streak     = 0;
+    // cppcheck-suppress variableScope
+    static int gmc_fail_streak     = 0;
+    // cppcheck-suppress variableScope
+    static int ts_fail_streak      = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t min_free  = esp_get_minimum_free_heap_size();
@@ -1103,6 +1197,64 @@ static void tx_run(tx_context_t *c) {
         display_set_status(DSP_STATUS_RADMON, DSP_SRV_IDLE);
     } else {
         display_set_status(DSP_STATUS_RADMON, DSP_SRV_OFF);
+    }
+
+    // V2.5.1: GMCMap — radiation-only (gated on tube_enabled like Radmon).
+    // No OLED status slot (matches OSM/aqi.eco — sealed-tube deployment).
+    if (c->gmc.enabled && c->tube_enabled) {
+        if (s_stats[TX_TARGET_GMC].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_GMC].breaker_open_cycles--;
+            ESP_LOGI(TAG, "GMC: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_GMC].breaker_open_cycles);
+        } else {
+            ESP_LOGI(TAG, "Sending to GMC (gmcmap.com, http)");
+            int rc = send_gmc(c);
+            bool ok = (rc == 200);
+            record_outcome(TX_TARGET_GMC, rc, ok);
+            ESP_LOGI(TAG, "GMC: %s (rc=%d)", ok ? "ok" : "error", rc);
+            if (ok) {
+                gmc_fail_streak = 0;
+            } else if (rc == -1) {
+                gmc_fail_streak++;
+                if (gmc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
+                    s_stats[TX_TARGET_GMC].breaker_open_cycles = TX_CB_SKIP_CYCLES;
+                    ESP_LOGW(TAG, "GMC: %d fails, breaker open for %d cycles",
+                             gmc_fail_streak, TX_CB_SKIP_CYCLES);
+                    gmc_fail_streak = 0;
+                }
+            }
+        }
+    } else if (c->gmc.enabled) {
+        ESP_LOGI(TAG, "GMC: skipping (tube disabled — GMC is radiation-only)");
+    }
+
+    // V2.5.1: ThingSpeak — generic (gated on any payload like OSM/aqi.eco).
+    if (c->thingspeak.enabled && any_payload) {
+        if (s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles--;
+            ESP_LOGI(TAG, "ThingSpeak: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles);
+        } else {
+            ESP_LOGI(TAG, "Sending to ThingSpeak (%s)",
+                     c->thingspeak.use_https ? "https" : "http");
+            int rc = send_thingspeak(c);
+            bool ok = (rc == 200);
+            record_outcome(TX_TARGET_THINGSPEAK, rc, ok);
+            ESP_LOGI(TAG, "ThingSpeak: %s (rc=%d)", ok ? "ok" : "error", rc);
+            if (ok) {
+                ts_fail_streak = 0;
+            } else if (rc == -1) {
+                ts_fail_streak++;
+                if (ts_fail_streak >= TX_CB_FAIL_THRESHOLD) {
+                    s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles = TX_CB_SKIP_CYCLES;
+                    ESP_LOGW(TAG, "ThingSpeak: %d fails, breaker open for %d cycles",
+                             ts_fail_streak, TX_CB_SKIP_CYCLES);
+                    ts_fail_streak = 0;
+                }
+            }
+        }
+    } else if (c->thingspeak.enabled) {
+        ESP_LOGI(TAG, "ThingSpeak: skipping (no payload)");
     }
 
     if (c->send_osm && any_payload) {

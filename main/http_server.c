@@ -747,6 +747,8 @@ static bool target_enabled(tx_target_id_t id) {
         case TX_TARGET_RADMON:  return s_cfg->send_radmon;
         case TX_TARGET_OSM:     return s_cfg->send_osm;
         case TX_TARGET_AQI:     return s_cfg->send_aqi;
+        case TX_TARGET_GMC:        return s_cfg->send_gmc;
+        case TX_TARGET_THINGSPEAK: return s_cfg->send_thingspeak;
         default:                return false;
     }
 }
@@ -1088,6 +1090,13 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
     html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
+    // V2.5.1: GMCMap + ThingSpeak. Numeric/hex fields, but escape for safety.
+    char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
+    char e_gmc_gid[CFG_USER_NAME_MAX * 3 + 4];
+    char e_ts_key [CFG_TOKEN_MAX     * 3 + 4];
+    html_esc(s_cfg->gmc_account_id,     e_gmc_aid, sizeof(e_gmc_aid));
+    html_esc(s_cfg->gmc_geiger_id,      e_gmc_gid, sizeof(e_gmc_gid));
+    html_esc(s_cfg->thingspeak_api_key, e_ts_key,  sizeof(e_ts_key));
     html_esc(s_cfg->mqtt_broker,       e_mhost, sizeof(e_mhost));
     html_esc(s_cfg->mqtt_user,         e_muser, sizeof(e_muser));
     html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
@@ -1193,6 +1202,17 @@ static esp_err_t config_get(httpd_req_t *req) {
         "aqi.eco (HTTPS only) — token from your aqi.eco account</label></div>"
         "<label>aqi.eco token"
         "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label>"
+        "<h3>GMCMap + ThingSpeak</h3>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" %s> "
+        "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
+        "<label>GMCMap Account ID"
+        "<input type=\"text\" name=\"gmc_aid\" value=\"%s\" maxlength=\"32\"></label>"
+        "<label>GMCMap Geiger Counter ID"
+        "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" %s> ThingSpeak</label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
+        "<label>ThingSpeak Channel Write API Key"
+        "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label>"
         "<h3>BME280 (environmental)</h3>"
         "<label>Station altitude (m above sea level) "
         "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
@@ -1366,6 +1386,12 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_osm_tok,
         s_cfg->send_aqi ? "checked" : "",
         e_aqi,
+        s_cfg->send_gmc ? "checked" : "",
+        e_gmc_aid,
+        e_gmc_gid,
+        s_cfg->send_thingspeak  ? "checked" : "",
+        s_cfg->thingspeak_https ? "checked" : "",
+        e_ts_key,
         (double)s_cfg->station_altitude_m,
         s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->ftp_enabled ? "checked" : "",

@@ -111,6 +111,18 @@ typedef struct {
     bool        send_aqi;
     bool        aqi_use_insecure;
     const char *aqi_token;
+
+    // GMCMap (gmcmap.com / GQ Electronics) — radiation-only GET upload, HTTP
+    // only (gmcmap has no TLS). Skipped when tube_enabled is false. V2.5.1.
+    tx_target_t gmc;
+    const char *gmc_account_id;
+    const char *gmc_geiger_id;
+
+    // ThingSpeak — generic GET channel update keyed by the channel write API
+    // key. field1=CPM, field2=µSv/h, field3/4=CPM (current; no rolling
+    // windows), +field5/6/7=T/H/P when bme_valid. HTTPS supported. V2.5.1.
+    tx_target_t thingspeak;
+    const char *thingspeak_api_key;
 } tx_context_t;
 
 /** @brief Create the worker task and queue. Call once at boot. */
@@ -152,6 +164,8 @@ typedef enum {
     TX_TARGET_RADMON,
     TX_TARGET_OSM,
     TX_TARGET_AQI,
+    TX_TARGET_GMC,          // V2.5.1: gmcmap.com (radiation-only, HTTP)
+    TX_TARGET_THINGSPEAK,   // V2.5.1: ThingSpeak channel update
     TX_TARGET_COUNT
 } tx_target_id_t;
 

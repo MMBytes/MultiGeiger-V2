@@ -15,6 +15,24 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.1
+
+**New upload targets: GMCMap (gmcmap.com) and ThingSpeak.** Two community/generic radiation outputs modelled on ESPGeiger's `GMC` and `Thingspeak` modules, wired into the existing TX-target framework (per-cycle dispatch, retry, circuit breaker, status page, MQTT/HA).
+
+### Changes
+
+- **GMCMap** (`TX_TARGET_GMC`) — `GET http://www.gmcmap.com/log2.asp?AID=&GID=&CPM=&ACPM=&uSV=`. HTTP-only (gmcmap has no TLS). Radiation-only (gated on `tube_enabled`, like Radmon). Success = body contains `OK` (`ERR1`/`ERR2` = bad account/counter ID). Config: enable + Account ID + Geiger Counter ID.
+- **ThingSpeak** (`TX_TARGET_THINGSPEAK`) — `GET …/update?api_key=&field1=CPM&field2=µSv&field3=CPM&field4=CPM` (+ `field5/6/7=T/H/P` when a BME-class sensor is present). HTTPS supported (default on). Generic (gated on any payload). Success = response body ≠ `0`. Config: enable + HTTPS + channel write API key.
+- **Current-values-only mapping** (per design decision): no 5/15-min rolling windows in this firmware, so `ACPM`/`field3`/`field4` carry the current per-cycle CPM. A rolling-average accumulator can be added later if the averaged columns are wanted.
+- **Config page**: new "GMCMap + ThingSpeak" section on `/config` so both are configurable post-deploy (fields auto-flow through the `config_fields.def` X-macro → struct/NVS/POST; form rows added by hand like the other targets).
+- **MQTT + HA Discovery** (PSRAM/rich-state boards only): `gmc_*` and `ts_*` per-target upload stats in the rich-state JSON + 8 HA diagnostic entities, gated on the target being enabled — same pattern as the existing per-target stats.
+
+### Memory
+
+The MQTT/HA additions are entirely inside `#ifdef MQTT_RICH_STATE`, which the **Heltec V2 build intentionally does not define** — so they add nothing to the Heltec image. The Heltec only carries the base feature (two GET send functions + config). On PSRAM boards the rich-state JSON grows ~2 targets × 4 fields (~120 B, well within the 1280 B buffer). See the per-board partition-free figures in the release build.
+
+---
+
 ## V2.4.33
 
 **Publish the internal/DMA-RAM split to MQTT so Home Assistant can graph the long-uptime net-stack drain.** Follow-on to V2.4.32: the per-cycle `diag_log_heap()` lands in `/log` → FTP, which means watching the multi-day trend meant pulling and diffing log files. The MQTT rich state already published `heap_free` / `heap_min` / `heap_max_alloc` — but those are the **PSRAM-dominated totals**, i.e. the same misleading numbers that hid the problem. This adds the gauge that matters.

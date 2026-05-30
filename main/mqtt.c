@@ -53,7 +53,8 @@
 extern void mqtt_discovery_set_tube_enabled(bool enabled);
 #ifdef MQTT_RICH_STATE
 extern void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
-                                            bool osm, bool aqi, bool ftp);
+                                            bool osm, bool aqi, bool gmc,
+                                            bool thingspeak, bool ftp);
 #endif
 
 static const char *TAG = "mqtt";
@@ -80,6 +81,8 @@ static bool s_send_sensorc = false;
 static bool s_send_radmon  = false;
 static bool s_send_osm     = false;
 static bool s_send_aqi     = false;
+static bool s_send_gmc        = false;
+static bool s_send_thingspeak = false;
 static bool s_ftp_enabled  = false;
 #endif
 
@@ -214,9 +217,12 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     s_send_radmon  = cfg->send_radmon;
     s_send_osm     = cfg->send_osm;
     s_send_aqi     = cfg->send_aqi;
+    s_send_gmc        = cfg->send_gmc;
+    s_send_thingspeak = cfg->send_thingspeak;
     s_ftp_enabled  = cfg->ftp_enabled;
     mqtt_discovery_set_upload_flags(s_send_madavi, s_send_sensorc, s_send_radmon,
-                                    s_send_osm, s_send_aqi, s_ftp_enabled);
+                                    s_send_osm, s_send_aqi, s_send_gmc,
+                                    s_send_thingspeak, s_ftp_enabled);
 #endif
 
     // Pre-build the per-device topic strings so the publish path doesn't
@@ -514,6 +520,8 @@ void mqtt_publish_state(const main_status_t *st,
         { TX_TARGET_RADMON,  &s_send_radmon,  "radmon" },
         { TX_TARGET_OSM,     &s_send_osm,     "osm"    },
         { TX_TARGET_AQI,     &s_send_aqi,     "aqi"    },
+        { TX_TARGET_GMC,        &s_send_gmc,        "gmc" },
+        { TX_TARGET_THINGSPEAK, &s_send_thingspeak, "ts"  },
     };
     for (size_t i = 0; i < sizeof(UL_TARGETS)/sizeof(UL_TARGETS[0]); i++) {
         if (!*UL_TARGETS[i].enabled) continue;

@@ -84,6 +84,24 @@ X_STR (osm_access_token,   CFG_TOKEN_MAX     + 1,  "osm_tok",    "")
 X_BOOL(send_aqi,               "send_aqi",   false)
 X_STR (aqi_token,          CFG_TOKEN_MAX     + 1,  "aqi_tok",    "")
 
+// --- GMCMap + ThingSpeak (V2.5.1) -------------------------------------------
+//
+// GMCMap (gmcmap.com / GQ Electronics) — radiation community map. HTTP-only
+// (no TLS). Needs the account ID + geiger-counter ID from your gmcmap.com
+// account. Radiation-only (skipped when the tube is disabled).
+//
+// ThingSpeak — generic time-series. Needs the channel WRITE API key. HTTPS
+// supported. field1=CPM, field2=µSv/h, field3/4=CPM (current; no rolling
+// windows), +field5/6/7=temp/humidity/pressure when a BME-class sensor is fit.
+
+X_BOOL(send_gmc,               "send_gmc",   false)
+X_STR (gmc_account_id,     CFG_USER_NAME_MAX + 1,  "gmc_aid",    "")
+X_STR (gmc_geiger_id,      CFG_USER_NAME_MAX + 1,  "gmc_gid",    "")
+
+X_BOOL(send_thingspeak,        "send_ts",    false)
+X_BOOL(thingspeak_https,       "ts_https",   true)
+X_STR (thingspeak_api_key, CFG_TOKEN_MAX     + 1,  "ts_key",     "")
+
 // --- NTP + timezone ---------------------------------------------------------
 
 X_STR (ntp_server,         CFG_NTP_HOST_MAX + 1,  "ntp",        "pool.ntp.org")

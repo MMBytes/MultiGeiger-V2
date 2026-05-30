@@ -15,6 +15,21 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.3
+
+**Republish HA discovery on `/config` Save (no reboot) so a newly-enabled upload target appears in Home Assistant immediately.** Gap found 2026-05-30: a TX target toggled via plain "Save" starts uploading right away (the TX path reads `g_cfg` fresh each cycle), but MQTT's rich-state JSON gating and the HA-discovery entity-presence predicates read **cached** enable flags that were only refreshed inside `mqtt_init()` — i.e. at boot/reconnect. So the new target's `*_ok`/`*_att` entities (and JSON fields) didn't show in HA until a reboot. (`mqtt.c`'s own comment already claimed config-Save re-entered the cache refresh; that wire was missing.)
+
+### Changes
+
+- New **`mqtt_apply_config(cfg)`** — re-syncs the cached enable gates (HA-discovery, tube-enabled, the per-target upload flags) and republishes HA discovery if connected. Called from `config_post`'s save path, guarded by `mqtt_is_initialized()`.
+- Extracted the flag-cache logic `mqtt_init()` already did into a shared `mqtt_cache_cfg_gates()` helper so `mqtt_init()` and `mqtt_apply_config()` can't drift (adding a future target now touches one place). Republish runs under the same `s_state_mux` TOCTOU guard as `mqtt_publish_state()`.
+
+### Scope
+
+**Enable case only.** A target just *disabled* keeps its (now-stale) HA entity until a reconnect/reboot — removing it cleanly needs a retained-empty discovery delete, deliberately out of scope here. Broker/port/TLS/prefix changes remain reboot-required (not live-tunable). No-op when MQTT isn't connected; works on Heltec too (refreshes the base gates + republishes its core entities).
+
+---
+
 ## V2.5.2
 
 **Grow the MQTT rich-state JSON buffer 1280 → 1664 B.** The rich-state publish buffer was sized at V2.4.26 for **5** upload targets, but has since grown: V2.4.33 added 3 internal/DMA heap fields, and V2.5.1 added **GMC + ThingSpeak (now 7 targets × 4 fields ≈ 560 B of upload stats)**. Worst case on a fully-loaded FeatherS3-D (tube + env + PM + DNMS + lux + all 7 upload targets + FTP, with uint32-max counters) is ~1.27 KB — at the old 1280 B ceiling. `APPEND()` truncates safely (no overflow/crash), but a truncated JSON fails Home Assistant's parse for that publish, briefly dropping the entity. Bumped to 1664 B to restore the original ~380 B slack. PSRAM/rich-state boards only; the Heltec base buffer (768 B, no upload stats / heap split) is unchanged. Stack-allocated; the cycle task has 4 KB+ stack.

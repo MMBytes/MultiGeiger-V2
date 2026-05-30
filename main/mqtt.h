@@ -114,3 +114,17 @@ uint32_t mqtt_publish_count(void);
  *  (first boot, before mqtt_init) or already connected. Safe from any task.
  */
 void mqtt_kick_reconnect(void);
+
+/** @brief Apply MQTT-discovery-affecting config changes live (V2.5.3).
+ *
+ *  Called from /config Save (the no-reboot path). Re-syncs the cached upload-
+ *  target enable flags + the HA-discovery / tube-enabled gates, then
+ *  republishes HA discovery — so a target enabled via plain "Save" shows its
+ *  HA entities (and starts emitting its rich-state stats) without a reboot.
+ *  The TX upload path itself already picks up `g_cfg` live each cycle.
+ *
+ *  Enable-case only: a target just DISABLED keeps its (stale) HA entity until
+ *  a reconnect/reboot — removing it would need a retained-empty discovery
+ *  delete. No-op if MQTT isn't currently connected. Safe from the httpd task.
+ */
+void mqtt_apply_config(const config_t *cfg);

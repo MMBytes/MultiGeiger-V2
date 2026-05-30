@@ -1582,6 +1582,15 @@ static esp_err_t config_post(httpd_req_t *req) {
     // change. ~1 ms (OLED) or ~10 ms (SerLCD) of I²C traffic.
     display_set_contrast(s_cfg->oled_brightness_pct);
 
+    // V2.5.3: live-apply MQTT discovery for upload-target enable changes. The
+    // TX path picks up g_cfg next cycle, but MQTT's cached enable flags + the
+    // HA-discovery entities only refresh in mqtt_init() — so without this a
+    // target toggled via plain "Save" wouldn't show its HA entities until a
+    // reconnect/reboot. No-op when MQTT isn't running.
+    if (mqtt_is_initialized()) {
+        mqtt_apply_config(s_cfg);
+    }
+
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
     if (restart_after_save) {

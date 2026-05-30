@@ -171,7 +171,54 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
     }
 }
 
+// V2.5.3: refresh the config-derived gates the publish/discovery hot paths
+// read — HA-discovery enable, the tube-enabled predicate, and (rich boards)
+// the per-target upload-enable flags. Shared by mqtt_init() and
+// mqtt_apply_config() so adding an upload target only touches ONE place.
+// Deliberately does NOT touch s_chip_id / s_prefix (init-/reconnect-level —
+// a broker/prefix change is reboot-required, not live-tunable).
+static void mqtt_cache_cfg_gates(const config_t *cfg) {
+    s_ha_discovery_enabled = cfg->mqtt_ha_discovery;
+    mqtt_discovery_set_tube_enabled(cfg->tube_enabled);
+#ifdef MQTT_RICH_STATE
+    s_send_madavi     = cfg->send_madavi;
+    s_send_sensorc    = cfg->send_sensorc;
+    s_send_radmon     = cfg->send_radmon;
+    s_send_osm        = cfg->send_osm;
+    s_send_aqi        = cfg->send_aqi;
+    s_send_gmc        = cfg->send_gmc;
+    s_send_thingspeak = cfg->send_thingspeak;
+    s_ftp_enabled     = cfg->ftp_enabled;
+    mqtt_discovery_set_upload_flags(s_send_madavi, s_send_sensorc, s_send_radmon,
+                                    s_send_osm, s_send_aqi, s_send_gmc,
+                                    s_send_thingspeak, s_ftp_enabled);
+#endif
+}
+
 // --- Public API -------------------------------------------------------------
+
+// V2.5.3: apply MQTT-discovery-affecting config changes live, from /config
+// Save (no-reboot path). The TX path already picks up g_cfg each cycle, so a
+// newly-enabled upload target starts uploading immediately — but the rich-
+// state JSON gating and the HA-discovery entity-presence predicates read
+// CACHED enable flags that were previously only refreshed inside mqtt_init().
+// Re-sync those caches and republish discovery so the new target's entities
+// appear at once, no reboot. Enable-case only: a target just DISABLED keeps
+// its (now-stale) HA entity until a reconnect/reboot — removing it would need
+// a retained-empty delete to the config topic (out of scope here). No-op when
+// MQTT isn't connected.
+void mqtt_apply_config(const config_t *cfg) {
+    if (!cfg) return;
+    mqtt_cache_cfg_gates(cfg);
+    // Republish under the state mutex — same TOCTOU guard against the OTA
+    // teardown's mqtt_stop() that mqtt_publish_state() uses.
+    if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
+    if (s_client && s_connected && s_ha_discovery_enabled) {
+        mqtt_discovery_publish_all(s_client, s_chip_id, s_prefix);
+        ESP_LOGI(TAG, "config applied live — HA discovery republished");
+    }
+    if (s_state_mux) xSemaphoreGive(s_state_mux);
+}
 
 void mqtt_init(const config_t *cfg, const char *chip_id) {
     // Lazy mutex creation. Runs once on first mqtt_init (cold boot)
@@ -203,27 +250,10 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
 
     s_chip_id = chip_id;
     s_prefix  = cfg->mqtt_topic_prefix;
-    s_ha_discovery_enabled = cfg->mqtt_ha_discovery;
-    // Seed the tube-enabled predicate in mqtt_discovery so its entity
-    // gate function can run without reaching into main.c's cfg singleton.
-    mqtt_discovery_set_tube_enabled(cfg->tube_enabled);
-#ifdef MQTT_RICH_STATE
-    // V2.4.26: cache upload-target enables for the rich-state JSON. Same
-    // pattern as tube_enabled — pulled out of cfg here so the publish hot
-    // path doesn't need to reach into main.c's cfg singleton, and so the
-    // /config Save path's mqtt_stop + mqtt_init cycle re-reads them.
-    s_send_madavi  = cfg->send_madavi;
-    s_send_sensorc = cfg->send_sensorc;
-    s_send_radmon  = cfg->send_radmon;
-    s_send_osm     = cfg->send_osm;
-    s_send_aqi     = cfg->send_aqi;
-    s_send_gmc        = cfg->send_gmc;
-    s_send_thingspeak = cfg->send_thingspeak;
-    s_ftp_enabled  = cfg->ftp_enabled;
-    mqtt_discovery_set_upload_flags(s_send_madavi, s_send_sensorc, s_send_radmon,
-                                    s_send_osm, s_send_aqi, s_send_gmc,
-                                    s_send_thingspeak, s_ftp_enabled);
-#endif
+    // V2.5.3: cache the config-derived publish/discovery gates (HA-discovery
+    // enable, tube-enabled predicate, rich-state upload flags). Shared with
+    // mqtt_apply_config() so a /config Save can refresh them live.
+    mqtt_cache_cfg_gates(cfg);
 
     // Pre-build the per-device topic strings so the publish path doesn't
     // re-snprintf every cycle. snprintf return ignored — the buffers are

@@ -764,6 +764,9 @@ static int send_thingspeak(const tx_context_t *c) {
         int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
                             &resp, c->thingspeak.use_insecure);
         if (rc == 200) {
+            // buf is filled by do_request()'s event callback, which cppcheck
+            // can't trace — it constant-folds buf[0] from the init to 0.
+            // cppcheck-suppress knownConditionTrueFalse
             if (buf[0] && strcmp(buf, "0") != 0) return 200;
             ESP_LOGW(TAG, "ThingSpeak rejected (entry id 0 — rate limit or bad key)");
             return -1;

@@ -54,7 +54,8 @@ extern void mqtt_discovery_set_tube_enabled(bool enabled);
 #ifdef MQTT_RICH_STATE
 extern void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
                                             bool osm, bool aqi, bool gmc,
-                                            bool thingspeak, bool ftp);
+                                            bool thingspeak, bool thingspeak_pm,
+                                            bool ftp);
 #endif
 
 static const char *TAG = "mqtt";
@@ -83,6 +84,7 @@ static bool s_send_osm     = false;
 static bool s_send_aqi     = false;
 static bool s_send_gmc        = false;
 static bool s_send_thingspeak = false;
+static bool s_send_thingspeak_pm = false;
 static bool s_ftp_enabled  = false;
 #endif
 
@@ -188,10 +190,12 @@ static void mqtt_cache_cfg_gates(const config_t *cfg) {
     s_send_aqi        = cfg->send_aqi;
     s_send_gmc        = cfg->send_gmc;
     s_send_thingspeak = cfg->send_thingspeak;
+    s_send_thingspeak_pm = cfg->send_thingspeak_pm;
     s_ftp_enabled     = cfg->ftp_enabled;
     mqtt_discovery_set_upload_flags(s_send_madavi, s_send_sensorc, s_send_radmon,
                                     s_send_osm, s_send_aqi, s_send_gmc,
-                                    s_send_thingspeak, s_ftp_enabled);
+                                    s_send_thingspeak, s_send_thingspeak_pm,
+                                    s_ftp_enabled);
 #endif
 }
 
@@ -427,9 +431,9 @@ void mqtt_publish_state(const main_status_t *st,
     //     of upload stats). Bumped 1280 → 1664 B to restore the original ~380 B
     //     slack. APPEND() truncates safely (no overflow), but a truncated JSON
     //     fails HA's parse for that publish — so keep real headroom here.
-    // Stack-allocated — cycle task has 4 KB+ stack, so 1664 / 768 B both fit.
+    // Stack-allocated — cycle task has 4 KB+ stack, so 1792 / 768 B both fit.
 #ifdef MQTT_RICH_STATE
-    char buf[1664];   // 7 upload targets + heap split + all sensors + FTP
+    char buf[1792];   // 8 upload targets + heap split + all sensors + FTP
 #else
     char buf[768];
 #endif
@@ -557,6 +561,7 @@ void mqtt_publish_state(const main_status_t *st,
         { TX_TARGET_AQI,     &s_send_aqi,     "aqi"    },
         { TX_TARGET_GMC,        &s_send_gmc,        "gmc" },
         { TX_TARGET_THINGSPEAK, &s_send_thingspeak, "ts"  },
+        { TX_TARGET_THINGSPEAK_PM, &s_send_thingspeak_pm, "tspm" },
     };
     for (size_t i = 0; i < sizeof(UL_TARGETS)/sizeof(UL_TARGETS[0]); i++) {
         if (!*UL_TARGETS[i].enabled) continue;

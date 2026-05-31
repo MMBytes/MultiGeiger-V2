@@ -74,6 +74,7 @@ static bool s_send_osm_     = false;
 static bool s_send_aqi_     = false;
 static bool s_send_gmc_        = false;
 static bool s_send_thingspeak_ = false;
+static bool s_send_thingspeak_pm_ = false;
 static bool s_ftp_enabled_  = false;
 static bool send_madavi_present_(void)   { return s_send_madavi_; }
 static bool send_sensorc_present_(void)  { return s_send_sensorc_; }
@@ -82,6 +83,7 @@ static bool send_osm_present_(void)      { return s_send_osm_; }
 static bool send_aqi_present_(void)      { return s_send_aqi_; }
 static bool send_gmc_present_(void)        { return s_send_gmc_; }
 static bool send_thingspeak_present_(void) { return s_send_thingspeak_; }
+static bool send_thingspeak_pm_present_(void) { return s_send_thingspeak_pm_; }
 static bool ftp_present_(void)           { return s_ftp_enabled_; }
 #endif
 
@@ -212,6 +214,10 @@ static const ha_entity_t ENTITIES[] = {
     { "ts_att",         "ts_att",         "ThingSpeak att",    NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_thingspeak_present_, NULL },
     { "ts_rc",          "ts_rc",          "ThingSpeak last rc",NULL, NULL, "measurement",      "mdi:counter",      NULL, send_thingspeak_present_, NULL },
     { "ts_breaker",     "ts_breaker",     "ThingSpeak breaker",NULL, NULL, "measurement",      "mdi:fuse",         NULL, send_thingspeak_present_, NULL },
+    { "tspm_ok",        "tspm_ok",        "ThingSpeak PM OK",  NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_thingspeak_pm_present_, NULL },
+    { "tspm_att",       "tspm_att",       "ThingSpeak PM att", NULL, NULL, "total_increasing", "mdi:cloud-upload", NULL, send_thingspeak_pm_present_, NULL },
+    { "tspm_rc",        "tspm_rc",        "ThingSpeak PM last rc",NULL, NULL, "measurement",   "mdi:counter",      NULL, send_thingspeak_pm_present_, NULL },
+    { "tspm_breaker",   "tspm_breaker",   "ThingSpeak PM breaker",NULL, NULL, "measurement",   "mdi:fuse",         NULL, send_thingspeak_pm_present_, NULL },
 
     // --- V2.4.26: FTPS log upload (PSRAM boards only) ---------------------
     { "ftp_ok",     "ftp_ok",    "FTP last OK",     NULL,        NULL, NULL,          "mdi:check-circle",      NULL, ftp_present_, NULL },
@@ -342,10 +348,12 @@ void mqtt_discovery_set_tube_enabled(bool enabled) {
 // predicates so the entity catalog knows which targets to advertise.
 void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
                                      bool osm, bool aqi, bool gmc,
-                                     bool thingspeak, bool ftp);
+                                     bool thingspeak, bool thingspeak_pm,
+                                     bool ftp);
 void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
                                      bool osm, bool aqi, bool gmc,
-                                     bool thingspeak, bool ftp) {
+                                     bool thingspeak, bool thingspeak_pm,
+                                     bool ftp) {
     s_send_madavi_  = madavi;
     s_send_sensorc_ = sensorc;
     s_send_radmon_  = radmon;
@@ -353,6 +361,7 @@ void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
     s_send_aqi_     = aqi;
     s_send_gmc_        = gmc;
     s_send_thingspeak_ = thingspeak;
+    s_send_thingspeak_pm_ = thingspeak_pm;
     s_ftp_enabled_  = ftp;
 }
 #endif

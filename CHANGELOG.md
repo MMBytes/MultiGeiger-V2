@@ -15,6 +15,26 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.4
+
+**New `/config` polish + a second ThingSpeak channel for the dust node.**
+
+### `/config` page
+
+- Dropped the standalone "GMCMap + ThingSpeak" sub-heading — those rows now sit directly under **Transmission targets** with the rest.
+- Added "— radiation-only" to the **Radmon** and **ThingSpeak** labels (matching GMCMap), so it's clear they carry only the Geiger payload.
+- When **Enable Geiger tube** is unticked, Radmon / GMCMap / ThingSpeak are now greyed + force-unchecked (`syncTube()` JS), and `config_post` re-enforces it server-side (a hand-crafted POST can't enable a radiation-only target on a tube-less node). Credential fields stay editable so values survive a tube off→on round-trip. Unlike `ftp_ps_dis`, "tube off" genuinely clears these to off rather than just hiding them.
+
+### ThingSpeak (Particulate Matter) — new TX target
+
+A **second, independent ThingSpeak channel** dedicated to the SPS30 dust node, so radiation and PM live in separate channels (free-tier accounts get 4 channels × 8 fields). Modelled 1:1 on the existing ThingSpeak target — its own enable + HTTPS tickboxes and write-API-key field on `/config`.
+
+- **Field map** (fills the 8-field channel exactly): field1=PM1.0, field2=PM2.5, field3=PM4.0, field4=PM10 (µg/m³); field5/6/7=temp/humidity/pressure; field8=typical particle size (µm).
+- **Not tube-gated.** Gated on a live PM reading (`pm_valid`) instead, so the dust node uploads with the tube *off*, and a hypothetical combined node would fill both the radiation and PM channels independently.
+- Full framework wiring: enum `TX_TARGET_THINGSPEAK_PM`, circuit breaker, `/status` per-target stats, and — on PSRAM/rich-state boards — MQTT JSON fields (`tspm_*`) + four HA-discovery entities. Rich-state JSON buffer 1664 → 1792 B for the 8th target. Heltec/base boards unaffected.
+
+---
+
 ## V2.5.3
 
 **Republish HA discovery on `/config` Save (no reboot) so a newly-enabled upload target appears in Home Assistant immediately.** Gap found 2026-05-30: a TX target toggled via plain "Save" starts uploading right away (the TX path reads `g_cfg` fresh each cycle), but MQTT's rich-state JSON gating and the HA-discovery entity-presence predicates read **cached** enable flags that were only refreshed inside `mqtt_init()` — i.e. at boot/reconnect. So the new target's `*_ok`/`*_att` entities (and JSON fields) didn't show in HA until a reboot. (`mqtt.c`'s own comment already claimed config-Save re-entered the cache refresh; that wire was missing.)

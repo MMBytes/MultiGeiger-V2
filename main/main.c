@@ -426,6 +426,11 @@ static void build_tx_context(tx_context_t *ctx,
     tx_target_configure(&ctx->thingspeak, TX_TARGET_THINGSPEAK,
                         g_cfg.send_thingspeak, g_cfg.thingspeak_https);
     ctx->thingspeak_api_key = g_cfg.thingspeak_api_key;
+
+    // V2.5.4: ThingSpeak PM — second, independent channel for the SPS30.
+    tx_target_configure(&ctx->thingspeak_pm, TX_TARGET_THINGSPEAK_PM,
+                        g_cfg.send_thingspeak_pm, g_cfg.thingspeak_pm_https);
+    ctx->thingspeak_pm_api_key = g_cfg.thingspeak_pm_api_key;
 }
 
 static void do_tx_cycle(void) {

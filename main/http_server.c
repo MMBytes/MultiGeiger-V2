@@ -749,6 +749,7 @@ static bool target_enabled(tx_target_id_t id) {
         case TX_TARGET_AQI:     return s_cfg->send_aqi;
         case TX_TARGET_GMC:        return s_cfg->send_gmc;
         case TX_TARGET_THINGSPEAK: return s_cfg->send_thingspeak;
+        case TX_TARGET_THINGSPEAK_PM: return s_cfg->send_thingspeak_pm;
         default:                return false;
     }
 }
@@ -1094,9 +1095,11 @@ static esp_err_t config_get(httpd_req_t *req) {
     char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
     char e_gmc_gid[CFG_USER_NAME_MAX * 3 + 4];
     char e_ts_key [CFG_TOKEN_MAX     * 3 + 4];
+    char e_ts_pm_key [CFG_TOKEN_MAX  * 3 + 4];   // V2.5.4: ThingSpeak PM key
     html_esc(s_cfg->gmc_account_id,     e_gmc_aid, sizeof(e_gmc_aid));
     html_esc(s_cfg->gmc_geiger_id,      e_gmc_gid, sizeof(e_gmc_gid));
     html_esc(s_cfg->thingspeak_api_key, e_ts_key,  sizeof(e_ts_key));
+    html_esc(s_cfg->thingspeak_pm_api_key, e_ts_pm_key, sizeof(e_ts_pm_key));
     html_esc(s_cfg->mqtt_broker,       e_mhost, sizeof(e_mhost));
     html_esc(s_cfg->mqtt_user,         e_muser, sizeof(e_muser));
     html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
@@ -1178,7 +1181,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
         "MAC: <code>%s</code></p>"
         "<h3>Hardware</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" %s> "
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" "
+        "id=\"tube_en\" onchange=\"syncTube()\" %s> "
         "Enable Geiger tube (HV pump, pulse counter, radiation uploads). "
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
@@ -1188,7 +1192,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sc_https\" %s> HTTPS</label></div><br>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_rad\" %s> Radmon</label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_rad\" id=\"send_rad\" %s> "
+        "Radmon &mdash; radiation-only</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
         "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
         "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label>"
@@ -1202,17 +1207,24 @@ static esp_err_t config_get(httpd_req_t *req) {
         "aqi.eco (HTTPS only) — token from your aqi.eco account</label></div>"
         "<label>aqi.eco token"
         "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label>"
-        "<h3>GMCMap + ThingSpeak</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" %s> "
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" id=\"send_gmc\" %s> "
         "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
         "<label>GMCMap Account ID"
         "<input type=\"text\" name=\"gmc_aid\" value=\"%s\" maxlength=\"32\"></label>"
         "<label>GMCMap Geiger Counter ID"
         "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" %s> ThingSpeak</label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" id=\"send_ts\" %s> "
+        "ThingSpeak &mdash; radiation-only</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
         "<label>ThingSpeak Channel Write API Key"
         "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label>"
+        // V2.5.4: ThingSpeak (Particulate Matter) — independent channel for the
+        // SPS30 dust node. field1-4=PM1.0/2.5/4.0/10, 5-7=T/H/P, 8=typ. size.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts_pm\" %s> "
+        "ThingSpeak (Particulate Matter) &mdash; SPS30 dust node (separate channel)</label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_pm_https\" %s> HTTPS</label></div>"
+        "<label>ThingSpeak PM Channel Write API Key"
+        "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label>"
         "<h3>BME280 (environmental)</h3>"
         "<label>Station altitude (m above sea level) "
         "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
@@ -1239,7 +1251,18 @@ static esp_err_t config_get(httpd_req_t *req) {
         "var f=document.getElementById('ftp_ps_dis');"
         "if(w.checked){f.checked=false;f.disabled=true;}"
         "else{f.disabled=false;}"
-        "}syncFtpPs();</script>"
+        "}syncFtpPs();"
+        // V2.5.4: radiation upload targets are meaningless without the tube.
+        // Grey + force-uncheck Radmon/GMCMap/ThingSpeak when "Enable Geiger
+        // tube" is off (server-side enforcement in config_post mirrors this).
+        "function syncTube(){"
+        "var t=document.getElementById('tube_en');"
+        "var a=['send_rad','send_gmc','send_ts'];"
+        "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
+        "if(!e)continue;"
+        "if(t.checked){e.disabled=false;}"
+        "else{e.checked=false;e.disabled=true;}}"
+        "}syncTube();</script>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
         "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
         "<h3>MQTT (Home Assistant / Mosquitto)</h3>"
@@ -1392,6 +1415,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->send_thingspeak  ? "checked" : "",
         s_cfg->thingspeak_https ? "checked" : "",
         e_ts_key,
+        s_cfg->send_thingspeak_pm  ? "checked" : "",
+        s_cfg->thingspeak_pm_https ? "checked" : "",
+        e_ts_pm_key,
         (double)s_cfg->station_altitude_m,
         s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->ftp_enabled ? "checked" : "",
@@ -1569,6 +1595,18 @@ static esp_err_t config_post(httpd_req_t *req) {
     // previously saved value rather than clobbering it to false — that way
     // the user's preference survives a round-trip through "global PS off".
     if (next.wifi_ps_disabled) next.ftp_ps_disabled = s_cfg->ftp_ps_disabled;
+
+    // V2.5.4: the radiation-only upload targets (Radmon, GMCMap, ThingSpeak)
+    // are meaningless without the Geiger tube. The UI greys + force-unchecks
+    // them when "Enable Geiger tube" is off (syncTube()); enforce the same
+    // invariant here so a hand-crafted POST can't enable them, and so the
+    // stored config stays honest. Unlike ftp_ps_dis we do NOT preserve the
+    // prior choice — "tube off" genuinely turns these off, not just hides them.
+    if (!next.tube_enabled) {
+        next.send_radmon = false;
+        next.send_gmc = false;
+        next.send_thingspeak = false;
+    }
 
     *s_cfg = next;
     esp_err_t err = config_save(s_cfg);

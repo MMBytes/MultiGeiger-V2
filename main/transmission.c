@@ -41,7 +41,7 @@ static tx_target_stats_t s_stats[TX_TARGET_COUNT] = {0};
 static portMUX_TYPE      s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_target_names[TX_TARGET_COUNT] = {
     "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco",
-    "GMC", "ThingSpeak"
+    "GMC", "ThingSpeak", "ThingSpeak PM"
 };
 
 const char *tx_target_name(tx_target_id_t id) {
@@ -69,6 +69,8 @@ static const struct {
     [TX_TARGET_GMC]     = { "http://www.gmcmap.com/log2.asp", NULL },  // HTTP-only
     [TX_TARGET_THINGSPEAK] = { "http://api.thingspeak.com/update",
                                "https://api.thingspeak.com/update" },
+    [TX_TARGET_THINGSPEAK_PM] = { "http://api.thingspeak.com/update",
+                                  "https://api.thingspeak.com/update" },
 };
 
 void tx_target_configure(tx_target_t *out, tx_target_id_t id,
@@ -778,6 +780,64 @@ static int send_thingspeak(const tx_context_t *c) {
     return -1;
 }
 
+// --- ThingSpeak (Particulate Matter) ----------------------------------------
+// GET /update?api_key=&field1=PM1.0&field2=PM2.5&field3=PM4.0&field4=PM10
+//   &field8=typ_size [&field5=T&field6=H&field7=P] — a SECOND ThingSpeak
+// channel dedicated to the SPS30 dust node, independent of the radiation
+// channel above. Not tube-gated; the caller only dispatches this when
+// pm_valid is true, but we re-check defensively. Field order in the query
+// string is irrelevant to ThingSpeak, so the PM block (1-4 + 8) is emitted
+// first and the optional env block (5-7) appended. Success = HTTP 200 + body
+// != "0". V2.5.4.
+static int send_thingspeak_pm(const tx_context_t *c) {
+    if (!c->thingspeak_pm_api_key[0]) {
+        ESP_LOGW(TAG, "ThingSpeak PM: API key empty, skipping.");
+        return -3;
+    }
+    if (!c->pm_valid) {
+        ESP_LOGW(TAG, "ThingSpeak PM: no PM reading, skipping.");
+        return -3;
+    }
+    const char *base = c->thingspeak_pm.use_https
+                       ? c->thingspeak_pm.url_https : c->thingspeak_pm.url_http;
+    char url[320];
+    int n = snprintf(url, sizeof(url),
+             "%s?api_key=%s&field1=%.2f&field2=%.2f&field3=%.2f&field4=%.2f"
+             "&field8=%.2f",
+             base, c->thingspeak_pm_api_key,
+             (double)c->pm.pm1_0, (double)c->pm.pm2_5,
+             (double)c->pm.pm4_0, (double)c->pm.pm10,
+             (double)c->pm.typ_size_um);
+    // Optional env fields (matches the radiation channel's field5/6/7 layout).
+    if (c->bme_valid && n > 0 && n < (int)sizeof(url)) {
+        snprintf(url + n, sizeof(url) - n,
+                 "&field5=%.2f&field6=%.2f&field7=%.1f",
+                 (double)c->bme_temperature_c, (double)c->bme_humidity_pct,
+                 (double)(c->bme_pressure_pa / 100.0f));   // Pa → hPa
+    }
+
+    for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
+        if (!wifi_up()) return -2;
+        char buf[RESP_BUF_SIZE];
+        resp_ctx_t resp = { .buf = buf, .cap = sizeof(buf), .len = 0 };
+        buf[0] = 0;
+        int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
+                            &resp, c->thingspeak_pm.use_insecure);
+        if (rc == 200) {
+            // buf is filled by do_request()'s event callback, which cppcheck
+            // can't trace — it constant-folds buf[0] from the init to 0.
+            // cppcheck-suppress knownConditionTrueFalse
+            if (buf[0] && strcmp(buf, "0") != 0) return 200;
+            ESP_LOGW(TAG, "ThingSpeak PM rejected (entry id 0 — rate limit or bad key)");
+            return -1;
+        }
+        if (rc > 0 && rc != 408 && rc < 500) return rc;
+        ESP_LOGW(TAG, "ThingSpeak PM rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    return -1;
+}
+
 // --- Combined Luftdaten body (used by openSenseMap + aqi.eco) ---------------
 // Both targets accept a Luftdaten-style sensordatavalues array. openSenseMap
 // gets the full sensor bundle (Si22G_* radiation, BME280_* T/H/P, SPS30_* PM,
@@ -1083,6 +1143,8 @@ static void tx_run(tx_context_t *c) {
     static int gmc_fail_streak     = 0;
     // cppcheck-suppress variableScope
     static int ts_fail_streak      = 0;
+    // cppcheck-suppress variableScope
+    static int ts_pm_fail_streak   = 0;
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t min_free  = esp_get_minimum_free_heap_size();
@@ -1258,6 +1320,37 @@ static void tx_run(tx_context_t *c) {
         }
     } else if (c->thingspeak.enabled) {
         ESP_LOGI(TAG, "ThingSpeak: skipping (no payload)");
+    }
+
+    // V2.5.4: ThingSpeak PM — second, independent channel for the SPS30 dust
+    // node. Gated on a live PM reading (not the tube), so the dust node uploads
+    // even with the tube disabled, and a combined node fills both channels.
+    if (c->thingspeak_pm.enabled && c->pm_valid) {
+        if (s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles > 0) {
+            s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles--;
+            ESP_LOGI(TAG, "ThingSpeak PM: breaker open (%d cycles left)",
+                     s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles);
+        } else {
+            ESP_LOGI(TAG, "Sending to ThingSpeak PM (%s)",
+                     c->thingspeak_pm.use_https ? "https" : "http");
+            int rc = send_thingspeak_pm(c);
+            bool ok = (rc == 200);
+            record_outcome(TX_TARGET_THINGSPEAK_PM, rc, ok);
+            ESP_LOGI(TAG, "ThingSpeak PM: %s (rc=%d)", ok ? "ok" : "error", rc);
+            if (ok) {
+                ts_pm_fail_streak = 0;
+            } else if (rc == -1) {
+                ts_pm_fail_streak++;
+                if (ts_pm_fail_streak >= TX_CB_FAIL_THRESHOLD) {
+                    s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles = TX_CB_SKIP_CYCLES;
+                    ESP_LOGW(TAG, "ThingSpeak PM: %d fails, breaker open for %d cycles",
+                             ts_pm_fail_streak, TX_CB_SKIP_CYCLES);
+                    ts_pm_fail_streak = 0;
+                }
+            }
+        }
+    } else if (c->thingspeak_pm.enabled) {
+        ESP_LOGI(TAG, "ThingSpeak PM: skipping (no PM reading)");
     }
 
     if (c->send_osm && any_payload) {

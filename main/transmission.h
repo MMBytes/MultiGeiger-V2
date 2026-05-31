@@ -123,6 +123,14 @@ typedef struct {
     // windows), +field5/6/7=T/H/P when bme_valid. HTTPS supported. V2.5.1.
     tx_target_t thingspeak;
     const char *thingspeak_api_key;
+
+    // ThingSpeak (Particulate Matter) — a SECOND, independent ThingSpeak
+    // channel for the SPS30 dust node. Separate write key. NOT tube-gated;
+    // skipped at runtime when pm_valid is false. field1..4 = PM1.0/PM2.5/
+    // PM4.0/PM10, field5/6/7 = T/H/P, field8 = typical particle size (µm).
+    // HTTPS supported. V2.5.4.
+    tx_target_t thingspeak_pm;
+    const char *thingspeak_pm_api_key;
 } tx_context_t;
 
 /** @brief Create the worker task and queue. Call once at boot. */
@@ -165,7 +173,8 @@ typedef enum {
     TX_TARGET_OSM,
     TX_TARGET_AQI,
     TX_TARGET_GMC,          // V2.5.1: gmcmap.com (radiation-only, HTTP)
-    TX_TARGET_THINGSPEAK,   // V2.5.1: ThingSpeak channel update
+    TX_TARGET_THINGSPEAK,   // V2.5.1: ThingSpeak channel update (radiation)
+    TX_TARGET_THINGSPEAK_PM, // V2.5.4: ThingSpeak channel update (SPS30 PM)
     TX_TARGET_COUNT
 } tx_target_id_t;
 

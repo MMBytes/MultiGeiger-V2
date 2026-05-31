@@ -102,6 +102,16 @@ X_BOOL(send_thingspeak,        "send_ts",    false)
 X_BOOL(thingspeak_https,       "ts_https",   true)
 X_STR (thingspeak_api_key, CFG_TOKEN_MAX     + 1,  "ts_key",     "")
 
+// ThingSpeak (Particulate Matter) — a SECOND, independent ThingSpeak channel
+// for the SPS30 dust node. Separate write key so radiation and PM live in
+// their own channels. NOT tube-gated (the dust node runs with the tube off);
+// skipped at runtime when no PM reading is present. field1..4 = PM1.0/PM2.5/
+// PM4.0/PM10 (µg/m³), field5/6/7 = temp/humidity/pressure, field8 = typical
+// particle size (µm). V2.5.4.
+X_BOOL(send_thingspeak_pm,        "send_ts_pm",  false)
+X_BOOL(thingspeak_pm_https,       "ts_pm_https", true)
+X_STR (thingspeak_pm_api_key, CFG_TOKEN_MAX  + 1,  "ts_pm_key",   "")
+
 // --- NTP + timezone ---------------------------------------------------------
 
 X_STR (ntp_server,         CFG_NTP_HOST_MAX + 1,  "ntp",        "pool.ntp.org")

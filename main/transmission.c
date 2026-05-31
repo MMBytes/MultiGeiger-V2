@@ -1,5 +1,6 @@
 #include "transmission.h"
 
+#include <stddef.h>             // V2.5.5: offsetof (TX dispatch table)
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1033,7 +1034,7 @@ static int send_osm(const tx_context_t *c) {
             .buffer_size_tx = 1024,
             .transport_type = HTTP_TRANSPORT_OVER_SSL,
         };
-        if (!c->osm_use_insecure) cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        if (!c->osm.use_insecure) cfg.crt_bundle_attach = esp_crt_bundle_attach;
         else                       cfg.skip_cert_common_name_check = true;
 
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -1083,7 +1084,7 @@ static int send_aqi(const tx_context_t *c) {
         if (!wifi_up()) return -2;
         int rc = do_request(url, HTTP_METHOD_POST,
                             "application/json; charset=UTF-8",
-                            c->chip_id, NULL, body, NULL, c->aqi_use_insecure);
+                            c->chip_id, NULL, body, NULL, c->aqi.use_insecure);
         if (rc == 200 || rc == 201) return rc;
         if (rc > 0 && rc != 408 && rc < 500) {
             ESP_LOGW(TAG, "aqi.eco rc=%d (4xx) — not retrying", rc);
@@ -1112,39 +1113,114 @@ void tx_transmit(const tx_context_t *c) {
     }
 }
 
+// --- V2.5.5: table-driven TX dispatch (audit finding A2) --------------------
+// Collapses the 8 formerly copy-pasted per-target dispatch blocks (~240 LOC)
+// into one table + one interpreter. Each target's payload/body building stays
+// in its own send_*() — only the identical orchestration skeleton (enable →
+// gate → circuit-breaker → send → success-check → fail-streak/breaker-trip →
+// log + OLED status) is unified here. Adding target #9 is now one table row.
+typedef enum {
+    GATE_ANY_PAYLOAD,   // tube || bme || pm || noise present
+    GATE_TUBE,          // radiation-only targets (Radmon, GMC)
+    GATE_PM,            // PM-only target (ThingSpeak PM)
+} tx_gate_t;
+
+typedef struct {
+    tx_target_id_t id;
+    size_t         target_off;   // offsetof(tx_context_t, <tx_target_t member>)
+    int          (*send)(const tx_context_t *);
+    int            ok1;          // primary success rc
+    int            ok2;          // secondary success rc; 0 = unused
+    tx_gate_t      gate;
+    int            dsp_slot;     // DSP_STATUS_* or -1 (no OLED slot)
+    const char    *skip_reason;  // logged when enabled but the gate is closed
+} tx_dispatch_t;
+
+static const tx_dispatch_t TX_TABLE[] = {
+    { TX_TARGET_MADAVI,        offsetof(tx_context_t, madavi),        send_madavi,        200, 0,   GATE_ANY_PAYLOAD, DSP_STATUS_MADAVI,
+      "Madavi: skipping (no payload — tube disabled and no env/PM sensor)" },
+    { TX_TARGET_SENSORC,       offsetof(tx_context_t, sensorc),       send_sensorc,       201, 0,   GATE_ANY_PAYLOAD, DSP_STATUS_SCOMM,
+      "sensor.community: skipping (no payload — tube disabled and no env/PM sensor)" },
+    { TX_TARGET_RADMON,        offsetof(tx_context_t, radmon),        send_radmon,        200, 0,   GATE_TUBE,        DSP_STATUS_RADMON,
+      "Radmon: skipping (tube disabled — Radmon is radiation-only)" },
+    { TX_TARGET_GMC,           offsetof(tx_context_t, gmc),           send_gmc,           200, 0,   GATE_TUBE,        -1,
+      "GMC: skipping (tube disabled — GMC is radiation-only)" },
+    { TX_TARGET_THINGSPEAK,    offsetof(tx_context_t, thingspeak),    send_thingspeak,    200, 0,   GATE_ANY_PAYLOAD, -1,
+      "ThingSpeak: skipping (no payload)" },
+    { TX_TARGET_THINGSPEAK_PM, offsetof(tx_context_t, thingspeak_pm), send_thingspeak_pm, 200, 0,   GATE_PM,          -1,
+      "ThingSpeak PM: skipping (no PM reading)" },
+    { TX_TARGET_OSM,           offsetof(tx_context_t, osm),           send_osm,           201, 200, GATE_ANY_PAYLOAD, -1,
+      "openSenseMap: skipping (no payload)" },
+    { TX_TARGET_AQI,           offsetof(tx_context_t, aqi),           send_aqi,           200, 201, GATE_ANY_PAYLOAD, -1,
+      "aqi.eco: skipping (no payload)" },
+};
+
+// Run one table entry: identical to each old hand-written block. `fail_streak`
+// is the caller-owned per-target counter; `any_payload` is precomputed once.
+static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
+                            bool any_payload, int *fail_streak) {
+    const tx_target_t *t = (const tx_target_t *)((const char *)c + e->target_off);
+    int slot = e->dsp_slot;
+
+    if (!t->enabled) {                       // disabled → OLED OFF (no-op if slot-less)
+        if (slot >= 0) display_set_status(slot, DSP_SRV_OFF);
+        return;
+    }
+
+    bool gate;
+    switch (e->gate) {
+        case GATE_TUBE: gate = c->tube_enabled; break;
+        case GATE_PM:   gate = c->pm_valid;     break;
+        default:        gate = any_payload;     break;
+    }
+    if (!gate) {                             // enabled but nothing to send
+        ESP_LOGI(TAG, "%s", e->skip_reason);
+        if (slot >= 0) display_set_status(slot, DSP_SRV_IDLE);
+        return;
+    }
+
+    const char *name = tx_target_name(e->id);
+
+    if (s_stats[e->id].breaker_open_cycles > 0) {   // breaker open → count down
+        s_stats[e->id].breaker_open_cycles--;
+        ESP_LOGI(TAG, "%s: breaker open (%d cycles left)",
+                 name, s_stats[e->id].breaker_open_cycles);
+        if (slot >= 0) display_set_status(slot, DSP_SRV_ERROR);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sending to %s (%s)", name, t->use_https ? "https" : "http");
+    if (slot >= 0) display_set_status(slot, DSP_SRV_SENDING);
+    int rc = e->send(c);
+    bool ok = (rc == e->ok1) || (e->ok2 && rc == e->ok2);
+    record_outcome(e->id, rc, ok);
+    ESP_LOGI(TAG, "%s: %s (rc=%d)", name, ok ? "ok" : "error", rc);
+    if (slot >= 0) display_set_status(slot, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
+
+    if (ok) {
+        *fail_streak = 0;
+    } else if (rc == -1) {                   // only full retry-exhaustion trips it
+        (*fail_streak)++;
+        if (*fail_streak >= TX_CB_FAIL_THRESHOLD) {
+            s_stats[e->id].breaker_open_cycles = TX_CB_SKIP_CYCLES;
+            ESP_LOGW(TAG, "%s: %d fails, breaker open for %d cycles",
+                     name, *fail_streak, TX_CB_SKIP_CYCLES);
+            *fail_streak = 0;
+        }
+    }
+}
+
 static void tx_run(tx_context_t *c) {
-    // Per-target consecutive-fail streak — internal only. The "skip remaining"
-    // counters were promoted to s_stats[i].breaker_open_cycles so the status
-    // page can show them; updates here keep them in sync (single-writer).
+    // Per-target consecutive-fail streaks, indexed by tx_target_id_t — internal
+    // only. The "skip remaining" counters live in s_stats[i].breaker_open_cycles
+    // for the status page; updates here keep them in sync (single-writer).
     //
-    // V2.4.1 (B5): these are function-static which means they survive across
-    // calls. SAFE ONLY because TX_QUEUE_DEPTH == 1 and exactly one tx_task
-    // exists — tx_run is never reentered. If either invariant ever changes
-    // (deeper queue OR a second worker on the other core), promote to
-    // module-static with a per-target spinlock OR pass these in via the
-    // tx_context_t. Adding a comment rather than restructuring today —
-    // single-worker queue is a long-standing design choice.
-    //
-    // cppcheck suggests moving each variable inside its per-target if-block
-    // (`variableScope` warning). That would work but loses the visual
-    // grouping at function entry that makes the persist-across-calls
-    // contract obvious. Suppress inline.
-    // cppcheck-suppress variableScope
-    static int madavi_fail_streak  = 0;
-    // cppcheck-suppress variableScope
-    static int sensorc_fail_streak = 0;
-    // cppcheck-suppress variableScope
-    static int radmon_fail_streak  = 0;
-    // cppcheck-suppress variableScope
-    static int osm_fail_streak     = 0;
-    // cppcheck-suppress variableScope
-    static int aqi_fail_streak     = 0;
-    // cppcheck-suppress variableScope
-    static int gmc_fail_streak     = 0;
-    // cppcheck-suppress variableScope
-    static int ts_fail_streak      = 0;
-    // cppcheck-suppress variableScope
-    static int ts_pm_fail_streak   = 0;
+    // V2.4.1 (B5) / V2.5.5: function-static so they persist across calls. SAFE
+    // ONLY because TX_QUEUE_DEPTH == 1 and exactly one tx_task exists — tx_run is
+    // never reentered. If either invariant ever changes (deeper queue OR a second
+    // worker on the other core), promote to module-static with a per-target
+    // spinlock OR pass via the tx_context_t.
+    static int fail_streak[TX_TARGET_COUNT] = {0};
 
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t min_free  = esp_get_minimum_free_heap_size();
@@ -1165,245 +1241,8 @@ static void tx_run(tx_context_t *c) {
     // radiation-only, so it's gated strictly on tube_enabled.
     bool any_payload = c->tube_enabled || c->bme_valid || c->pm_valid || c->noise_valid;
 
-    if (c->madavi.enabled && any_payload) {
-        if (s_stats[TX_TARGET_MADAVI].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_MADAVI].breaker_open_cycles--;
-            ESP_LOGI(TAG, "Madavi: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_MADAVI].breaker_open_cycles);
-            display_set_status(DSP_STATUS_MADAVI, DSP_SRV_ERROR);
-        } else {
-            ESP_LOGI(TAG, "Sending to Madavi (%s)", c->madavi.use_https ? "https" : "http");
-            display_set_status(DSP_STATUS_MADAVI, DSP_SRV_SENDING);
-            int rc = send_madavi(c);
-            bool ok = (rc == 200);
-            record_outcome(TX_TARGET_MADAVI, rc, ok);
-            ESP_LOGI(TAG, "Madavi: %s (rc=%d)", ok ? "ok" : "error", rc);
-            display_set_status(DSP_STATUS_MADAVI, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
-            if (ok) {
-                madavi_fail_streak = 0;
-            } else if (rc == -1) {  // only full retry exhaustion counts
-                madavi_fail_streak++;
-                if (madavi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_MADAVI].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "Madavi: %d fails, breaker open for %d cycles",
-                             madavi_fail_streak, TX_CB_SKIP_CYCLES);
-                    madavi_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->madavi.enabled) {
-        ESP_LOGI(TAG, "Madavi: skipping (no payload — tube disabled and no env/PM sensor)");
-        display_set_status(DSP_STATUS_MADAVI, DSP_SRV_IDLE);
-    } else {
-        display_set_status(DSP_STATUS_MADAVI, DSP_SRV_OFF);
-    }
-
-    if (c->sensorc.enabled && any_payload) {
-        if (s_stats[TX_TARGET_SENSORC].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_SENSORC].breaker_open_cycles--;
-            ESP_LOGI(TAG, "sensor.community: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_SENSORC].breaker_open_cycles);
-            display_set_status(DSP_STATUS_SCOMM, DSP_SRV_ERROR);
-        } else {
-            ESP_LOGI(TAG, "Sending to sensor.community (%s)", c->sensorc.use_https ? "https" : "http");
-            display_set_status(DSP_STATUS_SCOMM, DSP_SRV_SENDING);
-            int rc = send_sensorc(c);
-            bool ok = (rc == 201);
-            record_outcome(TX_TARGET_SENSORC, rc, ok);
-            ESP_LOGI(TAG, "sensor.community: %s (rc=%d)", ok ? "ok" : "error", rc);
-            display_set_status(DSP_STATUS_SCOMM, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
-            if (ok) {
-                sensorc_fail_streak = 0;
-            } else if (rc == -1) {  // only full retry exhaustion counts
-                sensorc_fail_streak++;
-                if (sensorc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_SENSORC].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "sensor.community: %d fails, breaker open for %d cycles",
-                             sensorc_fail_streak, TX_CB_SKIP_CYCLES);
-                    sensorc_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->sensorc.enabled) {
-        ESP_LOGI(TAG, "sensor.community: skipping (no payload — tube disabled and no env/PM sensor)");
-        display_set_status(DSP_STATUS_SCOMM, DSP_SRV_IDLE);
-    } else {
-        display_set_status(DSP_STATUS_SCOMM, DSP_SRV_OFF);
-    }
-
-    if (c->radmon.enabled && c->tube_enabled) {
-        if (s_stats[TX_TARGET_RADMON].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_RADMON].breaker_open_cycles--;
-            ESP_LOGI(TAG, "Radmon: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_RADMON].breaker_open_cycles);
-            display_set_status(DSP_STATUS_RADMON, DSP_SRV_ERROR);
-        } else {
-            ESP_LOGI(TAG, "Sending to Radmon (%s)", c->radmon.use_https ? "https" : "http");
-            display_set_status(DSP_STATUS_RADMON, DSP_SRV_SENDING);
-            int rc = send_radmon(c);
-            bool ok = (rc == 200);
-            record_outcome(TX_TARGET_RADMON, rc, ok);
-            ESP_LOGI(TAG, "Radmon: %s (rc=%d)", ok ? "ok" : "error", rc);
-            display_set_status(DSP_STATUS_RADMON, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
-            if (ok) {
-                radmon_fail_streak = 0;
-            } else if (rc == -1) {  // only full retry exhaustion counts
-                radmon_fail_streak++;
-                if (radmon_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_RADMON].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "Radmon: %d fails, breaker open for %d cycles",
-                             radmon_fail_streak, TX_CB_SKIP_CYCLES);
-                    radmon_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->radmon.enabled) {
-        ESP_LOGI(TAG, "Radmon: skipping (tube disabled — Radmon is radiation-only)");
-        display_set_status(DSP_STATUS_RADMON, DSP_SRV_IDLE);
-    } else {
-        display_set_status(DSP_STATUS_RADMON, DSP_SRV_OFF);
-    }
-
-    // V2.5.1: GMCMap — radiation-only (gated on tube_enabled like Radmon).
-    // No OLED status slot (matches OSM/aqi.eco — sealed-tube deployment).
-    if (c->gmc.enabled && c->tube_enabled) {
-        if (s_stats[TX_TARGET_GMC].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_GMC].breaker_open_cycles--;
-            ESP_LOGI(TAG, "GMC: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_GMC].breaker_open_cycles);
-        } else {
-            ESP_LOGI(TAG, "Sending to GMC (gmcmap.com, http)");
-            int rc = send_gmc(c);
-            bool ok = (rc == 200);
-            record_outcome(TX_TARGET_GMC, rc, ok);
-            ESP_LOGI(TAG, "GMC: %s (rc=%d)", ok ? "ok" : "error", rc);
-            if (ok) {
-                gmc_fail_streak = 0;
-            } else if (rc == -1) {
-                gmc_fail_streak++;
-                if (gmc_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_GMC].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "GMC: %d fails, breaker open for %d cycles",
-                             gmc_fail_streak, TX_CB_SKIP_CYCLES);
-                    gmc_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->gmc.enabled) {
-        ESP_LOGI(TAG, "GMC: skipping (tube disabled — GMC is radiation-only)");
-    }
-
-    // V2.5.1: ThingSpeak — generic (gated on any payload like OSM/aqi.eco).
-    if (c->thingspeak.enabled && any_payload) {
-        if (s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles--;
-            ESP_LOGI(TAG, "ThingSpeak: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles);
-        } else {
-            ESP_LOGI(TAG, "Sending to ThingSpeak (%s)",
-                     c->thingspeak.use_https ? "https" : "http");
-            int rc = send_thingspeak(c);
-            bool ok = (rc == 200);
-            record_outcome(TX_TARGET_THINGSPEAK, rc, ok);
-            ESP_LOGI(TAG, "ThingSpeak: %s (rc=%d)", ok ? "ok" : "error", rc);
-            if (ok) {
-                ts_fail_streak = 0;
-            } else if (rc == -1) {
-                ts_fail_streak++;
-                if (ts_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_THINGSPEAK].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "ThingSpeak: %d fails, breaker open for %d cycles",
-                             ts_fail_streak, TX_CB_SKIP_CYCLES);
-                    ts_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->thingspeak.enabled) {
-        ESP_LOGI(TAG, "ThingSpeak: skipping (no payload)");
-    }
-
-    // V2.5.4: ThingSpeak PM — second, independent channel for the SPS30 dust
-    // node. Gated on a live PM reading (not the tube), so the dust node uploads
-    // even with the tube disabled, and a combined node fills both channels.
-    if (c->thingspeak_pm.enabled && c->pm_valid) {
-        if (s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles--;
-            ESP_LOGI(TAG, "ThingSpeak PM: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles);
-        } else {
-            ESP_LOGI(TAG, "Sending to ThingSpeak PM (%s)",
-                     c->thingspeak_pm.use_https ? "https" : "http");
-            int rc = send_thingspeak_pm(c);
-            bool ok = (rc == 200);
-            record_outcome(TX_TARGET_THINGSPEAK_PM, rc, ok);
-            ESP_LOGI(TAG, "ThingSpeak PM: %s (rc=%d)", ok ? "ok" : "error", rc);
-            if (ok) {
-                ts_pm_fail_streak = 0;
-            } else if (rc == -1) {
-                ts_pm_fail_streak++;
-                if (ts_pm_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_THINGSPEAK_PM].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "ThingSpeak PM: %d fails, breaker open for %d cycles",
-                             ts_pm_fail_streak, TX_CB_SKIP_CYCLES);
-                    ts_pm_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->thingspeak_pm.enabled) {
-        ESP_LOGI(TAG, "ThingSpeak PM: skipping (no PM reading)");
-    }
-
-    if (c->send_osm && any_payload) {
-        if (s_stats[TX_TARGET_OSM].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_OSM].breaker_open_cycles--;
-            ESP_LOGI(TAG, "openSenseMap: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_OSM].breaker_open_cycles);
-        } else {
-            ESP_LOGI(TAG, "Sending to openSenseMap (https)");
-            int rc = send_osm(c);
-            bool ok = (rc == 201 || rc == 200);
-            record_outcome(TX_TARGET_OSM, rc, ok);
-            ESP_LOGI(TAG, "openSenseMap: %s (rc=%d)", ok ? "ok" : "error", rc);
-            if (ok) {
-                osm_fail_streak = 0;
-            } else if (rc == -1) {
-                osm_fail_streak++;
-                if (osm_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_OSM].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "openSenseMap: %d fails, breaker open for %d cycles",
-                             osm_fail_streak, TX_CB_SKIP_CYCLES);
-                    osm_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->send_osm) {
-        ESP_LOGI(TAG, "openSenseMap: skipping (no payload)");
-    }
-
-    if (c->send_aqi && any_payload) {
-        if (s_stats[TX_TARGET_AQI].breaker_open_cycles > 0) {
-            s_stats[TX_TARGET_AQI].breaker_open_cycles--;
-            ESP_LOGI(TAG, "aqi.eco: breaker open (%d cycles left)",
-                     s_stats[TX_TARGET_AQI].breaker_open_cycles);
-        } else {
-            ESP_LOGI(TAG, "Sending to aqi.eco (https)");
-            int rc = send_aqi(c);
-            bool ok = (rc == 200 || rc == 201);
-            record_outcome(TX_TARGET_AQI, rc, ok);
-            ESP_LOGI(TAG, "aqi.eco: %s (rc=%d)", ok ? "ok" : "error", rc);
-            if (ok) {
-                aqi_fail_streak = 0;
-            } else if (rc == -1) {
-                aqi_fail_streak++;
-                if (aqi_fail_streak >= TX_CB_FAIL_THRESHOLD) {
-                    s_stats[TX_TARGET_AQI].breaker_open_cycles = TX_CB_SKIP_CYCLES;
-                    ESP_LOGW(TAG, "aqi.eco: %d fails, breaker open for %d cycles",
-                             aqi_fail_streak, TX_CB_SKIP_CYCLES);
-                    aqi_fail_streak = 0;
-                }
-            }
-        }
-    } else if (c->send_aqi) {
-        ESP_LOGI(TAG, "aqi.eco: skipping (no payload)");
+    for (size_t i = 0; i < sizeof(TX_TABLE) / sizeof(TX_TABLE[0]); i++) {
+        tx_dispatch_one(c, &TX_TABLE[i], any_payload,
+                        &fail_streak[TX_TABLE[i].id]);
     }
 }

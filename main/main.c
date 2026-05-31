@@ -409,13 +409,16 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->radmon_user     = g_cfg.radmon_user;
     ctx->radmon_password = g_cfg.radmon_password;
 
-    ctx->send_osm         = g_cfg.send_osm;
-    ctx->osm_use_insecure = false;
+    // V2.5.5: OSM + aqi.eco unified to tx_target_t (were bare send_*/use_insecure
+    // bools). HTTPS-only; the per-box/per-token URL is built dynamically in
+    // send_osm()/send_aqi(), so url_* come out NULL via the s_target_urls
+    // {NULL,NULL} rows. tx_target_configure sets use_insecure=false, matching
+    // the prior hardcoded literal.
+    tx_target_configure(&ctx->osm, TX_TARGET_OSM, g_cfg.send_osm, /*use_https=*/true);
     ctx->osm_box_id       = g_cfg.osm_box_id;
     ctx->osm_access_token = g_cfg.osm_access_token;
 
-    ctx->send_aqi         = g_cfg.send_aqi;
-    ctx->aqi_use_insecure = false;
+    tx_target_configure(&ctx->aqi, TX_TARGET_AQI, g_cfg.send_aqi, /*use_https=*/true);
     ctx->aqi_token        = g_cfg.aqi_token;
 
     // V2.5.1: GMCMap (HTTP-only) + ThingSpeak (HTTPS-capable).

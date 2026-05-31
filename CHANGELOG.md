@@ -15,6 +15,22 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.5
+
+**Pure refactor — audit finding A2: table-driven TX dispatch.** No user-visible behaviour change. `tx_run()` in `transmission.c` carried **8 copy-pasted ~28-LOC per-target dispatch blocks** (~240 LOC) that shared one skeleton — enable → gate → circuit-breaker → send → success-check → fail-streak/breaker-trip → log + OLED status. With 8 upload targets the duplication had become the place divergence creeps in (a wrong success code, a missed streak reset). Collapsed to a `static const tx_dispatch_t TX_TABLE[]` (one row per target) + a single `tx_dispatch_one()` interpreter, looped. ~240 → ~80 LOC; adding target #9 is now one table row + its `send_*()`.
+
+### Changes
+
+- **`TX_TABLE[]` + `tx_dispatch_one()`** encode the 6 axes that actually varied per target: enable flag, gate (`any_payload` / `tube_enabled` / `pm_valid`), send fn, success rc(s) (200 / 201 / 200‖201), OLED slot (only Madavi/sensor.community/Radmon have one), skip-reason string. Each target's payload/body builder (`send_madavi` etc.) is **untouched** — the table just holds a function pointer, so Madavi's SDS011/BME280 relabelling and every other per-target quirk are unchanged.
+- **OSM + aqi.eco unified to `tx_target_t`** (were bare `send_*` / `*_use_insecure` bools). Their URLs are dynamic + HTTPS-only, so `url_*` stay NULL via the `s_target_urls` `{NULL,NULL}` rows; `tx_target_configure()` sets `use_insecure=false` (matching the prior literal). This lets the table reach every target's `enabled`/`use_https` by a uniform `offsetof`, with no special-case row.
+- The 8 function-static `*_fail_streak` ints became one `fail_streak[TX_TARGET_COUNT]` array indexed by `tx_target_id_t`.
+
+### Only output difference
+
+The GMC "Sending" log line now reads `Sending to GMC (http)` instead of `Sending to GMC (gmcmap.com, http)` (the protocol label is derived uniformly). Cosmetic; every other log/result/breaker/skip line is byte-identical. Verified by building all 5 boards + diffing a TX cycle's logs.
+
+---
+
 ## V2.5.4
 
 **New `/config` polish + a second ThingSpeak channel for the dust node.**

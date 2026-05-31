@@ -96,8 +96,7 @@ typedef struct {
     // openSenseMap — single HTTPS POST per cycle to ingress.opensensemap.org
     // /boxes/<box_id>/data?luftdaten=1. Body is the standard combined
     // Luftdaten payload (Si22G_* + BME280_* + SPS30_* fields).
-    bool        send_osm;
-    bool        osm_use_insecure;
+    tx_target_t osm;            // V2.5.5: url_http/url_https stay NULL (dynamic per-box URL)
     const char *osm_box_id;
     // V2.3.16: optional OSM access token. Empty string = unauthenticated upload
     // (the historical Luftdaten path). When set, send_osm adds an
@@ -108,8 +107,7 @@ typedef struct {
     // aqi.eco — single HTTPS POST per cycle to api.aqi.eco/update/<token>.
     // Body is the standard Luftdaten payload prefixed with an esp8266id
     // field (legacy field name, accepts our esp32-N chip ID format).
-    bool        send_aqi;
-    bool        aqi_use_insecure;
+    tx_target_t aqi;            // V2.5.5: url_http/url_https stay NULL (dynamic per-token URL)
     const char *aqi_token;
 
     // GMCMap (gmcmap.com / GQ Electronics) — radiation-only GET upload, HTTP

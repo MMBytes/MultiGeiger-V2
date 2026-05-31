@@ -207,7 +207,7 @@ static bool wifi_up(void) {
     return esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
 }
 
-static void tx_run(tx_context_t *c);
+static void tx_run(const tx_context_t *c);
 
 static void tx_task(void *arg) {
     (void)arg;
@@ -1210,7 +1210,7 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
     }
 }
 
-static void tx_run(tx_context_t *c) {
+static void tx_run(const tx_context_t *c) {
     // Per-target consecutive-fail streaks, indexed by tx_target_id_t — internal
     // only. The "skip remaining" counters live in s_stats[i].breaker_open_cycles
     // for the status page; updates here keep them in sync (single-writer).

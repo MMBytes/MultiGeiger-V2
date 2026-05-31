@@ -121,6 +121,13 @@ static const ha_entity_t ENTITIES[] = {
     { "cpm",        "cpm",        "CPM",             NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
     { "usvph",      "dose_rate",  "Dose rate",       NULL,             "µSv/h", "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
     { "hv_pulses",  "hv_pulses",  "HV pulses",       NULL,             NULL,    "total_increasing", "mdi:flash",         NULL, tube_enabled_, NULL },
+#ifdef MQTT_RICH_STATE
+    // V2.5.6: rolling CPM means — rich/PSRAM boards only (mqtt.c emits cpm5/
+    // cpm15 only under MQTT_RICH_STATE), so the entities are #ifdef-gated too
+    // to avoid phantom "unavailable" entities on Heltec.
+    { "cpm5",       "cpm5",       "CPM (5-min avg)", NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
+    { "cpm15",      "cpm15",      "CPM (15-min avg)",NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
+#endif
 
     // --- Environment (BME280 / SHT45+BMP581 / etc.) -----------------------
     // V2.4.12: each field gated on its own per-field predicate (e.g.

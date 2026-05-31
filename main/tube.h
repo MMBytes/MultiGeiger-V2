@@ -51,6 +51,15 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
 /** @brief True if tube_setup(true) was called at boot. */
 bool tube_is_enabled(void);
 
+/** @brief Monotonic count of valid tube pulses since boot (never reset).
+ *
+ *  V2.5.6: separate from the tube_read() window accumulator. Lets a sampler
+ *  (history.c) take its own fixed-interval deltas without disturbing the TX
+ *  cycle's destructive tube_read(). Returns 0 while the tube is disabled (the
+ *  count ISR is never installed). Unsigned wrap is safe for bounded deltas.
+ */
+uint32_t tube_get_total_counts(void);
+
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *
  *  Runs in IRAM/ISR context — the function must be IRAM_ATTR and must not

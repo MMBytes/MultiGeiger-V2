@@ -41,6 +41,7 @@
 
 #include "als.h"
 #include "log_ftp.h"
+#include "history.h"
 #include "mqtt_discovery.h"
 #include "sysinfo.h"
 #include "transmission.h"
@@ -431,9 +432,11 @@ void mqtt_publish_state(const main_status_t *st,
     //     of upload stats). Bumped 1280 → 1664 B to restore the original ~380 B
     //     slack. APPEND() truncates safely (no overflow), but a truncated JSON
     //     fails HA's parse for that publish — so keep real headroom here.
+    //   - V2.5.6 added cpm5/cpm15 (~24 B) to the rich radiation block; still
+    //     well within the ~380 B slack, so the 1792 B ceiling is unchanged.
     // Stack-allocated — cycle task has 4 KB+ stack, so 1792 / 768 B both fit.
 #ifdef MQTT_RICH_STATE
-    char buf[1792];   // 8 upload targets + heap split + all sensors + FTP
+    char buf[1792];   // 8 upload targets + heap split + cpm5/15 + all sensors + FTP
 #else
     char buf[768];
 #endif
@@ -462,6 +465,18 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"usvph\":%.4f",     st->last_usvph);
         APPEND(",\"hv_pulses\":%" PRIu32, st->last_hv_pulses);
         APPEND(",\"hv_err\":%s",      st->last_hv_error ? "true" : "false");
+#ifdef MQTT_RICH_STATE
+        // V2.5.6: rolling 5-/15-min CPM means (history.c). Rich/PSRAM boards
+        // only; suppressed during ramp-up so HA shows unavailable, not 0.
+        {
+            history_snapshot_t h;
+            history_get(&h);
+            if (h.min_count > 0) {
+                APPEND(",\"cpm5\":%u",  (unsigned)h.cpm5);
+                APPEND(",\"cpm15\":%u", (unsigned)h.cpm15);
+            }
+        }
+#endif
     }
 
     // Environment (BME280 / SHT45+BMP581 / etc.)

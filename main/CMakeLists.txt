@@ -4,6 +4,7 @@ idf_component_register(
         "config.c"
         "http_server.c"
         "tube.c"
+        "history.c"
         "ntp.c"
         "transmission.c"
         "bme280.c"

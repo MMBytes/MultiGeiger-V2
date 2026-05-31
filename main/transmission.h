@@ -43,6 +43,14 @@ typedef struct {
     uint32_t min_micro;
     uint32_t max_micro;
 
+    // V2.5.6: rolling CPM averages from history.c (windowed means of the last
+    // 5 / 15 one-minute samples). roll_valid=false during ramp-up (before the
+    // first minute sample) — callers fall back to the current per-cycle cpm.
+    // GMC ACPM=cpm5; ThingSpeak field3=cpm5, field4=cpm15.
+    uint32_t cpm5;
+    uint32_t cpm15;
+    bool     roll_valid;
+
     // When false, the entire radiation payload (CPM, dose, HV, pulse stats)
     // is suppressed. Madavi sends only the THP body, sensor.community sends
     // only the X-PIN 11 POST, and Radmon (radiation-only) is skipped.

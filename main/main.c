@@ -37,6 +37,7 @@
 #include "net_arp.h"            // V2.4.19: gratuitous ARP after WiFi reconnect
 #include "ntp.h"
 #include "periodic.h"           // V2.4.19: 24h housekeeping (PSA refresh + safety-net ARP)
+#include "history.h"            // V2.5.6: in-RAM CPM history + rolling averages
 #include "speaker.h"
 #include "syslog.h"
 #include "transmission.h"
@@ -380,6 +381,16 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->dt_ms        = dt_ms;
     ctx->gm_counts    = counts;
     ctx->cpm          = cpm;
+    // V2.5.6: rolling 5-/15-min CPM means from history.c (GMC ACPM + ThingSpeak
+    // field3/4). Ramp-up: before the first minute sample, fall back to the
+    // current per-cycle cpm so uploads never send 0.
+    {
+        history_snapshot_t h;
+        history_get(&h);
+        ctx->roll_valid = (h.min_count > 0);
+        ctx->cpm5  = ctx->roll_valid ? h.cpm5  : cpm;
+        ctx->cpm15 = ctx->roll_valid ? h.cpm15 : cpm;
+    }
     ctx->hv_pulses    = hv_pulses;
     ctx->min_micro    = (min_us == UINT32_MAX) ? 0 : min_us;
     ctx->max_micro    = max_us;
@@ -885,6 +896,7 @@ void app_main(void) {
     // LOW output but skips ISR install + HV gptimer; speaker pulse callback
     // can still be registered (it just never fires without ISR pulses).
     tube_setup(g_cfg.tube_enabled);
+    history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
 
     // NeoPixel (boards with HAL_HAS_NEOPIXEL only — stubs out elsewhere).
@@ -1105,6 +1117,7 @@ void app_main(void) {
         {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             periodic_loop(now_ms);       // V2.4.19: 24h PSA refresh + safety-net ARP
+            history_tick(now_ms);        // V2.5.6: 60s CPM history sampler
             log_ftp_loop(now_ms);
         }
 

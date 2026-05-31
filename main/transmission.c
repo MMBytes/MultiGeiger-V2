@@ -697,8 +697,9 @@ static int send_radmon(const tx_context_t *c) {
 // HTTP-only (gmcmap has no TLS). Success = HTTP 200 + body contains "OK";
 // "ERR1" = account ID not found, "ERR2" = counter ID not found. V2.5.1.
 //
-// Current-values-only mapping (no rolling windows in this firmware): CPM and
-// ACPM both carry the per-cycle CPM; uSV is the per-cycle dose derived from it.
+// V2.5.6: CPM carries the current per-cycle CPM; ACPM carries the rolling
+// 5-min mean (cpm5) from history.c (current cpm during ramp-up). uSV is the
+// per-cycle dose derived from the current CPM.
 static int send_gmc(const tx_context_t *c) {
     if (!c->gmc_account_id[0] || !c->gmc_geiger_id[0]) {
         ESP_LOGW(TAG, "GMC: account/counter ID empty, skipping.");
@@ -709,7 +710,7 @@ static int send_gmc(const tx_context_t *c) {
     snprintf(url, sizeof(url),
              "%s?AID=%s&GID=%s&CPM=%lu&ACPM=%lu&uSV=%.4f",
              c->gmc.url_http, c->gmc_account_id, c->gmc_geiger_id,
-             (unsigned long)c->cpm, (unsigned long)c->cpm, (double)usv);
+             (unsigned long)c->cpm, (unsigned long)c->cpm5, (double)usv);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
@@ -733,10 +734,11 @@ static int send_gmc(const tx_context_t *c) {
 }
 
 // --- ThingSpeak -------------------------------------------------------------
-// GET /update?api_key=&field1=CPM&field2=uSv&field3=CPM&field4=CPM
+// GET /update?api_key=&field1=CPM&field2=uSv&field3=cpm5&field4=cpm15
 //   [&field5=T&field6=H&field7=P]  — generic time-series. HTTPS supported.
 // Success = HTTP 200 + body != "0" (ThingSpeak returns the new entry id, 0 on
-// reject — rate limit or bad key). field3/4 carry current CPM (no windows). V2.5.1.
+// reject — rate limit or bad key). V2.5.6: field3=rolling 5-min mean, field4=
+// rolling 15-min mean from history.c (current cpm during ramp-up). V2.5.1.
 static int send_thingspeak(const tx_context_t *c) {
     if (!c->thingspeak_api_key[0]) {
         ESP_LOGW(TAG, "ThingSpeak: API key empty, skipping.");
@@ -750,7 +752,7 @@ static int send_thingspeak(const tx_context_t *c) {
              "%s?api_key=%s&field1=%lu&field2=%.4f&field3=%lu&field4=%lu",
              base, c->thingspeak_api_key,
              (unsigned long)c->cpm, (double)usv,
-             (unsigned long)c->cpm, (unsigned long)c->cpm);
+             (unsigned long)c->cpm5, (unsigned long)c->cpm15);
     // Optional env fields (matches ESPGeiger field5/6/7 = temp/humidity/pressure).
     if (c->bme_valid && n > 0 && n < (int)sizeof(url)) {
         snprintf(url + n, sizeof(url) - n,

@@ -37,6 +37,7 @@
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "tube.h"
+#include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
@@ -769,6 +770,23 @@ static int append_safe(char *out, size_t sz, int n, const char *fmt, ...) {
     return n;
 }
 
+// --- CPM history graph data (V2.5.6) -----------------------------------------
+// Emits the minute + hour rings as a JS object for the inline SVG graph
+// (STATUS_GRAPH). Empty when the tube is disabled — the dust node has no
+// radiation history. Values are CPM, only the valid ring entries, oldest..newest.
+static void format_history_data(char *out, size_t sz) {
+    if (!tube_is_enabled()) { out[0] = 0; return; }
+    history_snapshot_t h;
+    history_get(&h);
+    int n = append_safe(out, sz, 0, "<script>var H={min:[");
+    for (uint8_t i = 0; i < h.min_count; i++)
+        n = append_safe(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_min[i]);
+    n = append_safe(out, sz, n, "],hour:[");
+    for (uint8_t i = 0; i < h.hour_count; i++)
+        n = append_safe(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_hour[i]);
+    append_safe(out, sz, n, "]};</script>");
+}
+
 static void format_uploads(char *out, size_t sz) {
     int n = append_safe(out, sz, 0,
         "<div class=\"info\"><h3>Uploads</h3>"
@@ -941,6 +959,36 @@ static const char STATUS_LINKS_HEAD[] =
 static const char STATUS_LINKS_TAIL[] =
     "</body></html>";
 
+// V2.5.6: CPM-history graph chrome — static SVG + hand-drawn JS (no external
+// lib; offline device). Drawing runs in the browser; the device only serves
+// this markup + the per-request data object `H` (emitted by format_history_data
+// just before this chunk). `H2` is the SVG height — must NOT shadow the data
+// object `H`. Sent verbatim via send_chunk, so `%` is literal.
+static const char STATUS_GRAPH[] =
+    "<div class='info'><h3>CPM history</h3>"
+    "<svg id='hg' viewBox='0 0 320 120' style='width:100%;height:auto;"
+    "background:#111;border-radius:4px'>"
+    "<polyline id='hpl' fill='none' stroke='#4caf50' stroke-width='1.5' points=''/>"
+    "<text id='hmax' x='3' y='11' fill='#888' font-size='9'></text>"
+    "<text id='hmin' x='3' y='117' fill='#888' font-size='9'></text>"
+    "<text id='hlbl' x='317' y='117' fill='#888' font-size='9' text-anchor='end'></text>"
+    "</svg><br>"
+    "<button onclick=\"hdraw('min')\">60 min</button> "
+    "<button onclick=\"hdraw('hour')\">24 h</button>"
+    "<script>function hdraw(s){"
+    "var d=(s=='hour'?H.hour:H.min);"
+    "if(!d||!d.length){document.getElementById('hlbl').textContent='no data yet';"
+    "document.getElementById('hpl').setAttribute('points','');return;}"
+    "var mx=Math.max.apply(null,d),mn=Math.min.apply(null,d),sp=(mx-mn)||1,"
+    "n=d.length,W=320,H2=120,p=10;"
+    "var pts=d.map(function(v,i){return (p+i*(W-2*p)/(n>1?n-1:1)).toFixed(1)+','+"
+    "(H2-p-(v-mn)*(H2-2*p)/sp).toFixed(1);}).join(' ');"
+    "document.getElementById('hpl').setAttribute('points',pts);"
+    "document.getElementById('hmax').textContent=mx;"
+    "document.getElementById('hmin').textContent=mn;"
+    "document.getElementById('hlbl').textContent=(s=='hour'?'last '+n+' h':'last '+n+' min');}"
+    "hdraw('min');</script></div>";
+
 // Streaming-friendly send: skip if format function emitted nothing (the
 // "block hidden" case for radiation/env/noise/PM). Returns false on
 // transport error — caller bails immediately.
@@ -981,6 +1029,12 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_system     (buf, sizeof(buf), uptime_s);  if (!send_block(req, buf)) goto fail;
     format_cycle      (buf, sizeof(buf), uptime_ms); if (!send_block(req, buf)) goto fail;
     format_radiation  (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    // V2.5.6: CPM-history graph — radiation nodes only. Data object first, then
+    // the static SVG+JS chrome that draws it.
+    if (tube_is_enabled()) {
+        format_history_data(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+        if (httpd_resp_send_chunk(req, STATUS_GRAPH, sizeof(STATUS_GRAPH) - 1) != ESP_OK) goto fail;
+    }
     format_environment(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_als        (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;

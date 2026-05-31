@@ -20,6 +20,11 @@ static bool s_enabled = false;
 
 // --- Pulse counter state ---
 static volatile uint32_t isr_gmc_counts     = 0;
+// V2.5.6: monotonic pulse total since boot — NEVER reset by tube_read(). The
+// CPM-history sampler (history.c) reads this every 60 s and takes its own
+// delta, so its 1-min resolution is fully decoupled from the destructive
+// tube_read() window (which the TX cycle drains on its own ~150-180 s cadence).
+static volatile uint32_t isr_gmc_total      = 0;
 static volatile uint64_t isr_last_pulse_us  = 0;
 static volatile uint32_t isr_min_us_between = UINT32_MAX;
 static volatile uint32_t isr_max_us_between = 0;
@@ -137,12 +142,14 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     uint64_t last = isr_last_pulse_us;
     if (last == 0) {
         isr_gmc_counts++;
+        isr_gmc_total++;            // V2.5.6: monotonic history counter
         isr_last_pulse_us = now;
         counted = true;
     } else {
         uint32_t dt = (uint32_t)(now - last);
         if (dt > GMC_DEAD_TIME_US) {
             isr_gmc_counts++;
+            isr_gmc_total++;        // V2.5.6: monotonic history counter
             if (dt < isr_min_us_between) isr_min_us_between = dt;
             if (dt > isr_max_us_between) isr_max_us_between = dt;
             isr_last_pulse_us = now;
@@ -268,4 +275,15 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
 
 bool tube_is_enabled(void) {
     return s_enabled;
+}
+
+uint32_t tube_get_total_counts(void) {
+    // Non-destructive read of the monotonic pulse total. 32-bit aligned read is
+    // atomic on Xtensa, but take mux_gmc anyway for consistency with the ISR
+    // writer. Callers take their own deltas (unsigned subtraction is wrap-safe).
+    uint32_t v;
+    portENTER_CRITICAL(&mux_gmc);
+    v = isr_gmc_total;
+    portEXIT_CRITICAL(&mux_gmc);
+    return v;
 }

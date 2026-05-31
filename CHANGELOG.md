@@ -15,6 +15,27 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.6
+
+**CPM history graph on `/status` + rolling 5-/15-min averages** (modelled on ESPGeiger; closes the long-standing "rolling averages for GMC/ThingSpeak" follow-up in the same change).
+
+### New: in-RAM CPM history (`history.c/h`, all boards)
+- Two-tier ring — 60 samples @ 1/min + 24 samples @ 1/hour (~250 B RAM). Sampled every 60 s from a **new monotonic pulse counter in `tube.c`** (`tube_get_total_counts()`), which the count ISR bumps alongside the existing window accumulator. The history sampler takes its own 60 s deltas off that counter, so it's **fully decoupled from the destructive `tube_read()`** — the TX cycle's per-cycle CPM path is untouched and the TX interval stays freely settable without affecting the 1-min graph resolution.
+- Live only (resets on reboot — no flash persistence by design). Radiation-only: inert while the tube is disabled.
+
+### Rolling averages (all boards)
+- `cpm5`/`cpm15` = windowed means of the last 5 / 15 one-minute samples. Now feed **GMC `ACPM`** and **ThingSpeak `field3` (cpm5) / `field4` (cpm15)** (were the current per-cycle CPM placeholders). Ramp-up before the first minute sample falls back to the current CPM so uploads never send 0.
+
+### `/status` graph (all boards)
+- Hand-drawn inline SVG polyline + ~25 lines of vanilla JS (no external/CDN library — offline device). The device serves static markup + an ~84-value data array over the existing chunked response; the browser does the drawing. 60-min / 24-h toggle. ~2-4 KB flash; shown only on radiation nodes.
+
+### MQTT/HA (rich-state boards only)
+- `cpm5`/`cpm15` added to the rich-state JSON + two HA-discovery entities, gated on the existing `MQTT_RICH_STATE` (so no phantom entities on Heltec).
+
+No new per-board flag — history, rolling averages, uploads and the graph are universal; only the MQTT fields ride `MQTT_RICH_STATE`.
+
+---
+
 ## V2.5.5
 
 **Pure refactor — audit finding A2: table-driven TX dispatch.** No user-visible behaviour change. `tx_run()` in `transmission.c` carried **8 copy-pasted ~28-LOC per-target dispatch blocks** (~240 LOC) that shared one skeleton — enable → gate → circuit-breaker → send → success-check → fail-streak/breaker-trip → log + OLED status. With 8 upload targets the duplication had become the place divergence creeps in (a wrong success code, a missed streak reset). Collapsed to a `static const tx_dispatch_t TX_TABLE[]` (one row per target) + a single `tx_dispatch_one()` interpreter, looped. ~240 → ~80 LOC; adding target #9 is now one table row + its `send_*()`.

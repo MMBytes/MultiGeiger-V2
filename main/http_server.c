@@ -962,31 +962,49 @@ static const char STATUS_LINKS_TAIL[] =
 // V2.5.6: CPM-history graph chrome — static SVG + hand-drawn JS (no external
 // lib; offline device). Drawing runs in the browser; the device only serves
 // this markup + the per-request data object `H` (emitted by format_history_data
-// just before this chunk). `H2` is the SVG height — must NOT shadow the data
+// just before this chunk). `Hh` is the SVG height — must NOT shadow the data
 // object `H`. Sent verbatim via send_chunk, so `%` is literal.
 static const char STATUS_GRAPH[] =
     "<div class='info'><h3>CPM history</h3>"
-    "<svg id='hg' viewBox='0 0 320 120' style='width:100%;height:auto;"
-    "background:#111;border-radius:4px'>"
+    "<svg id='hg' viewBox='0 0 320 140' style='width:100%;height:auto;"
+    "background:#111;border-radius:4px;font-family:sans-serif'>"
+    "<g id='hgrid'></g><g id='hxlab'></g><g id='hylab'></g>"
     "<polyline id='hpl' fill='none' stroke='#4caf50' stroke-width='1.5' points=''/>"
-    "<text id='hmax' x='3' y='11' fill='#888' font-size='9'></text>"
-    "<text id='hmin' x='3' y='117' fill='#888' font-size='9'></text>"
-    "<text id='hlbl' x='317' y='117' fill='#888' font-size='9' text-anchor='end'></text>"
+    "<text id='hlbl' x='316' y='11' fill='#888' font-size='9' text-anchor='end'></text>"
     "</svg><br>"
     "<button onclick=\"hdraw('min')\">60 min</button> "
     "<button onclick=\"hdraw('hour')\">24 h</button>"
     "<script>function hdraw(s){"
     "var d=(s=='hour'?H.hour:H.min);"
-    "if(!d||!d.length){document.getElementById('hlbl').textContent='no data yet';"
-    "document.getElementById('hpl').setAttribute('points','');return;}"
-    "var mx=Math.max.apply(null,d),mn=Math.min.apply(null,d),sp=(mx-mn)||1,"
-    "n=d.length,W=320,H2=120,p=10;"
-    "var pts=d.map(function(v,i){return (p+i*(W-2*p)/(n>1?n-1:1)).toFixed(1)+','+"
-    "(H2-p-(v-mn)*(H2-2*p)/sp).toFixed(1);}).join(' ');"
-    "document.getElementById('hpl').setAttribute('points',pts);"
-    "document.getElementById('hmax').textContent=mx;"
-    "document.getElementById('hmin').textContent=mn;"
-    "document.getElementById('hlbl').textContent=(s=='hour'?'last '+n+' h':'last '+n+' min');}"
+    "var gr=document.getElementById('hgrid'),yl=document.getElementById('hylab'),"
+    "xl=document.getElementById('hxlab'),pl=document.getElementById('hpl'),"
+    "lb=document.getElementById('hlbl');"
+    "if(!d||!d.length){lb.textContent='no data yet';pl.setAttribute('points','');"
+    "gr.innerHTML='';yl.innerHTML='';xl.innerHTML='';return;}"
+    "var mx=Math.max.apply(null,d),mn=Math.min.apply(null,d),sp=(mx-mn)||1,n=d.length;"
+    "var W=320,Hh=140,L=24,R=6,T=10,B=20,x0=L,x1=W-R,y0=T,y1=Hh-B;"
+    "function X(i){return x0+i*(x1-x0)/(n>1?n-1:1);}"
+    "function Y(v){return y1-(v-mn)*(y1-y0)/sp;}"
+    // horizontal gridlines at every 1 CPM (skipped when the range is huge so we
+    // don't emit hundreds of <line>s); emphasise + label round steps.
+    "var st=sp>40?10:sp>12?5:1,mok=sp<=45,g='',yt='';"
+    "for(var v=Math.ceil(mn);v<=Math.floor(mx);v++){"
+    "var bg=(v%st==0);if(!bg&&!mok)continue;var y=Y(v).toFixed(1);"
+    "g+='<line x1=\"'+x0+'\" y1=\"'+y+'\" x2=\"'+x1+'\" y2=\"'+y+'\" stroke=\"#fff\" stroke-opacity=\"'+(bg?0.18:0.05)+'\" stroke-width=\"0.5\"/>';"
+    "if(bg)yt+='<text x=\"'+(x0-3)+'\" y=\"'+(Y(v)+3).toFixed(1)+'\" fill=\"#888\" font-size=\"8\" text-anchor=\"end\">'+v+'</text>';"
+    "}"
+    "gr.innerHTML=g;yl.innerHTML=yt;"
+    "pl.setAttribute('points',d.map(function(v,i){return X(i).toFixed(1)+','+Y(v).toFixed(1);}).join(' '));"
+    // x-axis reading times — newest point = now (viewer's clock), evenly spaced.
+    "var ms=(s=='hour'?3600000:60000),nw=Date.now(),xt='',tk=Math.min(5,n);"
+    "for(var k=0;k<tk;k++){"
+    "var i=Math.round(k*(n-1)/(tk>1?tk-1:1)),t=new Date(nw-(n-1-i)*ms);"
+    "var hh=('0'+t.getHours()).slice(-2)+':'+('0'+t.getMinutes()).slice(-2),xx=X(i).toFixed(1);"
+    "xt+='<line x1=\"'+xx+'\" y1=\"'+y0+'\" x2=\"'+xx+'\" y2=\"'+y1+'\" stroke=\"#fff\" stroke-opacity=\"0.05\" stroke-width=\"0.5\"/>';"
+    "xt+='<text x=\"'+xx+'\" y=\"'+(Hh-7)+'\" fill=\"#888\" font-size=\"8\" text-anchor=\"middle\">'+hh+'</text>';"
+    "}"
+    "xl.innerHTML=xt;"
+    "lb.textContent=(s=='hour'?'last '+n+' h':'last '+n+' min');}"
     "hdraw('min');</script></div>";
 
 // Streaming-friendly send: skip if format function emitted nothing (the
@@ -1189,6 +1207,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "input[type=text],input[type=password],input[type=number]{width:100%%;padding:.4em;box-sizing:border-box}"
         "input[type=submit]{padding:.6em 1.2em;margin-top:1.2em;font-size:1em}"
         ".chk{display:inline-block;margin-right:1em;margin-top:.4em}"
+        // V2.5.7: indent each TX target's config fields under its enable checkbox.
+        ".cfg{margin:.1em 0 .9em 1.7em;padding-left:.8em;border-left:2px solid #ccc}"
+        ".cfg label{margin-top:.5em}"
         // V2.3.24: browsers' user-agent stylesheet shrinks <code> to ~85 % of
         // body text. Override so the chip-id / MAC values stay visually equal
         // to the surrounding label text — monospace is the distinguishing cue,
@@ -1241,49 +1262,59 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
+        // V2.5.7: each target = main enable (+ inline HTTPS) at the left margin,
+        // with its config fields indented in a .cfg block. Station altitude +
+        // sea-level toggle live under sensor.community (its only consumer — the
+        // old standalone "BME280 (environmental)" section was retired).
         "<h3>Transmission targets</h3>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sc_https\" %s> HTTPS</label></div><br>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sc_https\" %s> HTTPS</label></div>"
+        "<div class=\"cfg\">"
+        "<label>Station altitude (m above sea level)"
+        "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sl\" %s> "
+        "Send pressure-at-sealevel</label></div></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_rad\" id=\"send_rad\" %s> "
         "Radmon &mdash; radiation-only</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
+        "<div class=\"cfg\">"
         "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
-        "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label>"
+        "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
-        "openSenseMap (HTTPS only) — Box ID configured per-device on opensensemap.org</label></div>"
-        "<label>openSenseMap Box ID (24-char MongoDB ObjectId)"
+        "openSenseMap (HTTPS only)</label></div>"
+        "<div class=\"cfg\">"
+        "<label>Box ID (24-char MongoDB ObjectId &mdash; per-device on opensensemap.org)"
         "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
-        "<label>openSenseMap Access Token (optional &mdash; only needed if your box has authentication enabled)"
-        "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label>"
+        "<label>Access Token (optional &mdash; only if your box has authentication enabled)"
+        "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
-        "aqi.eco (HTTPS only) — token from your aqi.eco account</label></div>"
+        "aqi.eco (HTTPS only)</label></div>"
+        "<div class=\"cfg\">"
         "<label>aqi.eco token"
-        "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label>"
+        "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" id=\"send_gmc\" %s> "
         "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
-        "<label>GMCMap Account ID"
+        "<div class=\"cfg\">"
+        "<label>Account ID"
         "<input type=\"text\" name=\"gmc_aid\" value=\"%s\" maxlength=\"32\"></label>"
-        "<label>GMCMap Geiger Counter ID"
-        "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label>"
+        "<label>Geiger Counter ID"
+        "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" id=\"send_ts\" %s> "
         "ThingSpeak &mdash; radiation-only</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
-        "<label>ThingSpeak Channel Write API Key"
-        "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label>"
+        "<div class=\"cfg\">"
+        "<label>Channel Write API Key"
+        "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label></div>"
         // V2.5.4: ThingSpeak (Particulate Matter) — independent channel for the
         // SPS30 dust node. field1-4=PM1.0/2.5/4.0/10, 5-7=T/H/P, 8=typ. size.
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts_pm\" %s> "
         "ThingSpeak (Particulate Matter) &mdash; SPS30 dust node (separate channel)</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_pm_https\" %s> HTTPS</label></div>"
-        "<label>ThingSpeak PM Channel Write API Key"
-        "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label>"
-        "<h3>BME280 (environmental)</h3>"
-        "<label>Station altitude (m above sea level) "
-        "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sl\" %s> "
-        "Send pressure-at-sealevel to sensor.community</label></div>"
+        "<div class=\"cfg\">"
+        "<label>Channel Write API Key"
+        "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label></div>"
         "<h3>FTP log upload</h3>"
         "<p>Periodically uploads the in-memory log ring (same content as "
         "<a href=\"/log\">/log</a>) to a LAN FTP server. Passive mode. "
@@ -1455,6 +1486,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",
         s_cfg->sensorc_https ? "checked" : "",
+        (double)s_cfg->station_altitude_m,            // V2.5.7: moved under sensor.community
+        s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->send_radmon  ? "checked" : "",
         s_cfg->radmon_https ? "checked" : "",
         e_ru, e_rp,
@@ -1472,8 +1505,6 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->send_thingspeak_pm  ? "checked" : "",
         s_cfg->thingspeak_pm_https ? "checked" : "",
         e_ts_pm_key,
-        (double)s_cfg->station_altitude_m,
-        s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->ftp_enabled ? "checked" : "",
         s_cfg->ftp_tls     ? "checked" : "",
         e_fhost, e_fuser, e_fpw, e_fpath,

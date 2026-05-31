@@ -15,6 +15,20 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.7
+
+**UI polish — `/status` graph + `/config` layout. No behaviour change.**
+
+### `/status` CPM graph
+- **Faint horizontal gridlines at every 1 CPM** so you can read where the trace sits, with emphasised + labelled lines at round steps (the step auto-adapts to the range: every 1 / 5 / 10 CPM). Minor 1-CPM lines are skipped when the range is very wide (>45) so a radiation event can't emit hundreds of `<line>`s.
+- **Reading times on the x-axis** (`HH:MM` ticks, newest = now, evenly spaced) with faint vertical guides; y-axis CPM labels on the left. Chart height 120→140 to fit the time row. Still hand-drawn inline SVG (no JS lib), drawn in the browser.
+
+### `/config` transmission targets
+- Each TX target's config fields (credentials/tokens/IDs) are now **indented in a left-bordered block under the target's enable checkbox**, so the main enable toggles (and their inline HTTPS toggles) read as a clean left-aligned column.
+- **Station altitude + sea-level-pressure toggle moved under sensor.community** — its only consumer (the sea-level reduction is emitted only in the sensor.community body) — and the standalone **"BME280 (environmental)"** heading was retired. Form field `name`s are unchanged, so `config_post` parsing and the tube-disable greying of Radmon/GMCMap/ThingSpeak are unaffected.
+
+---
+
 ## V2.5.6
 
 **CPM history graph on `/status` + rolling 5-/15-min averages** (modelled on ESPGeiger; closes the long-standing "rolling averages for GMC/ThingSpeak" follow-up in the same change).

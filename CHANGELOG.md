@@ -15,6 +15,31 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.8
+
+**GNSS receiver — GPS-primary time source + position on `/status`.**
+
+### New: `gnss.c/h` driver (all boards, opt-in)
+- One driver auto-detects either I²C breakout and binds the matching transport: **u-blox MAX-M10S** (SparkFun Qwiic, addr `0x42`, DDC byte-count at `0xFD/0xFE` → stream at `0xFF`) or **CDTop PA1010D** (Adafruit 4415, addr `0x10`, plain NMEA stream).
+- Shared `$`-anchored, **XOR-checksum-validated** NMEA accumulator parses `RMC` (time/date/position/validity) + `GGA` (satellites/HDOP/altitude). Talker-ID-agnostic, so it handles both `GP*` (GPS-only) and `GN*` (multi-constellation) sentences; interleaved UBX binary on the MAX-M10S is harmlessly discarded by the framing.
+- Drained at ~1 Hz on the main service tick (`gnss_poll()`); `/status` reads a `portMUX`-guarded cached snapshot, so the device is touched from exactly one task.
+
+### Time discipline — GPS-primary, NTP fallback
+- On each valid fix the system clock is set from GNSS UTC via `settimeofday()`, **rate-limited to drift ≥ 2 s** to avoid sub-second jitter. SNTP keeps running untouched: NTP naturally owns the clock first (Wi-Fi/DHCP beats GPS cold-start lock), then GPS takes over once it has a fix. If GPS loses the fix for >5 min, the indicator reverts to NTP.
+
+### `/status` "GNSS / Position" card
+- Shows detected chip + address, fix type / satellites / HDOP, lat/lon with an OpenStreetMap link, altitude (MSL), UTC, and the **active system time source (GPS / NTP / none)**.
+
+### Config
+- New opt-in toggle `gnss_enable` (`gnss_en`). The PA1010D shares `0x10` with the VEML7700 ambient-light sensor and the two are never used together, so enabling GNSS takes the address and the light-sensor probe is skipped. Reboot-required.
+
+### Scope (deferred)
+- No GPS→`station_altitude_m` auto-fill (GPS MSL is geoid-noisy; that field stays LiDAR-sourced). No GNSS position in upload payloads this pass — `/status` + time only.
+
+> Clean-room from the PA1010D / u-blox datasheets — pending bench validation against real hardware.
+
+---
+
 ## V2.5.7
 
 **UI polish — `/status` graph + `/config` layout. No behaviour change.**

@@ -6,6 +6,7 @@ idf_component_register(
         "tube.c"
         "history.c"
         "ntp.c"
+        "gnss.c"
         "transmission.c"
         "bme280.c"
         "bme688.c"

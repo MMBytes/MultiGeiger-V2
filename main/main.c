@@ -19,6 +19,7 @@
 
 #include "als.h"
 #include "veml7700.h"
+#include "gnss.h"               // V2.5.8: I²C GNSS (PA1010D / MAX-M10S)
 #include "applog.h"
 #include "coredump.h"
 #include "hal.h"
@@ -820,7 +821,18 @@ void app_main(void) {
     PROBE_ON_BOTH_BUSES(env_sensor_init,   env_sensor_present,   bus1);
     PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);
     PROBE_ON_BOTH_BUSES(noise_sensor_init, noise_sensor_present, bus1);
-    PROBE_ON_BOTH_BUSES(veml7700_init,     veml7700_present,     bus1);
+
+    // V2.5.8: GNSS vs ambient-light arbitration. The PA1010D GNSS breakout
+    // sits at I²C 0x10 — the SAME address as the VEML7700 — so they can never
+    // share a bus. The two are never used together by design, so a single
+    // config switch decides which one owns the probe: GNSS when gnss_enable,
+    // otherwise the light sensor as before. (The MAX-M10S at 0x42 wouldn't
+    // collide, but keeping one rule across both GNSS parts is simpler.)
+    if (g_cfg.gnss_enable) {
+        PROBE_ON_BOTH_BUSES(gnss_init,     gnss_present,     bus1);
+    } else {
+        PROBE_ON_BOTH_BUSES(veml7700_init, veml7700_present, bus1);
+    }
 
     #undef PROBE_ON_BOTH_BUSES
 
@@ -1000,6 +1012,7 @@ void app_main(void) {
         }
 
         ntp_poll();
+        gnss_poll();   // V2.5.8: drain GNSS I²C + GPS-primary clock discipline (no-op if absent)
 
         // V2.4.12: start MQTT only once both preconditions hold (see boot
         // section comment above). n_got_ip>0 means STA has reached the LAN

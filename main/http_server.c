@@ -36,6 +36,8 @@
 #include "display.h"           // V2.3.30: live-apply OLED brightness via display_set_contrast
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
+#include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
+#include "ntp.h"               // V2.5.8: ntp_time_valid() for the GNSS time-source line
 #include "tube.h"
 #include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
@@ -667,6 +669,53 @@ static void format_als(char *out, size_t sz) {
     snprintf(out + n, sz - n, "</div>");
 }
 
+// --- GNSS / position block --------------------------------------------------
+// V2.5.8: shown only when a GNSS receiver was bound at boot (gnss_enable + a
+// chip present). Reads the cached fix snapshot — no I²C here; the receiver is
+// drained on the main service task. Until the first valid fix we show the
+// acquisition state (satellite count climbs as the receiver locks on).
+static void format_gnss(char *out, size_t sz) {
+    if (!gnss_present()) { out[0] = 0; return; }
+
+    gnss_fix_t f;
+    gnss_get_fix(&f);
+
+    int n = snprintf(out, sz,
+        "<div class=\"info\"><h3>GNSS / Position</h3>"
+        "<b>Sensor:</b> %s (I²C, 0x%02X)<br>",
+        gnss_chip_name(), gnss_i2c_addr());
+
+    if (!f.valid) {
+        n += snprintf(out + n, sz - n,
+            "<b>Fix:</b> acquiring… (%u satellites visible)", (unsigned)f.sats);
+    } else {
+        char utc[32] = "—";
+        if (f.utc > 0) {
+            struct tm tm_utc;
+            gmtime_r(&f.utc, &tm_utc);
+            strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+        }
+        n += snprintf(out + n, sz - n,
+            "<b>Fix:</b> %s, %u satellites, HDOP %.1f<br>"
+            "<b>Position:</b> %.6f, %.6f "
+            "(<a href=\"https://www.openstreetmap.org/?mlat=%.6f&amp;mlon=%.6f"
+            "#map=15/%.6f/%.6f\" target=\"_blank\" rel=\"noopener\">map</a>)<br>"
+            "<b>Altitude:</b> %.0f m MSL<br>"
+            "<b>UTC:</b> %s",
+            f.fix_3d ? "3D" : "2D", (unsigned)f.sats, (double)f.hdop,
+            f.lat, f.lon, f.lat, f.lon, f.lat, f.lon,
+            (double)f.alt_m, utc);
+    }
+
+    // Which source currently owns the wall clock. GNSS wins while it has
+    // disciplined the clock recently; otherwise SNTP (if it ever synced).
+    const char *src = gnss_time_is_source() ? "GPS"
+                      : (ntp_time_valid() ? "NTP" : "none");
+    n += snprintf(out + n, sz - n, "<br><b>System time source:</b> %s", src);
+
+    snprintf(out + n, sz - n, "</div>");
+}
+
 // --- Noise block -------------------------------------------------------------
 static void format_noise(char *out, size_t sz) {
     if (!noise_sensor_present()) { out[0] = 0; return; }
@@ -1055,6 +1104,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     }
     format_environment(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_als        (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_gnss       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
@@ -1262,6 +1312,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
+        // V2.5.8: GNSS receiver toggle. Auto-detects u-blox MAX-M10S (0x42) or
+        // PA1010D (0x10). The PA1010D shares 0x10 with the VEML7700 light
+        // sensor — enabling GNSS skips the light-sensor probe. Reboot-required.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"gnss_en\" %s> "
+        "Enable GNSS receiver (I&sup2;C) &mdash; GPS-primary time source + position "
+        "on this page. Auto-detects MAX-M10S (0x42) or PA1010D (0x10); the "
+        "PA1010D shares 0x10 with the ambient-light sensor, so enabling GNSS "
+        "disables that sensor. <span class=\"r\">*</span></label></div>"
         // V2.5.7: each target = main enable (+ inline HTTPS) at the left margin,
         // with its config fields indented in a .cfg block. Station altitude +
         // sea-level toggle live under sensor.community (its only consumer — the
@@ -1482,6 +1540,7 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
         e_chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
+        s_cfg->gnss_enable  ? "checked" : "",   // V2.5.8: matches gnss_en checkbox above
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",

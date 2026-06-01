@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"   // vTaskDelay (NMEA auto-detect sniff)
 
 static const char *TAG = "gnss";
 
@@ -278,11 +279,15 @@ static void parse_sentence(char *line, int64_t now_ms) {
 
     const char *fields[24];
     int nf = split_fields(line, fields, 24);
-    if (nf < 1 || strlen(fields[0]) < 5) return;
+    if (nf < 1 || strlen(fields[0]) < 6) return;
 
-    // fields[0] = talker(2) + type(3), e.g. "GPRMC" / "GNRMC" / "GNGGA".
-    // Match on type only so both single-GPS and multi-constellation talkers work.
-    const char *type = fields[0] + 2;
+    // fields[0] retains the leading '$', so it's "$" + talker(2) + type(3),
+    // e.g. "$GPRMC" / "$GNRMC" / "$GNGGA". Skip the '$' AND the 2-char talker
+    // (+3) to land on the 3-char sentence type, so both single-GPS (GP) and
+    // multi-constellation (GN) talkers match. (Was +2 — an off-by-one that
+    // dropped every sentence because the '$' was counted as part of the
+    // talker; surfaced on first real-hardware fix.)
+    const char *type = fields[0] + 3;
     if      (!strncmp(type, "RMC", 3)) parse_rmc(fields, nf, now_ms);
     else if (!strncmp(type, "GGA", 3)) parse_gga(fields, nf);
 }
@@ -317,12 +322,53 @@ static void feed_byte(uint8_t b, int64_t now_ms) {
     }
 }
 
+// V2.5.10: confirm a device at the shared 0x10 address is actually a GNSS
+// (streaming NMEA) and not a VEML7700 ambient-light sensor — both ACK at 0x10
+// and both swallow register writes, so address + write-ACK can't tell them
+// apart. We read raw bytes and look for ONE checksum-valid "$...*HH" sentence
+// within a short window. A VEML7700 returns opaque register bytes
+// (00 00 FF FF...) that can never pass an NMEA checksum, so this cannot
+// false-positive. The window covers a module that hasn't emitted its first
+// sentence yet at boot (idle-fill until the first fix-independent sentence).
+static bool sniff_nmea(i2c_master_dev_handle_t dev) {
+    int64_t deadline = esp_timer_get_time() + 1500 * 1000;   // ~1.5 s
+    char line[GNSS_LINE_MAX];
+    int  len = 0;
+    bool cap = false;
+    while (esp_timer_get_time() < deadline) {
+        uint8_t buf[64];
+        if (i2c_master_receive(dev, buf, sizeof(buf), 200) == ESP_OK) {
+            for (int i = 0; i < 64; i++) {
+                uint8_t b = buf[i];
+                if (b == '$') {
+                    cap = true; len = 0; line[len++] = '$';
+                } else if (!cap) {
+                    continue;
+                } else if (b == '\r' || b == '\n') {
+                    if (len > 0) { line[len] = 0; if (checksum_ok(line)) return true; }
+                    cap = false; len = 0;
+                } else if (len < GNSS_LINE_MAX - 1) {
+                    line[len++] = (char)b;
+                } else {
+                    cap = false; len = 0;
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return false;
+}
+
 // --- Public API -------------------------------------------------------------
 
 esp_err_t gnss_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
     if (!bus) return ESP_ERR_INVALID_ARG;
 
+    // Auto-detect: probe u-blox 0x42 first (unambiguous — nothing else lives
+    // there), then PA1010D 0x10. 0x10 is shared with the VEML7700 light
+    // sensor, so for that address we must SNIFF for live NMEA before claiming
+    // it; a VEML7700 fails the sniff and is left for the ambient-light probe.
     for (size_t i = 0; i < sizeof(TRANSPORTS) / sizeof(TRANSPORTS[0]); i++) {
         const gnss_transport_t *tp = &TRANSPORTS[i];
         if (i2c_master_probe(bus, tp->addr, 50) != ESP_OK) continue;
@@ -332,21 +378,34 @@ esp_err_t gnss_init(i2c_master_bus_handle_t bus) {
             .device_address  = tp->addr,
             .scl_speed_hz    = 400000,   // both parts support 400 kHz
         };
-        esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+        i2c_master_dev_handle_t dev = NULL;
+        esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &dev);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "%s ACK'd at 0x%02X but add_device failed: %s",
                      tp->name, tp->addr, esp_err_to_name(err));
-            s_dev = NULL;
-            return err;
+            continue;
         }
+
+        // Disambiguate the shared 0x10 address; 0x42 binds on ACK.
+        if (tp->addr == ADDR_PA1010D && !sniff_nmea(dev)) {
+            ESP_LOGI(TAG, "0x%02X ACK'd but no NMEA in 1.5s — not a GNSS "
+                          "(likely VEML7700), leaving for light-sensor probe",
+                     tp->addr);
+            i2c_master_bus_rm_device(dev);
+            continue;
+        }
+
+        s_dev   = dev;
         s_tp    = tp;
         s_ready = true;
-        ESP_LOGI(TAG, "%s ready at 0x%02X (GPS-primary time source)",
+        ESP_LOGI(TAG, "%s auto-detected at 0x%02X (GPS-primary time source)",
                  tp->name, tp->addr);
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "no GNSS receiver found (probed 0x%02X, 0x%02X)",
+    // Quiet (debug) — auto-detect now runs on every node, so "not found" is
+    // the normal case for boards without a GNSS, not a warning.
+    ESP_LOGD(TAG, "no GNSS receiver found (probed 0x%02X, 0x%02X)",
              ADDR_UBLOX, ADDR_PA1010D);
     return ESP_ERR_NOT_FOUND;
 }

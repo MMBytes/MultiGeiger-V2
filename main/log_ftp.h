@@ -50,6 +50,16 @@ typedef struct {
 /** @brief Read the current FTP stats snapshot. Safe from any task. */
 void log_ftp_get_stats(log_ftp_stats_t *out);
 
+/** @brief True when a scheduled or retry FTPS upload is due to fire.
+ *
+ *  V2.5.10: lets the main loop defer (re)starting MQTT when an FTPS upload is
+ *  imminent — both the 24h PSA refresh and the FTPS prep stop MQTT, and if
+ *  they land on adjacent ticks the main loop would otherwise restart MQTT in
+ *  the gap (full TLS connect + HA discovery) only for FTP to tear it down
+ *  ~180 ms later. Computes uptime internally; safe from the main task.
+ */
+bool log_ftp_imminent(void);
+
 /** @brief Pause scheduled + retry FTP uploads until next reboot.
  *
  *  V2.4.13: called by the OTA path before the receive-write loop so a

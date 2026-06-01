@@ -143,6 +143,21 @@ void log_ftp_pause(void) {
     ESP_LOGI(TAG, "paused — no scheduled uploads until reboot");
 }
 
+// V2.5.10: true when a scheduled or retry upload is due to fire. Mirrors the
+// is_scheduled/is_retry decision in log_ftp_loop() so the main loop can avoid
+// re-initialising MQTT in the brief window between the 24h PSA refresh (which
+// stops MQTT) and an imminent FTPS upload (which also stops MQTT) — otherwise
+// MQTT gets started + connected + discovery-published only to be torn down
+// ~180 ms later by the FTP prep. See the gate at main.c's MQTT (re)start.
+bool log_ftp_imminent(void) {
+    if (!s_cfg || !s_cfg->ftp_enabled || s_paused) return false;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    bool is_scheduled = ((int32_t)(now_ms - s_next_upload_ms) >= 0);
+    bool is_retry     = (!is_scheduled && s_retry_count > 0 &&
+                         (int32_t)(now_ms - s_retry_ms) >= 0);
+    return is_scheduled || is_retry;
+}
+
 // V2.4.19: exported so the extracted periodic.c can reset the FTP-side
 // PSA-OOM streak after a successful 24h refresh. See log_ftp.h doc.
 void log_ftp_note_psa_refreshed(void) {

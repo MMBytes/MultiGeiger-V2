@@ -64,17 +64,10 @@ X_BOOL(use_external_antenna,   "wifi_ext_a", false)
 
 X_BOOL(tube_enabled,           "tube_en",    true)
 
-// --- GNSS receiver (V2.5.8) -------------------------------------------------
-//
-// Enables an I²C GNSS receiver as a GPS-primary time source + position on the
-// status page. Auto-detects either supported breakout: u-blox MAX-M10S
-// (SparkFun Qwiic, addr 0x42) or CDTop PA1010D (Adafruit 4415, addr 0x10).
-//
-// The PA1010D shares 0x10 with the VEML7700 ambient-light sensor; the two are
-// never used together, so enabling GNSS takes the address and the VEML7700
-// probe is skipped entirely (see main.c). Off by default — opt-in.
-
-X_BOOL(gnss_enable,            "gnss_en",    false)
+// V2.5.10: the GNSS receiver is now AUTO-DETECTED at boot (gnss_init sniffs
+// for live NMEA at the shared 0x10 address, binds u-blox 0x42 unambiguously),
+// so the former `gnss_enable` toggle was removed — nothing to configure. The
+// NVS key "gnss_en" on already-provisioned devices is simply ignored.
 
 // --- Madavi / sensor.community / Radmon -------------------------------------
 

@@ -11,20 +11,21 @@
  *    * Adafruit 4415 — CDTop PA1010D (MediaTek MT3333). I²C addr 0x10.
  *      Plain streaming reads; idle/no-data padding byte is 0x0A.
  *      NOTE: 0x10 is the SAME address as the VEML7700 ambient-light
- *      sensor. They cannot share a bus. `gnss_enable` (config) takes the
- *      address and the VEML7700 probe is skipped — the two are never
- *      used together by design.
+ *      sensor (both ACK and both swallow register writes, so address
+ *      alone can't tell them apart). gnss_init() disambiguates by
+ *      sniffing for live NMEA at 0x10 before binding — a VEML7700 fails
+ *      the sniff and is left for the light-sensor probe.
  *
  *    * SparkFun MAX-M10S Qwiic — u-blox MAX-M10S. I²C addr 0x42 (u-blox
  *      DDC). Bytes-available count at registers 0xFD/0xFE, data stream at
  *      0xFF; idle padding byte is 0xFF. Outputs NMEA + UBX binary by
  *      default — the '$'-anchored, checksum-validated line accumulator
- *      simply discards the interleaved UBX frames. No conflict with the
- *      VEML7700 (different address), but the same `gnss_enable` rule keeps
- *      the wiring uniform across boards.
+ *      simply discards the interleaved UBX frames. 0x42 is unambiguous, so
+ *      it binds on ACK without sniffing.
  *
- *  `gnss_init()` auto-detects which chip is present (probes 0x42 then
- *  0x10) and binds the matching transport. Time discipline is GPS-primary:
+ *  V2.5.10: fully AUTO-DETECTED — no config toggle. `gnss_init()` probes
+ *  0x42 then 0x10 and binds the matching transport (sniffing 0x10 as
+ *  above). Time discipline is GPS-primary:
  *  on every valid fix the system clock is set from the GNSS UTC (rate-
  *  limited to avoid sub-second jitter), overriding SNTP whenever a fix is
  *  available. SNTP keeps running untouched as the no-fix fallback.
@@ -54,13 +55,16 @@ typedef struct {
 
 /** @brief Probe + initialise a GNSS receiver on the given bus.
  *
- *  Probes the u-blox DDC address (0x42) first, then the PA1010D (0x10),
- *  and binds the matching transport on the first ACK. Idempotent — once
- *  bound, subsequent calls return ESP_OK without re-probing (so the
- *  caller can retry on a second bus without disturbing a prior hit).
+ *  Probes the u-blox DDC address (0x42) first — bound on ACK (unambiguous) —
+ *  then the PA1010D (0x10), which is bound only if sniff_nmea() sees live
+ *  NMEA there (0x10 is shared with the VEML7700, so an ACK alone is not
+ *  enough). Idempotent — once bound, subsequent calls return ESP_OK without
+ *  re-probing (so the caller can retry on a second bus without disturbing a
+ *  prior hit).
  *
  *  @return ESP_OK if a receiver was bound, ESP_ERR_NOT_FOUND if neither
- *          address ACK'd, or a propagated i2c error.
+ *          address ACK'd (or 0x10 ACK'd but produced no NMEA — i.e. a
+ *          VEML7700), or a propagated i2c error.
  */
 esp_err_t gnss_init(i2c_master_bus_handle_t bus);
 

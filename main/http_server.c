@@ -670,10 +670,10 @@ static void format_als(char *out, size_t sz) {
 }
 
 // --- GNSS / position block --------------------------------------------------
-// V2.5.8: shown only when a GNSS receiver was bound at boot (gnss_enable + a
-// chip present). Reads the cached fix snapshot — no I²C here; the receiver is
-// drained on the main service task. Until the first valid fix we show the
-// acquisition state (satellite count climbs as the receiver locks on).
+// V2.5.8: shown only when a GNSS receiver was auto-detected at boot. Reads the
+// cached fix snapshot — no I²C here; the receiver is drained on the main
+// service task. Until the first valid fix we show the acquisition state
+// (satellite count climbs as the receiver locks on).
 static void format_gnss(char *out, size_t sz) {
     if (!gnss_present()) { out[0] = 0; return; }
 
@@ -1312,14 +1312,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
-        // V2.5.8: GNSS receiver toggle. Auto-detects u-blox MAX-M10S (0x42) or
-        // PA1010D (0x10). The PA1010D shares 0x10 with the VEML7700 light
-        // sensor — enabling GNSS skips the light-sensor probe. Reboot-required.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"gnss_en\" %s> "
-        "Enable GNSS receiver (I&sup2;C) &mdash; GPS-primary time source + position "
-        "on this page. Auto-detects MAX-M10S (0x42) or PA1010D (0x10); the "
-        "PA1010D shares 0x10 with the ambient-light sensor, so enabling GNSS "
-        "disables that sensor. <span class=\"r\">*</span></label></div>"
+        // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
+        // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
+        // configure here. See the "GNSS / Position" card on /status.
         // V2.5.7: each target = main enable (+ inline HTTPS) at the left margin,
         // with its config fields indented in a .cfg block. Station altitude +
         // sea-level toggle live under sensor.community (its only consumer — the
@@ -1540,7 +1535,6 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
         e_chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
-        s_cfg->gnss_enable  ? "checked" : "",   // V2.5.8: matches gnss_en checkbox above
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",

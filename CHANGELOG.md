@@ -15,6 +15,24 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.10
+
+**GNSS made actually work on hardware (parser fix), auto-detect (no config toggle), and an MQTT/FTP timing fix. All bench-validated on a real PA1010D + VEML7700.**
+
+### GNSS NMEA parser fix (`gnss.c`) — the one that matters
+- `parse_sentence` matched the sentence type at `fields[0] + 2`, but the accumulator keeps the leading `$`, so `fields[0]` is `"$GNRMC"` — the offset landed on `"NRMC"` and **every RMC/GGA sentence was silently dropped**. Detection worked (chip bound), but no fix ever parsed: `/status` sat at "acquiring… 0 satellites / time source NTP" even with a valid 12-satellite fix on the wire. Fixed to `fields[0] + 3` (skip `$` + 2-char talker), guard widened to `< 6`. Present (latent) since the driver shipped in V2.5.8.
+
+### GNSS auto-detect — config toggle removed
+- `gnss_init()` now auto-detects: probes u-blox **0x42** (bound on ACK — unambiguous) then PA1010D **0x10**, where it **sniffs for a checksum-valid `$…*HH` NMEA sentence** (up to ~1.5 s) before binding. A VEML7700 at the shared 0x10 fails the sniff (it returns `00 00 FF…`, which can't pass an NMEA checksum) and is left for the ambient-light probe. `main.c` probes GNSS unconditionally, falling through to the VEML7700 probe only if none is found.
+- The `gnss_enable` config field, its `/config` checkbox, and form arg are **removed** — both supported modules now "just work" when plugged in, no setting required. The orphaned `gnss_en` NVS key on existing devices is ignored. (Bench-validated: PA1010D auto-detected + GPS fix on the dust node; VEML7700 correctly falls through on a QT Py.)
+
+### MQTT/FTP timing — stop a redundant MQTT thrash (`main.c`, `log_ftp.c/.h`)
+- When the 24h PSA-crypto refresh (stops MQTT) and a scheduled FTPS upload (also stops MQTT) landed on **adjacent service-loop ticks**, the main loop's MQTT-restart fired in the gap — bringing MQTT up (full TLS connect + HA-discovery publish) only for the FTPS prep to tear it down ~180 ms later, then a third bring-up after the upload. New `log_ftp_imminent()` lets the MQTT (re)start gate skip when an FTPS upload is due, so MQTT comes back up exactly once, after the upload. Cosmetic on PSRAM boards; removes a transient TLS heap spike on tight-heap Heltec. (Diagnosed from a PSA+FTP schedule alignment on esp32-5963724.)
+
+> Reviewed with cppcheck 2.20.0 (clean) + an independent code/security audit (no Critical/High; device-handle lifecycle, snprintf arg-balance, and boot-blocking all verified clean).
+
+---
+
 ## V2.5.9
 
 **Post-V2.5.8 hardening from a focused security/memory code audit of the GNSS driver. No new features.**

@@ -822,15 +822,15 @@ void app_main(void) {
     PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);
     PROBE_ON_BOTH_BUSES(noise_sensor_init, noise_sensor_present, bus1);
 
-    // V2.5.8: GNSS vs ambient-light arbitration. The PA1010D GNSS breakout
-    // sits at I²C 0x10 — the SAME address as the VEML7700 — so they can never
-    // share a bus. The two are never used together by design, so a single
-    // config switch decides which one owns the probe: GNSS when gnss_enable,
-    // otherwise the light sensor as before. (The MAX-M10S at 0x42 wouldn't
-    // collide, but keeping one rule across both GNSS parts is simpler.)
-    if (g_cfg.gnss_enable) {
-        PROBE_ON_BOTH_BUSES(gnss_init,     gnss_present,     bus1);
-    } else {
+    // V2.5.10: GNSS vs ambient-light auto-detect (no config toggle). The
+    // PA1010D GNSS breakout sits at I²C 0x10 — the SAME address as the
+    // VEML7700 — so they can't coexist on a bus. gnss_init() resolves this by
+    // sniffing for live NMEA at 0x10 (and binding u-blox 0x42 unambiguously);
+    // a VEML7700 fails the sniff, so we fall through to the light-sensor probe
+    // only when no GNSS was found. Whichever module is physically present just
+    // works — nothing to configure.
+    PROBE_ON_BOTH_BUSES(gnss_init, gnss_present, bus1);
+    if (!gnss_present()) {
         PROBE_ON_BOTH_BUSES(veml7700_init, veml7700_present, bus1);
     }
 
@@ -1027,8 +1027,15 @@ void app_main(void) {
         // V2.4.17: skip re-init if the OTA teardown set the suspended flag.
         // Without this, an OTA in progress would see MQTT/syslog re-init
         // ~1 s after the teardown, defeating the V2.4.13 heap-freeing intent.
+        // V2.5.10: also defer the (re)start when an FTPS upload is imminent.
+        // The 24h PSA refresh stops MQTT and relies on this poll to restart
+        // it; if an FTPS upload (which also stops MQTT) is due on the next
+        // tick, restarting here just burns a full TLS connect + HA-discovery
+        // publish that FTP tears down ~180 ms later. Skipping it lets MQTT
+        // come back up exactly once, after the upload. (Diagnosed from a
+        // PSA+FTP schedule alignment on esp32-5963724.)
         if (!mqtt_is_initialized() && !main_services_suspended() &&
-            n_got_ip > 0 && ntp_time_valid()) {
+            n_got_ip > 0 && ntp_time_valid() && !log_ftp_imminent()) {
             ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
         }

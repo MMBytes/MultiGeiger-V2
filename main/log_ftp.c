@@ -1140,15 +1140,13 @@ void log_ftp_loop(uint32_t now_ms) {
     // next loop tick (1 s) when the worker goes idle.
     if (!tx_is_idle()) return;
 
-    uint32_t interval_min = s_cfg->ftp_interval_min;
-    if (interval_min < 1) interval_min = 60;
-    uint32_t interval_ms = interval_min * 60000UL;
-
     if (is_scheduled) {
         // Advance the regular schedule from this attempt — interval counts from
         // first try, not from retries. Also clears any stale retry state from
         // the previous interval (whether it eventually succeeded or not).
-        s_next_upload_ms = now_ms + interval_ms;
+        uint32_t interval_min = s_cfg->ftp_interval_min;
+        if (interval_min < 1) interval_min = 60;
+        s_next_upload_ms = now_ms + interval_min * 60000UL;
         s_retry_count    = 0;
         s_retry_ms       = 0;
     } else {

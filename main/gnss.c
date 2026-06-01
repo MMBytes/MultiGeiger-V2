@@ -34,6 +34,12 @@ static const char *TAG = "gnss";
 // back in charge).
 #define TIME_SOURCE_TTL_MS   (5 * 60 * 1000)
 
+// Plausibility floor for a GNSS-supplied year (see parse_datetime). The NMEA
+// 2-digit year already caps the range at 2000-2099; rejecting anything before
+// this also rules out the cold-start "year 00" glitch. A date that passes is
+// trusted enough to drive settimeofday(), so keep this current.
+#define GNSS_MIN_YEAR   2020
+
 // Largest NMEA sentence we keep (spec max payload is 82 incl. CRLF; round up).
 // Prefixed to avoid colliding with POSIX <limits.h> LINE_MAX.
 #define GNSS_LINE_MAX 100
@@ -148,24 +154,54 @@ static int split_fields(char *line, const char *fields[], int max_fields) {
     return n;
 }
 
+// Parse exactly two ASCII digits at p[0..1]. Returns -1 if either character
+// is not 0-9 — important because atoi() silently accepts garbage (atoi("1x")
+// == 1), and this value can reach settimeofday() (see parse_datetime).
+static int two_digits(const char *p) {
+    if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return -1;
+    return (p[0] - '0') * 10 + (p[1] - '0');
+}
+
 // Parse hhmmss(.sss) + ddmmyy into a UTC Unix epoch. Returns false on a blank
-// time/date (no fix yet). `t_field` = "hhmmss.sss", `d_field` = "ddmmyy".
+// time/date (no fix yet) OR on any out-of-range / non-digit field.
+//
+// This validation is a SECURITY/AVAILABILITY guard, not just hygiene: a
+// checksum-valid NMEA sentence only proves wire integrity, not sanity — RF
+// multipath / a glitching module can present a self-consistent garbage date.
+// Since the parsed value flows straight into settimeofday() (GPS-primary
+// clock), an unchecked bad date could yank the wall clock outside TLS
+// cert-validity windows and break every HTTPS/MQTT upload until a good fix
+// re-disciplines it. Reject anything implausible so a bad fix is a no-op, not
+// a clock-corrupting event. `t_field` = "hhmmss.sss", `d_field` = "ddmmyy".
 static bool parse_datetime(const char *t_field, const char *d_field, time_t *out) {
     if (!t_field || strlen(t_field) < 6) return false;
     if (!d_field || strlen(d_field) < 6) return false;
 
-    char b[3] = { 0 };
+    int hh  = two_digits(t_field);
+    int mm  = two_digits(t_field + 2);
+    int ss  = two_digits(t_field + 4);
+    int day = two_digits(d_field);
+    int mon = two_digits(d_field + 2);
+    int yy  = two_digits(d_field + 4);
+    if (hh < 0 || mm < 0 || ss < 0 || day < 0 || mon < 0 || yy < 0) return false;
+
+    // Range-validate every component (ss==60 allowed for leap seconds). The
+    // NMEA 2-digit year already caps the range at 2000-2099; additionally
+    // reject anything before GNSS_MIN_YEAR to catch the "year 00" cold-start
+    // glitch — keeps the accepted window tight enough not to break TLS.
+    if (hh > 23 || mm > 59 || ss > 60)                 return false;
+    if (mon < 1 || mon > 12 || day < 1 || day > 31)    return false;
+    if (yy + 2000 < GNSS_MIN_YEAR)                     return false;
+
     struct tm tm = { 0 };
+    tm.tm_hour = hh;
+    tm.tm_min  = mm;
+    tm.tm_sec  = ss;
+    tm.tm_mday = day;
+    tm.tm_mon  = mon - 1;      // 0-based
+    tm.tm_year = yy + 100;     // years since 1900 → 20yy
 
-    b[0] = t_field[0]; b[1] = t_field[1]; tm.tm_hour = atoi(b);
-    b[0] = t_field[2]; b[1] = t_field[3]; tm.tm_min  = atoi(b);
-    b[0] = t_field[4]; b[1] = t_field[5]; tm.tm_sec  = atoi(b);
-
-    b[0] = d_field[0]; b[1] = d_field[1]; tm.tm_mday = atoi(b);
-    b[0] = d_field[2]; b[1] = d_field[3]; tm.tm_mon  = atoi(b) - 1;     // 0-based
-    b[0] = d_field[4]; b[1] = d_field[5]; tm.tm_year = atoi(b) + 100;   // 20yy
-
-    time_t e = timegm(&tm);   // interpret tm as UTC (newlib provides timegm)
+    time_t e = timegm(&tm);    // interpret tm as UTC (newlib provides timegm)
     if (e <= 0) return false;
     *out = e;
     return true;
@@ -183,7 +219,13 @@ static void discipline_clock(time_t gnss_utc, int64_t now_ms) {
         settimeofday(&tv, NULL);
         ESP_LOGI(TAG, "clock disciplined from GNSS (drift was %lds)", drift);
     }
-    s_last_clock_set_ms = now_ms;   // GNSS owns the clock as long as fixes keep coming
+    // GNSS owns the clock as long as fixes keep coming. Wrap the 64-bit store
+    // in the fix mux so the HTTP task's read in gnss_time_is_source() can't
+    // tear on a 32-bit core. (The read of it just above is on this same poll
+    // task — the only writer — so it needs no lock.)
+    taskENTER_CRITICAL(&s_fix_mux);
+    s_last_clock_set_ms = now_ms;
+    taskEXIT_CRITICAL(&s_fix_mux);
 }
 
 static void parse_rmc(const char *const fields[], int nf, int64_t now_ms) {
@@ -191,19 +233,29 @@ static void parse_rmc(const char *const fields[], int nf, int64_t now_ms) {
     if (nf < 10) return;
     bool valid = (fields[2][0] == 'A');
 
+    // Do all parsing (nmea_to_deg/atof, parse_datetime/timegm) BEFORE taking
+    // the spinlock — they're pure, but taskENTER_CRITICAL disables interrupts
+    // on-core, so keep only the struct stores inside the section.
+    double lat = 0.0, lon = 0.0;
+    time_t utc = 0;
+    bool   have_utc = false;
+    if (valid) {
+        lat = nmea_to_deg(fields[3], fields[4][0]);
+        lon = nmea_to_deg(fields[5], fields[6][0]);
+        have_utc = parse_datetime(fields[1], fields[9], &utc);
+    }
+
     taskENTER_CRITICAL(&s_fix_mux);
     s_fix.valid = valid;
     if (valid) {
-        s_fix.lat = nmea_to_deg(fields[3], fields[4][0]);
-        s_fix.lon = nmea_to_deg(fields[5], fields[6][0]);
-        time_t utc;
-        if (parse_datetime(fields[1], fields[9], &utc)) s_fix.utc = utc;
+        s_fix.lat = lat;
+        s_fix.lon = lon;
+        if (have_utc) s_fix.utc = utc;
     }
     time_t utc_for_clock = s_fix.utc;
-    bool   do_clock      = valid && utc_for_clock > 0;
     taskEXIT_CRITICAL(&s_fix_mux);
 
-    if (do_clock) discipline_clock(utc_for_clock, now_ms);   // GPS-primary
+    if (valid && utc_for_clock > 0) discipline_clock(utc_for_clock, now_ms);  // GPS-primary
 }
 
 static void parse_gga(const char *const fields[], int nf) {
@@ -341,7 +393,14 @@ uint8_t gnss_i2c_addr(void) {
 }
 
 bool gnss_time_is_source(void) {
-    if (!s_ready || s_last_clock_set_ms == 0) return false;
+    if (!s_ready) return false;
+    // Snapshot the 64-bit timestamp under the fix mux — written by the poll
+    // task in discipline_clock(); a bare read here (HTTP task) could tear on a
+    // 32-bit core and mislabel the /status time source for one tick.
+    taskENTER_CRITICAL(&s_fix_mux);
+    int64_t last = s_last_clock_set_ms;
+    taskEXIT_CRITICAL(&s_fix_mux);
+    if (last == 0) return false;
     int64_t now_ms = esp_timer_get_time() / 1000;
-    return (now_ms - s_last_clock_set_ms) < TIME_SOURCE_TTL_MS;
+    return (now_ms - last) < TIME_SOURCE_TTL_MS;
 }

@@ -638,11 +638,13 @@ void display_boot_screen(void) {
 static void format_time(int secs, char *out, size_t outsz) {
     int mins  = secs / 60;
     int hours = secs / 3600;
-    int days  = secs / 86400;
     if (secs < 60)        snprintf(out, outsz, "%2ds", secs);
     else if (mins < 60)   snprintf(out, outsz, "%2dm", mins);
     else if (hours < 24)  snprintf(out, outsz, "%2dh", hours);
-    else                  snprintf(out, outsz, "%2dd", days % 100);
+    else {
+        int days = secs / 86400;
+        snprintf(out, outsz, "%2dd", days % 100);
+    }
 }
 
 void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {

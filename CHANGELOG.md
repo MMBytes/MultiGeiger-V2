@@ -15,6 +15,25 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.9
+
+**Post-V2.5.8 hardening from a focused security/memory code audit of the GNSS driver. No new features.**
+
+### GNSS clock-discipline input validation (`gnss.c`)
+- **The fix that matters:** `parse_datetime` now strictly validates the NMEA date/time before it can reach `settimeofday()`. New `two_digits()` helper rejects non-digit characters (plain `atoi` silently accepts garbage like `"1x"→1`), every field is range-checked (hh≤23, mm≤59, ss≤60, mon 1-12, day 1-31), and a `GNSS_MIN_YEAR` (2020) plausibility floor is enforced. **Why:** an NMEA checksum only proves wire integrity, not sanity — RF multipath or a glitching module can present a self-consistent garbage date. Since GNSS is the GPS-primary time source, an unchecked bad date could yank the wall clock outside TLS cert-validity windows and break every HTTPS/MQTT upload until a good fix re-disciplined it. A bad fix is now a no-op, not a clock-corrupting event.
+
+### Concurrency tightening (`gnss.c`)
+- `parse_rmc` now does all parsing (`nmea_to_deg`, `parse_datetime`/`timegm`) **before** taking the `portMUX` spinlock — only the struct stores run inside the critical section (interrupts are disabled on-core under a portMUX).
+- The 64-bit `s_last_clock_set_ms` is now written (in `discipline_clock`) and read (in `gnss_time_is_source`, HTTP task) under the fix mux, closing a benign torn-read that could mislabel the `/status` time source for one tick on a 32-bit core.
+
+### cppcheck `variableScope` nits (pre-existing, unrelated to GNSS)
+- `display.c::format_time` — `days` moved into the branch that uses it.
+- `log_ftp.c` — the FTP interval computation moved into the `is_scheduled` branch. Pre-emptive: a stricter cppcheck (2.20.0 locally) flags these `style` findings; squashed so a future CI cppcheck bump can't trip the gate.
+
+> Reviewed with cppcheck 2.20.0 (now available locally) — full tree clean. GNSS driver remains clean-room / not yet bench-validated against real hardware.
+
+---
+
 ## V2.5.8
 
 **GNSS receiver — GPS-primary time source + position on `/status`.**

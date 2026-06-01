@@ -130,7 +130,7 @@ static double nmea_to_deg(const char *field, char hemi) {
 
 // Split `line` (a mutable copy) into comma-separated fields. The trailing
 // "*HH" checksum is cut off the last field. Returns the field count.
-static int split_fields(char *line, char *fields[], int max_fields) {
+static int split_fields(char *line, const char *fields[], int max_fields) {
     // Drop checksum suffix.
     char *star = strchr(line, '*');
     if (star) *star = 0;
@@ -186,7 +186,7 @@ static void discipline_clock(time_t gnss_utc, int64_t now_ms) {
     s_last_clock_set_ms = now_ms;   // GNSS owns the clock as long as fixes keep coming
 }
 
-static void parse_rmc(char *const fields[], int nf, int64_t now_ms) {
+static void parse_rmc(const char *const fields[], int nf, int64_t now_ms) {
     // $..RMC,time,status,lat,N/S,lon,E/W,spd,cog,date,...
     if (nf < 10) return;
     bool valid = (fields[2][0] == 'A');
@@ -206,7 +206,7 @@ static void parse_rmc(char *const fields[], int nf, int64_t now_ms) {
     if (do_clock) discipline_clock(utc_for_clock, now_ms);   // GPS-primary
 }
 
-static void parse_gga(char *const fields[], int nf) {
+static void parse_gga(const char *const fields[], int nf) {
     // $..GGA,time,lat,N/S,lon,E/W,quality,numSV,HDOP,alt,M,...
     if (nf < 10) return;
     int quality = atoi(fields[6]);
@@ -224,7 +224,7 @@ static void parse_sentence(char *line, int64_t now_ms) {
     if (line[0] != '$') return;
     if (!checksum_ok(line)) return;
 
-    char *fields[24];
+    const char *fields[24];
     int nf = split_fields(line, fields, 24);
     if (nf < 1 || strlen(fields[0]) < 5) return;
 

@@ -15,6 +15,23 @@ Accumulating for the next tag. Bump + ship when ready.
 
 ---
 
+## V2.5.11
+
+**GNSS is now display-only — it never sets the system clock. NTP is the sole time source.**
+
+### Why
+Field logs (esp32-5965048) showed the GNSS clock-discipline re-firing every few seconds with ~2 s drift, repeatedly stepping the clock **backward** (non-monotonic — log timestamps jumped, lines went out of order), plus periodic ~26 s spikes where SNTP clawed the clock back. Root cause: GNSS-over-1 Hz-NMEA-over-I²C is inherently ~1–2 s laggy (no PPS pin is broken out on the Qwiic/STEMMA wiring), so comparing the parsed fix-time to "now" and hard-setting whenever they differ by ≥2 s is a latency-chasing oscillation — and SNTP, the other clock owner, fought it. On these **networked** nodes LAN NTP is ~100× more accurate than the GNSS path, and an **offline** node uploads nothing anyway, so GPS-as-time-fallback added zero value while churning `settimeofday()`.
+
+### Change (`gnss.c`, `gnss.h`, `http_server.c`)
+- Removed `discipline_clock()`, `gnss_time_is_source()`, the `s_last_clock_set_ms` tracker, and the `DISCIPLINE_DRIFT_S` / `TIME_SOURCE_TTL_MS` constants. GNSS **never calls `settimeofday()`** now.
+- `gnss_poll()` parses RMC/GGA only to populate the cached fix snapshot for `/status`. `parse_datetime` is retained (still digit/range/`GNSS_MIN_YEAR`-validated) but now only renders the receiver's UTC on the page — never the clock.
+- `/status` GNSS card: dropped the "System time source" line (GNSS no longer affects the clock); still shows chip / fix / sats / HDOP / lat-lon + OSM map / altitude / UTC.
+- Dropped the now-unused `<sys/time.h>` and `ntp.h` includes.
+
+Deleting the loop (rather than rate-limiting/deadbanding it) removes the churn and the non-monotonic-clock hazard by construction — no tuning constants, no NTP-vs-GNSS coordination. cppcheck 2.20.0 clean.
+
+---
+
 ## V2.5.10
 
 **GNSS made actually work on hardware (parser fix), auto-detect (no config toggle), and an MQTT/FTP timing fix. All bench-validated on a real PA1010D + VEML7700.**

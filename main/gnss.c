@@ -1,12 +1,17 @@
 // V2.5.8 — Generic GNSS receiver driver. See gnss.h for the design doc and
 // the PA1010D / MAX-M10S transport differences.
+//
+// V2.5.11: DISPLAY-ONLY — GNSS never touches the system clock. NTP is the sole
+// time source. (On this 1 Hz-NMEA-over-I²C path, with no PPS pin broken out,
+// GNSS time is ~1-2 s laggy/non-monotonic — far worse than LAN NTP — and a
+// node with no network sends nothing anyway, so GPS-as-time-fallback had no
+// value while causing constant settimeofday churn. Now position/fix/UTC are
+// parsed only to render the /status card.)
 
 #include "gnss.h"
-#include "ntp.h"
 
 #include <string.h>
 #include <stdlib.h>
-#include <sys/time.h>      // struct timeval, settimeofday() for clock discipline
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -22,23 +27,10 @@ static const char *TAG = "gnss";
 #define UBX_REG_LEN_HI 0xFD  // bytes-available, high byte
 #define UBX_REG_STREAM 0xFF  // data-stream register
 
-// Clock discipline: re-set the system clock from GNSS only when it drifts at
-// least this far from the fix UTC. Below this we leave it alone — RMC arrives
-// at 1 Hz and writing settimeofday() every second injects sub-second jitter
-// into everything that reads the clock. The RC oscillator drifts far less
-// than this over the inter-set interval, so the clock stays GNSS-led without
-// the churn.
-#define DISCIPLINE_DRIFT_S   2
-
-// How long after the last GNSS clock-set we still report GNSS as the active
-// time source on /status (after which, with no fresh fix, SNTP is effectively
-// back in charge).
-#define TIME_SOURCE_TTL_MS   (5 * 60 * 1000)
-
 // Plausibility floor for a GNSS-supplied year (see parse_datetime). The NMEA
 // 2-digit year already caps the range at 2000-2099; rejecting anything before
-// this also rules out the cold-start "year 00" glitch. A date that passes is
-// trusted enough to drive settimeofday(), so keep this current.
+// this rules out the cold-start "year 00" glitch so /status never shows a
+// nonsense UTC. (Display-only now — the clock is never set from this.)
 #define GNSS_MIN_YEAR   2020
 
 // Largest NMEA sentence we keep (spec max payload is 82 incl. CRLF; round up).
@@ -65,7 +57,6 @@ static bool                    s_ready     = false;
 // --- Latest fix snapshot (written by poll task, read by HTTP task) ----------
 static portMUX_TYPE s_fix_mux = portMUX_INITIALIZER_UNLOCKED;
 static gnss_fix_t   s_fix     = { 0 };
-static int64_t      s_last_clock_set_ms = 0;   // 0 = never
 
 // --- Transport implementations ----------------------------------------------
 
@@ -156,24 +147,18 @@ static int split_fields(char *line, const char *fields[], int max_fields) {
 }
 
 // Parse exactly two ASCII digits at p[0..1]. Returns -1 if either character
-// is not 0-9 — important because atoi() silently accepts garbage (atoi("1x")
-// == 1), and this value can reach settimeofday() (see parse_datetime).
+// is not 0-9 — atoi() silently accepts garbage (atoi("1x")==1), so this keeps
+// a malformed sentence from rendering a nonsense UTC on /status.
 static int two_digits(const char *p) {
     if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return -1;
     return (p[0] - '0') * 10 + (p[1] - '0');
 }
 
-// Parse hhmmss(.sss) + ddmmyy into a UTC Unix epoch. Returns false on a blank
-// time/date (no fix yet) OR on any out-of-range / non-digit field.
-//
-// This validation is a SECURITY/AVAILABILITY guard, not just hygiene: a
-// checksum-valid NMEA sentence only proves wire integrity, not sanity — RF
-// multipath / a glitching module can present a self-consistent garbage date.
-// Since the parsed value flows straight into settimeofday() (GPS-primary
-// clock), an unchecked bad date could yank the wall clock outside TLS
-// cert-validity windows and break every HTTPS/MQTT upload until a good fix
-// re-disciplines it. Reject anything implausible so a bad fix is a no-op, not
-// a clock-corrupting event. `t_field` = "hhmmss.sss", `d_field` = "ddmmyy".
+// Parse hhmmss(.sss) + ddmmyy into a UTC Unix epoch (for /status display only —
+// the system clock is never set from this). Returns false on a blank time/date
+// (no fix yet) OR on any out-of-range / non-digit field, so a checksum-valid
+// but garbled sentence (RF multipath / glitching module) can't render a
+// nonsense UTC. `t_field` = "hhmmss.sss", `d_field` = "ddmmyy".
 static bool parse_datetime(const char *t_field, const char *d_field, time_t *out) {
     if (!t_field || strlen(t_field) < 6) return false;
     if (!d_field || strlen(d_field) < 6) return false;
@@ -208,35 +193,14 @@ static bool parse_datetime(const char *t_field, const char *d_field, time_t *out
     return true;
 }
 
-// Apply GNSS UTC to the system clock when it has drifted past the threshold,
-// and stamp the "GNSS is the time source" TTL.
-static void discipline_clock(time_t gnss_utc, int64_t now_ms) {
-    time_t sys = time(NULL);
-    long drift = (long)(sys - gnss_utc);
-    if (drift < 0) drift = -drift;
-
-    if (s_last_clock_set_ms == 0 || drift >= DISCIPLINE_DRIFT_S) {
-        struct timeval tv = { .tv_sec = gnss_utc, .tv_usec = 0 };
-        settimeofday(&tv, NULL);
-        ESP_LOGI(TAG, "clock disciplined from GNSS (drift was %lds)", drift);
-    }
-    // GNSS owns the clock as long as fixes keep coming. Wrap the 64-bit store
-    // in the fix mux so the HTTP task's read in gnss_time_is_source() can't
-    // tear on a 32-bit core. (The read of it just above is on this same poll
-    // task — the only writer — so it needs no lock.)
-    taskENTER_CRITICAL(&s_fix_mux);
-    s_last_clock_set_ms = now_ms;
-    taskEXIT_CRITICAL(&s_fix_mux);
-}
-
-static void parse_rmc(const char *const fields[], int nf, int64_t now_ms) {
+static void parse_rmc(const char *const fields[], int nf) {
     // $..RMC,time,status,lat,N/S,lon,E/W,spd,cog,date,...
     if (nf < 10) return;
     bool valid = (fields[2][0] == 'A');
 
-    // Do all parsing (nmea_to_deg/atof, parse_datetime/timegm) BEFORE taking
-    // the spinlock — they're pure, but taskENTER_CRITICAL disables interrupts
-    // on-core, so keep only the struct stores inside the section.
+    // Parse (nmea_to_deg/atof, parse_datetime) BEFORE taking the spinlock —
+    // they're pure, but taskENTER_CRITICAL disables interrupts on-core, so
+    // keep only the struct stores inside the section.
     double lat = 0.0, lon = 0.0;
     time_t utc = 0;
     bool   have_utc = false;
@@ -253,10 +217,7 @@ static void parse_rmc(const char *const fields[], int nf, int64_t now_ms) {
         s_fix.lon = lon;
         if (have_utc) s_fix.utc = utc;
     }
-    time_t utc_for_clock = s_fix.utc;
     taskEXIT_CRITICAL(&s_fix_mux);
-
-    if (valid && utc_for_clock > 0) discipline_clock(utc_for_clock, now_ms);  // GPS-primary
 }
 
 static void parse_gga(const char *const fields[], int nf) {
@@ -273,7 +234,7 @@ static void parse_gga(const char *const fields[], int nf) {
 }
 
 // Dispatch one validated, NUL-terminated "$...*HH" sentence.
-static void parse_sentence(char *line, int64_t now_ms) {
+static void parse_sentence(char *line) {
     if (line[0] != '$') return;
     if (!checksum_ok(line)) return;
 
@@ -288,7 +249,7 @@ static void parse_sentence(char *line, int64_t now_ms) {
     // dropped every sentence because the '$' was counted as part of the
     // talker; surfaced on first real-hardware fix.)
     const char *type = fields[0] + 3;
-    if      (!strncmp(type, "RMC", 3)) parse_rmc(fields, nf, now_ms);
+    if      (!strncmp(type, "RMC", 3)) parse_rmc(fields, nf);
     else if (!strncmp(type, "GGA", 3)) parse_gga(fields, nf);
 }
 
@@ -297,7 +258,7 @@ static char s_line[GNSS_LINE_MAX];
 static int  s_len = 0;
 static bool s_cap = false;
 
-static void feed_byte(uint8_t b, int64_t now_ms) {
+static void feed_byte(uint8_t b) {
     if (b == '$') {                 // (re)start of a sentence
         s_cap = true;
         s_len = 0;
@@ -308,7 +269,7 @@ static void feed_byte(uint8_t b, int64_t now_ms) {
     if (b == '\r' || b == '\n') {   // end of sentence
         if (s_len > 0) {
             s_line[s_len] = 0;
-            parse_sentence(s_line, now_ms);
+            parse_sentence(s_line);
         }
         s_cap = false;
         s_len = 0;
@@ -398,7 +359,7 @@ esp_err_t gnss_init(i2c_master_bus_handle_t bus) {
         s_dev   = dev;
         s_tp    = tp;
         s_ready = true;
-        ESP_LOGI(TAG, "%s auto-detected at 0x%02X (GPS-primary time source)",
+        ESP_LOGI(TAG, "%s auto-detected at 0x%02X (position/fix on /status; clock untouched)",
                  tp->name, tp->addr);
         return ESP_OK;
     }
@@ -417,8 +378,6 @@ bool gnss_present(void) {
 void gnss_poll(void) {
     if (!s_ready) return;
 
-    int64_t now_ms = esp_timer_get_time() / 1000;
-
     // Drain in bounded chunks. Stop early on an all-idle chunk (no fresh data)
     // or a bus error; the cap bounds worst-case time on the service tick.
     uint8_t chunk[64];
@@ -429,7 +388,7 @@ void gnss_poll(void) {
         bool all_idle = true;
         for (int j = 0; j < got; j++) {
             if (chunk[j] != s_tp->idle_byte) all_idle = false;
-            feed_byte(chunk[j], now_ms);
+            feed_byte(chunk[j]);
         }
         if (all_idle) break;
     }
@@ -449,17 +408,4 @@ const char *gnss_chip_name(void) {
 
 uint8_t gnss_i2c_addr(void) {
     return s_ready ? s_tp->addr : 0;
-}
-
-bool gnss_time_is_source(void) {
-    if (!s_ready) return false;
-    // Snapshot the 64-bit timestamp under the fix mux — written by the poll
-    // task in discipline_clock(); a bare read here (HTTP task) could tear on a
-    // 32-bit core and mislabel the /status time source for one tick.
-    taskENTER_CRITICAL(&s_fix_mux);
-    int64_t last = s_last_clock_set_ms;
-    taskEXIT_CRITICAL(&s_fix_mux);
-    if (last == 0) return false;
-    int64_t now_ms = esp_timer_get_time() / 1000;
-    return (now_ms - last) < TIME_SOURCE_TTL_MS;
 }

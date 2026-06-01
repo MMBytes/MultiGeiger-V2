@@ -37,7 +37,6 @@
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
-#include "ntp.h"               // V2.5.8: ntp_time_valid() for the GNSS time-source line
 #include "tube.h"
 #include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
@@ -707,12 +706,8 @@ static void format_gnss(char *out, size_t sz) {
             (double)f.alt_m, utc);
     }
 
-    // Which source currently owns the wall clock. GNSS wins while it has
-    // disciplined the clock recently; otherwise SNTP (if it ever synced).
-    const char *src = gnss_time_is_source() ? "GPS"
-                      : (ntp_time_valid() ? "NTP" : "none");
-    n += snprintf(out + n, sz - n, "<br><b>System time source:</b> %s", src);
-
+    // V2.5.11: no "system time source" line — GNSS no longer sets the clock
+    // (NTP is the sole source). The UTC above is the receiver's reported time.
     snprintf(out + n, sz - n, "</div>");
 }
 

@@ -5,8 +5,8 @@
  *
  *  ONE driver, TWO supported breakouts — both stream NMEA-0183 text over
  *  I²C; they differ only in how bytes are pulled off the bus, so the
- *  NMEA parser + clock discipline + fix snapshot are shared and the
- *  per-chip part is a thin transport:
+ *  NMEA parser + fix snapshot are shared and the per-chip part is a thin
+ *  transport:
  *
  *    * Adafruit 4415 — CDTop PA1010D (MediaTek MT3333). I²C addr 0x10.
  *      Plain streaming reads; idle/no-data padding byte is 0x0A.
@@ -24,11 +24,14 @@
  *      it binds on ACK without sniffing.
  *
  *  V2.5.10: fully AUTO-DETECTED — no config toggle. `gnss_init()` probes
- *  0x42 then 0x10 and binds the matching transport (sniffing 0x10 as
- *  above). Time discipline is GPS-primary:
- *  on every valid fix the system clock is set from the GNSS UTC (rate-
- *  limited to avoid sub-second jitter), overriding SNTP whenever a fix is
- *  available. SNTP keeps running untouched as the no-fix fallback.
+ *  0x42 then 0x10 and binds the matching transport (sniffing 0x10 as above).
+ *
+ *  V2.5.11: DISPLAY-ONLY — GNSS never sets the system clock. NTP is the sole
+ *  time source. On this 1 Hz-NMEA-over-I²C path (no PPS pin broken out) GNSS
+ *  time is ~1-2 s laggy/non-monotonic, far worse than LAN NTP; and an
+ *  offline node sends nothing anyway, so GPS-as-time-fallback added no value
+ *  while churning settimeofday. The parsed UTC is shown on /status as the
+ *  receiver's reported time, nothing more.
  *
  *  Draining (`gnss_poll()`) runs on the main service task at ~1 Hz; the
  *  status page reads only the cached snapshot via `gnss_get_fix()`, so the
@@ -71,9 +74,9 @@ esp_err_t gnss_init(i2c_master_bus_handle_t bus);
 /** @brief True once a receiver has been bound by gnss_init(). */
 bool gnss_present(void);
 
-/** @brief Drain the I²C stream, parse complete NMEA sentences, and
- *  discipline the system clock from any valid fix. No-op if not present.
- *  Call at ~1 Hz from the main service task. */
+/** @brief Drain the I²C stream and parse complete NMEA sentences into the
+ *  fix snapshot. No-op if not present. Call at ~1 Hz from the main service
+ *  task. Does NOT touch the system clock (display-only — see file header). */
 void gnss_poll(void);
 
 /** @brief Copy the latest fix snapshot. @return false if not present. */
@@ -85,7 +88,3 @@ const char *gnss_chip_name(void);
 
 /** @brief 7-bit I²C address of the bound receiver (0 if not present). */
 uint8_t gnss_i2c_addr(void);
-
-/** @brief True if GNSS has disciplined the system clock within the last
- *  few minutes — i.e. GPS is the active wall-clock source (vs SNTP). */
-bool gnss_time_is_source(void);

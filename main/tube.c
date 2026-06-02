@@ -30,6 +30,16 @@ static volatile uint32_t isr_min_us_between = UINT32_MAX;
 static volatile uint32_t isr_max_us_between = 0;
 static portMUX_TYPE mux_gmc = portMUX_INITIALIZER_UNLOCKED;
 
+// --- V2.5.12: raw-edge count profiler ---
+// isr_raw_edges increments on EVERY interrupt (every edge), before the dead-time
+// gate, so (raw_edges - counts) isolates edges rejected as ringing/double-counts.
+// isr_dt_hist bins consecutive edge-to-edge spacing (incl. sub-dead-time edges)
+// to show WHERE excess edges sit in time: low bins = ringing/noise, top bins =
+// real ~1.2 cps pulses. Snapshot/reset via tube_get_diag().
+static volatile uint32_t isr_raw_edges    = 0;
+static volatile uint64_t isr_last_edge_us = 0;
+static volatile uint32_t isr_dt_hist[TUBE_DIAG_NBUCKETS] = {0};
+
 // --- HV charge state ---
 static volatile uint32_t isr_hv_pulses    = 0;
 static volatile bool     isr_hv_error     = false;
@@ -139,6 +149,25 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     uint64_t now = (uint64_t)esp_timer_get_time();
     bool counted = false;
     portENTER_CRITICAL_ISR(&mux_gmc);
+
+    // V2.5.12: profile every raw edge BEFORE the dead-time gate below.
+    isr_raw_edges++;
+    uint64_t le = isr_last_edge_us;
+    if (le != 0) {
+        uint32_t edt = (uint32_t)(now - le);
+        uint32_t b;
+        if      (edt <     50) b = 0;
+        else if (edt <    190) b = 1;
+        else if (edt <    500) b = 2;
+        else if (edt <   1000) b = 3;
+        else if (edt <   5000) b = 4;
+        else if (edt <  50000) b = 5;
+        else if (edt < 500000) b = 6;
+        else                   b = 7;
+        isr_dt_hist[b]++;
+    }
+    isr_last_edge_us = now;
+
     uint64_t last = isr_last_pulse_us;
     if (last == 0) {
         isr_gmc_counts++;
@@ -286,4 +315,18 @@ uint32_t tube_get_total_counts(void) {
     v = isr_gmc_total;
     portEXIT_CRITICAL(&mux_gmc);
     return v;
+}
+
+void tube_get_diag(uint32_t *raw_edges, uint32_t hist[TUBE_DIAG_NBUCKETS]) {
+    // V2.5.12: snapshot + reset under the same lock as the ISR writer,
+    // mirroring tube_read()'s window-reset discipline so the diag window tiles
+    // cleanly cycle-to-cycle.
+    portENTER_CRITICAL(&mux_gmc);
+    *raw_edges = isr_raw_edges;
+    for (int i = 0; i < TUBE_DIAG_NBUCKETS; i++) {
+        hist[i] = isr_dt_hist[i];
+        isr_dt_hist[i] = 0;
+    }
+    isr_raw_edges = 0;
+    portEXIT_CRITICAL(&mux_gmc);
 }

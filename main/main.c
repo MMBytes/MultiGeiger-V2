@@ -453,6 +453,13 @@ static void do_tx_cycle(void) {
     bool hv_error;
     tube_read(&counts, &dt_ms, &min_us, &max_us, &hv_pulses, &hv_error);
 
+    // V2.5.12: capture the raw-edge profile right next to tube_read so the
+    // count window and raw-edge window align (so raw_edges >= counts). Dumped
+    // in the DIAG log line below when the tube is enabled.
+    uint32_t diag_raw_edges = 0;
+    uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
+    tube_get_diag(&diag_raw_edges, diag_hist);
+
     // V2.4.27: hv_pulses returned by tube_read() is cumulative-since-boot
     // (see tube.h). Derive the per-cycle delta here so the legacy HTTPS
     // upload paths (sensor.community / Madavi / Radmon) carry the same
@@ -485,6 +492,19 @@ static void do_tx_cycle(void) {
                  (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
                  (unsigned long)max_us, rssi, (unsigned long)i2c_errs);
+
+        // V2.5.12: raw-edge profiler dump. rejected = edges suppressed by
+        // the dead-time gate (ringing/double-counts). edt_us bins show where
+        // edge-to-edge spacing lands: low bins = ringing/noise, top two = real.
+        uint32_t diag_rejected =
+            (diag_raw_edges >= counts) ? (diag_raw_edges - counts) : 0;
+        ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu "
+                 "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
+                 (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
+                 (unsigned long)diag_hist[0], (unsigned long)diag_hist[1],
+                 (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
+                 (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
+                 (unsigned long)diag_hist[6], (unsigned long)diag_hist[7]);
     } else {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,

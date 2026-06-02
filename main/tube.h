@@ -21,6 +21,11 @@
 // Si22G dead time (µs). Rejects rising-edge noise on the count input.
 #define GMC_DEAD_TIME_US 190
 
+// V2.5.12: number of edge-to-edge spacing buckets for the raw-edge count
+// profiler (see tube_get_diag) — lets a clean Poisson count path be told
+// apart from count-node ringing/noise.
+#define TUBE_DIAG_NBUCKETS 8
+
 /** @brief Configure GPIOs, install ISRs, and start the recharge timer.
  *
  *  @param enabled  When false, configures HV_FET as a static LOW output
@@ -59,6 +64,20 @@ bool tube_is_enabled(void);
  *  count ISR is never installed). Unsigned wrap is safe for bounded deltas.
  */
 uint32_t tube_get_total_counts(void);
+
+/** @brief V2.5.12: snapshot + reset the raw-edge count profiler.
+ *
+ *  Permanent diagnostic on the Geiger count path, emitted as the per-cycle
+ *  DIAG log line — distinguishes clean counting from count-node ringing/noise.
+ *  @param raw_edges  Out: every GMC ISR entry since the last call, counted
+ *                    BEFORE the dead-time gate. raw_edges - counts isolates
+ *                    edges suppressed as ringing/double-counts (< GMC_DEAD_TIME_US).
+ *  @param hist       Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
+ *                    (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
+ *                    ~1.2 cps pulses land in the top two bins; a fat low-bin
+ *                    population is count-node ringing/noise.
+ */
+void tube_get_diag(uint32_t *raw_edges, uint32_t hist[TUBE_DIAG_NBUCKETS]);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

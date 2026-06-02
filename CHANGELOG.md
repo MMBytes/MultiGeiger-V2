@@ -9,9 +9,7 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## Unreleased (V2.5.12 — accumulating, not yet tagged)
-
-Bump + ship when ready.
+## V2.5.12 — GNSS per-cycle log + MAX-M10S identity + raw-edge count profiler
 
 ### Per-cycle GNSS log line (`main.c`)
 - Each TX cycle now emits a `v2_main:` GNSS line (after the SHT45/BMP env line), gated on `gnss_present()` so boards without a receiver log nothing. Two shapes mirror the `/status` card: a full fix (`<chip>: Fix: 3D, N satellites, HDOP x.x Position: lat, lon Altitude: a m MSL UTC: <iso8601>`) or `Fix: acquiring (N satellites visible)` before RMC goes valid. Reads only the cached snapshot via `gnss_get_fix()` — no extra I²C, the bus is still touched only by `gnss_poll()` on the main task.
@@ -19,7 +17,7 @@ Bump + ship when ready.
 ### MAX-M10S unique chip ID + firmware via UBX (`gnss.c`, `gnss.h`, `http_server.c`)
 - Added a one-shot UBX poll at `gnss_init()`, **u-blox-only** (gated on addr 0x42): `UBX-MON-VER` (logs `sw`/`hw` version strings) and `UBX-SEC-UNIQID` (factory unique chip ID → hex, the analogue of the SHT45/SPS30 serial). Logged once at boot (`MAX-M10S serial = 0x…`) and surfaced as a `Serial:` line on the `/status` GNSS card. The PA1010D has no per-unit serial (plain-NMEA part) and skips this entirely — its log/card are unchanged.
 - Implementation: `ublox_send_poll()` builds the `B5 62 | class id | len | ckA ckB` frame with an 8-bit Fletcher checksum and prepends `0xFF` (the DDC stream register — correct whether or not the first written byte is treated as a register address); `ublox_poll()` runs a UBX framing state machine over the live stream (via the existing `ublox_read_chunk`), ignoring interleaved NMEA, with a per-message timeout. Best-effort — a missing reply logs a warning, position/fix work regardless.
-- ⚠️ **Unvalidated on hardware** — the SparkFun MAX-M10S board is on backorder (~2026-06-16). This is the first code in the driver to *write* to the u-blox DDC; the write semantics and response-scan timing need bench confirmation before this ships. cppcheck 2.20.0 clean; builds for `adafruit_qtpy_esp32_pico` (verified embedded V2.5.12). Committed locally, **not tagged**.
+- ⚠️ **Unvalidated on hardware** — the SparkFun MAX-M10S board is on backorder (~2026-06-16). This is the first code in the driver to *write* to the u-blox DDC; the write semantics and response-scan timing need bench confirmation before this ships. cppcheck 2.20.0 clean; builds for `adafruit_qtpy_esp32_pico` (verified embedded V2.5.12).
 
 ### Per-cycle raw-edge profiler on the Geiger count path (`tube.c`, `tube.h`, `main.c`)
 - New `DIAG:` log line each TX cycle, gated on `tube_enabled` (PM-only nodes log nothing): `raw_edges` (every count-ISR edge, tallied *before* the 190 µs `GMC_DEAD_TIME_US` gate) + `rejected` (= raw_edges − counts; edges suppressed as ringing/double-counts) + an 8-bin edge-to-edge spacing histogram (`<50/<190/<500/<1k/<5k/<50k/<500k/≥500k µs`). Distinguishes a clean Poisson count path from count-node ringing/noise at a glance.

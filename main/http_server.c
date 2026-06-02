@@ -684,6 +684,12 @@ static void format_gnss(char *out, size_t sz) {
         "<b>Sensor:</b> %s (I²C, 0x%02X)<br>",
         gnss_chip_name(), gnss_i2c_addr());
 
+    // Unique chip ID — MAX-M10S only (UBX-SEC-UNIQID); empty for the PA1010D.
+    const char *serial = gnss_serial();
+    if (serial[0]) {
+        n += snprintf(out + n, sz - n, "<b>Serial:</b> 0x%s<br>", serial);
+    }
+
     if (!f.valid) {
         n += snprintf(out + n, sz - n,
             "<b>Fix:</b> acquiring… (%u satellites visible)", (unsigned)f.sats);

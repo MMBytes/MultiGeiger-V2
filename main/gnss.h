@@ -88,3 +88,8 @@ const char *gnss_chip_name(void);
 
 /** @brief 7-bit I²C address of the bound receiver (0 if not present). */
 uint8_t gnss_i2c_addr(void);
+
+/** @brief Factory unique chip ID as a hex string (MAX-M10S only, from
+ *  UBX-SEC-UNIQID at init), or "" for the PA1010D (no per-unit serial) or if
+ *  the query failed. Never NULL. */
+const char *gnss_serial(void);

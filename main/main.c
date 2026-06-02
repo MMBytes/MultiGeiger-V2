@@ -564,6 +564,33 @@ static void do_tx_cycle(void) {
         g_last_bme_p = bme_p;
     }
 
+    // GNSS line — emitted only when a receiver is bound (gnss_present()), so
+    // boards without a GPS module log nothing here. Display-only data (V2.5.11):
+    // the snapshot is whatever gnss_poll() last drained on the main task, so no
+    // I²C is touched from this TX path. Two shapes mirror the /status card:
+    // a full fix line, or an "acquiring" line before RMC goes valid.
+    if (gnss_present()) {
+        gnss_fix_t gf;
+        gnss_get_fix(&gf);
+        if (gf.valid) {
+            char utc[32] = "—";
+            if (gf.utc > 0) {
+                struct tm tm_utc;
+                gmtime_r(&gf.utc, &tm_utc);
+                strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+            }
+            ESP_LOGI(TAG,
+                     "%s: Fix: %s, %u satellites, HDOP %.1f "
+                     "Position: %.6f, %.6f Altitude: %.0f m MSL UTC: %s",
+                     gnss_chip_name(), gf.fix_3d ? "3D" : "2D",
+                     (unsigned)gf.sats, (double)gf.hdop,
+                     gf.lat, gf.lon, (double)gf.alt_m, utc);
+        } else {
+            ESP_LOGI(TAG, "%s: Fix: acquiring (%u satellites visible)",
+                     gnss_chip_name(), (unsigned)gf.sats);
+        }
+    }
+
     // Particulate-matter sample — uploaded to Madavi (combined env body) and
     // sensor.community (X-PIN 12 POST) when pm_valid. Driver's data-ready
     // poll keeps this safe even if the sensor missed an internal 1 Hz tick

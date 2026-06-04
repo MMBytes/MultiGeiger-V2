@@ -9,6 +9,46 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.13 — /status uploads fix + Heltec MQTT boot‑defer
+
+### `/status` Uploads block: per-cell inline styles → CSS classes (`http_server.c`)
+- **Bug:** the shared `/status` scratch buffer (`buf[1600]`) overflowed on nodes with
+  ~5+ enabled upload targets — the Uploads table plus the FTPS line exceeded 1600 B, so
+  `append_safe()` silently truncated the **FTPS line** (rendered last) mid-string and
+  dropped its closing `</div>`, leaving the MQTT block mis-nested. Confirmed live on the
+  dust node (5 targets): the line died at "…next i".
+- **Fix is RAM-neutral** (deliberate — the Heltec V2 is heap-tight; the FTPS/TLS
+  handshake already dips min-free to ~2 KB, which is why MQTT is torn down before FTPS).
+  Rather than enlarging the buffer (which would add BSS), the repeated
+  `align=right style="padding-left:10px"` and `style='color:#…'` on every table cell are
+  factored into CSS classes (`.u/.ar/.g/.r/.o/.d`) added to the `STATUS_HEAD` `<style>`,
+  which is `static const` → flash `.rodata`, not RAM. Each upload row shrinks ~210→~110 B,
+  so the block now fits the existing 1600 B buffer even at the 8-target worst case, and
+  every `/status` render is ~600 B lighter. No `buf`, BSS, stack, or heap change.
+
+### Heltec only: defer MQTT start until after the first TX round (`main.c`)
+- **Why:** on the no-PSRAM Heltec, starting MQTT eagerly on GOT-IP overlapped the MQTT
+  TLS handshake + 16-entity HA-discovery burst with the first TX cycle's HTTPS upload
+  handshakes — 2–3 concurrent TLS contexts at boot drove the DMA-capable heap to
+  `min_free=280 B` and triggered an MQTT connect→disconnect→reconnect churn (observed on
+  esp32-12276328). Steady state was fine; the failure window was boot.
+- **Fix:** gated `#ifdef BOARD_HELTEC_V2`, the MQTT-start poll requires
+  `tx_cycles >= 1 && tx_is_idle()`. `tx_cycles >= 1` gates past boot; `tx_is_idle()` (the
+  existing accessor: TX worker not busy + queue empty) ensures the CPU1 upload worker
+  isn't mid-cycle — so MQTT starts in the ~168 s gap *between* cycle #1's uploads and
+  cycle #2, with no concurrent upload TLS, instead of overlapping them. (A first cut with
+  `tx_cycles >= 1` alone still collided: `tx_cycles` flips at the cycle *log* line, but
+  the HTTPS uploads run async on the worker *after* `do_tx_cycle`'s non-blocking
+  `tx_transmit` — `tx_is_idle()` is what actually tracks completion. Confirmed on
+  esp32-12276328: MQTT started 1 s into cycle #1, mid-Madavi-handshake.) Race-free since
+  `do_tx_cycle` bumps the counter and enqueues the worker in one pass on the same task as
+  the gate. Also stops the FTPS/OTA/PSA re-inits (same poll) colliding with an in-flight
+  upload. PSRAM boards unchanged (both terms inside the `#ifdef`; cppcheck byte-identical).
+  Boot-only — steady-state heap (the tight margin that can OOM the big `/config` render on
+  a Heltec+MQTT node) is unchanged.
+
+---
+
 ## V2.5.12 — GNSS per-cycle log + MAX-M10S identity + raw-edge count profiler
 
 ### Per-cycle GNSS log line (`main.c`)

@@ -1081,8 +1081,25 @@ void app_main(void) {
         // publish that FTP tears down ~180 ms later. Skipping it lets MQTT
         // come back up exactly once, after the upload. (Diagnosed from a
         // PSA+FTP schedule alignment on esp32-5963724.)
+        // V2.5.13: on the heap-tight Heltec (no PSRAM), defer the MQTT TLS handshake
+        // + HA-discovery burst until the first TX cycle's HTTPS uploads have FINISHED.
+        // Otherwise the two TLS storms overlap at boot (2-3 concurrent TLS contexts),
+        // cratering the DMA-capable heap (min_free 280-1664 B) and triggering an MQTT
+        // connect->disconnect->reconnect churn (observed on esp32-12276328). Two terms:
+        // `tx_cycles >= 1` gates past boot; `tx_is_idle()` ensures the CPU1 worker
+        // (which runs the uploads ASYNC, after do_tx_cycle's non-blocking tx_transmit)
+        // isn't mid-cycle — so MQTT starts in the ~168 s gap BETWEEN cycle #1's uploads
+        // and cycle #2, with no concurrent upload TLS. Race-free: do_tx_cycle bumps the
+        // counter AND enqueues the worker in one pass on this same task. `tx_cycles` is
+        // monotonic and the worker idles >90% of the time, so the OTA-/FTPS-teardown
+        // MQTT re-inits (same poll) are unaffected (and also no longer collide with an
+        // in-flight upload). PSRAM boards start MQTT as soon as IP+clock are ready.
         if (!mqtt_is_initialized() && !main_services_suspended() &&
-            n_got_ip > 0 && ntp_time_valid() && !log_ftp_imminent()) {
+            n_got_ip > 0 && ntp_time_valid() && !log_ftp_imminent()
+#ifdef BOARD_HELTEC_V2
+            && tx_cycles >= 1 && tx_is_idle()
+#endif
+           ) {
             ESP_LOGI(TAG, "STA has IP + clock sane — starting MQTT client");
             mqtt_init(&g_cfg, g_chip_id);
         }

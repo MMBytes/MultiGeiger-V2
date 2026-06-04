@@ -840,42 +840,42 @@ static void format_history_data(char *out, size_t sz) {
 static void format_uploads(char *out, size_t sz) {
     int n = append_safe(out, sz, 0,
         "<div class=\"info\"><h3>Uploads</h3>"
-        "<table style=\"border-collapse:collapse;font-size:0.95em\">"
+        "<table class=u>"
         "<tr><th align=left>Target</th>"
-        "<th align=right style=\"padding-left:10px\">OK / Attempted</th>"
-        "<th align=right style=\"padding-left:10px\">Last rc</th>"
-        "<th align=right style=\"padding-left:10px\">Breaker</th></tr>");
+        "<th class=ar>OK / Attempted</th>"
+        "<th class=ar>Last rc</th>"
+        "<th class=ar>Breaker</th></tr>");
 
     for (int i = 0; i < TX_TARGET_COUNT; i++) {
         if (!target_enabled(i)) continue;
         tx_target_stats_t s;
         tx_get_stats(i, &s);
         const char *breaker_html =
-            (s.breaker_open_cycles == 0) ? "<span style='color:#080'>closed</span>" : NULL;
+            (s.breaker_open_cycles == 0) ? "<span class=g>closed</span>" : NULL;
         char breaker_buf[80];
         if (!breaker_html) {
             snprintf(breaker_buf, sizeof(breaker_buf),
-                     "<span style='color:#c80;font-weight:bold'>open (%d cyc)</span>",
+                     "<b class=o>open (%d cyc)</b>",
                      s.breaker_open_cycles);
             breaker_html = breaker_buf;
         }
-        const char *rc_color =
-            (s.attempted == 0)                            ? "#888" :
-            (s.last_rc >= 200 && s.last_rc < 300)         ? "#080" :
-            (s.last_rc == -1)                             ? "#c00" :
-                                                            "#c80";
+        const char *rc_class =
+            (s.attempted == 0)                            ? "d" :
+            (s.last_rc >= 200 && s.last_rc < 300)         ? "g" :
+            (s.last_rc == -1)                             ? "r" :
+                                                            "o";
         char rc_buf[16];
         if (s.attempted == 0) snprintf(rc_buf, sizeof(rc_buf), "—");
         else                  snprintf(rc_buf, sizeof(rc_buf), "%d", s.last_rc);
 
         n = append_safe(out, sz, n,
             "<tr><td>%s</td>"
-            "<td align=right style=\"padding-left:10px\">%lu / %lu</td>"
-            "<td align=right style=\"padding-left:10px;color:%s\">%s</td>"
-            "<td align=right style=\"padding-left:10px\">%s</td></tr>",
+            "<td class=ar>%lu / %lu</td>"
+            "<td class=\"ar %s\">%s</td>"
+            "<td class=ar>%s</td></tr>",
             tx_target_name(i),
             (unsigned long)s.succeeded, (unsigned long)s.attempted,
-            rc_color, rc_buf,
+            rc_class, rc_buf,
             breaker_html);
     }
     n = append_safe(out, sz, n, "</table>");
@@ -906,8 +906,8 @@ static void format_uploads(char *out, size_t sz) {
 
         const char *result_html;
         if (!f.have_last)         result_html = "—";
-        else if (f.last_ok)       result_html = "<span style='color:#080'>OK</span>";
-        else                      result_html = "<span style='color:#c00'>FAIL</span>";
+        else if (f.last_ok)       result_html = "<span class=g>OK</span>";
+        else                      result_html = "<span class=r>FAIL</span>";
 
         n = append_safe(out, sz, n,
             "<br><b>FTP%s:</b> last %s%s%s &middot; %lu bytes &middot; result %s &middot; next %s",
@@ -997,6 +997,8 @@ static const char STATUS_HEAD[] =
     "<style>body{font-family:sans-serif;max-width:680px;margin:20px auto;padding:0 10px}"
     "h1{color:#333}h3{margin:0 0 6px 0;color:#444}a{color:#0066cc}"
     ".info{background:#f5f5f5;border:1px solid #ddd;padding:10px;border-radius:4px;margin:10px 0}"
+    ".u{border-collapse:collapse;font-size:.95em}.ar{text-align:right;padding-left:10px}"
+    ".g{color:#080}.r{color:#c00}.o{color:#c80}.d{color:#888}"
     "</style></head><body>";
 // V2.3.32: split into HEAD + TAIL so status_get can inject the optional
 // per-chip Madavi graphs link between them when madavi uploads are enabled.

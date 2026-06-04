@@ -13,10 +13,13 @@ sdkconfig.*.old
 # Per-release staging dir for `gh release upload` (board-suffixed binaries).
 release_staging/
 
-# IDF Component Manager: COMMIT `dependencies.lock` (pins resolved versions of
-# espressif/mqtt etc. — needed for reproducible builds across dev + CI). The
-# fetched component sources under `managed_components/` are regenerated on
-# every clean build and must NOT be committed.
+# IDF Component Manager: `dependencies.lock` is IGNORED (V2.5.13) — its `target:`
+# field flips esp32<->esp32s3 per board across our 5-target matrix, churning the
+# tree on every build. Reproducibility is preserved by pinning the EXACT esp-mqtt
+# version (`==1.0.0`) in main/idf_component.yml (committed, never churns). The
+# fetched component sources under `managed_components/` are regenerated on every
+# clean build and must NOT be committed.
+dependencies.lock
 managed_components/
 
 # VS Code workspace settings (machine-local)

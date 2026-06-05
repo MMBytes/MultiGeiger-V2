@@ -340,9 +340,16 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout
+        # NB: unlike the build/release jobs, this checkout intentionally does
+        # NOT use inputs.tag. docs/ (the web UI + manifests + vendored
+        # esp-web-tools) is a *current* web asset, not versioned firmware, so it
+        # tracks the workflow ref — the default branch on a workflow_dispatch,
+        # or the tag on a real release tag-push — both of which contain docs/.
+        # Checking out inputs.tag would 404 here when dispatching an OLDER tag
+        # that predates docs/ (e.g. V2.5.13). The published firmware is still
+        # version-correct: the bins come from the build job's artefacts, which
+        # built inputs.tag's source.
         uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Download built artefacts (for the merged bins)
         uses: actions/download-artifact@v4

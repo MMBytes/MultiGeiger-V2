@@ -37,3 +37,10 @@ release_stage_*/
 
 # Build/flash logs
 *.log
+
+# Loose binaries at the repo ROOT only — local OTA images and `_merge.cmd`
+# output (geiger_v2_merged_<board>.bin). All real release artefacts are built
+# in CI and attached to the GitHub Release; none belong in the tree. Root-
+# anchored so it never touches build_*/ outputs (already ignored) or anything
+# intentional in a subdir.
+/*.bin

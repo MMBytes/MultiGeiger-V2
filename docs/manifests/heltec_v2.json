@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Heltec WiFi Kit 32 V2",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_heltec_v2.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

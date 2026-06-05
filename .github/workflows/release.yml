@@ -299,3 +299,79 @@ jobs:
               artefacts/*.bin
           fi
           echo "::notice::release ready at $(gh release view "$TAG" --json url -q .url)"
+
+  # ---------------------------------------------------------------------------
+  # Publish the browser "web flasher" (docs/) + the 5 merged firmware images to
+  # GitHub Pages, so https://<owner>.github.io/<repo>/ always serves an
+  # install page wired to THIS release's binaries.
+  #
+  # Why Pages and not the release assets directly: ESP Web Tools fetches each
+  # firmware part with a cross-origin `fetch()` and needs an
+  # `Access-Control-Allow-Origin` header on the response. GitHub *release*
+  # assets (release-assets.githubusercontent.com) send no CORS header, so the
+  # browser blocks the read; GitHub *Pages* serves `ACAO: *`. Publishing the
+  # merged bins onto Pages alongside the page makes the fetch same-origin and
+  # CORS becomes a non-issue. The manifests point at `../firmware/<bin>`
+  # (relative to docs/manifests/), which resolves to the firmware/ dir we
+  # assemble below.
+  #
+  # "Latest" is automatic: the manifest paths are stable, and this job
+  # overwrites what lives at those paths with the freshly-built bins on every
+  # release. No manifest edits, no per-release copying.
+  #
+  # ONE-TIME SETUP (repo owner): Settings → Pages → Build and deployment →
+  # Source = "GitHub Actions". Without that, deploy-pages has nowhere to push.
+  #
+  # Artifact-based deploy (upload-pages-artifact) — the ~1.4 MB bins are
+  # published from the build artifacts and never committed to git history.
+  pages:
+    name: deploy web flasher to Pages
+    needs: build          # needs the merged bins; build itself gates on cppcheck
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write        # deploy-pages
+      id-token: write      # OIDC token deploy-pages uses to authenticate
+    # Serialise Pages deploys so two releases can't race the same environment.
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Download built artefacts (for the merged bins)
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts/
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Assemble Pages site (docs/ + firmware/)
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p _site/firmware
+          # The install page, manifests and vendored esp-web-tools.
+          cp -r docs/. _site/
+          # Only the merged (full-flash) images are what the web flasher writes.
+          cp artefacts/geiger_v2_merged_*.bin _site/firmware/
+          # Stamp the real version into the served manifests (repo files keep
+          # the literal "latest"; only the published copies get the tag, so the
+          # ESP Web Tools dialog shows e.g. "V2.5.13" instead of "latest").
+          sed -i "s/\"version\": \"latest\"/\"version\": \"$TAG\"/" _site/manifests/*.json
+          echo "Published site tree:"
+          find _site -maxdepth 2 -type f | sort
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

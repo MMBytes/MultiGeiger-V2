@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Install MultiGeiger V2</title>
+
+  <!--
+    ESP Web Tools "Install" page for MultiGeiger V2.
+
+    Flashes the per-board MERGED firmware image (bootloader + partition table
+    + ota_data + app, written at flash offset 0x0) directly from the browser
+    over Web Serial — no esptool, no Python, no CLI.
+
+    Multi-board note: ESP Web Tools auto-selects a build by *chip family*
+    (ESP32 / ESP32-S3), but three of our boards are all plain "ESP32" and two
+    are both "ESP32-S3", so chip-family auto-detection cannot tell them apart.
+    The board <select> below resolves that by pointing the install button at a
+    per-board manifest (docs/manifests/<board>.json), each carrying exactly one
+    build. The user picks their board; we hand ESP Web Tools an unambiguous
+    single-build manifest.
+
+    WiFi is intentionally NOT handled here (no Improv responder in the
+    firmware). After flashing, the device brings up its own configuration
+    access point for ~2 minutes — join it and browse to
+    http://192.168.4.1/config to set WiFi + everything else.
+  -->
+  <!--
+    Self-hosted (vendored) ESP Web Tools — see docs/vendor/esp-web-tools/.
+    Pinned to a known version rather than a CDN so a compromised or changed
+    CDN file can't silently alter a page that flashes firmware. Subresource
+    Integrity is not used because ESP Web Tools is an ES module that
+    dynamically imports sibling chunks at runtime, which an `integrity` hash
+    on this entry tag would not cover — vendoring protects the whole graph
+    instead. To upgrade, re-run the steps in vendor/esp-web-tools/VERSION.txt.
+  -->
+  <script
+    type="module"
+    src="vendor/esp-web-tools/install-button.js"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      max-width: 46rem;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+      line-height: 1.55;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+    .sub { color: #6b7280; margin-top: 0; }
+    .card {
+      border: 1px solid #d1d5db;
+      border-radius: 12px;
+      padding: 1.25rem 1.25rem 1.5rem;
+      margin: 1.5rem 0;
+    }
+    label { font-weight: 600; display: block; margin-bottom: 0.4rem; }
+    select {
+      font-size: 1rem;
+      padding: 0.5rem 0.6rem;
+      border-radius: 8px;
+      border: 1px solid #9ca3af;
+      width: 100%;
+      max-width: 28rem;
+      background: Canvas;
+      color: CanvasText;
+    }
+    .actions { margin-top: 1.25rem; }
+    .note {
+      background: rgba(125,125,125,0.10);
+      border-left: 3px solid #9ca3af;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      font-size: 0.95rem;
+    }
+    .step { margin: 0.25rem 0; }
+    code { background: rgba(125,125,125,0.18); padding: 0.1rem 0.35rem; border-radius: 4px; }
+    a { color: #2563eb; }
+    .unsupported { color: #b91c1c; font-weight: 600; }
+    footer { margin-top: 2.5rem; color: #6b7280; font-size: 0.9rem; }
+  </style>
+</head>
+
+<body>
+  <h1>Install MultiGeiger&nbsp;V2</h1>
+  <p class="sub">Flash the firmware straight from your browser — no command line.</p>
+
+  <div class="card">
+    <label for="board">1.&nbsp; Choose your board</label>
+    <select id="board" aria-label="Board">
+      <option value="manifests/heltec_v2.json">Heltec WiFi Kit 32 V2</option>
+      <option value="manifests/heltec_v2_4mb.json">Heltec WiFi Kit 32 V2 — 4&nbsp;MB flash</option>
+      <option value="manifests/adafruit_qtpy_esp32_pico.json">Adafruit QT&nbsp;Py ESP32 PICO</option>
+      <option value="manifests/feathers3_d.json">Unexpected Maker FeatherS3-D</option>
+      <option value="manifests/seeed_xiao_esp32s3.json">Seeed XIAO ESP32-S3</option>
+    </select>
+
+    <div class="actions">
+      <p style="font-weight:600; margin-bottom:0.5rem;">
+        2.&nbsp; Plug the board in over USB, then:
+      </p>
+      <esp-web-install-button id="installer" manifest="manifests/heltec_v2.json">
+        <span slot="unsupported" class="unsupported">
+          Your browser can’t flash over USB. Use desktop Chrome or Edge
+          (Web Serial isn’t available in Firefox, Safari, or on iOS/Android).
+        </span>
+        <span slot="not-allowed" class="unsupported">
+          This page must be served over HTTPS to flash. Open the hosted
+          version rather than a local file.
+        </span>
+      </esp-web-install-button>
+    </div>
+  </div>
+
+  <div class="note">
+    <p style="margin-top:0;"><strong>3.&nbsp; Connect it to WiFi after flashing</strong></p>
+    <p class="step">When flashing finishes, the device starts its own setup
+      access point for about two minutes:</p>
+    <p class="step">• Join the WiFi network named after the device — by default
+      <code>esp32-&lt;number&gt;</code> (its unique chip ID, e.g.
+      <code>esp32-1234567</code>), password <code>ESP32Geiger</code>.</p>
+    <p class="step">• Browse to <code>http://192.168.4.1/config</code> to enter
+      your WiFi credentials and the rest of the settings.</p>
+    <p class="step" style="margin-bottom:0;">The board then reboots onto your
+      network. From then on it updates over-the-air — no cable needed.</p>
+  </div>
+
+  <div class="note">
+    <strong>Need to recover a bricked or mis-flashed board?</strong>
+    Pick the board above and flash again — the merged image rewrites the
+    bootloader and partition table from scratch. If the device won’t enter
+    download mode automatically, hold its <code>BOOT</code> button while
+    pressing <code>RESET</code>, then release <code>BOOT</code>.
+  </div>
+
+  <footer>
+    Always flashes the <strong>latest</strong> published release for the
+    selected board.
+    &nbsp;·&nbsp; <a href="https://github.com/MMBytes/MultiGeiger-V2/releases">All releases</a>
+    &nbsp;·&nbsp; <a href="https://github.com/MMBytes/MultiGeiger-V2">Source &amp; docs</a>
+  </footer>
+
+  <script>
+    // Point the single install button at the manifest for the selected board.
+    // ESP Web Tools re-reads the `manifest` attribute when it changes, so
+    // swapping it here is all that's needed to switch firmware variants.
+    const select = document.getElementById("board");
+    const installer = document.getElementById("installer");
+    select.addEventListener("change", () => {
+      installer.manifest = select.value;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Unexpected Maker FeatherS3-D",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_feathers3_d.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

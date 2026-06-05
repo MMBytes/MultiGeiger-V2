@@ -1,0 +1,45 @@
+esp-web-tools — vendored (self-hosted) copy
+===========================================
+
+Pinned version : 10.2.1
+Source         : https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-10.2.1.tgz
+Vendored from  : package/dist/web/  (the whole directory — install-button.js
+                 is the entry, but it dynamically imports the sibling hashed
+                 chunks at runtime, so all files are required)
+Vendored on    : 2026-06-05
+
+Why vendored instead of CDN
+---------------------------
+This page flashes firmware over Web Serial. Loading the flasher from a
+third-party CDN (unpkg/jsdelivr) means a compromised or silently-changed CDN
+file could alter what gets written to a device. Pinning + self-hosting removes
+that runtime trust. Subresource Integrity (SRI) was considered but does not
+fit: ESP Web Tools is an ES module that dynamically imports sibling chunks, so
+an `integrity` hash on the entry <script> would leave the imported chunks
+unverified. Vendoring the entire dist/web/ graph is the complete fix.
+
+How to upgrade
+--------------
+PowerShell, from the repo root:
+
+    $v   = "10.2.1"                       # <- set to the new version
+    $tmp = Join-Path $env:TEMP "ewt"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $tmp | Out-Null
+    $tgz = Join-Path $tmp "ewt.tgz"
+    Invoke-WebRequest "https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-$v.tgz" -OutFile $tgz
+    tar -xzf $tgz -C $tmp
+    $dest = "docs\vendor\esp-web-tools"
+    Get-ChildItem $dest -File | Where-Object Name -ne "VERSION.txt" | Remove-Item -Force
+    Copy-Item (Join-Path $tmp "package\dist\web\*") -Destination $dest -Force
+
+Then sanity-check there are no external CDN URLs baked in:
+
+    Select-String -Path docs\vendor\esp-web-tools\*.js `
+      -Pattern "https?://(unpkg|cdn|jsdelivr|esm\.sh)"
+
+(no matches = good), update the "Pinned version" + date above, and commit.
+
+Note: install-button.js is loaded by docs/index.html via a relative path, so
+the filename must stay install-button.js (the hashed chunk names can change
+freely between versions — they are referenced from within install-button.js).

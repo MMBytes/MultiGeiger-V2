@@ -1,0 +1,4 @@
+Designator,Qty,Value,Package,Part Number
+J1,1,I2C 5V,Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal,C50137
+J2,1,I2C 3V3,Connector_JST:JST_SH_SM04B-SRSS-TB_1x04-1MP_P1.00mm_Horizontal,C160404
+U3,1,BSP125H6327,SOT223,C123756

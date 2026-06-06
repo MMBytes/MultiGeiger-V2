@@ -1,0 +1,97 @@
+(footprint "PIEPSER_small"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "PIEZO_KL1"
+		(at -4.3 -4.1 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "35f86e91-36a5-4f46-a2c4-bf3294c3cc87")
+		(effects
+			(font
+				(size 1.1684 1.1684)
+				(thickness 0.1016)
+			)
+			(justify left bottom)
+		)
+	)
+	(property "Value" "PIEPSER_small"
+		(at 0 0 180)
+		(layer "F.Fab")
+		(uuid "5de8f254-83a6-4f90-9533-ea08565d3cd6")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 180)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "5083f7dc-5fa7-4b02-a348-fe30f19ac513")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 180)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "3e1d4770-4443-4a96-835a-3c45c4ca8052")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_circle
+		(center 0 0)
+		(end 1.27 0)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "b6c30fe3-c999-4793-bdb9-3653fa513b92")
+	)
+	(fp_circle
+		(center 0 0)
+		(end 7 0)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "226855fc-53e3-4528-906f-15357479378c")
+	)
+	(pad "P1" thru_hole rect
+		(at -3.81 0)
+		(size 1.508 1.508)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.1016)
+		(thermal_bridge_angle 0)
+		(uuid "645c2d99-810c-4bd0-bc74-a4ac9c253453")
+	)
+	(pad "P2" thru_hole rect
+		(at 3.81 0)
+		(size 1.508 1.508)
+		(drill 1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.1016)
+		(thermal_bridge_angle 0)
+		(uuid "bf164428-44de-4a2d-8ec1-b896157b57fe")
+	)
+	(embedded_fonts no)
+)

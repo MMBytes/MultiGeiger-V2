@@ -145,6 +145,8 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  tz:               %s", cfg->tz_posix);
     ESP_LOGI(TAG, "  web:              admin_pw=%s tx_interval=%lums",
              MASK(cfg->ap_password), (unsigned long)cfg->tx_interval_ms);
+    ESP_LOGI(TAG, "  heap-guard:       floor=%lukB (0=off)",
+             (unsigned long)cfg->heap_guard_floor_kb);
     ESP_LOGI(TAG, "  station:          altitude=%.1fm send_sealevel_pressure=%d",
              (double)cfg->station_altitude_m, cfg->send_sealevel_pressure);
     ESP_LOGI(TAG, "  ftp:              enabled=%d tls=%d host=%s user=%s pw=%s",

@@ -1200,7 +1200,7 @@ void app_main(void) {
 
         {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            periodic_loop(now_ms);       // V2.4.19: 24h PSA refresh + safety-net ARP
+            periodic_loop(now_ms, g_cfg.heap_guard_floor_kb);  // V2.4.19: 24h PSA refresh + ARP; V2.5.14: heap-guard reboot
             history_tick(now_ms);        // V2.5.6: 60s CPM history sampler
             log_ftp_loop(now_ms);
         }

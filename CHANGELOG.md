@@ -9,6 +9,35 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.14 — heap-guard auto-reboot (opt-in fragmentation safety-net)
+
+### New config knob `heap_guard_floor_kb` (default 0 = off)
+- **Problem:** INTERNAL-DRAM **fragmentation** (total free heap stays flat, but the
+  *largest contiguous block* slowly shrinks across days of TLS-handshake churn) is the
+  OTA-stall precursor and a long-tail OOM risk on month+ uptimes. The existing 24h PSA
+  crypto refresh (`periodic.c`) *slows* it but doesn't fully prevent it — the dust node
+  `esp32-5965048` soaked `INTERNAL largest` from **71.7 K → 62.5 K over 4.8 days** despite
+  the refresh, on a clear downward (not plateauing) trend.
+- **Fix:** new `periodic_heap_guard()` in `periodic.c`. When `heap_guard_floor_kb > 0`, it
+  reboots the node (via the clean `main_request_restart()` path — persists state, flushes
+  applog, `esp_restart` from the main loop) once `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)`
+  stays below the floor. A reboot is the only certain reset of fragmentation.
+- **Boot-loop hardened** (a loop on an unreachable field node is worse than fragmentation):
+  - **2h arm-delay** — never acts in the first 2h of uptime (a board that boots
+    already-fragmented, or with a mis-set floor, can't reboot itself in a loop).
+  - **6h rate-limit** — at most one guard-reboot per 6h.
+  - **TX-idle sampling** — only samples `largest` when `tx_is_idle()`, so transient
+    mid-handshake dips are filtered (no separate de-glitch timer).
+  - **3-sample debounce** — needs 3 consecutive idle sub-floor reads before acting.
+- **Opt-in & live:** default `0` = disabled (no behaviour change for the fleet). Set per
+  node on `/config` ("Heap-guard auto-reboot floor (KB)"); read live each tick by
+  `periodic_loop()`, so a plain **Save** applies it **without a reboot**. `~44` KB is a
+  sane starting floor — validate against an actual OTA's contiguous-alloc need first. The
+  trigger logs a loud `HEAP GUARD: …` WARN to `/log` + syslog before rebooting.
+- Plumbing: one schema line in `config_fields.def` (X-macro auto-generates struct + NVS
+  load/save + POST parse); `periodic_loop()` gains a `heap_guard_floor_kb` arg (passed
+  from `g_cfg` in `main.c`); boot-dump line in `config.c`; form field in `http_server.c`.
+
 ## V2.5.13 — /status uploads fix + Heltec MQTT boot‑defer
 
 ### `/status` Uploads block: per-cell inline styles → CSS classes (`http_server.c`)

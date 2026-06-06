@@ -1504,6 +1504,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Web admin and access point password<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
         "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
         "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
+        // V2.5.14: heap-guard auto-reboot floor. No asterisk — read live each
+        // tick by periodic_loop(), so it applies on plain Save (no reboot).
+        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\">"
+        " <small>Unattended long-uptime nodes only: reboots the device if the "
+        "internal largest-free block stays below this floor (the OTA-stall / "
+        "long-tail-OOM precursor). 0 disables. ~44 is a sane starting floor; a "
+        "2h arm-delay + 6h rate-limit prevent boot-loops.</small></label>"
         // V2.3.24: two submit buttons. The clicked button's name=value is the
         // only one included in the POST body (standard HTML form behaviour),
         // so the handler distinguishes via the "save_restart" key. Plain
@@ -1598,7 +1606,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->display_mode == 2 ? " selected" : "",
         br_opts,
         e_ntp1, e_ntp2, e_ntp3, e_tz, e_ap,
-        (unsigned long)s_cfg->tx_interval_ms);
+        (unsigned long)s_cfg->tx_interval_ms,
+        (unsigned long)s_cfg->heap_guard_floor_kb);   // V2.5.14 heap-guard floor
 
     // V2.3.33: snprintf returns the would-have-been length on truncation,
     // not the bytes actually written. If n >= buffer size the page tail was

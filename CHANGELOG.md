@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.15 — DNMS noise: fix sensor.community field naming (HTTP 400)
+
+### Bug: every DNMS noise POST to sensor.community 400'd
+- **Symptom:** with a DNMS connected (first deployed on dust node `esp32-5965048`
+  2026-06-07), every cycle logged `sensor.community: ... noise rc=400` while BME (PIN 11)
+  and PM (PIN 1) on the same node returned 201. Madavi / openSenseMap / aqi.eco all
+  accepted the noise data fine.
+- **Root cause:** the PIN-15 body sent **`DNMS_`-prefixed** value names
+  (`DNMS_noise_LAeq` / `DNMS_noise_LA_min` / `DNMS_noise_LA_max`). sensor.community
+  expects the **unprefixed** `noise_LAeq` / `noise_LA_min` / `noise_LA_max` on PIN 15 and
+  rejects the prefixed form: `{"value_type":["\"DNMS_noise_LAeq\" is not a valid choice."]}`.
+  This is the **same prefix-strip rule as SPS30 on PIN 1** — upstream airrohr builds the
+  JSON with `DNMS_`-prefixed names (for Madavi) then *strips* the prefix before the SC POST
+  (the `"DNMS_"` argument to `sendSensorCommunity()` is the replace string, not proof the
+  prefix is kept). Verified live against `api.sensor.community`: prefixed → HTTP 400,
+  unprefixed → HTTP 201.
+- **Fix:** `build_sensorc_noise_body()` in `transmission.c` now emits the unprefixed
+  `noise_*` names. Madavi / openSenseMap / aqi.eco builders are unchanged (they correctly
+  keep `DNMS_noise_*`). No hardware/config change — the SC node was already registered with
+  DNMS on pin 15; only the field naming was wrong.
+
+---
+
 ## V2.5.14 — heap-guard auto-reboot (opt-in fragmentation safety-net)
 
 ### New config knob `heap_guard_floor_kb` (default 0 = off)

@@ -506,18 +506,29 @@ static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t c
         (unsigned long)c->gm_counts, (unsigned long)c->dt_ms, msi);
 }
 
-// X-PIN 15 body for hbitter DNMS noise sensor. Canonical airrohr value
-// (DNMS_API_PIN 15 from airrohr-firmware/defines.h) — keep DNMS_noise_*
-// prefixed names identical between SC and Madavi (unlike Si22G/BME which
-// use unprefixed names on SC, prefixed on Madavi).
+// X-PIN 15 body for hbitter DNMS noise sensor. PIN 15 = DNMS_API_PIN.
+//
+// IMPORTANT: sensor.community expects the UNPREFIXED value names
+// noise_LAeq / noise_LA_min / noise_LA_max on PIN 15 — NOT the DNMS_-prefixed
+// ones. This is the same prefix-strip rule as SPS30 on PIN 1 (see below):
+// upstream airrohr builds the JSON with "DNMS_"-prefixed names for internal /
+// Madavi use, then sendSensorCommunity() STRIPS the prefix (its replace_str
+// argument is "DNMS_") before POSTing to sensor.community. Madavi / openSenseMap
+// / aqi.eco keep the DNMS_noise_* prefix (their builders are unchanged).
+//
+// Verified live 2026-06-07 against api.sensor.community: the prefixed body 400s
+// with {"value_type":["\"DNMS_noise_LAeq\" is not a valid choice."]} while the
+// unprefixed body below returns 201. (V2.5.14 and earlier shipped the prefixed
+// names → every noise POST 400'd; first surfaced when the DNMS was wired up on
+// the dust node 2026-06-07.)
 static void build_sensorc_noise_body(const tx_context_t *c, char *buf, size_t cap) {
     snprintf(buf, cap,
         "{\n"
         " \"software_version\": \"%s\",\n"
         " \"sensordatavalues\": [\n"
-        "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
-        "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}\n"
+        "  {\"value_type\": \"noise_LAeq\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"noise_LA_min\", \"value\": \"%.2f\"},\n"
+        "  {\"value_type\": \"noise_LA_max\", \"value\": \"%.2f\"}\n"
         " ]\n}",
         c->sw_version,
         c->noise.laeq, c->noise.la_min, c->noise.la_max);

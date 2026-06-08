@@ -1335,8 +1335,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         // the TX sub-options, and tube-gated via syncTube() (greyed when the
         // tube is off; it can't run without count pulses).
         "<div class=\"cfg\">"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filter\" "
-        "id=\"pcnt_filter\" %s> "
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filt\" "
+        "id=\"pcnt_filt\" %s> "
         "PCNT pulse-width filter &mdash; drops count-line pulses narrower than the "
         "width below (removes the ESP32-S3 narrow-pulse over-count). When ON it "
         "<b>changes the counted CPM</b> (dose/uploads use the filtered count); the log "
@@ -1429,7 +1429,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         // tube" is off (server-side enforcement in config_post mirrors this).
         "function syncTube(){"
         "var t=document.getElementById('tube_en');"
-        "var a=['send_rad','send_gmc','send_ts','pcnt_filter','pcnt_filt_w'];"
+        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
         "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
         "if(!e)continue;"
         "if(t.checked){e.disabled=false;}"

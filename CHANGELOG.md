@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.17 — fix: the PCNT filter checkbox could never be enabled (form-name vs NVS-key mismatch)
+
+**What:** In V2.5.16 the `/config` "PCNT pulse-width filter" checkbox was `name="pcnt_filter"`, but the POST handler dispatches on the **NVS key**, which is `"pcnt_filt"` (`config.c::config_post` → `strcmp(key, k)`). `"pcnt_filter" != "pcnt_filt"`, so ticking the box was silently ignored: the bool stayed pre-cleared to `false` and **`pcnt_filter` could never be set true from the web UI** — the entire feature was un-enableable as shipped.
+
+**Why it happened:** the `pcnt_diag → pcnt_filter` rename. When the field was `pcnt_diag` the struct name and NVS key were both `"pcnt_diag"`, so the HTML `name=` matched by coincidence; the rename made them diverge (struct `pcnt_filter`, key `pcnt_filt`) and the HTML `name=` was left as the struct name. The `pcnt_filter_width_ns` input (`name="pcnt_filt_w"`) was already correct. No other field is affected (every pre-existing field's HTML name already equals its NVS key).
+
+**Fix:** checkbox `name`/`id` → `"pcnt_filt"`, and the `syncTube()` id list updated to match. Not an NVS-size or save-path issue — `config_save()`'s error handling is correct and NVS (0x6000 = 24 KB) is not full. Three V2.5.16 reviews missed it because they checked C-side rename consistency + printf-arg order, not the HTML-name == NVS-key contract.
+
 ## V2.5.16 — PCNT pulse-width filter (+ width diagnostic) for the board-gap, off by default
 
 **What:** A new opt-in **width filter** (`tube_pcnt.c`) on the GMC count pin, built from up to 4 parallel hardware PCNT units running the peripheral glitch filter at 0 / 250 ns / 1 µs / 4 µs. When the `pcnt_filter` flag is **on**, the authoritative per-cycle count switches from the ISR (dead-time-gated) count to the **4 µs-filtered PCNT count** — dropping the narrow pulses behind the board gap — and that filtered count drives CPM, dose, `/status`, MQTT and all uploads. The full diagnostic is still logged every cycle: the `DIAG:` line (raw edges + spacing histogram), the `PCNT:` line (the 4-width comb), plus a new `FILTER:` line carrying the **pre-filter** counts/cpm so the unfiltered reading stays visible.

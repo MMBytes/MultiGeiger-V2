@@ -190,6 +190,6 @@ void tube_pcnt_read(uint32_t out[TUBE_PCNT_NWIDTHS]) {
 uint32_t tube_pcnt_filtered_total(void) {
     if (!s_active) return 0u;
     int total = 0;
-    pcnt_unit_get_count(s_units[TUBE_PCNT_NWIDTHS - 1], &total);  // widest = 4 µs
+    pcnt_unit_get_count(s_units[TUBE_PCNT_NWIDTHS - 1], &total);  // widest = filter width
     return (total < 0) ? 0u : (uint32_t)total;
 }

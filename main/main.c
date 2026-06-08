@@ -469,10 +469,11 @@ static void do_tx_cycle(void) {
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
     tube_get_diag(&diag_raw_edges, diag_hist);
 
-    // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read resets
-    // the units) so the same snapshot drives BOTH the optional width FILTER and
-    // the PCNT diag log line below. pc[NWIDTHS-1] = count surviving the widest
-    // (4 µs) glitch filter.
+    // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read
+    // advances each unit's per-cycle delta base, so re-reading would zero the
+    // second consumer's delta) so the same snapshot drives BOTH the optional
+    // width FILTER and the PCNT diag log line below. pc[NWIDTHS-1] = count
+    // surviving the widest (configured filter width, default 4 µs) glitch filter.
     uint32_t pc[TUBE_PCNT_NWIDTHS] = {0};
     bool pcnt_on = tube_pcnt_active();
     if (pcnt_on) tube_pcnt_read(pc);
@@ -561,7 +562,8 @@ static void do_tx_cycle(void) {
                  (unsigned long)diag_hist[6], (unsigned long)diag_hist[7]);
 
         // V2.5.16: PCNT width-comb dump (reuses the snapshot taken up top — do
-        // NOT re-read, that would reset the units mid-cycle). pc[0] is unfiltered
+        // NOT re-read, that would advance the delta base and zero this dump).
+        // pc[0] is unfiltered
         // (≈ DIAG raw_edges, same cycle); pc[1..3] reject pulses narrower than
         // TUBE_PCNT_WIDTHS_NS[i]. (pc[0]-pc[N]) = pulses in that width band. When
         // pcnt_filter is on, pc[NWIDTHS-1] is the count the CYCLE line reports.

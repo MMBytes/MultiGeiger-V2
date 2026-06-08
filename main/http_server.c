@@ -38,6 +38,7 @@
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
 #include "tube.h"
+#include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
 #include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
 #include "log_ftp.h"
@@ -581,15 +582,30 @@ static void format_radiation(char *out, size_t sz) {
                  (unsigned long)st.last_hv_pulses);
     }
 
+    // V2.5.16: width-filter indicator — only shown when the filter is active.
+    // Makes it obvious on the page that the CPM above is POST-filter, and what
+    // the pre-filter value was, so the effect is visible without the syslog.
+    char filt_line[128];
+    if (st.pcnt_filtering) {
+        snprintf(filt_line, sizeof(filt_line),
+                 "<b>PCNT width filter:</b> ON @%lu ns &mdash; raw CPM %lu "
+                 "&rarr; filtered %lu<br>",
+                 (unsigned long)st.pcnt_filter_width_ns,
+                 (unsigned long)st.last_cpm_raw, (unsigned long)st.last_cpm);
+    } else {
+        filt_line[0] = 0;
+    }
+
     snprintf(out, sz,
         "<div class=\"info\"><h3>Radiation</h3>"
         "<b>Tube:</b> enabled%s<br>"
         "<b>CPM:</b> %lu<br>"
+        "%s"
         "<b>Dose rate:</b> %.3f µSv/h<br>"
         "<b>HV pulses:</b> %s"
         "</div>",
         st.last_hv_error ? " &middot; <span style='color:#c00;font-weight:bold'>HV ERROR</span>" : "",
-        (unsigned long)st.last_cpm, st.last_usvph,
+        (unsigned long)st.last_cpm, filt_line, st.last_usvph,
         hv_line);
 }
 
@@ -1315,6 +1331,21 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
+        // V2.5.16: PCNT pulse-width filter — indented under the tube enable like
+        // the TX sub-options, and tube-gated via syncTube() (greyed when the
+        // tube is off; it can't run without count pulses).
+        "<div class=\"cfg\">"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filter\" "
+        "id=\"pcnt_filter\" %s> "
+        "PCNT pulse-width filter &mdash; drops count-line pulses narrower than the "
+        "width below (removes the ESP32-S3 narrow-pulse over-count). When ON it "
+        "<b>changes the counted CPM</b> (dose/uploads use the filtered count); the log "
+        "still shows the full <code>DIAG</code>/<code>PCNT</code> data and a "
+        "<code>FILTER:</code> line with the pre-filter CPM. "
+        "<span class=\"r\">*</span></label></div>"
+        "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
+        "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
+        "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label></div>"
         // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
         // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
         // configure here. See the "GNSS / Position" card on /status.
@@ -1398,7 +1429,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         // tube" is off (server-side enforcement in config_post mirrors this).
         "function syncTube(){"
         "var t=document.getElementById('tube_en');"
-        "var a=['send_rad','send_gmc','send_ts'];"
+        "var a=['send_rad','send_gmc','send_ts','pcnt_filter','pcnt_filt_w'];"
         "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
         "if(!e)continue;"
         "if(t.checked){e.disabled=false;}"
@@ -1546,6 +1577,8 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
         e_chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
+        s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
+        (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",
@@ -1756,6 +1789,7 @@ static esp_err_t config_post(httpd_req_t *req) {
         next.send_radmon = false;
         next.send_gmc = false;
         next.send_thingspeak = false;
+        next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
     }
 
     *s_cfg = next;
@@ -2017,6 +2051,8 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     log_ftp_pause();
     mqtt_stop();
     syslog_stop();   // V2.4.15: close UDP socket too (small but consistent)
+    tube_pcnt_stop(); // V2.5.16: release the opt-in PCNT comb's internal DRAM
+                      // (no-op when pcnt_filter is off — the common case)
     // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
     // this the poll re-armed both within ~1 s of the stops above, undoing
     // the V2.4.13 heap-freeing intent during the bulk of the OTA write.

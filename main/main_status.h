@@ -50,6 +50,9 @@ typedef struct {
     uint32_t last_cycle_ms;   // monotonic uptime ms at last cycle (0 = never)
     uint32_t reconnects;      // WiFi STA reconnect count since boot
     uint32_t i2c_errors;      // V2.4.28: cumulative I²C sensor read failures
+    bool     pcnt_filtering;  // V2.5.16: last_cpm is PCNT width-filtered
+    uint32_t last_cpm_raw;    // V2.5.16: pre-filter CPM (== last_cpm when off)
+    uint32_t pcnt_filter_width_ns;  // V2.5.16: active filter width (0 = off)
 } main_status_t;
 
 /** @brief Snapshot the cached last-cycle state into `out`.

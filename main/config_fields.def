@@ -260,3 +260,33 @@ X_U32 (syslog_port,            "syslog_p",    514,      1,       65535)
 // /config Save applies WITHOUT a reboot. ~44 is a sane starting floor; validate
 // it against an actual OTA's contiguous-alloc need before trusting in the field.
 X_U32 (heap_guard_floor_kb,    "heap_guard",  0,        0,       200)
+
+// --- PCNT pulse-width FILTER + diagnostic (V2.5.16) --------------------------
+//
+// When ON, the authoritative per-cycle count switches from the ISR (dead-time
+// gated) count to the PCNT widest-width count (tube_pcnt.c): the hardware
+// glitch filter drops count-line pulses narrower than TUBE_PCNT_WIDTHS_NS's top
+// tooth (4 us), removing the 1-4 us marginal-pulse population that makes the
+// Feather (ESP32-S3) read ~+14 % over the Heltec (ESP32) — see
+// reference_radiation_data_analysis. This filtered count drives CPM, dose,
+// /status, MQTT and all uploads.
+//
+// The full diagnostic is ALWAYS logged while this is on: the DIAG line (raw
+// edges + spacing histogram) and the PCNT line (the 4-width comb) are emitted
+// every cycle, plus a FILTER line carrying the PRE-filter counts/cpm so the
+// unfiltered value stays visible. So you see both before- and after-filter.
+//
+// The rolling 5-/15-min averages (history.c, GMC ACPM + ThingSpeak f3/f4) are
+// filtered too: history.c samples the PCNT width-filtered monotonic total when
+// this is on, so cpm5/cpm15 stay consistent with the per-cycle filtered CPM.
+// Off by default on every board (opt-in per node); tube must be enabled.
+// Reboot-required (PCNT units are brought up at tube setup).
+X_BOOL(pcnt_filter,           "pcnt_filt",   false)
+
+// Filter width (ns): pulses narrower than this are dropped. Sets the WIDEST
+// comb tooth (the filter source); the diagnostic teeth stay 0/250ns/1µs. The
+// experiment found ~4µs but the optimum is temperature-sensitive (the Heltec's
+// narrow-pulse fraction climbs as it warms), so it's tunable per node. Bounded
+// to stay under the APB glitch-filter ceiling (~12.8µs). Reboot-required (the
+// glitch filter is set at unit init). Only meaningful when pcnt_filter is on.
+X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)

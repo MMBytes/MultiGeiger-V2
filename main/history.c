@@ -6,7 +6,8 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 
-#include "tube.h"   // tube_get_total_counts(), tube_is_enabled()
+#include "tube.h"        // tube_get_total_counts(), tube_is_enabled()
+#include "tube_pcnt.h"   // V2.5.16: tube_pcnt_filtered_total() (filtered source)
 
 static const char *TAG = "history";
 
@@ -30,6 +31,7 @@ static uint16_t s_cpm15;
 static uint32_t s_last_total;      // tube total at the previous sample
 static uint32_t s_last_ms;         // ms at the previous sample
 static bool     s_primed;          // first tick establishes the baseline
+static bool     s_filtered_src;    // V2.5.16: which total feeds the last sample
 static uint32_t s_hour_sum;        // running sum of minute samples this hour
 static uint8_t  s_hour_n;          // minute samples accumulated this hour
 
@@ -64,27 +66,38 @@ void history_init(void) {
     s_cpm_now = s_cpm5 = s_cpm15 = 0;
     s_last_total = s_last_ms = 0;
     s_primed = false;
+    s_filtered_src = false;
     s_hour_sum = 0;
     s_hour_n = 0;
     s_mux = xSemaphoreCreateMutex();
     if (!s_mux) ESP_LOGE(TAG, "mutex alloc failed — history disabled");
 }
 
-void history_tick(uint32_t now_ms) {
+void history_tick(uint32_t now_ms, bool use_filtered) {
     if (!s_mux) return;
     if (!tube_is_enabled()) return;   // radiation-only; dust node collects nothing
 
-    // First tick establishes the count/time baseline (now_ms is unknown at init).
-    if (!s_primed) {
-        s_last_total = tube_get_total_counts();
-        s_last_ms    = now_ms;
-        s_primed     = true;
+    // V2.5.16: count source = PCNT width-filtered monotonic total when the
+    // filter is on, else the raw ISR total — so cpm5/cpm15 stay consistent with
+    // the filtered per-cycle CPM. Both totals are monotonic since boot; this is
+    // the only place that reads the filtered one for the rolling averages.
+    uint32_t total = use_filtered ? tube_pcnt_filtered_total()
+                                  : tube_get_total_counts();
+
+    // (Re)prime on the first tick (now_ms unknown at init) OR on a source
+    // switch (a runtime pcnt_filter toggle) — the two totals have different
+    // magnitudes, so carrying a delta across the switch would inject one
+    // garbage minute. Re-priming skips a single sample instead.
+    if (!s_primed || use_filtered != s_filtered_src) {
+        s_last_total   = total;
+        s_last_ms      = now_ms;
+        s_primed       = true;
+        s_filtered_src = use_filtered;
         return;
     }
     if ((uint32_t)(now_ms - s_last_ms) < HIST_SAMPLE_MS) return;
     s_last_ms = now_ms;
 
-    uint32_t total = tube_get_total_counts();
     uint32_t d = total - s_last_total;        // unsigned, wrap-safe
     s_last_total = total;
     uint16_t cpm = (d > 0xFFFEu) ? 0xFFFEu : (uint16_t)d;   // 60 s delta == CPM

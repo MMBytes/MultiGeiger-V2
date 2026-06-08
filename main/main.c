@@ -43,6 +43,7 @@
 #include "syslog.h"
 #include "transmission.h"
 #include "tube.h"
+#include "tube_pcnt.h"   // V2.5.16: optional PCNT pulse-width comb diagnostic
 #include "util.h"
 #include "version.h"
 
@@ -160,6 +161,11 @@ static uint32_t g_last_dt_ms      = 0;
 static uint32_t g_last_counts     = 0;
 static uint32_t g_last_cpm        = 0;
 static float    g_last_usvph      = 0.0f;
+// V2.5.16: PCNT width-filter state for /status — whether the last cycle's CPM
+// was width-filtered, the pre-filter CPM, and the active filter width.
+static bool     g_last_filtering    = false;
+static uint32_t g_last_cpm_raw      = 0;
+static uint32_t g_last_filter_width_ns = 0;
 static uint32_t g_last_hv_pulses        = 0;   // cumulative since boot (MQTT)
 static uint32_t g_last_hv_pulses_delta  = 0;   // V2.4.27: per-cycle delta (status + legacy HTTPS)
 static bool     g_last_hv_error   = false;
@@ -203,6 +209,9 @@ void main_status_snapshot(main_status_t *out) {
     out->last_cycle_ms  = g_last_cycle_ms;
     out->reconnects     = (uint32_t)n_disconnects;   // truncating cast — see counter decl
     out->i2c_errors     = diag_i2c_errors();         // V2.4.28
+    out->pcnt_filtering = g_last_filtering;          // V2.5.16
+    out->last_cpm_raw   = g_last_cpm_raw;
+    out->pcnt_filter_width_ns = g_last_filter_width_ns;
 }
 
 // V2.3.29: per-target enable accessor used by the multi-page display
@@ -449,9 +458,9 @@ static void build_tx_context(tx_context_t *ctx,
 }
 
 static void do_tx_cycle(void) {
-    uint32_t counts, dt_ms, min_us, max_us, hv_pulses;
+    uint32_t counts_raw, dt_ms, min_us, max_us, hv_pulses;
     bool hv_error;
-    tube_read(&counts, &dt_ms, &min_us, &max_us, &hv_pulses, &hv_error);
+    tube_read(&counts_raw, &dt_ms, &min_us, &max_us, &hv_pulses, &hv_error);
 
     // V2.5.12: capture the raw-edge profile right next to tube_read so the
     // count window and raw-edge window align (so raw_edges >= counts). Dumped
@@ -459,6 +468,34 @@ static void do_tx_cycle(void) {
     uint32_t diag_raw_edges = 0;
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
     tube_get_diag(&diag_raw_edges, diag_hist);
+
+    // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read resets
+    // the units) so the same snapshot drives BOTH the optional width FILTER and
+    // the PCNT diag log line below. pc[NWIDTHS-1] = count surviving the widest
+    // (4 µs) glitch filter.
+    uint32_t pc[TUBE_PCNT_NWIDTHS] = {0};
+    bool pcnt_on = tube_pcnt_active();
+    if (pcnt_on) tube_pcnt_read(pc);
+
+    // V2.5.16: when pcnt_filter is on, the authoritative count for this cycle is
+    // the width-filtered PCNT count — it drops the 1-4 µs marginal-pulse
+    // population behind the Feather/Heltec gap (see reference_radiation_data_
+    // analysis). counts_raw (the ISR dead-time-gated count) is kept as the
+    // pre-filter reference and logged on the FILTER line. NOTE the PCNT path
+    // applies a WIDTH gate only — it has no dead-time/spacing gate. On THIS
+    // hardware the sub-190 µs ringing the ISR rejects is <250 ns wide (measured,
+    // 2026-06-08), so the 4 µs width filter is EXPECTED to drop it too — but
+    // that's the thing under test, not a guarantee: a genuine >4 µs-wide pulse
+    // arriving inside the 190 µs window would be counted by PCNT and not by the
+    // ISR (so the filtered count can occasionally exceed counts_raw — the
+    // `removed`/`drop` guards handle that without underflow). Everything
+    // downstream (cps/cpm/usvph, /status, MQTT, uploads,
+    // build_tx_context) derives from `counts`, so this one substitution filters
+    // the whole pipeline. Rolling cpm5/cpm15 are ALSO filtered now: history.c
+    // samples the PCNT filtered monotonic total via the same `filtering`
+    // decision passed to history_tick() (V2.5.16).
+    bool filtering = g_cfg.pcnt_filter && pcnt_on;
+    uint32_t counts = filtering ? pc[TUBE_PCNT_NWIDTHS - 1] : counts_raw;
 
     // V2.4.27: hv_pulses returned by tube_read() is cumulative-since-boot
     // (see tube.h). Derive the per-cycle delta here so the legacy HTTPS
@@ -493,11 +530,28 @@ static void do_tx_cycle(void) {
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
                  (unsigned long)max_us, rssi, (unsigned long)i2c_errs);
 
-        // V2.5.12: raw-edge profiler dump. rejected = edges suppressed by
-        // the dead-time gate (ringing/double-counts). edt_us bins show where
-        // edge-to-edge spacing lands: low bins = ringing/noise, top two = real.
+        // V2.5.16: when filtering, the CYCLE line above carries the POST-filter
+        // count/cpm (what's uploaded); surface the PRE-filter ISR values here so
+        // the unfiltered reading stays in the log. removed = how many ISR counts
+        // the width filter dropped this cycle.
+        if (filtering) {
+            uint32_t cpm_raw = (dt_ms > 0)
+                ? (uint32_t)(((uint64_t)counts_raw * 60000ULL) / dt_ms) : 0;
+            uint32_t removed = (counts_raw >= counts) ? (counts_raw - counts) : 0;
+            ESP_LOGI(TAG, "FILTER: pcnt_filter ON @%luns — CYCLE counts/cpm are "
+                     "POST-filter; pre-filter counts=%lu cpm=%lu (removed %lu)",
+                     (unsigned long)tube_pcnt_width_ns(TUBE_PCNT_NWIDTHS - 1),
+                     (unsigned long)counts_raw, (unsigned long)cpm_raw,
+                     (unsigned long)removed);
+        }
+
+        // V2.5.12: raw-edge profiler dump. rejected = edges suppressed by the
+        // dead-time gate (ringing/double-counts) — always the RAW ISR count, so
+        // it stays meaningful whether or not the width filter is on. edt_us bins
+        // show where edge-to-edge spacing lands: low bins = ringing/noise, top
+        // two = real.
         uint32_t diag_rejected =
-            (diag_raw_edges >= counts) ? (diag_raw_edges - counts) : 0;
+            (diag_raw_edges >= counts_raw) ? (diag_raw_edges - counts_raw) : 0;
         ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu "
                  "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
@@ -505,6 +559,23 @@ static void do_tx_cycle(void) {
                  (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
                  (unsigned long)diag_hist[6], (unsigned long)diag_hist[7]);
+
+        // V2.5.16: PCNT width-comb dump (reuses the snapshot taken up top — do
+        // NOT re-read, that would reset the units mid-cycle). pc[0] is unfiltered
+        // (≈ DIAG raw_edges, same cycle); pc[1..3] reject pulses narrower than
+        // TUBE_PCNT_WIDTHS_NS[i]. (pc[0]-pc[N]) = pulses in that width band. When
+        // pcnt_filter is on, pc[NWIDTHS-1] is the count the CYCLE line reports.
+        if (pcnt_on) {
+            uint32_t drop = (pc[0] >= pc[TUBE_PCNT_NWIDTHS - 1])
+                                ? (pc[0] - pc[TUBE_PCNT_NWIDTHS - 1]) : 0;
+            ESP_LOGI(TAG, "PCNT: w_ns[%lu|%lu|%lu|%lu]=%lu %lu %lu %lu "
+                     "(off≈raw_edges; off-widest=%lu narrow)",
+                     (unsigned long)tube_pcnt_width_ns(0), (unsigned long)tube_pcnt_width_ns(1),
+                     (unsigned long)tube_pcnt_width_ns(2), (unsigned long)tube_pcnt_width_ns(3),
+                     (unsigned long)pc[0], (unsigned long)pc[1],
+                     (unsigned long)pc[2], (unsigned long)pc[3],
+                     (unsigned long)drop);
+        }
     } else {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,
@@ -516,6 +587,10 @@ static void do_tx_cycle(void) {
     g_last_counts    = counts;
     g_last_cpm       = cpm;
     g_last_usvph     = usvph;
+    g_last_filtering = filtering;          // V2.5.16: /status filter indicator
+    g_last_cpm_raw   = (dt_ms > 0)
+        ? (uint32_t)(((uint64_t)counts_raw * 60000ULL) / dt_ms) : 0;
+    g_last_filter_width_ns = filtering ? tube_pcnt_width_ns(TUBE_PCNT_NWIDTHS - 1) : 0;
     g_last_hv_pulses       = hv_pulses;        // cumulative — MQTT
     g_last_hv_pulses_delta = hv_pulses_delta;  // per-cycle — status page + HTTPS uploads
     g_last_hv_error  = hv_error;
@@ -955,6 +1030,17 @@ void app_main(void) {
     // LOW output but skips ISR install + HV gptimer; speaker pulse callback
     // can still be registered (it just never fires without ISR pulses).
     tube_setup(g_cfg.tube_enabled);
+
+    // V2.5.16: optional PCNT pulse-width filter+comb (off by default). Brought
+    // up after tube_setup so the count pin is already an input with the GMC ISR
+    // live — PCNT only adds GPIO-matrix taps and never disturbs the ISR. When
+    // pcnt_filter is on, do_tx_cycle uses the widest-tooth count as the
+    // authoritative CPM (and logs the full comb + pre-filter values). Tube-gated:
+    // pointless without count pulses.
+    if (g_cfg.tube_enabled && g_cfg.pcnt_filter) {
+        tube_pcnt_init(g_cfg.pcnt_filter_width_ns);
+    }
+
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
 
@@ -1201,7 +1287,11 @@ void app_main(void) {
         {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             periodic_loop(now_ms, g_cfg.heap_guard_floor_kb);  // V2.4.19: 24h PSA refresh + ARP; V2.5.14: heap-guard reboot
-            history_tick(now_ms);        // V2.5.6: 60s CPM history sampler
+            // V2.5.6: 60s CPM history sampler. V2.5.16: feed it the SAME
+            // filtered-vs-raw decision as the per-cycle count so cpm5/cpm15
+            // (GMC ACPM, ThingSpeak f3/f4) track the filtered CPM when the
+            // width filter is on.
+            history_tick(now_ms, g_cfg.pcnt_filter && tube_pcnt_active());
             log_ftp_loop(now_ms);
         }
 

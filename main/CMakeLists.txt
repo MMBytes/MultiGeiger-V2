@@ -4,6 +4,7 @@ idf_component_register(
         "config.c"
         "http_server.c"
         "tube.c"
+        "tube_pcnt.c"
         "history.c"
         "ntp.c"
         "gnss.c"
@@ -43,6 +44,7 @@ idf_component_register(
         esp_timer
         esp_driver_gpio
         esp_driver_gptimer
+        esp_driver_pcnt        # V2.5.16: parallel PCNT width-comb diag (tube_pcnt.c)
         esp_driver_i2c
         esp_adc
         esp_driver_ledc

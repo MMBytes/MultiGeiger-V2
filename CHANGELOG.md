@@ -9,6 +9,20 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.16 — PCNT pulse-width filter (+ width diagnostic) for the board-gap, off by default
+
+**What:** A new opt-in **width filter** (`tube_pcnt.c`) on the GMC count pin, built from up to 4 parallel hardware PCNT units running the peripheral glitch filter at 0 / 250 ns / 1 µs / 4 µs. When the `pcnt_filter` flag is **on**, the authoritative per-cycle count switches from the ISR (dead-time-gated) count to the **4 µs-filtered PCNT count** — dropping the narrow pulses behind the board gap — and that filtered count drives CPM, dose, `/status`, MQTT and all uploads. The full diagnostic is still logged every cycle: the `DIAG:` line (raw edges + spacing histogram), the `PCNT:` line (the 4-width comb), plus a new `FILTER:` line carrying the **pre-filter** counts/cpm so the unfiltered reading stays visible.
+
+**Why:** The socketed Feather (ESP32-S3) reads a stable **+15–17 %** CPM over the Heltec (ESP32), localised to the MCU board (controlled PCB/HV/parts swaps ruled out everything else) and characterised as ESP32-S3 input over-sensitivity — about half of the excess is a 1–4 µs narrow-pulse population the ESP32 never registers. A 4 µs width filter removes that half (gap → ~+8 %). The measures the *width* axis the production ISR never saw (it only gates on *spacing*: the 190 µs dead-time + V2.5.12 edge histogram).
+
+**How:** PCNT taps the same pad through the GPIO matrix, parallel to the ISR (unlike ESPGeiger's compile-time PCNT replacement on legacy `driver/pcnt.h`); built on IDF v6 `driver/pulse_cnt.h`. The ISR count is retained as `counts_raw` (pre-filter reference + the `rejected` calc); the snapshot is read once per cycle and reused for both the filter election and the `PCNT:` dump. New `esp_driver_pcnt` REQUIRES. Gated by a new `pcnt_filter` config flag (default **off** on every board), shown indented under "Enable Geiger tube" on `/config`, tube-gated like the radiation TX targets. Reboot-required (units come up at tube setup). The filter is **not recommended on the production radiation node** (it only halves the gap and may clip genuine pulses — see reference notes); it's offered for new nodes or after a check-source validates the narrow pulses as noise.
+
+**Consistency + tunability (added before close):**
+- The PCNT comb units are **monotonic accumulators** (`flags.accum_count` + a high-limit watch point), read as software deltas (no clear → also removes the old read/clear lost-edge bias). A new `tube_pcnt_filtered_total()` lets `history.c`'s 60 s sampler read the *filtered* monotonic total, so the **rolling 5-/15-min averages (GMC ACPM / ThingSpeak f3/f4) are now filtered too** when the filter is on — consistent with the per-cycle CPM. `history_tick()` takes the live `pcnt_filter && tube_pcnt_active()` decision; a source switch re-primes one sample.
+- **Configurable filter width** via `pcnt_filter_width_ns` (default 4000, bounded 250–12000 ns) — sets the widest comb tooth = the filter source; the diagnostic teeth stay 0/250 ns/1 µs. The optimum is temperature-sensitive (the Heltec's narrow-pulse fraction climbs as it warms), so it's tunable per node from the syslog `PCNT:`/`FILTER:` lines. Reboot-required.
+- **`/status` indicator** — when the filter is active the Radiation card shows "PCNT width filter: ON @N ns — raw CPM X → filtered Y", so the effect is visible without the syslog.
+- OTA teardown calls `tube_pcnt_stop()` to release the comb's DRAM (+watch ISRs) for the OTA window. Two independent code reviews (no Critical/High); off/default path verified byte-for-byte unchanged.
+
 ## V2.5.15 — DNMS noise: fix sensor.community field naming (HTTP 400)
 
 ### Bug: every DNMS noise POST to sensor.community 400'd

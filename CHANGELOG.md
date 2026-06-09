@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.19 — fix: label the Seeed XIAO ESP32-S3 on the OTA page (was "(unknown board)")
+
+**What:** Added an `#elif BOARD_SEEED_XIAO_ESP32S3` branch to the `UPLOAD_PROMPT_BOARD` compile-time chain in `http_server.c` so the `/update` page reads "Select a firmware .bin for **Seeed XIAO ESP32-S3**" instead of falling through to the `#else` "**(unknown board)**".
+
+**Why:** The XIAO target shipped in V2.4.25 but was never given a label branch in that chain (which covered only Heltec 4 MB/8 MB, FeatherS3-D, and QT Py ESP32-PICO). Every XIAO build from V2.4.25 onward therefore showed "(unknown board)" on its OTA page. Cosmetic only — OTA itself always worked — but it made the page misleading. (Ironically it also made the page an accidental XIAO fingerprint: of the five supported targets, the XIAO was the only one that hit the `#else`, so "(unknown board)" uniquely identified a XIAO build.)
+
+**How:** Label-string `#define` only; no HAL/pin/partition change. `BOARD_SEEED_XIAO_ESP32S3` is defined `=1` by CMakeLists like the other board macros, so the bare-macro `#elif` evaluates correctly.
+
 ## V2.5.18 — fix: relocate the heap-guard auto-reboot off the 1 Hz tick onto the per-cycle resting snapshot (stop the /log-fetch misfire)
 
 **What:** The `heap_guard_floor_kb` INTERNAL-fragmentation auto-reboot (V2.5.14) moved from `periodic.c::periodic_heap_guard()` — called every main-loop tick (~1 Hz) — to `transmission.c::tx_heap_guard()`, evaluated **once per TX cycle** (~180 s) on the same resting heap snapshot the per-cycle `diag: per-cycle heap` line already reports. The predicate is now a fragmentation test, not a bare floor test: it counts a cycle only when `INTERNAL largest < floor` **AND** `INTERNAL free_total > 2×floor`; 5 consecutive qualifying cycles (~15 min) trigger the reboot.

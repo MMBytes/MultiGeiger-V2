@@ -1950,6 +1950,11 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
 #elif BOARD_ADAFRUIT_QTPY_ESP32_PICO
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit QT Py ESP32-PICO</b>"
+#elif BOARD_SEEED_XIAO_ESP32S3
+    // V2.5.19: the XIAO target shipped in V2.4.25 but was never given a label
+    // branch here, so it fell through to "(unknown board)" on the OTA page —
+    // which, by elimination, was the only way to identify a XIAO build.
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
 #else
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
 #endif

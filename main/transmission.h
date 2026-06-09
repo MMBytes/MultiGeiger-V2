@@ -137,6 +137,13 @@ typedef struct {
     // HTTPS supported. V2.5.4.
     tx_target_t thingspeak_pm;
     const char *thingspeak_pm_api_key;
+
+    // V2.5.18: INTERNAL-fragmentation auto-reboot floor (KB); 0 = disabled
+    // (default). Evaluated once per cycle in tx_run, at the same quiescent
+    // pre-upload moment the per-cycle heap line is logged — so the guard reads
+    // the true resting floor it reports, not the inbound-/log transient that
+    // misfired the old per-tick V2.5.14 guard. See tx_run()/tx_heap_guard().
+    uint32_t heap_guard_floor_kb;
 } tx_context_t;
 
 /** @brief Create the worker task and queue. Call once at boot. */

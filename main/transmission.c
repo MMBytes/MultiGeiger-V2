@@ -7,6 +7,7 @@
 #include <math.h>
 #include <time.h>
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
+#include "main_status.h"        // V2.5.18: main_request_restart (heap-guard reboot)
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -1223,6 +1224,52 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
     }
 }
 
+// V2.5.18: per-cycle INTERNAL-fragmentation auto-reboot. Replaces the V2.5.14
+// periodic_heap_guard(), which sampled at ~1 Hz on the main task and so caught
+// the transient largest-free dip caused by any inbound HTTP connection — most
+// often the monitor's own GET /log, whose lwIP/TCP buffers are DMA-capable
+// INTERNAL RAM. That misfire rebooted the Feather every ~4 h (root-caused
+// 2026-06-09 from the .150 syslog: each HEAP GUARD line landed 2-3 s after a
+// GET /log). It is called once per TX cycle from tx_run, on the SAME resting
+// snapshot the per-cycle heap line reports — quiescent, ~once per 180 s.
+//
+// The signature we act on is fragmentation: free heap stays high (lots still
+// free) while the largest *contiguous* INTERNAL block shrinks below the floor
+// (the OTA-stall / long-tail-OOM precursor). The `free_total > 2*floor` arm is
+// the load-bearing transient filter — a connection that grabs net buffers drops
+// BOTH largest AND free, so it fails this arm and never counts; only genuine
+// fragmentation (largest low, free high) does. 5 consecutive cycles (~15 min)
+// must qualify before we reboot via the same path /reboot uses.
+//
+// No persistence is needed: a production node (no PCNT comb) boots with a
+// healthy largest block and cannot reach this state, so it can't boot-loop. The
+// ONE residual loop risk is the experimental PCNT width-comb taking an unlucky
+// INTERNAL boot-split — acceptable on the bench (pcnt_filter is off by default).
+static void tx_heap_guard(uint32_t floor_kb) {
+    if (floor_kb == 0) { return; }            // feature off (default)
+
+    static int s_below = 0;
+    const int  CONFIRM_CYCLES = 5;
+
+    uint32_t largest    = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    uint32_t free_total = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    uint32_t floor_b    = floor_kb * 1024u;
+
+    if (!(largest < floor_b && free_total > 2u * floor_b)) {
+        s_below = 0;                          // healthy (or merely transient) -> reset
+        return;
+    }
+
+    if (++s_below < CONFIRM_CYCLES) { return; }
+
+    ESP_LOGW(TAG,
+             "HEAP GUARD: INTERNAL largest=%u < floor=%u (%lukB) with free=%u "
+             "for %d cycles — rebooting to defragment",
+             (unsigned)largest, (unsigned)floor_b, (unsigned long)floor_kb,
+             (unsigned)free_total, s_below);
+    main_request_restart();
+}
+
 static void tx_run(const tx_context_t *c) {
     // Per-target consecutive-fail streaks, indexed by tx_target_id_t — internal
     // only. The "skip remaining" counters live in s_stats[i].breaker_open_cycles
@@ -1248,6 +1295,10 @@ static void tx_run(const tx_context_t *c) {
     // internal/DMA RAM. Log the capability split each cycle so the multi-day
     // /log → FTP trail exposes any internal/DMA drain (suspected OTA-stall cause).
     diag_log_heap("per-cycle");
+
+    // V2.5.18: fragmentation auto-reboot, judged on the resting snapshot just
+    // logged above (not a 1 Hz sample that catches inbound-/log transients).
+    tx_heap_guard(c->heap_guard_floor_kb);
 
     // Madavi and sensor.community accept a mix of radiation + env (THP) + PM +
     // noise payloads, so they're called whenever ANY source is live. Radmon is

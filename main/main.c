@@ -422,6 +422,11 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->station_altitude_m   = g_cfg.station_altitude_m;
     ctx->send_sealevel_pressure = g_cfg.send_sealevel_pressure;
 
+    // V2.5.18: heap-guard floor travels with the per-cycle snapshot so the
+    // fragmentation auto-reboot can be evaluated on the TX worker right where
+    // the per-cycle heap line is logged (relocated from periodic_loop).
+    ctx->heap_guard_floor_kb = g_cfg.heap_guard_floor_kb;
+
     // V2.4.1 (C9): URLs moved to transmission.c. main.c just passes the
     // per-cycle config flags; the helper fills the URL pair + insecure=false.
     tx_target_configure(&ctx->madavi,  TX_TARGET_MADAVI,  g_cfg.send_madavi,  g_cfg.madavi_https);
@@ -1288,7 +1293,7 @@ void app_main(void) {
 
         {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            periodic_loop(now_ms, g_cfg.heap_guard_floor_kb);  // V2.4.19: 24h PSA refresh + ARP; V2.5.14: heap-guard reboot
+            periodic_loop(now_ms);  // V2.4.19: 24h PSA refresh + ARP (heap-guard moved to tx_run, V2.5.18)
             // V2.5.6: 60s CPM history sampler. V2.5.16: feed it the SAME
             // filtered-vs-raw decision as the per-cycle count so cpm5/cpm15
             // (GMC ACPM, ThingSpeak f3/f4) track the filtered CPM when the

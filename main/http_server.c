@@ -1536,7 +1536,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
         "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
         // V2.5.14: heap-guard auto-reboot floor. No asterisk — read live each
-        // tick by periodic_loop(), so it applies on plain Save (no reboot).
+        // TX cycle by tx_heap_guard() (V2.5.18), so it applies on plain Save
+        // (no reboot).
         "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
         "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\">"
         " <small>Unattended long-uptime nodes only: reboots the device if the "

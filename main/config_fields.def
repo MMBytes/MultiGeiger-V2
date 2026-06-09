@@ -252,12 +252,15 @@ X_U32 (syslog_port,            "syslog_p",    514,      1,       65535)
 // precursor and a long-tail OOM risk on month+ uptimes. The 24h PSA refresh in
 // periodic.c slows but does NOT fully prevent it — esp32-5965048 soak showed
 // INTERNAL largest 71.7K -> 62.5K over 4.8 days despite the refresh. When > 0,
-// periodic_heap_guard() reboots the node once INTERNAL largest-free stays below
-// this floor (KB), via the clean main_request_restart() path. Reboot is the
-// only certain reset of fragmentation; the guard is hardened against boot-loops
-// (2h arm-delay + 6h rate-limit + TX-idle sampling + N-sample debounce — see
-// periodic.c). 0 = OFF (default — opt-in per node). Read live each tick, so a
-// /config Save applies WITHOUT a reboot. ~44 is a sane starting floor; validate
+// transmission.c::tx_heap_guard() reboots the node once INTERNAL largest-free
+// stays below this floor (KB) WHILE total free stays > 2x the floor (the
+// fragmentation signature) for 5 consecutive TX cycles, via the clean
+// main_request_restart() path. Reboot is the only certain reset of
+// fragmentation. V2.5.18 moved this off the 1 Hz periodic tick onto the
+// per-cycle resting heap snapshot so it no longer misfires on the transient
+// largest-free dip an inbound /log fetch causes. 0 = OFF (default — opt-in per
+// node). Read live each cycle, so a /config Save applies WITHOUT a reboot. ~44
+// is a sane starting floor; validate
 // it against an actual OTA's contiguous-alloc need before trusting in the field.
 X_U32 (heap_guard_floor_kb,    "heap_guard",  0,        0,       200)
 

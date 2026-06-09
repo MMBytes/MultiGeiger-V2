@@ -25,12 +25,12 @@
  *     so that sensors which never reconnect for days still keep
  *     upstream AP/mesh bridge forwarding tables warm. The per-
  *     reconnect ARP in `main.c` handles the common case (V2.4.19).
- *  3. **Heap-guard auto-reboot** (V2.5.14) — when `heap_guard_floor_kb > 0`,
- *     reboots the node if the INTERNAL largest-free block stays below the
- *     floor (the OTA-stall / long-tail-OOM signature the PSA refresh only
- *     slows). Runs every tick (not 24h-gated), but self-gates on a 2h
- *     arm-delay, 6h rate-limit, TX-idle sampling and an N-sample debounce
- *     so a boot-loop is structurally impossible. See periodic.c.
+ *
+ *  The heap-guard auto-reboot (V2.5.14) USED to run here too, but its 1 Hz
+ *  main-task sampling caught the transient largest-free dip that any inbound
+ *  HTTP connection causes (the monitor's own GET /log rebooted the Feather
+ *  every ~4h). V2.5.18 moved it to `transmission.c::tx_heap_guard()`, judged
+ *  once per TX cycle on the resting per-cycle heap snapshot.
  *
  *  Both chores share the same 24h cadence and the same `tx_is_idle()`
  *  gate. The TX-worker idle check matters because:
@@ -50,12 +50,8 @@
 
 /** @brief Call once per main-loop tick with the current monotonic
  *  uptime in milliseconds. No-op for most ticks (the 24h chores fire at
- *  most once per 24h each; the heap guard self-gates). Cheap when nothing
- *  is due.
+ *  most once per 24h each). Cheap when nothing is due.
  *
- *  @param now_ms              monotonic uptime in milliseconds.
- *  @param heap_guard_floor_kb INTERNAL largest-free-block floor in KB for
- *         the auto-reboot safety-net. 0 = disabled. Passed each tick (not
- *         cached) so a live `/config` change applies without a reboot.
+ *  @param now_ms monotonic uptime in milliseconds.
  */
-void periodic_loop(uint32_t now_ms, uint32_t heap_guard_floor_kb);
+void periodic_loop(uint32_t now_ms);

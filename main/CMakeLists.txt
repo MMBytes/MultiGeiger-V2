@@ -35,6 +35,7 @@ idf_component_register(
         "display.c"
         "display_serlcd.c"
         "neopixel.c"
+        "led.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash

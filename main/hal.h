@@ -371,8 +371,15 @@
     #define PIN_GMC_COUNT_INPUT      2   // D1  ≡ A1 — Geiger pulse interrupt
     #define PIN_HV_FET_OUTPUT        7   // D8  ≡ SCK — HV MOSFET gate (LEDC PWM)
 
-    // No piezo, no user LED, no NeoPixel — all stubs above.
-    // PIN_SPEAKER_P / PIN_SPEAKER_N / PIN_LED_BUILTIN intentionally undefined.
+    // No piezo, no NeoPixel — those stubs above. But the XIAO ESP32-S3 DOES
+    // have a single onboard user LED on GPIO21, and it is ACTIVE-LOW (drive the
+    // pin LOW to light it — confirmed by Seeed's own ESPHome config which sets
+    // `pin: GPIO21 inverted: true`). led.c flashes it per GM pulse when led_tick
+    // is enabled (V2.5.19). PIN_SPEAKER_P / PIN_SPEAKER_N stay undefined
+    // (HAL_HAS_SPEAKER=0 stubs speaker.c, so led.c — not speaker.c — owns the
+    // pulse-tick LED here).
+    #define PIN_LED_BUILTIN         21   // onboard user LED (active-LOW)
+    #define HAL_LED_ACTIVE_LOW       1   // GPIO21: LOW = on, HIGH = off
 
     // I²C bus — default XIAO pinout: D4 = SDA = GPIO5, D5 = SCL = GPIO6.
     // External sensor breakouts (env / PM / noise / display) attach here via

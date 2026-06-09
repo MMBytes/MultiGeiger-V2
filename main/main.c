@@ -35,6 +35,7 @@
 #include "main_status.h"
 #include "mqtt.h"
 #include "neopixel.h"
+#include "led.h"
 #include "net_arp.h"            // V2.4.19: gratuitous ARP after WiFi reconnect
 #include "ntp.h"
 #include "periodic.h"           // V2.4.19: 24h housekeeping (PSA refresh + safety-net ARP)
@@ -1056,14 +1057,19 @@ void app_main(void) {
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
 
-    // NeoPixel (boards with HAL_HAS_NEOPIXEL only — stubs out elsewhere).
-    // Init the pixel after the tube ISR is wired so the pulse-tick callback
-    // registration in neopixel_register_pulse_tick() finds a live tube.
-    // Both calls are unconditional — neopixel.c handles the no-NeoPixel case
-    // with no-op stubs, so no #if HAL_HAS_NEOPIXEL guard needed here.
+    // Per-GM-pulse visual feedback. Init unconditionally (each driver stubs to
+    // a no-op on boards it doesn't apply to), but only register the pulse-tick
+    // callback when the user has the led_tick flash enabled — same gate the
+    // speaker.c LED honours internally. V2.5.19: previously the NeoPixel
+    // registered on tube_enabled alone, so the QT Py flashed even with led_tick
+    // OFF. The single tube callback slot is claimed by exactly one of these:
+    // neopixel.c (HAL_HAS_NEOPIXEL, QT Py) or led.c (plain user LED with no
+    // speaker/NeoPixel, XIAO GPIO21); the other is a stub.
     neopixel_init();
-    if (g_cfg.tube_enabled) {
+    led_init();
+    if (g_cfg.tube_enabled && g_cfg.led_tick) {
         neopixel_register_pulse_tick();
+        led_register_pulse_tick();
     }
     tx_setup();
     http_server_start(&g_cfg, g_chip_id);

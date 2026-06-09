@@ -170,12 +170,27 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  display:          mode=%lu(%s)",
              (unsigned long)cfg->display_mode, disp_mode_str);
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
+    ESP_LOGI(TAG, "  pcnt-filter:      enabled=%d width=%luns",
+             cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
     ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
     ESP_LOGI(TAG, "  openSenseMap:     access_token=%s",
              MASK(cfg->osm_access_token));
     ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
              cfg->send_aqi, MASK(cfg->aqi_token));
+    // gmcmap account/geiger IDs are public-ish account identifiers (like
+    // radmon_user above), not secrets — shown in clear. ThingSpeak write
+    // keys ARE secrets → MASK()ed.
+    ESP_LOGI(TAG, "  gmcmap:           enabled=%d account=%s geiger=%s",
+             cfg->send_gmc,
+             cfg->gmc_account_id[0] ? cfg->gmc_account_id : "<empty>",
+             cfg->gmc_geiger_id[0]  ? cfg->gmc_geiger_id  : "<empty>");
+    ESP_LOGI(TAG, "  thingspeak:       enabled=%d https=%d key=%s",
+             cfg->send_thingspeak, cfg->thingspeak_https,
+             MASK(cfg->thingspeak_api_key));
+    ESP_LOGI(TAG, "  thingspeak.pm:    enabled=%d https=%d key=%s",
+             cfg->send_thingspeak_pm, cfg->thingspeak_pm_https,
+             MASK(cfg->thingspeak_pm_api_key));
     ESP_LOGI(TAG, "  mqtt:             enabled=%d broker=%s:%lu user=%s pw=%s",
              cfg->mqtt_enable,
              cfg->mqtt_broker[0] ? cfg->mqtt_broker : "<empty>",

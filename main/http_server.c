@@ -1346,6 +1346,13 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
         "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
         "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label></div>"
+        // V2.5.19: I²C pin-out route toggle. Board-gated like the antenna switch
+        // (greyed + force-off on boards without HAL_HAS_I2C_PINOUT_SWITCH). 3 %s
+        // slots: disabled-attr, checked-attr, trailing note.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"i2c_pinout\" "
+        "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
+        "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
+        "<span class=\"r\">*</span>%s</label></div>"
         // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
         // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
         // configure here. See the "GNSS / Position" card on /status.
@@ -1580,6 +1587,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->tube_enabled ? "checked" : "",
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
         (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
+#if HAL_HAS_I2C_PINOUT_SWITCH
+        "",                                          // not disabled on this board
+        s_cfg->i2c_pinout ? "checked" : "",          // current state
+        "",                                          // no trailing note
+#else
+        "disabled",                                  // greyed out
+        "",                                          // never checked on this board
+        " <small>(not available on this board)</small>",
+#endif
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",
@@ -1772,6 +1788,12 @@ static esp_err_t config_post(httpd_req_t *req) {
     // hand-crafted POST could still set it.
 #if !HAL_HAS_ANTENNA_SWITCH
     next.use_external_antenna = false;
+#endif
+
+    // V2.5.19: same defence-in-depth for the I²C pin-out route — force-disable
+    // on boards without the alternate pads (UI already greys it).
+#if !HAL_HAS_I2C_PINOUT_SWITCH
+    next.i2c_pinout = false;
 #endif
 
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the

@@ -19,8 +19,36 @@ static i2c_master_bus_handle_t s_bus_secondary  = NULL;
 #endif
 static bool                    s_secondary_kept = false;
 
+// V2.5.19: primary-bus pin route selector. Honoured only where the board
+// defines HAL_HAS_I2C_PINOUT_SWITCH (QT Py); set from g_cfg.i2c_pinout by
+// main.c before the first i2c_bus_get_primary(). Guarded to the switch boards
+// so the static doesn't trip -Wunused-variable where it's never read (same
+// reason s_bus_secondary is BOARD_FEATHERS3_D-scoped above).
+#if HAL_HAS_I2C_PINOUT_SWITCH
+static bool                    s_primary_pinout = false;
+#endif
+
+void i2c_bus_set_primary_pinout(bool use_pinout) {
+#if HAL_HAS_I2C_PINOUT_SWITCH
+    s_primary_pinout = use_pinout;
+#else
+    (void)use_pinout;   // no alternate route on this board — selector inert
+#endif
+}
+
 i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     if (s_bus_primary) return s_bus_primary;
+
+#if HAL_HAS_I2C_PINOUT_SWITCH
+    // Pick the broken-out SDA/SCL pads when the user opted into pin-out mode,
+    // else the onboard/STEMMA route. The switch only exists on boards that
+    // define a PIN_I2C_*_ALT pair (guarded by the HAL flag above).
+    const int sda = s_primary_pinout ? PIN_I2C_SDA_ALT : PIN_I2C_SDA;
+    const int scl = s_primary_pinout ? PIN_I2C_SCL_ALT : PIN_I2C_SCL;
+#else
+    const int sda = PIN_I2C_SDA;
+    const int scl = PIN_I2C_SCL;
+#endif
 
 #if HAL_HAS_VEXT_GATE
     // Heltec Vext rail (active-LOW MOSFET on PIN_VEXT). Older modules
@@ -38,8 +66,8 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
 
     i2c_master_bus_config_t cfg = {
         .i2c_port             = I2C_NUM_0,
-        .sda_io_num           = PIN_I2C_SDA,
-        .scl_io_num           = PIN_I2C_SCL,
+        .sda_io_num           = sda,
+        .scl_io_num           = scl,
         .clk_source           = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt    = 7,
         .flags.enable_internal_pullup = true,
@@ -50,8 +78,12 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
         s_bus_primary = NULL;
         return NULL;
     }
-    ESP_LOGI(TAG, "primary bus up (I2C_NUM_0, SDA=%d SCL=%d)",
-             PIN_I2C_SDA, PIN_I2C_SCL);
+#if HAL_HAS_I2C_PINOUT_SWITCH
+    ESP_LOGI(TAG, "primary bus up (I2C_NUM_0, SDA=%d SCL=%d, route=%s)",
+             sda, scl, s_primary_pinout ? "pinout-pads" : "onboard/STEMMA");
+#else
+    ESP_LOGI(TAG, "primary bus up (I2C_NUM_0, SDA=%d SCL=%d)", sda, scl);
+#endif
     return s_bus_primary;
 }
 

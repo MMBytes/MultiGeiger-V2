@@ -187,6 +187,17 @@ X_U8  (oled_brightness_pct,    "oled_bright", 80,      0,       100)
 
 X_U32 (display_mode,           "disp_mode",   0,        0,       2)
 
+// --- I²C bus routing (V2.5.19, QT Py ESP32-PICO only) -----------------------
+//
+// false (default) = primary I²C master bus on the onboard route (QT Py: STEMMA
+// QT connector, IO22/IO19). true = bring it up on the broken-out SDA/SCL
+// castellated pads instead (QT Py: IO4/IO33, see PIN_I2C_*_ALT in hal.h). Only
+// consumed where HAL_HAS_I2C_PINOUT_SWITCH==1; forced false on every other board
+// by the POST handler, so the stored value is inert elsewhere. Reboot-required —
+// the bus is created once at first sensor probe.
+
+X_BOOL(i2c_pinout,             "i2c_pinout",  false)
+
 // --- MQTT broker client (V2.4.2 Phase 1) ------------------------------------
 //
 // Generic MQTT 3.1.1 publish-only client. State is published as a single JSON

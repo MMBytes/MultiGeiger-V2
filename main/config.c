@@ -172,6 +172,10 @@ void config_load(config_t *cfg) {
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     ESP_LOGI(TAG, "  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
+    // i2c_pinout is consumed only on QT Py (HAL_HAS_I2C_PINOUT_SWITCH); shown
+    // on every board for a complete dump, like ext_antenna in the wifi line.
+    ESP_LOGI(TAG, "  i2c:              pinout=%d (0=onboard/STEMMA)",
+             cfg->i2c_pinout);
     ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
     ESP_LOGI(TAG, "  openSenseMap:     access_token=%s",

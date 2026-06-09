@@ -931,6 +931,11 @@ void app_main(void) {
     // (and calls i2c_bus_secondary_keep_alive() itself if it lands on
     // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
     // nothing — sensor or display — ended up on STEMMA2.
+    //
+    // V2.5.19: select the primary-bus pin route from config BEFORE the first
+    // i2c_bus_get_primary() below caches the bus. No-op except on QT Py
+    // (HAL_HAS_I2C_PINOUT_SWITCH); reboot-required by construction.
+    i2c_bus_set_primary_pinout(g_cfg.i2c_pinout);
     i2c_master_bus_handle_t bus1 = i2c_bus_get_primary();
 
     // Helper macro: try a sensor's init on bus 1; if no device bound,

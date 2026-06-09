@@ -20,6 +20,11 @@
  *    HAL_HAS_NATIVE_USB      console routing in sdkconfig overlay
  *    HAL_HAS_VEXT_GATE       Heltec-style active-LOW power gate
  *    HAL_HAS_ANTENNA_SWITCH  external u.FL antenna toggle in /config UI
+ *    HAL_HAS_I2C_PINOUT_SWITCH  V2.5.19: 1 = the board exposes a SECOND set of
+ *                            I²C pads distinct from the onboard/STEMMA route, so
+ *                            /config offers an `i2c_pinout` toggle to move the
+ *                            primary bus there (QT Py ESP32-PICO: STEMMA IO22/IO19
+ *                            ↔ SDA/SCL pads IO4/IO33). 0 elsewhere = no toggle.
  *    HAL_HAS_SPEAKER         speaker.c stubs out when 0 (small-board path)
  *    HAL_HAS_NEOPIXEL        neopixel.c init + tube-pulse hook gated on this
  *    HAL_HAS_ALS             V2.3.29: 1 = onboard ALS-PT19 ambient-light sensor
@@ -48,6 +53,7 @@
     #define HAL_HAS_NATIVE_USB      0   // Console via CP2102 UART0
     #define HAL_HAS_VEXT_GATE       1   // GPIO 21 = active-LOW MOSFET on V2+ Heltec carriers
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL / no RF switch)
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
@@ -110,6 +116,7 @@
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No Vext gate — sensors powered via Qwiic 3V3
     #define HAL_HAS_ANTENNA_SWITCH  1   // u.FL external antenna + onboard SPDT RF switch
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (STEMMA1 + STEMMA2 are separate buses, not a pinout toggle)
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (V2.3.18)
@@ -237,6 +244,7 @@
     #define HAL_HAS_NATIVE_USB      0   // USB-C via CH9102F or CP2102N UART bridge (NOT native — original ESP32 has no USB-OTG)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — STEMMA QT bus always powered
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
+    #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
     // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
@@ -289,6 +297,16 @@
     #define PIN_I2C_SDA             22
     #define PIN_I2C_SCL             19
 
+    // V2.5.19: ALTERNATE I²C route on the broken-out SDA/SCL castellated pads
+    // (the "primary" bus IO4/IO33 previously left free for user expansion).
+    // When the `i2c_pinout` config bool is set, i2c_bus.c brings the primary
+    // master bus up here INSTEAD of the STEMMA QT pins above — for wiring a
+    // sensor/display straight to the header pads rather than via a Qwiic cable.
+    // Reboot-required (the bus is created once at first sensor probe). The
+    // STEMMA QT route (IO22/IO19) stays the default.
+    #define PIN_I2C_SDA_ALT          4   // SDA castellated pad
+    #define PIN_I2C_SCL_ALT         33   // SCL castellated pad
+
     // RESERVED pins — do not repurpose:
     //   IO0   BOOT button (strap)
     //   IO5   NeoPixel data (strap; default pull-up — fine if only driven post-boot)
@@ -324,6 +342,7 @@
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on standard XIAO ESP32-S3)
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor

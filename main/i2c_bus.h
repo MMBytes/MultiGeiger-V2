@@ -32,7 +32,20 @@
  *  always-on for deployments that only use STEMMA1.
  */
 
+#include <stdbool.h>
 #include "driver/i2c_master.h"
+
+/** @brief V2.5.19: select the primary-bus pin route BEFORE the first
+ *  i2c_bus_get_primary() call. On a board with HAL_HAS_I2C_PINOUT_SWITCH==1
+ *  (QT Py ESP32-PICO), `true` routes the primary master bus to the broken-out
+ *  SDA/SCL pads (PIN_I2C_*_ALT) instead of the onboard/STEMMA pins. No-op on
+ *  boards without the switch — they always use PIN_I2C_SDA / PIN_I2C_SCL.
+ *
+ *  Must be called before the first i2c_bus_get_primary() (the bus is created
+ *  lazily and cached on first use, so a later change won't take effect until
+ *  reboot). main.c calls this right after config_load().
+ */
+void i2c_bus_set_primary_pinout(bool use_pinout);
 
 /** @brief Get the primary I²C bus handle. Lazy init on first call.
  *  Always returns a valid handle on a properly-configured board (any

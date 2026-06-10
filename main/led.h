@@ -32,5 +32,11 @@ esp_err_t led_init(void);
  *  LED blinks briefly on every GM pulse. Call only when led_tick is enabled
  *  (the caller gates on g_cfg.led_tick) and the tube is enabled. Idempotent.
  *  No-op stub on boards without a led.c-owned user LED.
+ *
+ *  led_tick is REBOOT-REQUIRED by design (signalled by the `*` marker on the
+ *  /config form): it is applied only at boot here, exactly as speaker.c applies
+ *  it at boot via speaker_setup() — no board re-applies led_tick live on a
+ *  /config Save. Deliberately no runtime setter (vs. speaker_set_modes, which
+ *  exists but is likewise only called at boot) so all boards behave the same.
  */
 void led_register_pulse_tick(void);

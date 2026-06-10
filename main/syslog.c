@@ -107,7 +107,11 @@ bool syslog_is_initialized(void) {
 // /config (and intermittently /log) with `LoadStoreError` in
 // `vPortYieldFromInt`. Moving to BSS eliminates the stack contribution.
 static void emit_packet(const char *line, size_t len) {
-    static char s_emit_buf[600];
+    // V2.5.20 (review R10): 600 → 1200 B so a full LOG_LINE_MAX (1024 B)
+    // applog line + the RFC 3164 header fits in one frame. Still well under
+    // the 1500 B LAN MTU (no IP fragmentation). BSS, single-threaded by
+    // construction (applog mutex) — same justification as before.
+    static char s_emit_buf[1200];
 
     // Severity from the ESP_LOG level prefix. ESP_LOG output looks like:
     //   "I (HH:MM:SS.mmm) tag: text\n"
@@ -148,7 +152,11 @@ static void emit_packet(const char *line, size_t len) {
     int n = snprintf(s_emit_buf, sizeof(s_emit_buf),
                      "<%d>%s %s geiger: %.*s",
                      priority, ts, s_hostname, (int)len, line);
-    if (n > 0 && n < (int)sizeof(s_emit_buf)) {
+    if (n > 0) {
+        // V2.5.20 (review R10): clamp-and-send on truncation. Pre-V2.5.20 a
+        // frame longer than the buffer was silently DROPPED (the `n < sizeof`
+        // guard) — a truncated log line on the server beats a missing one.
+        if (n >= (int)sizeof(s_emit_buf)) n = (int)sizeof(s_emit_buf) - 1;
         // MSG_DONTWAIT: non-blocking. If lwIP's TX queue is full we'd
         // rather drop the packet than block applog (which holds its
         // mutex while calling us). UDP send is normally sub-ms.
@@ -173,11 +181,13 @@ void syslog_emit(const char *line, size_t len) {
     // see end-of-line (`\n`). Accumulator is static (BSS), safe because
     // applog_vprintf serialises all calls into us via its mutex.
     //
-    // Sized for the worst realistic full line: ~50 B prefix + LOG_LINE_MAX
-    // body (256 B) + slack = 768 B. Pathological inputs (a single ESP_LOG
-    // fragment > 768 B) bypass the accumulator and emit standalone — see
+    // V2.5.20 (review R10): sized for a genuinely worst-case full line —
+    // ~50 B ESP_LOG prefix + applog's LOG_LINE_MAX (1024 B) body + slack.
+    // The previous 768 B (sized against a misremembered 256 B line max)
+    // split long lines across two syslog rows. Pathological single
+    // fragments > the buffer still bypass and emit standalone — see the
     // overflow branch below.
-    static char   s_accum[768];
+    static char   s_accum[1100];
     static size_t s_accum_len = 0;
 
     size_t remain = sizeof(s_accum) - s_accum_len;

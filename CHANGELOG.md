@@ -9,6 +9,32 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.20 — full-codebase review batch: 5 bug fixes + hygiene (no feature changes)
+
+Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16.6 KLOC in `main/`. Review IDs R1–R11 below match the review report.
+
+**R1 — MQTT TLS Mode D could never connect.** "Mode D — skip server verification" (and the Mode B empty-CA fallback) set only `skip_cert_common_name_check`, which merely skips the CN match; with no CA attached, esp-tls aborts the handshake with "No server verification option set" unless `CONFIG_ESP_TLS_INSECURE` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY` are enabled — and they weren't, on any board. Both symbols now set in `sdkconfig.defaults` **and** in the five committed per-board `sdkconfig.<board>` caches (defaults only fill *missing* keys). Verified-mode connections (Mode A bundle / Mode B CA, all HTTPS uploads) still verify fully — the change only converts the deliberate no-CA case from hard-fail to encrypted-but-unverified, which is what the UI advertised.
+
+**R2 — Radmon credentials now percent-encoded.** User/password were interpolated raw into the submit query string, so a password containing `&` `=` `+` `%` or space broke or silently mangled the request. New generic `url_encode_query_value()` in `util.h` (RFC 3986 unreserved-set, 3× expansion bound); URL buffer 256 → 512 to fit worst-case encoded credentials.
+
+**R3 — FTPS TLS handshake can no longer wedge the main task.** `io_upgrade_tls()`'s retry loop had no wall-clock deadline — on a half-open socket (WiFi drop mid-handshake) `WANT_READ` repeated forever; worse, the DATA socket had no `SO_RCVTIMEO` at that point, so `recv()` inside `mbedtls_ssl_handshake` could block indefinitely. FTPS runs on the **main task**, so this wedged TX scheduling, history, and the restart path. Now: 5 s socket timeouts set at upgrade entry + a 30 s handshake deadline (matching the `io_send_all`/`io_close` guard discipline the file header always promised).
+
+**R4 — truncation-safe JSON/HTML body building.** The `transmission.c` body builders accumulated with bare `n += snprintf(buf + n, cap - n, …)`: one truncating call pushes `n` past `cap`, the next computes `cap - n` as a huge `size_t`, and silent truncation becomes an out-of-bounds write. Worst-case OSM body (~1.4 KB) had only ~13 % margin against its 1600 B buffer — one added field could have crossed it. New clamped `tx_append()` helper (mirrors `mqtt.c`'s `APPEND`); all three builders (Madavi env / sensor.community BME / Luftdaten) converted. `http_server.c`'s `format_als`/`format_gnss`/`format_pm_info` likewise converted to the existing `append_safe()` (forward-declared).
+
+**R5 — AP SSID length fixed for 32-char names.** `ssid_len` was taken from snprintf's *untruncated* return, so a maximum-length `ap_name` beaconed 31 chars + a trailing 0x00 as its "32-char" SSID. Now `strlen()` of what's actually in the buffer.
+
+**R6 — OTA refusal message labels the real board.** The chip-family check's `expected_board` strings were hardcoded: a QT Py reported itself as "heltec_v2 (ESP32)", a XIAO as "feathers3_d (ESP32-S3)". Now `BOARD_NAME " (ESP32[-S3])"` — always the running build's identity.
+
+**R8 — upload credentials copied by value into `tx_context_t`.** They were `const char *` aliases into `g_cfg`, which the worker task reads for the whole multi-second upload cycle while a concurrent `/config` Save rewrites `g_cfg` wholesale (`*s_cfg = next`) on the httpd task — a torn/changed credential could reach an in-flight request. Nine fields (Radmon ×2, OSM ×2, aqi, GMC ×2, ThingSpeak ×2) are now fixed arrays filled by `safe_strcpy` in `build_tx_context`; `sw_version`/`chip_id` stay pointers (static literals). Always-non-NULL array checks simplified accordingly (cppcheck `knownConditionTrueFalse` guard).
+
+**R9 — circuit-breaker counters now under `s_stats_mux`.** `breaker_open_cycles` was read/written lock-free in `tx_dispatch_one` while every other `s_stats[]` access takes the spinlock. Benign on Xtensa (aligned 32-bit) but inconsistent with the documented discipline; logging stays outside the critical section.
+
+**R10 — syslog long lines: truncate-send + full-line accumulator.** Frames longer than the 600 B emit buffer were silently *dropped* (`n < sizeof` guard); now clamped and sent. Buffers resized for reality: emit 600 → 1200 B, accumulator 768 → 1100 B (the old size was derived from a misremembered 256 B line max; applog's `LOG_LINE_MAX` is 1024) — long lines now arrive whole instead of split across syslog rows.
+
+**R11 — dead code removed.** `applog_snapshot()` — unused since the V2.3.16/17 streaming rewrites and the only API that malloc'd the entire ring (up to 4 MB on PSRAM boards) — deleted from `applog.c`/`.h`. `main.c`'s write-only `g_last_counts` removed. Stale comments fixed (`log_ftp.c` snapshot NOTE, `tx_transmit` "static literals" claim). `ntp.c`'s two `localtime()` stragglers → `localtime_r` for tree-wide consistency.
+
+**Also (carried in from the V2.5.19 review, same version): L1 + L2.** L1 — `neopixel_init()` is now gated on `led_tick` too, so the WS2812 power rail (`PIN_NEOPIXEL_POWER`) is not energised when the per-pulse flash is disabled. L2 — the boot config dump prints the `i2c: pinout=` line only on boards with `HAL_HAS_I2C_PINOUT_SWITCH` instead of an inert `pinout=0` everywhere.
+
 ## V2.5.19 — fix: label the Seeed XIAO ESP32-S3 on the OTA page (was "(unknown board)")
 
 **What:** Added an `#elif BOARD_SEEED_XIAO_ESP32S3` branch to the `UPLOAD_PROMPT_BOARD` compile-time chain in `http_server.c` so the `/update` page reads "Select a firmware .bin for **Seeed XIAO ESP32-S3**" instead of falling through to the `#else` "**(unknown board)**".

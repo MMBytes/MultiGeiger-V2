@@ -256,50 +256,10 @@ void applog_init(void) {
 #endif
 }
 
-char *applog_snapshot(size_t *out_len) {
-    if (!s_mtx) {
-        char *empty = malloc(1);
-        if (!empty) { if (out_len) *out_len = 0; return NULL; }
-        empty[0] = 0;
-        if (out_len) *out_len = 0;
-        return empty;
-    }
-
-    xSemaphoreTake(s_mtx, portMAX_DELAY);
-
-    size_t total;
-    char  *out;
-    if (s_wrapped) {
-        total = LOG_RING_SIZE;
-        out = malloc(total + 1);
-        if (!out) { xSemaphoreGive(s_mtx); if (out_len) *out_len = 0; return NULL; }
-        // Oldest half = [s_pos .. end). Skip to first newline so we don't
-        // start on a partial line cut by the wrap. Then the newer half =
-        // [0 .. s_pos).
-        size_t tail_len = LOG_RING_SIZE - s_pos;
-        const char *tail = s_ring + s_pos;
-        size_t skip = 0;
-        while (skip < tail_len && tail[skip] != '\n') skip++;
-        if (skip < tail_len) skip++;  // consume the newline itself
-        size_t w = 0;
-        memcpy(out + w, tail + skip, tail_len - skip);
-        w += tail_len - skip;
-        memcpy(out + w, s_ring, s_pos);
-        w += s_pos;
-        out[w] = 0;
-        total = w;
-    } else {
-        total = s_valid_end;
-        out = malloc(total + 1);
-        if (!out) { xSemaphoreGive(s_mtx); if (out_len) *out_len = 0; return NULL; }
-        memcpy(out, s_ring, total);
-        out[total] = 0;
-    }
-
-    xSemaphoreGive(s_mtx);
-    if (out_len) *out_len = total;
-    return out;
-}
+// V2.5.20 (review R11): applog_snapshot() removed — dead since the V2.3.17
+// /log + V2.3.16 FTPS streaming rewrites; it was the only API that malloc'd
+// the ENTIRE ring as one contiguous buffer (up to 4 MB on PSRAM boards).
+// applog_stream_begin() below is the sole snapshot mechanism.
 
 // V2.3.24: snapshot returns up to three segments — see applog.h for the full
 // failure-mode write-up. Summary: in the wrapped case, the oldest-half tail

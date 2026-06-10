@@ -333,6 +333,13 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
                 }
                 break;
             case 2:  // Mode D — skip server verification
+                // V2.5.20 (review R1): this mode also requires
+                // CONFIG_ESP_TLS_INSECURE + CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+                // (now set in sdkconfig.defaults). skip_cert_common_name_check
+                // alone only skips the CN match — with no CA attached and the
+                // kconfig pair off, esp-tls hard-fails the handshake with
+                // "No server verification option set", so Mode D (and the
+                // Mode B empty-CA fallback above) could never connect.
                 mc.broker.verification.skip_cert_common_name_check = true;
                 tls_mode_str = "D (skip verification)";
                 break;

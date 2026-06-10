@@ -10,6 +10,7 @@
  */
 
 #include <string.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -92,6 +93,40 @@ static inline void url_decode(char *s) {
         }
     }
     *w = 0;
+}
+
+/** @brief Percent-encode a string for safe use as a URL query-string VALUE.
+ *
+ *  RFC 3986 §2.3 unreserved characters (ALPHA / DIGIT / "-" / "." / "_" /
+ *  "~") pass through; every other byte becomes %XX. Stops early (always
+ *  NUL-terminated) if the destination fills. Caller should size `dstsz`
+ *  for the worst-case 3× expansion of the longest input it cares about.
+ *
+ *  V2.5.20 (review R2): Radmon credentials were interpolated raw into the
+ *  submit URL, so a password containing `&` / `=` / `+` / `%` / space broke
+ *  or silently mangled the request. Generic helper so future query-string
+ *  builders (tokens, IDs) can reuse it.
+ */
+static inline void url_encode_query_value(char *dst, size_t dstsz, const char *src) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    if (dstsz == 0) return;
+    while (*src) {
+        unsigned char c = (unsigned char)*src++;
+        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') ||
+                          c == '-' || c == '.' || c == '_' || c == '~';
+        if (unreserved) {
+            if (o + 1 >= dstsz) break;
+            dst[o++] = (char)c;
+        } else {
+            if (o + 3 >= dstsz) break;
+            dst[o++] = '%';
+            dst[o++] = hex[c >> 4];
+            dst[o++] = hex[c & 0x0F];
+        }
+    }
+    dst[o] = 0;
 }
 
 /** @brief Escape `&`, `"`, `<`, `>` for safe use inside an HTML

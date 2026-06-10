@@ -17,20 +17,9 @@
 /** @brief Install the log hook and create the mutex. Idempotent. */
 void applog_init(void);
 
-/** @brief Snapshot the ring in chronological order.
- *
- *  Returns a malloc'd, NUL-terminated buffer. *out_len is set to the length
- *  (excluding NUL). Caller must free. Returns NULL only on OOM; an empty ring
- *  returns a valid zero-length buffer. Safe to call from any task — briefly
- *  holds the log mutex while copying.
- *
- *  Used by the /log HTTP endpoint where a single Content-Length-friendly
- *  contiguous response is needed. The FTPS upload path uses the streaming
- *  API below instead, to avoid allocating a body buffer the size of the ring
- *  (especially important for the 1 MB PSRAM ring on FeatherS3-D and to keep
- *  the Heltec's tight internal-DRAM budget healthy at upload peak).
- */
-char *applog_snapshot(size_t *out_len);
+// V2.5.20 (review R11): applog_snapshot() removed — dead since V2.3.17 moved
+// /log onto the streaming API; it malloc'd the entire ring (up to 4 MB on
+// PSRAM boards) as one contiguous buffer. Use applog_stream_begin() instead.
 
 /** @brief Streaming snapshot — returns up to three segment descriptors the
  *  caller reads in order (seg_a → seg_b → seg_c) to consume the ring in

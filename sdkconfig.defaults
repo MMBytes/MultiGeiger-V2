@@ -60,6 +60,20 @@ CONFIG_LWIP_ESP_GRATUITOUS_ARP=y
 # (IDF 5.x: CONFIG_MBEDTLS_DEFAULT_CERTIFICATE_BUNDLE_FULL → IDF 6.0: _BUNDLE_DEFAULT_FULL.)
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
+# V2.5.20 (review R1): allow esp-tls connections that deliberately carry NO
+# verification option to proceed UNVERIFIED instead of failing the handshake.
+# Required by MQTT TLS "Mode D — skip server verification" (and the Mode B
+# empty-CA fallback) in mqtt.c: esp-mqtt's skip_cert_common_name_check only
+# skips the CN match — without these two symbols a no-CA config aborts with
+# "No server verification option set", so Mode D could never connect.
+# Connections that DO attach the CA bundle / a custom CA still verify fully;
+# this only changes the no-CA case from hard-fail to encrypted-but-unverified
+# (which is exactly what the /config UI advertises for Mode D, LAN-only).
+# NOTE: the committed per-board sdkconfig.<board> caches were updated in the
+# same change — defaults only fill keys MISSING from an existing cache.
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
 # TLS 1.3 alongside TLS 1.2 (IDF 6.0 default is 1.2 only). mbedTLS 4.x in
 # this IDF supports 1.3 production-ready; we keep 1.2 enabled as fallback for
 # any server that doesn't speak 1.3 yet. 1.3 saves 1 round trip per fresh

@@ -442,6 +442,17 @@ static void tls_ctx_free(ftp_tls_ctx_t *t) {
 // the saved control session — vsftpd's default require_ssl_reuse=YES rejects
 // data handshakes that don't resume the control session.
 static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
+    // V2.5.20 (review R3): bound each socket op during the handshake so
+    // recv()/send() return EAGAIN → WANT_READ/WANT_WRITE and the wall-clock
+    // deadline below can actually fire. Matters most for the DATA socket,
+    // which had NO SO_RCVTIMEO at this point (ftp_connect_pasv leaves it
+    // fully blocking) — a half-open data socket made recv() block forever
+    // inside mbedtls_ssl_handshake. Later protocol reads re-set their own
+    // timeouts per call (ftp_read_response / ftp_write_buf), so this
+    // doesn't leak into the body-transfer phases.
+    io_set_rcv_timeout(io, 5000);
+    io_set_snd_timeout(io, 5000);
+
     mbedtls_ssl_init(&io->ssl);
     int r = mbedtls_ssl_setup(&io->ssl, &t->conf);
     if (r != 0) {
@@ -460,17 +471,31 @@ static bool io_upgrade_tls(ftp_io_t *io, ftp_tls_ctx_t *t, bool is_data) {
         if (sr != 0) ESP_LOGW(TAG, "set_session: -0x%04x (continuing)", -sr);
     }
 
+    // V2.5.20 (review R3): wall-clock deadline on the handshake retry loop.
+    // WANT_READ here means recv() hit SO_RCVTIMEO (EAGAIN) — on a half-open
+    // socket (WiFi drop mid-handshake) that repeats FOREVER, wedging the
+    // main task (FTPS runs on main — see feedback_main_task_runs_ftps).
+    // This was the one mbedTLS retry loop in this file without the deadline
+    // guard io_send_all / io_close already have. 30 s ≫ any healthy LAN
+    // handshake (~100 ms) yet bounds the wedge to one upload attempt.
+    int64_t hs_deadline_us = esp_timer_get_time() + 30LL * 1000 * 1000;
     while ((r = mbedtls_ssl_handshake(&io->ssl)) != 0) {
-        if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
+        bool want_io = (r == MBEDTLS_ERR_SSL_WANT_READ ||
+                        r == MBEDTLS_ERR_SSL_WANT_WRITE);
+        if (want_io && esp_timer_get_time() <= hs_deadline_us) continue;
+        if (want_io) {
+            ESP_LOGW(TAG, "%s TLS handshake: 30s deadline exceeded — abandoning",
+                     is_data ? "data" : "ctrl");
+        } else {
             log_tls_err(is_data ? "data TLS handshake" : "ctrl TLS handshake", r);
             if (is_psa_oom(r)) t->psa_oom = true;
-            // V2.3.15: session_reset before free — same belt-and-braces as
-            // io_close. Releases any PSA refs the partial-handshake state
-            // is holding before we drop the context.
-            mbedtls_ssl_session_reset(&io->ssl);
-            mbedtls_ssl_free(&io->ssl);
-            return false;
         }
+        // V2.3.15: session_reset before free — same belt-and-braces as
+        // io_close. Releases any PSA refs the partial-handshake state
+        // is holding before we drop the context.
+        mbedtls_ssl_session_reset(&io->ssl);
+        mbedtls_ssl_free(&io->ssl);
+        return false;
     }
 
     if (!is_data) {
@@ -807,9 +832,9 @@ static bool do_ftp_upload(void) {
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     // Build remote filename: geiger_<chip>_YYYY-MM-DDTHHMMSS.log.
-    // NOTE: the "FTP uploading" log line below must come BEFORE applog_snapshot()
-    // so that line is included in this batch — if we logged after, we'd drop it
-    // whenever the ring wrapped.
+    // NOTE: the "FTP uploading" log line below must come BEFORE
+    // applog_stream_begin() so that line is included in this batch — if we
+    // logged after, we'd drop it whenever the ring wrapped.
     time_t t = time(NULL);
     struct tm tm;
     localtime_r(&t, &tm);

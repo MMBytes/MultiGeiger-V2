@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "config.h"         // CFG_*_MAX — by-value credential fields below
 #include "pm_sensor.h"      // pm_sample_t
 #include "noise_sensor.h"   // noise_sample_t
 
@@ -95,40 +96,49 @@ typedef struct {
     int8_t rssi;
 
     // Upload targets.
+    //
+    // V2.5.20 (review R8): credentials/tokens are copied BY VALUE into the
+    // context (were `const char *` aliases into `g_cfg`). The worker task
+    // reads the context for the whole multi-second upload cycle while a
+    // concurrent `/config` Save on the httpd task rewrites `g_cfg` wholesale
+    // (`*s_cfg = next`) — an aliasing pointer could hand a torn/changed
+    // credential to an in-flight request. `sw_version`/`chip_id` stay
+    // pointers (static literals, never mutated).
     tx_target_t madavi;
     tx_target_t sensorc;
     tx_target_t radmon;
-    const char *radmon_user;
-    const char *radmon_password;
+    char radmon_user[CFG_USER_NAME_MAX + 1];
+    char radmon_password[CFG_PASSWORD_MAX + 1];
 
     // openSenseMap — single HTTPS POST per cycle to ingress.opensensemap.org
     // /boxes/<box_id>/data?luftdaten=1. Body is the standard combined
     // Luftdaten payload (Si22G_* + BME280_* + SPS30_* fields).
     tx_target_t osm;            // V2.5.5: url_http/url_https stay NULL (dynamic per-box URL)
-    const char *osm_box_id;
+    char osm_box_id[CFG_OSM_BOX_MAX + 1];
     // V2.3.16: optional OSM access token. Empty string = unauthenticated upload
     // (the historical Luftdaten path). When set, send_osm adds an
-    // `Authorization: Bearer <token>` header — needed if the box has the
-    // server-side authentication toggle enabled on opensensemap.org.
-    const char *osm_access_token;
+    // `Authorization: <token>` header (raw, no Bearer prefix — V2.4.21) —
+    // needed if the box has the server-side authentication toggle enabled
+    // on opensensemap.org.
+    char osm_access_token[CFG_TOKEN_MAX + 1];
 
     // aqi.eco — single HTTPS POST per cycle to api.aqi.eco/update/<token>.
     // Body is the standard Luftdaten payload prefixed with an esp8266id
     // field (legacy field name, accepts our esp32-N chip ID format).
     tx_target_t aqi;            // V2.5.5: url_http/url_https stay NULL (dynamic per-token URL)
-    const char *aqi_token;
+    char aqi_token[CFG_TOKEN_MAX + 1];
 
     // GMCMap (gmcmap.com / GQ Electronics) — radiation-only GET upload, HTTP
     // only (gmcmap has no TLS). Skipped when tube_enabled is false. V2.5.1.
     tx_target_t gmc;
-    const char *gmc_account_id;
-    const char *gmc_geiger_id;
+    char gmc_account_id[CFG_USER_NAME_MAX + 1];
+    char gmc_geiger_id[CFG_USER_NAME_MAX + 1];
 
     // ThingSpeak — generic GET channel update keyed by the channel write API
     // key. field1=CPM, field2=µSv/h, field3/4=CPM (current; no rolling
     // windows), +field5/6/7=T/H/P when bme_valid. HTTPS supported. V2.5.1.
     tx_target_t thingspeak;
-    const char *thingspeak_api_key;
+    char thingspeak_api_key[CFG_TOKEN_MAX + 1];
 
     // ThingSpeak (Particulate Matter) — a SECOND, independent ThingSpeak
     // channel for the SPS30 dust node. Separate write key. NOT tube-gated;
@@ -136,7 +146,7 @@ typedef struct {
     // PM4.0/PM10, field5/6/7 = T/H/P, field8 = typical particle size (µm).
     // HTTPS supported. V2.5.4.
     tx_target_t thingspeak_pm;
-    const char *thingspeak_pm_api_key;
+    char thingspeak_pm_api_key[CFG_TOKEN_MAX + 1];
 
     // V2.5.18: INTERNAL-fragmentation auto-reboot floor (KB); 0 = disabled
     // (default). Evaluated once per cycle in tx_run, at the same quiescent

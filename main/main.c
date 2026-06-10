@@ -159,7 +159,6 @@ static uint32_t tx_cycles   = 0;
 // don't need the lock — keeping them out preserves the existing zero-
 // cost reads on the hot status-page path.
 static uint32_t g_last_dt_ms      = 0;
-static uint32_t g_last_counts     = 0;
 static uint32_t g_last_cpm        = 0;
 static float    g_last_usvph      = 0.0f;
 // V2.5.16: PCNT width-filter state for /status — whether the last cycle's CPM
@@ -433,8 +432,9 @@ static void build_tx_context(tx_context_t *ctx,
     tx_target_configure(&ctx->madavi,  TX_TARGET_MADAVI,  g_cfg.send_madavi,  g_cfg.madavi_https);
     tx_target_configure(&ctx->sensorc, TX_TARGET_SENSORC, g_cfg.send_sensorc, g_cfg.sensorc_https);
     tx_target_configure(&ctx->radmon,  TX_TARGET_RADMON,  g_cfg.send_radmon,  g_cfg.radmon_https);
-    ctx->radmon_user     = g_cfg.radmon_user;
-    ctx->radmon_password = g_cfg.radmon_password;
+    // V2.5.20 (review R8): credentials copied BY VALUE — see tx_context_t.
+    safe_strcpy(ctx->radmon_user,     g_cfg.radmon_user,     sizeof(ctx->radmon_user));
+    safe_strcpy(ctx->radmon_password, g_cfg.radmon_password, sizeof(ctx->radmon_password));
 
     // V2.5.5: OSM + aqi.eco unified to tx_target_t (were bare send_*/use_insecure
     // bools). HTTPS-only; the per-box/per-token URL is built dynamically in
@@ -442,25 +442,27 @@ static void build_tx_context(tx_context_t *ctx,
     // {NULL,NULL} rows. tx_target_configure sets use_insecure=false, matching
     // the prior hardcoded literal.
     tx_target_configure(&ctx->osm, TX_TARGET_OSM, g_cfg.send_osm, /*use_https=*/true);
-    ctx->osm_box_id       = g_cfg.osm_box_id;
-    ctx->osm_access_token = g_cfg.osm_access_token;
+    safe_strcpy(ctx->osm_box_id,       g_cfg.osm_box_id,       sizeof(ctx->osm_box_id));
+    safe_strcpy(ctx->osm_access_token, g_cfg.osm_access_token, sizeof(ctx->osm_access_token));
 
     tx_target_configure(&ctx->aqi, TX_TARGET_AQI, g_cfg.send_aqi, /*use_https=*/true);
-    ctx->aqi_token        = g_cfg.aqi_token;
+    safe_strcpy(ctx->aqi_token, g_cfg.aqi_token, sizeof(ctx->aqi_token));
 
     // V2.5.1: GMCMap (HTTP-only) + ThingSpeak (HTTPS-capable).
     tx_target_configure(&ctx->gmc, TX_TARGET_GMC, g_cfg.send_gmc, false);
-    ctx->gmc_account_id = g_cfg.gmc_account_id;
-    ctx->gmc_geiger_id  = g_cfg.gmc_geiger_id;
+    safe_strcpy(ctx->gmc_account_id, g_cfg.gmc_account_id, sizeof(ctx->gmc_account_id));
+    safe_strcpy(ctx->gmc_geiger_id,  g_cfg.gmc_geiger_id,  sizeof(ctx->gmc_geiger_id));
 
     tx_target_configure(&ctx->thingspeak, TX_TARGET_THINGSPEAK,
                         g_cfg.send_thingspeak, g_cfg.thingspeak_https);
-    ctx->thingspeak_api_key = g_cfg.thingspeak_api_key;
+    safe_strcpy(ctx->thingspeak_api_key, g_cfg.thingspeak_api_key,
+                sizeof(ctx->thingspeak_api_key));
 
     // V2.5.4: ThingSpeak PM — second, independent channel for the SPS30.
     tx_target_configure(&ctx->thingspeak_pm, TX_TARGET_THINGSPEAK_PM,
                         g_cfg.send_thingspeak_pm, g_cfg.thingspeak_pm_https);
-    ctx->thingspeak_pm_api_key = g_cfg.thingspeak_pm_api_key;
+    safe_strcpy(ctx->thingspeak_pm_api_key, g_cfg.thingspeak_pm_api_key,
+                sizeof(ctx->thingspeak_pm_api_key));
 }
 
 static void do_tx_cycle(void) {
@@ -592,7 +594,6 @@ static void do_tx_cycle(void) {
 
     // Cache for /status — see g_last_* declarations + accessors above.
     g_last_dt_ms     = dt_ms;
-    g_last_counts    = counts;
     g_last_cpm       = cpm;
     g_last_usvph     = usvph;
     g_last_filtering = filtering;          // V2.5.16: /status filter indicator
@@ -1019,9 +1020,13 @@ void app_main(void) {
     // at http://192.168.4.1/config even before STA is set. SSID comes from
     // cfg.ap_name (defaulted to g_chip_id above when empty).
     wifi_config_t apc = { 0 };
-    int ap_ssid_len = snprintf((char *)apc.ap.ssid, sizeof(apc.ap.ssid),
-                               "%s", g_cfg.ap_name);
-    apc.ap.ssid_len      = (ap_ssid_len > 0) ? ap_ssid_len : 0;
+    // V2.5.20 (review R5): ssid_len must be the bytes actually IN the buffer.
+    // The previous snprintf-based copy used the UNtruncated return length, so
+    // a 32-char ap_name into the 32-byte ssid field reported len 32 while the
+    // buffer held 31 chars + NUL — the beacon then carried a trailing 0x00 as
+    // its 32nd SSID byte.
+    safe_strcpy((char *)apc.ap.ssid, g_cfg.ap_name, sizeof(apc.ap.ssid));
+    apc.ap.ssid_len      = (uint8_t)strlen((const char *)apc.ap.ssid);
     apc.ap.channel       = 1;
     apc.ap.max_connection = 4;
     if (strlen(g_cfg.ap_password) >= 8) {
@@ -1057,17 +1062,18 @@ void app_main(void) {
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
 
-    // Per-GM-pulse visual feedback. Init unconditionally (each driver stubs to
-    // a no-op on boards it doesn't apply to), but only register the pulse-tick
-    // callback when the user has the led_tick flash enabled — same gate the
-    // speaker.c LED honours internally. V2.5.19: previously the NeoPixel
-    // registered on tube_enabled alone, so the QT Py flashed even with led_tick
-    // OFF. The single tube callback slot is claimed by exactly one of these:
-    // neopixel.c (HAL_HAS_NEOPIXEL, QT Py) or led.c (plain user LED with no
-    // speaker/NeoPixel, XIAO GPIO21); the other is a stub.
-    neopixel_init();
+    // Per-GM-pulse visual feedback. led_init() is unconditional: it drives the
+    // plain user LED (XIAO GPIO21) to a deterministic OFF so an active-low pin
+    // isn't left floating — cheap, and a no-op stub on boards without it.
+    // V2.5.20/L1: neopixel_init() is now gated on led_tick too, so the WS2812
+    // power rail (PIN_NEOPIXEL_POWER) is NOT energised when the flash is
+    // disabled. Both inits run before registration so the pulse-tick callback
+    // finds initialised hardware. The single tube callback slot is claimed by
+    // exactly one of these per board: neopixel.c (HAL_HAS_NEOPIXEL, QT Py) or
+    // led.c (plain user LED with no speaker/NeoPixel, XIAO); the other is a stub.
     led_init();
     if (g_cfg.tube_enabled && g_cfg.led_tick) {
+        neopixel_init();
         neopixel_register_pulse_tick();
         led_register_pulse_tick();
     }

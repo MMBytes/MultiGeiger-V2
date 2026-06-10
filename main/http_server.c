@@ -635,6 +635,13 @@ static void format_environment(char *out, size_t sz) {
         st.env_p / 100.0f);
 }
 
+// Defensive append helper — defined below near format_uploads; forward-declared
+// here so the multi-segment formatters above it (ALS / GNSS / PM) can use the
+// clamped accumulation instead of bare `n += snprintf` (V2.5.20 review R4:
+// on truncation the bare pattern pushes n past sz and `sz - n` underflows).
+__attribute__((format(printf, 4, 5)))
+static int append_safe(char *out, size_t sz, int n, const char *fmt, ...);
+
 // --- Ambient light block ----------------------------------------------------
 // Two possible sources, both shown when present:
 //   * VEML7700 (I²C, any board, fixed 0x10) — accurate lux + raw ALS + white
@@ -649,39 +656,39 @@ static void format_als(char *out, size_t sz) {
     bool have_pt19 = als_present();
     if (!have_veml && !have_pt19) { out[0] = 0; return; }
 
-    int n = snprintf(out, sz, "<div class=\"info\"><h3>Ambient light</h3>");
+    int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Ambient light</h3>");
 
     if (have_veml) {
         uint16_t als_raw = 0, white_raw = 0;
         float    lux = 0.0f;
         if (veml7700_read(&als_raw, &white_raw, &lux) == ESP_OK) {
-            n += snprintf(out + n, sz - n,
+            n = append_safe(out, sz, n,
                 "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>"
                 "<b>Reading:</b> %.1f lux (raw ALS=%u, white=%u, %s)",
                 (double)lux, (unsigned)als_raw, (unsigned)white_raw,
                 als_brightness_label(lux));
         } else {
-            n += snprintf(out + n, sz - n,
+            n = append_safe(out, sz, n,
                 "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>read failed");
         }
-        if (have_pt19) n += snprintf(out + n, sz - n, "<br><br>");
+        if (have_pt19) n = append_safe(out, sz, n, "<br><br>");
     }
 
     if (have_pt19) {
         uint32_t mv = 0;
         float    lux = 0.0f;
         if (als_read(NULL, &mv, &lux) == ESP_OK) {
-            n += snprintf(out + n, sz - n,
+            n = append_safe(out, sz, n,
                 "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>"
                 "<b>Reading:</b> %lu mV (~%d lux, %s)",
                 (unsigned long)mv, (int)lux, als_brightness_label(lux));
         } else {
-            n += snprintf(out + n, sz - n,
+            n = append_safe(out, sz, n,
                 "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>read failed");
         }
     }
 
-    snprintf(out + n, sz - n, "</div>");
+    append_safe(out, sz, n, "</div>");
 }
 
 // --- GNSS / position block --------------------------------------------------
@@ -695,7 +702,7 @@ static void format_gnss(char *out, size_t sz) {
     gnss_fix_t f;
     gnss_get_fix(&f);
 
-    int n = snprintf(out, sz,
+    int n = append_safe(out, sz, 0,
         "<div class=\"info\"><h3>GNSS / Position</h3>"
         "<b>Sensor:</b> %s (I²C, 0x%02X)<br>",
         gnss_chip_name(), gnss_i2c_addr());
@@ -703,11 +710,11 @@ static void format_gnss(char *out, size_t sz) {
     // Unique chip ID — MAX-M10S only (UBX-SEC-UNIQID); empty for the PA1010D.
     const char *serial = gnss_serial();
     if (serial[0]) {
-        n += snprintf(out + n, sz - n, "<b>Serial:</b> 0x%s<br>", serial);
+        n = append_safe(out, sz, n, "<b>Serial:</b> 0x%s<br>", serial);
     }
 
     if (!f.valid) {
-        n += snprintf(out + n, sz - n,
+        n = append_safe(out, sz, n,
             "<b>Fix:</b> acquiring… (%u satellites visible)", (unsigned)f.sats);
     } else {
         char utc[32] = "—";
@@ -716,7 +723,7 @@ static void format_gnss(char *out, size_t sz) {
             gmtime_r(&f.utc, &tm_utc);
             strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
         }
-        n += snprintf(out + n, sz - n,
+        n = append_safe(out, sz, n,
             "<b>Fix:</b> %s, %u satellites, HDOP %.1f<br>"
             "<b>Position:</b> %.6f, %.6f "
             "(<a href=\"https://www.openstreetmap.org/?mlat=%.6f&amp;mlon=%.6f"
@@ -730,7 +737,7 @@ static void format_gnss(char *out, size_t sz) {
 
     // V2.5.11: no "system time source" line — GNSS no longer sets the clock
     // (NTP is the sole source). The UTC above is the receiver's reported time.
-    snprintf(out + n, sz - n, "</div>");
+    append_safe(out, sz, n, "</div>");
 }
 
 // --- Noise block -------------------------------------------------------------
@@ -982,7 +989,7 @@ static void format_pm_info(char *out, size_t sz) {
         st.laser_fail           ? "<span style='color:#c00;font-weight:bold'>FAULT</span>" :
                                   "<span style='color:#080'>OK</span>";
 
-    int n = snprintf(out, sz,
+    int n = append_safe(out, sz, 0,
         "<div class=\"info\"><h3>Particulate matter</h3>"
         "<b>Sensor:</b> %s<br>"
         "<b>Fan:</b> %s<br>"
@@ -992,16 +999,16 @@ static void format_pm_info(char *out, size_t sz) {
         have_status ? (unsigned long)st.raw : 0UL);
 
     if (have_sample) {
-        n += snprintf(out + n, sz - n,
+        n = append_safe(out, sz, n,
             "<b>PM1.0 / PM2.5 / PM4.0 / PM10:</b> "
             "%.1f / %.1f / %.1f / %.1f µg/m³<br>"
             "<b>Typical particle size:</b> %.2f µm<br>",
             pm.pm1_0, pm.pm2_5, pm.pm4_0, pm.pm10, pm.typ_size_um);
     } else {
-        n += snprintf(out + n, sz - n,
+        n = append_safe(out, sz, n,
             "<b>PM readings:</b> awaiting first cycle...<br>");
     }
-    snprintf(out + n, sz - n, "</div>");
+    append_safe(out, sz, n, "</div>");
 }
 
 // Static page chrome — wrapper HTML that doesn't change between requests.
@@ -2260,14 +2267,19 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     esp_chip_info(&chip);
     esp_chip_id_t expected_chip_id;
     const char  *expected_board;
+    // V2.5.20 (review R6): the error label now uses the RUNNING build's
+    // BOARD_NAME instead of hardcoded board names — a QT Py used to report
+    // itself as "heltec_v2 (ESP32)" and a XIAO as "feathers3_d (ESP32-S3)"
+    // in the refusal message. Only one case can match the firmware actually
+    // running, so BOARD_NAME is always the right device label.
     switch (chip.model) {
         case CHIP_ESP32:
             expected_chip_id = ESP_CHIP_ID_ESP32;
-            expected_board   = "heltec_v2 (ESP32)";
+            expected_board   = BOARD_NAME " (ESP32)";
             break;
         case CHIP_ESP32S3:
             expected_chip_id = ESP_CHIP_ID_ESP32S3;
-            expected_board   = "feathers3_d (ESP32-S3)";
+            expected_board   = BOARD_NAME " (ESP32-S3)";
             break;
         default:
             // Future-proofing: if someone ports the firmware to ESP32-C3/C6/H2

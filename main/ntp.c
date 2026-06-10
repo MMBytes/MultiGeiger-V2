@@ -63,8 +63,12 @@ void ntp_poll(void) {
     sync_pending = false;
     char buf[32];
     time_t t = sync_tv_sec;
-    const struct tm *ti = localtime(&t);
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S %Z", ti);
+    // V2.5.20 (review): localtime_r — the non-reentrant localtime() returns a
+    // shared static struct tm; every other call site in the tree already uses
+    // the _r form, so make these two stragglers consistent.
+    struct tm tm_local;
+    localtime_r(&t, &tm_local);
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S %Z", &tm_local);
     ESP_LOGI(TAG, "sync OK: %s", buf);
 }
 
@@ -72,7 +76,8 @@ const char *ntp_localtime_str(void) {
     static char buf[32];
     time_t t;
     time(&t);
-    const struct tm *ti = localtime(&t);
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", ti);
+    struct tm tm_local;
+    localtime_r(&t, &tm_local);
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_local);
     return buf;
 }

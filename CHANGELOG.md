@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.21 — fix: GNSS I²C "hardware timeout" floods under a live multi-GNSS fix
+
+**What:** Added `.scl_wait_us = 13000` to the GNSS `i2c_device_config_t` in `gnss_init()`.
+
+**Why:** The u-blox MAX-M10S (and, less so, the PA1010D) **clock-stretches** — it holds SCL low while assembling NMEA. With the per-device timeout left at its short default, a sustained multi-GNSS fix (a real 12-satellite GPS+Galileo+BeiDou fix emits a heavy GSV burst every second) routinely stretches past that timeout, so `gnss_poll()` reads trip `I2C hardware timeout` — which IDF logs with the misleading `GPIO X is not usable, maybe conflict with others` wording — several times a second. The drain loop retries, so fixes keep flowing and `i2c_err` stays 0, but the log floods. Raising the SCL-low timeout to ~13 ms (≈ the classic-ESP32 I²C timeout-register ceiling) lets the stretch complete instead of erroring.
+
+**Scope:** per-device — does **not** change any other sensor's timeout, and the field is never built on boards without a GNSS (a no-op there). Covers both GNSS parts (M10S `0x42` and PA1010D `0x10`), which share the one `devcfg`. Bench-validated on a QT Py (esp32-15033992) with a live 12-sat fix: the timeout floods stopped, fixes unaffected.
+
 ## V2.5.20 — full-codebase review batch: 5 bug fixes + hygiene (no feature changes)
 
 Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16.6 KLOC in `main/`. Review IDs R1–R11 below match the review report.

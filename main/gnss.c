@@ -467,6 +467,17 @@ esp_err_t gnss_init(i2c_master_bus_handle_t bus) {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address  = tp->addr,
             .scl_speed_hz    = 400000,   // both parts support 400 kHz
+            // V2.5.21: the u-blox DDC (and, less so, the PA1010D) CLOCK-STRETCHES
+            // — holds SCL low while assembling NMEA. Under a live multi-GNSS fix
+            // (12 sats → heavy GSV) these stretches routinely exceed the default
+            // SCL-low timeout, so reads spuriously trip "I2C hardware timeout"
+            // (which IDF mislogs as the misleading "GPIO X not usable") several
+            // times a second. gnss_poll() retries so fixes still flow, but it
+            // floods the log. Raise the per-device SCL-low timeout to ~13 ms
+            // (≈ the classic-ESP32 I2C timeout-register ceiling) to tolerate the
+            // stretch. PER-DEVICE — does not change any other sensor's timeout;
+            // a no-op on boards without a GNSS (this devcfg is never built there).
+            .scl_wait_us     = 13000,
         };
         i2c_master_dev_handle_t dev = NULL;
         esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &dev);

@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.23 — full config dump now reaches the syslog server
+
+**What:** The boot `config:` trace (the ~28-line dump of every setting, secrets masked) now lands on the rsyslog server, not just the device's `/log` and serial console.
+
+**Why:** Like the boot banner, the config dump was logged at `config_load()` time — long before WiFi + syslog come up — so it never reached the server. Server-side you couldn't see a node's actual config without hitting its `/config`.
+
+**How:** The dump body was extracted into a single `config_log_summary(const config_t *cfg)` (so adding a config field still touches only one place). It's printed **once per boot**: at boot when `syslog_enable` is **off** (there's no server to forward to later, so the boot copy is the only chance), or right after the syslog UDP client comes up when syslog is **on** (so it reaches `/log` *and* the server). Syslog-disabled nodes therefore still get their dump locally; syslog-enabled nodes get it on the server. No duplicate printing.
+
 ## V2.5.22 — boot diagnostics: /status start time + a server-side boot banner
 
 **1. /status Uptime line shows the boot time.** The System block's `Uptime:` line now appends the boot wall-clock — e.g. `Uptime: 00h 03m 37s (Started 2026-06-12 15:36:00)`. Boot instant = `time(NULL) − uptime`, rendered as local time via the existing `format_wallclock()` helper, gated on the same `>2025-01-01` clock-sanity check as the NTP line (pre-sync shows the bare uptime, never a nonsense "Started 1970-…"). Rendered into a separate suffix buffer so it stays a single bounded `snprintf`.

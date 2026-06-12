@@ -81,6 +81,15 @@ void config_defaults(config_t *cfg);
  */
 void config_load(config_t *cfg);
 
+/** @brief Log the full config (secrets masked) as the "config:" boot trace.
+ *
+ *  The single place that knows the dump shape — adding a config field touches
+ *  only this function, not its call sites. Printed once per boot: at boot when
+ *  syslog is OFF (config_load), else right after the syslog client is up (main.c)
+ *  so the trace also reaches the rsyslog server.
+ */
+void config_log_summary(const config_t *cfg);
+
 /** @brief Persist cfg to NVS. Returns esp_err from nvs_commit. */
 esp_err_t config_save(const config_t *cfg);
 

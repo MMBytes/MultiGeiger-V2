@@ -1231,6 +1231,14 @@ void app_main(void) {
             syslog_init(g_cfg.syslog_host,
                         (uint16_t)g_cfg.syslog_port,
                         g_cfg.wifi_hostname);
+            // V2.5.23: now that the UDP client is up, emit the full config dump
+            // so it reaches the rsyslog server (the boot-time copy predates
+            // syslog and never leaves the device). One-shot by construction:
+            // this block is gated on !syslog_is_initialized() above, so it can't
+            // re-enter once syslog is up. Syslog-OFF nodes dumped it at boot.
+            if (syslog_is_initialized()) {
+                config_log_summary(&g_cfg);
+            }
         }
 
         // End of boot AP window: stop the AP and switch to STA-only.

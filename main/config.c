@@ -116,11 +116,24 @@ void config_load(config_t *cfg) {
 
     nvs_close(h);
 
-    // Boot-time dump — DELIBERATELY NOT generated from the schema. The
-    // current shape (grouping fields per line, masking password fields
-    // under a single token) is more readable than what a per-field loop
-    // would produce, and the cost of updating this when adding a field
-    // is tiny vs. the benefit of a clean serial trace.
+    // V2.5.23: the dump itself moved to config_log_summary() below — one place
+    // to edit when a field is added. Print it HERE only when syslog is off:
+    // there's no rsyslog server to forward to later, so this boot copy is the
+    // only chance. For syslog-ON nodes, main.c calls config_log_summary() right
+    // after the UDP client is up, so the dump lands on /log AND the server (a
+    // boot copy would predate syslog and never leave the device). One function,
+    // one print per boot.
+    if (!cfg->syslog_enable) {
+        config_log_summary(cfg);
+    }
+}
+
+// Full config dump — secrets masked, grouped per line for a readable trace.
+// DELIBERATELY NOT schema-generated: the hand-grouped shape (fields per line,
+// passwords under a single token) reads better than a per-field loop, and the
+// maintenance cost is one edit HERE per new field. Printed once per boot — see
+// config_load() (syslog off) and main.c (syslog on, after the UDP client is up).
+void config_log_summary(const config_t *cfg) {
     ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
              (unsigned long)cfg->tx_interval_ms);

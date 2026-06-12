@@ -5,6 +5,8 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"   // vTaskDelay — pace the config dump (see config_log_summary)
+#include "freertos/task.h"
 
 #include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH — gate the i2c-route dump line
 #include "util.h"
@@ -144,6 +146,14 @@ void config_log_summary(const config_t *cfg) {
     ESP_LOGI(TAG, "  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d",
              cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled,
              cfg->use_external_antenna);
+    // PACE the emit (V2.5.24): on the tight-heap heltec (plain ESP32, ~99 KB)
+    // an unpaced 27-line dump loses ~1 in 5 syslog UDP packets — the main task's
+    // back-to-back ESP_LOG → sendto() calls never yield, so the WiFi/lwIP task
+    // can't get scheduled to drain its TX queue + free pbufs. A 1-tick yield
+    // every few lines lets it catch up. No-op cost on the S3 boards and on the
+    // syslog-off boot path (where there's no UDP to lose). See the diff in the
+    // V2.5.24 changelog.
+    vTaskDelay(pdMS_TO_TICKS(10));
     ESP_LOGI(TAG, "  madavi:           enabled=%d https=%d",
              cfg->send_madavi, cfg->madavi_https);
     ESP_LOGI(TAG, "  sensor.community: enabled=%d https=%d",
@@ -163,6 +173,7 @@ void config_log_summary(const config_t *cfg) {
              (unsigned long)cfg->heap_guard_floor_kb);
     ESP_LOGI(TAG, "  station:          altitude=%.1fm send_sealevel_pressure=%d",
              (double)cfg->station_altitude_m, cfg->send_sealevel_pressure);
+    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     ESP_LOGI(TAG, "  ftp:              enabled=%d tls=%d host=%s user=%s pw=%s",
              cfg->ftp_enabled, cfg->ftp_tls,
              cfg->ftp_host[0] ? cfg->ftp_host : "<empty>",
@@ -186,6 +197,7 @@ void config_log_summary(const config_t *cfg) {
     ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
     ESP_LOGI(TAG, "  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
+    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing
@@ -207,6 +219,7 @@ void config_log_summary(const config_t *cfg) {
              cfg->send_gmc,
              cfg->gmc_account_id[0] ? cfg->gmc_account_id : "<empty>",
              cfg->gmc_geiger_id[0]  ? cfg->gmc_geiger_id  : "<empty>");
+    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     ESP_LOGI(TAG, "  thingspeak:       enabled=%d https=%d key=%s",
              cfg->send_thingspeak, cfg->thingspeak_https,
              MASK(cfg->thingspeak_api_key));
@@ -222,6 +235,7 @@ void config_log_summary(const config_t *cfg) {
     ESP_LOGI(TAG, "  mqtt:             topic_prefix=%s ha_discovery=%d",
              cfg->mqtt_topic_prefix[0] ? cfg->mqtt_topic_prefix : "<empty>",
              cfg->mqtt_ha_discovery);
+    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     // mqtt_tls_mode legend: 0=A Mozilla CA bundle / 1=B custom CA / 2=D skip-verify
     const char *mqtt_tls_str =
         (cfg->mqtt_tls_mode == 0) ? "A:bundle"  :

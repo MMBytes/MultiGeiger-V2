@@ -38,6 +38,7 @@
 #include "led.h"
 #include "net_arp.h"            // V2.4.19: gratuitous ARP after WiFi reconnect
 #include "ntp.h"
+#include "sysinfo.h"   // chip_model_str (shared model-string ladder)
 #include "periodic.h"           // V2.4.19: 24h housekeeping (PSA refresh + safety-net ARP)
 #include "history.h"            // V2.5.6: in-RAM CPM history + rolling averages
 #include "speaker.h"
@@ -890,11 +891,7 @@ void app_main(void) {
         esp_chip_info(&chip);
         uint32_t flash_size = 0;
         esp_flash_get_size(NULL, &flash_size);
-        const char *model =
-            (chip.model == CHIP_ESP32)   ? "ESP32"   :
-            (chip.model == CHIP_ESP32S2) ? "ESP32-S2":
-            (chip.model == CHIP_ESP32S3) ? "ESP32-S3":
-            (chip.model == CHIP_ESP32C3) ? "ESP32-C3": "?";
+        const char *model = chip_model_str(chip.model);
         ESP_LOGI(TAG, "chip: %s rev=v%d.%d cores=%d feat=[%s%s%s%s%s] flash=%luMB",
                  model,
                  chip.revision / 100, chip.revision % 100,

@@ -98,11 +98,7 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // applog's mutex, so ESP_LOG here is safe — see file header.)
     esp_chip_info_t chip;
     esp_chip_info(&chip);
-    const char *model =
-        (chip.model == CHIP_ESP32)   ? "ESP32"    :
-        (chip.model == CHIP_ESP32S2) ? "ESP32-S2" :
-        (chip.model == CHIP_ESP32S3) ? "ESP32-S3" :
-        (chip.model == CHIP_ESP32C3) ? "ESP32-C3" : "?";
+    const char *model = chip_model_str(chip.model);
     ESP_LOGI("boot",
              "Firmware %s (IDF %s) - Reset reason: %s - Board: %s - "
              "Chip: %s rev v%d.%d (%d cores) - Coredump: %s - "

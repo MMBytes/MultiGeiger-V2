@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.24 — internal DRY cleanups (no behaviour change)
+
+Follow-up to the independent review of V2.5.22/23 — both purely cosmetic:
+- **Shared `chip_model_str()`** in `sysinfo.h` replaces the model-string ternary ladder that had been copy-pasted in three spots (`main.c` boot `chip:` log, `http_server.c` /status device block, `syslog.c` boot banner). Switch + `default` keeps `-Wswitch` happy.
+- **`http_server.c` reuses `ntp_time_valid()`** instead of two raw `1735689600` ("> 2025-01-01") literals — the clock-sane predicate now has a single source of truth (`EPOCH_2025` in `ntp.c`).
+
+No functional change; both touch only how existing values are computed.
+
 ## V2.5.23 — full config dump now reaches the syslog server
 
 **What:** The boot `config:` trace (the ~28-line dump of every setting, secrets masked) now lands on the rsyslog server, not just the device's `/log` and serial console.

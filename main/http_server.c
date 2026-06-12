@@ -45,7 +45,8 @@
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 #include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
 #include "syslog.h"            // V2.4.15: tear down UDP socket in OTA teardown
-#include "sysinfo.h"           // V2.4.26: reset_reason_str (also used by mqtt.c)
+#include "sysinfo.h"           // V2.4.26: reset_reason_str / chip_model_str (also used by mqtt.c)
+#include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 
 static const char *TAG = "http";
@@ -360,11 +361,7 @@ static void format_device(char *out, size_t sz) {
     esp_chip_info(&chip);
     uint32_t flash_size = 0;
     esp_flash_get_size(NULL, &flash_size);
-    const char *model =
-        (chip.model == CHIP_ESP32)   ? "ESP32"   :
-        (chip.model == CHIP_ESP32S2) ? "ESP32-S2":
-        (chip.model == CHIP_ESP32S3) ? "ESP32-S3":
-        (chip.model == CHIP_ESP32C3) ? "ESP32-C3": "?";
+    const char *model = chip_model_str(chip.model);
     char feat[32]; feat[0] = 0;
     if (chip.features & CHIP_FEATURE_WIFI_BGN) strncat(feat, "WiFi ", sizeof(feat)-strlen(feat)-1);
     if (chip.features & CHIP_FEATURE_BLE)      strncat(feat, "BLE ",  sizeof(feat)-strlen(feat)-1);
@@ -443,7 +440,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
     // localtime sample.
     time_t now = time(NULL);
     char ntp_line[96];
-    if (now > 1735689600) {     // > 2025-01-01
+    if (ntp_time_valid()) {     // clock is real (NTP-synced or sane RTC carry-over)
         char ts[24];
         format_wallclock((int64_t)now, ts, sizeof(ts));
         snprintf(ntp_line, sizeof(ntp_line), "synced &middot; clock now %s", ts);
@@ -457,7 +454,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
     // sync). Local time, matching the rest of the page. Separate suffix buffer
     // (not an append into uptime_buf) keeps it a single bounded snprintf.
     char started_suffix[48] = "";
-    if (now > 1735689600) {
+    if (ntp_time_valid()) {
         char started[24];
         format_wallclock((int64_t)now - (int64_t)uptime_s, started, sizeof(started));
         snprintf(started_suffix, sizeof(started_suffix), " (Started %s)", started);

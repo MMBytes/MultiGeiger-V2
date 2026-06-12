@@ -10,6 +10,7 @@
 #pragma once
 
 #include "esp_system.h"
+#include "esp_chip_info.h"
 
 static inline const char *reset_reason_str(esp_reset_reason_t r) {
     switch (r) {
@@ -24,5 +25,19 @@ static inline const char *reset_reason_str(esp_reset_reason_t r) {
         case ESP_RST_BROWNOUT:  return "BROWNOUT";
         case ESP_RST_SDIO:      return "SDIO";
         default:                return "UNKNOWN";
+    }
+}
+
+// Chip silicon model as a short string ("ESP32" / "ESP32-S3" / …). Shared by the
+// boot `chip:` log, the /status device block, and the syslog boot banner so the
+// model ladder lives in exactly one place. The `default` keeps -Wswitch happy
+// (and covers parts this firmware doesn't target, e.g. C6/H2/P4).
+static inline const char *chip_model_str(esp_chip_model_t m) {
+    switch (m) {
+        case CHIP_ESP32:   return "ESP32";
+        case CHIP_ESP32S2: return "ESP32-S2";
+        case CHIP_ESP32S3: return "ESP32-S3";
+        case CHIP_ESP32C3: return "ESP32-C3";
+        default:           return "?";
     }
 }

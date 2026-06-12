@@ -9,6 +9,12 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.22 — /status Uptime line shows the boot time
+
+**What:** The System block's `Uptime:` line now appends the boot wall-clock — e.g. `Uptime: 00h 03m 37s (Started 2026-06-12 15:36:00)`.
+
+**Why/how:** Boot instant = `time(NULL) − uptime`, rendered as local time via the existing `format_wallclock()` helper. Gated on the same `>2025-01-01` clock-sanity check as the NTP line, so before the first NTP sync (when the wall clock reads 1970) only the bare uptime shows — never a nonsense "Started 1970-…". Rendered into a separate suffix buffer (not appended into `uptime_buf`) so it stays a single bounded `snprintf`.
+
 ## V2.5.21 — fix: GNSS I²C "hardware timeout" floods under a live multi-GNSS fix
 
 **What:** Added `.scl_wait_us = 13000` to the GNSS `i2c_device_config_t` in `gnss_init()`.

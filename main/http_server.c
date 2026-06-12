@@ -451,6 +451,18 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");
     }
 
+    // V2.5.22: append the boot wall-clock to the Uptime line — boot instant =
+    // now - uptime. Gated on the same >2025 sanity check as the NTP line so we
+    // never print a pre-sync "Started 1970-..." (uptime alone shows until first
+    // sync). Local time, matching the rest of the page. Separate suffix buffer
+    // (not an append into uptime_buf) keeps it a single bounded snprintf.
+    char started_suffix[48] = "";
+    if (now > 1735689600) {
+        char started[24];
+        format_wallclock((int64_t)now - (int64_t)uptime_s, started, sizeof(started));
+        snprintf(started_suffix, sizeof(started_suffix), " (Started %s)", started);
+    }
+
     // V2.4.18: core dump line. Three render modes:
     //   - no dump:  "none"
     //   - dump:     "yes &middot; <SZ> bytes &middot; task=<NAME> PC=0x...
@@ -498,7 +510,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
 
     snprintf(out, sz,
         "<div class=\"info\"><h3>System</h3>"
-        "<b>Uptime:</b> %s<br>"
+        "<b>Uptime:</b> %s%s<br>"
         "<b>Reset reason:</b> %s<br>"
         "%s"                                  // core-dump line (V2.4.18)
         "<b>Free heap:</b> %lu bytes<br>"
@@ -513,7 +525,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         // decision without digging into /log.
         "<b>Display layout:</b> %s"
         "</div>",
-        uptime_buf,
+        uptime_buf, started_suffix,
         reset_reason_str(esp_reset_reason()),
         cd_line,
         (unsigned long)free_heap,

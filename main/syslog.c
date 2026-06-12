@@ -22,6 +22,15 @@
 #include <arpa/inet.h>
 
 #include "esp_log.h"
+#include "esp_system.h"        // esp_reset_reason / esp_get_free_heap_size
+#include "esp_idf_version.h"   // esp_get_idf_version
+#include "esp_chip_info.h"     // esp_chip_info — model / rev / cores
+#include "esp_heap_caps.h"     // largest-free-block (fragmentation baseline)
+
+#include "version.h"           // VERSION_STR
+#include "sysinfo.h"           // reset_reason_str
+#include "hal.h"               // BOARD_NAME
+#include "coredump.h"          // coredump_have_dump
 
 static const char *TAG = "syslog";
 
@@ -78,6 +87,33 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // safe barrier. Without this, a concurrent vprintf could observe a
     // valid s_sock but stale s_addr.
     s_sock = sock;
+
+    // V2.5.22: boot summary as the FIRST line the server sees. The real boot
+    // banner (version / board / chip / reset reason) is logged before WiFi +
+    // syslog come up, so it never reaches the server — leaving the firmware
+    // version and reset reason invisible to server-side forensics (the gap that
+    // once hid an OTA behind an unexplained count-rate jump). Now that the
+    // socket is live, emit a one-line summary BEFORE "started" so it leads every
+    // device's server-side log. (syslog_init runs once at startup, outside
+    // applog's mutex, so ESP_LOG here is safe — see file header.)
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    const char *model =
+        (chip.model == CHIP_ESP32)   ? "ESP32"    :
+        (chip.model == CHIP_ESP32S2) ? "ESP32-S2" :
+        (chip.model == CHIP_ESP32S3) ? "ESP32-S3" :
+        (chip.model == CHIP_ESP32C3) ? "ESP32-C3" : "?";
+    ESP_LOGI("boot",
+             "Firmware %s (IDF %s) - Reset reason: %s - Board: %s - "
+             "Chip: %s rev v%d.%d (%d cores) - Coredump: %s - "
+             "Free heap: %lu B (largest %lu B)",
+             VERSION_STR, esp_get_idf_version(),
+             reset_reason_str(esp_reset_reason()),
+             BOARD_NAME,
+             model, chip.revision / 100, chip.revision % 100, chip.cores,
+             coredump_have_dump() ? "PRESENT (/coredump.elf)" : "none",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);

@@ -9,11 +9,17 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.5.22 — /status Uptime line shows the boot time
+## V2.5.22 — boot diagnostics: /status start time + a server-side boot banner
 
-**What:** The System block's `Uptime:` line now appends the boot wall-clock — e.g. `Uptime: 00h 03m 37s (Started 2026-06-12 15:36:00)`.
+**1. /status Uptime line shows the boot time.** The System block's `Uptime:` line now appends the boot wall-clock — e.g. `Uptime: 00h 03m 37s (Started 2026-06-12 15:36:00)`. Boot instant = `time(NULL) − uptime`, rendered as local time via the existing `format_wallclock()` helper, gated on the same `>2025-01-01` clock-sanity check as the NTP line (pre-sync shows the bare uptime, never a nonsense "Started 1970-…"). Rendered into a separate suffix buffer so it stays a single bounded `snprintf`.
 
-**Why/how:** Boot instant = `time(NULL) − uptime`, rendered as local time via the existing `format_wallclock()` helper. Gated on the same `>2025-01-01` clock-sanity check as the NTP line, so before the first NTP sync (when the wall clock reads 1970) only the bare uptime shows — never a nonsense "Started 1970-…". Rendered into a separate suffix buffer (not appended into `uptime_buf`) so it stays a single bounded `snprintf`.
+**2. Syslog boot-summary line.** The real boot banner (firmware version / board / chip / reset reason) is logged before WiFi + syslog come up, so it never reached the rsyslog server — leaving the firmware version and reset reason invisible to server-side forensics (the gap that once hid an OTA behind an unexplained count-rate jump). `syslog_init()` now emits a one-line summary as the **first** packet once the socket is live, under a greppable `boot` tag:
+
+```
+boot: Firmware V2.5.22 (IDF v6.0) - Reset reason: SOFT (esp_restart) - Board: seeed_xiao_esp32s3 - Chip: ESP32-S3 rev v0.2 (2 cores) - Coredump: none - Free heap: 4330740 B (largest 4128768 B)
+```
+
+The reset reason distinguishes a clean reboot from `BROWNOUT` / `TASK_WDT` / `PANIC` / `POWER_ON`; `Coredump: PRESENT` pairs with `PANIC` to point at `/coredump.elf`; the free/largest-heap pair gives a fragmentation baseline. Reuses `reset_reason_str()` (sysinfo.h), `BOARD_NAME` (hal.h), and the chip-model formatting from `main.c`.
 
 ## V2.5.21 — fix: GNSS I²C "hardware timeout" floods under a live multi-GNSS fix
 

@@ -56,6 +56,10 @@ void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_po
 }
 
 bool ntp_time_valid(void) {
+    // NOTE: also called from syslog.c emit_packet(), which runs inside
+    // applog_vprintf under a NON-recursive mutex. Must NOT ESP_LOG here (nor
+    // add any callee that does) — a log from this path re-enters applog and
+    // self-deadlocks before the s_in_emit guard. Keep it pure.
     time_t now;
     time(&now);
     return now > EPOCH_2026;
@@ -76,6 +80,10 @@ void ntp_poll(void) {
 }
 
 const char *ntp_localtime_str(void) {
+    // NOTE: called from syslog.c emit_packet() on every emitted line, under
+    // applog's NON-recursive mutex. Must NOT ESP_LOG here (nor add a callee
+    // that does) — it would re-enter applog and self-deadlock. time() /
+    // localtime_r() / strftime() are all log-free; keep it that way.
     static char buf[40];
     time_t t;
     time(&t);

@@ -1100,7 +1100,7 @@ void app_main(void) {
     //
     // V2.4.12 fix: the original V2.4.11 gated only on (2). ESP32's RTC
     // survives soft reboots (OTA, watchdog, esp_restart), so after the first
-    // cold boot the clock is already past 2025 and ntp_time_valid() returns
+    // cold boot the clock is already past 2026 and ntp_time_valid() returns
     // true immediately — defeating the gate. Adding (1) fixes both reboot
     // modes: cold boot waits for SNTP, soft reboot waits for STA GOT_IP.
     //
@@ -1180,7 +1180,7 @@ void app_main(void) {
         // V2.4.12: start MQTT only once both preconditions hold (see boot
         // section comment above). n_got_ip>0 means STA has reached the LAN
         // at least once (sticky — only ever increments); ntp_time_valid()
-        // means the wall clock is past 2025-01-01 (sane for TLS cert
+        // means the wall clock is past 2026-01-01 (sane for TLS cert
         // validation, whether from fresh SNTP or RTC carryover).
         // V2.4.13: source of truth moved to mqtt_is_initialized() so the
         // /update OTA-teardown path can flip it back to false via mqtt_stop()

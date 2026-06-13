@@ -9,8 +9,11 @@
 
 static const char *TAG = "ntp";
 
-// 2025-01-01 00:00 UTC — threshold for "time is valid".
-#define EPOCH_2025 1735689600L
+// 2026-01-01 00:00 UTC — threshold for "time is valid". Bumped from
+// 2025-01-01 in V2.5.27: the firmware only ever runs from 2026 onward, so a
+// clock reading any 2025 date is necessarily a stale/bad sync, not a real
+// "now" — rejecting it (→ wait for a proper sync) is the safer sanity floor.
+#define EPOCH_2026 1767225600L
 
 static volatile bool     sync_pending = false;
 static volatile time_t   sync_tv_sec  = 0;
@@ -55,7 +58,7 @@ void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_po
 bool ntp_time_valid(void) {
     time_t now;
     time(&now);
-    return now > EPOCH_2025;
+    return now > EPOCH_2026;
 }
 
 void ntp_poll(void) {

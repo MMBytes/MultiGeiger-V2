@@ -1,4 +1,4 @@
-// V2.4.15: UDP syslog client — RFC 3164 framing.
+// V2.4.15: UDP syslog client — RFC 5424 framing (RFC 3164 pre-V2.5.27).
 //
 // Hooked into applog_vprintf so every ESP_LOG line that lands in the ring
 // also gets sent out via UDP. See syslog.h for design rationale + heap cost.
@@ -31,6 +31,7 @@
 #include "sysinfo.h"           // reset_reason_str
 #include "hal.h"               // BOARD_NAME
 #include "coredump.h"          // coredump_have_dump
+#include "ntp.h"               // ntp_time_valid — the clock-sane gate
 
 static const char *TAG = "syslog";
 
@@ -127,7 +128,7 @@ bool syslog_is_initialized(void) {
     return s_sock >= 0;
 }
 
-// V2.4.16: build one RFC 3164 frame from an already-coalesced full line and
+// V2.4.16: build one RFC 5424 frame from an already-coalesced full line and
 // send it as a single UDP packet. Internal helper; the public entry-point
 // `syslog_emit()` below feeds full lines here after fragment accumulation.
 //
@@ -158,21 +159,31 @@ static void emit_packet(const char *line, size_t len) {
     }
     int priority = 16 * 8 + severity;    // facility = local0
 
-    // RFC 3164 timestamp "Mmm DD HH:MM:SS". We use device wall-clock when
-    // it's plausibly real (post-NTP-or-RTC-carryover); rsyslog re-stamps
-    // anyway based on receive time, but a real timestamp is friendlier
-    // when scrolling old log files. Pre-NTP, fall back to a benign fixed
-    // string — rsyslog still parses correctly and uses receive time.
-    char ts[16];
-    time_t now = time(NULL);
-    if (now > 1735689600L) {            // 2025-01-01 — clock is real
-        struct tm tm;
-        localtime_r(&now, &tm);
-        if (strftime(ts, sizeof(ts), "%b %e %H:%M:%S", &tm) == 0) {
-            memcpy(ts, "Jan  1 00:00:00", 16);
+    // V2.5.27: RFC 5424 framing so a pre-NTP line can carry a NILVALUE ("-")
+    // timestamp. RFC 3164 (the pre-V2.5.27 framing) has no nil-timestamp form,
+    // so the pre-sync path emitted a well-formed but bogus "Jan  1 00:00:00" —
+    // a collector trusting the reported time filed it under the wrong day
+    // (e.g. 2026-01-01T00:00:00), hiding every pre-sync boot line (banner +
+    // config dump) from date-scoped queries. With RFC 5424, "-" tells the
+    // collector "no reliable time" and it falls back to receive time on its
+    // own — correct on a stock rsyslog, no server-side template change needed.
+    //
+    // Once the clock is real (NTP-synced, or RTC carry-over across a soft
+    // reboot — ntp_time_valid()), emit a true RFC 3339 stamp. We use UTC
+    // ("...Z") rather than local time so there's no offset/DST arithmetic
+    // (and this newlib's struct tm has no tm_gmtoff anyway). The collector
+    // files by receive time regardless; this is just a friendly in-band
+    // stamp for stock collectors.
+    char ts[32];
+    if (ntp_time_valid()) {
+        time_t now = time(NULL);
+        struct tm gt;
+        gmtime_r(&now, &gt);
+        if (strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &gt) == 0) {
+            ts[0] = '-'; ts[1] = 0;     // unexpected — fall back to NILVALUE
         }
     } else {
-        memcpy(ts, "Jan  1 00:00:00", 16);
+        ts[0] = '-'; ts[1] = 0;         // NILVALUE — collector uses receive time
     }
 
     // Strip trailing newlines — rsyslog adds its own.
@@ -181,8 +192,11 @@ static void emit_packet(const char *line, size_t len) {
     }
     if (len == 0) return;
 
+    // RFC 5424: <PRI>1 SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP
+    //           MSGID SP STRUCTURED-DATA SP MSG. APP-NAME "geiger"; PROCID,
+    //           MSGID and STRUCTURED-DATA are all NILVALUE ("-").
     int n = snprintf(s_emit_buf, sizeof(s_emit_buf),
-                     "<%d>%s %s geiger: %.*s",
+                     "<%d>1 %s %s geiger - - - %.*s",
                      priority, ts, s_hostname, (int)len, line);
     if (n > 0) {
         // V2.5.20 (review R10): clamp-and-send on truncation. Pre-V2.5.20 a

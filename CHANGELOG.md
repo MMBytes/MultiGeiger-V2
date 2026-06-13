@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.27 — syslog RFC 5424 framing (pre-NTP NILVALUE timestamp)
+
+**What:** The UDP syslog client now frames messages as **RFC 5424** instead of RFC 3164. Before the wall clock is valid, the timestamp field is emitted as the NILVALUE `-`; once NTP has synced (or a soft-reboot RTC carry-over is sane) it carries a real RFC 3339 UTC timestamp (e.g. `2026-06-13T09:00:34Z`).
+
+**Why:** The boot banner + the full `config:` dump are emitted in the early-boot window, *before* the first NTP sync (which can take minutes). Under RFC 3164 there is no "unknown time" token, so the pre-sync path sent a well-formed but bogus `Jan  1 00:00:00`. A collector configured to trust the message's *reported* time then filed those lines under the wrong day — on our rsyslog server they landed at `2026-01-01T00:00:00`, invisible to any `grep 2026-06-13` and mis-sorted in the file. RFC 5424's NILVALUE `-` is defined to mean "originator has no reliable time," so a stock collector falls back to its own receive time automatically — no server-side template change required.
+
+**How:** `emit_packet()` in `syslog.c` reframed to `<PRI>1 TIMESTAMP HOSTNAME geiger - - - MSG` (APP-NAME `geiger`; PROCID / MSGID / STRUCTURED-DATA all NILVALUE). The clock-sane gate now reuses **`ntp_time_valid()`** (the V2.5.24 single-source predicate) instead of a duplicated `1735689600` literal. That predicate's floor was also bumped **2025-01-01 → 2026-01-01** (`EPOCH_2025` → `EPOCH_2026`): the firmware only runs from 2026 onward, so any 2025-dated clock is a stale/bad sync and is now correctly treated as not-yet-valid. This tightens the same gate used for TLS-cert and FTP timestamp readiness — safe, since a genuinely synced clock reads 2026-06+. **Note:** the rendered server tag changes from `geiger:` to `geiger` (RFC 5424 APP-NAME carries no colon) — cosmetic.
+
 ## V2.5.26 — new TX target: openSenseMap STAGING (beta)
 
 **What:** A ninth upload target, **"openSenseMap STAGING (HTTPS only)"**, on the `/config` page directly below the existing openSenseMap block. Independent Box ID + Access Token; posts the standard Luftdaten body to `upload.staging.opensensemap.org/boxes/<id>/data?luftdaten=1`.

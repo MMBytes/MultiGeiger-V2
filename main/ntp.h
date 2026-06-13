@@ -19,7 +19,7 @@
  */
 void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_posix);
 
-/** @brief True once the clock has ticked past 2025-01-01 (NTP has synced). */
+/** @brief True once the clock has ticked past 2026-01-01 (NTP has synced). */
 bool ntp_time_valid(void);
 
 /** @brief Drain the deferred sync-complete log message from the main task.

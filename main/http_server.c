@@ -315,6 +315,10 @@ static void format_net_info(char *out, size_t sz) {
         main_status_snapshot(&st);
         snprintf(out, sz,
                  "<div class=\"info\"><h3>Network</h3>"
+                 // AP SSID = this device's own fallback/AP-mode SSID (config
+                 // ap_name); distinct from the "SSID:" below = the network it's
+                 // joined to. Lives in the Network block (moved out of System).
+                 "<b>AP SSID:</b> %s<br>"
                  "<b>SSID:</b> %s<br>"
                  "<b>Security:</b> %s &middot; PHY %s &middot; %s &middot; channel %d<br>"
                  "<b>BSSID:</b> %02x:%02x:%02x:%02x:%02x:%02x &nbsp; AID %u<br>"
@@ -325,6 +329,7 @@ static void format_net_info(char *out, size_t sz) {
                  "<b>DNS:</b> %s%s%s<br>"
                  "<b>Reconnects:</b> %lu since boot"
                  "</div>",
+                 s_cfg->ap_name,
                  ssid_esc,
                  wifi_auth_str(ap.authmode), phy, bw, (int)ap.primary,
                  ap.bssid[0], ap.bssid[1], ap.bssid[2],
@@ -343,7 +348,7 @@ static void format_net_info(char *out, size_t sz) {
         if (apn) esp_netif_get_ip_info(apn, &ip);
         char ip_s[16];
         esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
-        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>IP:</b> %s (AP mode)</div>", ip_s);
+        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>IP:</b> %s (AP mode)</div>", s_cfg->ap_name, ip_s);
         return;
     }
 
@@ -515,7 +520,6 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         "<b>Max allocation:</b> %lu bytes<br>"
         "<b>I²C errors:</b> %lu since boot<br>"
         "<b>NTP:</b> %s<br>"
-        "<b>AP SSID:</b> %s<br>"
         // V2.4.9: resolved display layout mode. Shows what display.c
         // picked at boot (e.g. "auto (resolved: rotation)" or
         // "radiation (forced)") so the user can confirm the runtime
@@ -530,7 +534,6 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         (unsigned long)max_alloc,
         (unsigned long)st.i2c_errors,
         ntp_line,
-        s_cfg->ap_name,
         display_mode_str());
 }
 

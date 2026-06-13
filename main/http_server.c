@@ -284,6 +284,13 @@ static void format_net_info(char *out, size_t sz) {
     wifi_ap_record_t ap;
     bool sta_up = (sta != NULL) && (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
 
+    // ap_name is a user-editable config field, so escape it once for whichever
+    // Network branch renders below — same treatment as the joined SSID
+    // (ssid_esc) and the /config page (e_apn). 96 B matches the /config buffer;
+    // html_esc() is bounded so it truncates rather than overflows.
+    char ap_name_esc[96];
+    html_esc(s_cfg->ap_name, ap_name_esc, sizeof(ap_name_esc));
+
     if (sta_up) {
         esp_netif_ip_info_t ip = { 0 };
         esp_netif_get_ip_info(sta, &ip);
@@ -329,7 +336,7 @@ static void format_net_info(char *out, size_t sz) {
                  "<b>DNS:</b> %s%s%s<br>"
                  "<b>Reconnects:</b> %lu since boot"
                  "</div>",
-                 s_cfg->ap_name,
+                 ap_name_esc,
                  ssid_esc,
                  wifi_auth_str(ap.authmode), phy, bw, (int)ap.primary,
                  ap.bssid[0], ap.bssid[1], ap.bssid[2],
@@ -348,7 +355,7 @@ static void format_net_info(char *out, size_t sz) {
         if (apn) esp_netif_get_ip_info(apn, &ip);
         char ip_s[16];
         esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
-        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>IP:</b> %s (AP mode)</div>", s_cfg->ap_name, ip_s);
+        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>IP:</b> %s (AP mode)</div>", ap_name_esc, ip_s);
         return;
     }
 

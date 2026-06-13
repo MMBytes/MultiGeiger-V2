@@ -43,6 +43,12 @@ static char               s_hostname[32] = "geiger";
 // somehow fires from within sendto's call chain (lwIP error path? unlikely
 // but defensive) returns immediately instead of recursing.
 static bool               s_in_emit = false;
+// V2.5.29: cumulative UDP send accounting. Incremented in emit_packet (under
+// applog's mutex — no atomics needed); read via syslog_get_stats() from the TX
+// cycle. A non-zero drop count = device-side loss (sendto failed, almost always
+// lwIP pbuf-pool exhaustion when a burst outruns the WiFi/lwIP drain).
+static uint32_t           s_tx_count   = 0;
+static uint32_t           s_drop_count = 0;
 
 void syslog_init(const char *host, uint16_t port, const char *hostname) {
     if (!host || !host[0] || port == 0) {
@@ -134,6 +140,11 @@ bool syslog_is_initialized(void) {
     return s_sock >= 0;
 }
 
+void syslog_get_stats(uint32_t *sent, uint32_t *dropped) {
+    if (sent)    *sent    = s_tx_count;
+    if (dropped) *dropped = s_drop_count;
+}
+
 // V2.4.16: build one RFC 5424 frame from an already-coalesced full line and
 // send it as a single UDP packet. Internal helper; the public entry-point
 // `syslog_emit()` below feeds full lines here after fragment accumulation.
@@ -202,8 +213,19 @@ static void emit_packet(const char *line, size_t len) {
         // MSG_DONTWAIT: non-blocking. If lwIP's TX queue is full we'd
         // rather drop the packet than block applog (which holds its
         // mutex while calling us). UDP send is normally sub-ms.
-        (void)sendto(s_sock, s_emit_buf, (size_t)n, MSG_DONTWAIT,
-                     (struct sockaddr *)&s_addr, sizeof(s_addr));
+        //
+        // V2.5.29: count the result (was discarded). A sendto failure here is
+        // almost always lwIP pbuf-pool exhaustion when a burst (e.g. the boot
+        // config dump) outruns the WiFi/lwIP drain — previously INVISIBLE.
+        // Count only; the report is logged from the TX cycle via
+        // syslog_get_stats() — NEVER ESP_LOG here (it would re-enter applog's
+        // non-recursive mutex from the emit path → deadlock).
+        if (sendto(s_sock, s_emit_buf, (size_t)n, MSG_DONTWAIT,
+                   (struct sockaddr *)&s_addr, sizeof(s_addr)) < 0) {
+            s_drop_count++;
+        } else {
+            s_tx_count++;
+        }
     }
 }
 

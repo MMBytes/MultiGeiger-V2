@@ -57,6 +57,16 @@ void syslog_stop(void);
 /** @brief True if the syslog socket is currently open. */
 bool syslog_is_initialized(void);
 
+/** @brief Cumulative UDP send stats since boot (either pointer may be NULL).
+ *
+ *  `dropped` counts `sendto()` failures — almost always lwIP pbuf-pool
+ *  exhaustion when a burst (e.g. the boot config dump) outruns the WiFi/lwIP
+ *  drain. A non-zero count is a definitive device-side-loss signal; **zero
+ *  does NOT prove zero loss** (WiFi-driver-late, network, and server-side
+ *  drops aren't visible here). Read from the TX cycle, never the emit path.
+ */
+void syslog_get_stats(uint32_t *sent, uint32_t *dropped);
+
 /** @brief Emit one log line via UDP. Called from `applog_vprintf()`.
  *
  *  Severity is inferred from the first character of the formatted line:

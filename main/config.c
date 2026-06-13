@@ -144,11 +144,13 @@ void config_log_summary(const config_t *cfg) {
     // a large fraction of the dump is dropped on the WIRE (the device /log ring
     // stays complete — V2.5.29 confirmed the loss is pure UDP burst pressure,
     // not the line reassembly). A 1-tick yield after EACH line lets lwIP transmit
-    // between sends. ~28 ticks (~150-280 ms) on one boot event; no-op cost on the
-    // syslog-off path (no UDP to lose). LOG_PACED keeps the "one edit per field"
-    // property — just add another LOG_PACED line.
-    #define LOG_PACED(...) do { ESP_LOGI(TAG, __VA_ARGS__);          \
-                                vTaskDelay(pdMS_TO_TICKS(10)); } while (0)
+    // between sends. ~28 ticks (~150-280 ms) on one boot event. The yield is
+    // GATED on cfg->syslog_enable, so the syslog-off boot path (config_load)
+    // pays nothing — there's no UDP to lose there. LOG_PACED keeps the "one
+    // edit per field" property — just add another LOG_PACED line.
+    #define LOG_PACED(...) do { ESP_LOGI(TAG, __VA_ARGS__);                           \
+                                if (cfg->syslog_enable) vTaskDelay(pdMS_TO_TICKS(10)); \
+                              } while (0)
 
     LOG_PACED("config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,

@@ -8,6 +8,7 @@
 #include <math.h>
 #include <time.h>
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
+#include "syslog.h"             // V2.5.29: syslog_get_stats (per-cycle UDP drop report)
 #include "main_status.h"        // V2.5.18: main_request_restart (heap-guard reboot)
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -1377,6 +1378,16 @@ static void tx_run(const tx_context_t *c) {
     // internal/DMA RAM. Log the capability split each cycle so the multi-day
     // /log → FTP trail exposes any internal/DMA drain (suspected OTA-stall cause).
     diag_log_heap("per-cycle");
+    // V2.5.29: surface device-side syslog UDP drops (sendto failures = lwIP
+    // pbuf exhaustion under burst — e.g. the boot config dump). Logged from the
+    // TX worker (NOT the emit path), so it lands on /log even when syslog itself
+    // is dropping → self-evident. drops>0 ⇒ device-side loss confirmed.
+    if (syslog_is_initialized()) {
+        uint32_t slog_tx = 0, slog_drops = 0;
+        syslog_get_stats(&slog_tx, &slog_drops);
+        ESP_LOGI(TAG, "syslog udp: tx=%lu drops=%lu (since boot)",
+                 (unsigned long)slog_tx, (unsigned long)slog_drops);
+    }
 
     // V2.5.18: fragmentation auto-reboot, judged on the resting snapshot just
     // logged above (not a 1 Hz sample that catches inbound-/log transients).

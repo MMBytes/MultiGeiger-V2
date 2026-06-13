@@ -29,5 +29,7 @@ bool ntp_time_valid(void);
  */
 void ntp_poll(void);
 
-/** @brief Current local time as "YYYY-MM-DDTHH:MM:SS". Static buffer — not reentrant. */
+/** @brief Current local time as RFC 3339 with numeric UTC offset, e.g.
+ *  "2026-06-13T20:45:50+10:00" (DST-aware via the configured TZ).
+ *  Static buffer — not reentrant. */
 const char *ntp_localtime_str(void);

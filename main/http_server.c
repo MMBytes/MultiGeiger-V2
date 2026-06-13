@@ -2118,7 +2118,12 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     }
     log_ftp_pause();
     mqtt_stop();
-    syslog_stop();   // V2.4.15: close UDP socket too (small but consistent)
+    // V2.5.28: syslog deliberately stays UP through the whole flash (was
+    // syslog_stop() here pre-V2.5.28). The teardown's heap win is mqtt_stop
+    // (~50 KB TLS) + log_ftp_pause; the UDP socket is only a few hundred
+    // bytes, so keeping it open is negligible and lets the entire OTA trace
+    // (progress / verify / SUCCESS / FAILED) reach the syslog server —
+    // including failures, which used to be invisible server-side.
     tube_pcnt_stop(); // V2.5.16: release the opt-in PCNT comb's internal DRAM
                       // (no-op when pcnt_filter is off — the common case)
     // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
@@ -2168,7 +2173,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     esp_ota_handle_t ota = 0;
     esp_err_t err = esp_ota_begin(target, total, &ota);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA FAILED: esp_ota_begin — %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
@@ -2191,6 +2196,9 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // generally-OK link with occasional hiccups doesn't drain the budget.
     int recv_retries = 0;
     const int RECV_MAX_RETRIES = 5;
+    // V2.5.28: per-flash telemetry — wall-clock start + a 128 KB progress gate.
+    const int64_t t_start  = esp_timer_get_time();
+    size_t        next_log = 128 * 1024;
     while (received < total) {
         size_t want = total - received;
         if (want > OTA_CHUNK) want = OTA_CHUNK;
@@ -2203,16 +2211,16 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                          recv_retries, RECV_MAX_RETRIES);
                 continue;
             }
-            ESP_LOGE(TAG, "recv timed out %d× at %u/%u — giving up",
-                     RECV_MAX_RETRIES, (unsigned)received, (unsigned)total);
+            ESP_LOGE(TAG, "OTA FAILED: recv timed out %d× at %u/%u KB",
+                     RECV_MAX_RETRIES, (unsigned)(received / 1024), (unsigned)(total / 1024));
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv timeout");
             return ESP_OK;
         }
         if (r <= 0) {
-            ESP_LOGE(TAG, "recv failed at %u/%u (r=%d)",
-                     (unsigned)received, (unsigned)total, r);
+            ESP_LOGE(TAG, "OTA FAILED: recv at %u/%u KB (r=%d)",
+                     (unsigned)(received / 1024), (unsigned)(total / 1024), r);
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
@@ -2221,23 +2229,35 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         recv_retries = 0;   // got bytes — reset the retry budget
         err = esp_ota_write(ota, buf, (size_t)r);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_ota_write failed at %u: %s",
-                     (unsigned)received, esp_err_to_name(err));
+            ESP_LOGE(TAG, "OTA FAILED: esp_ota_write at %u KB — %s",
+                     (unsigned)(received / 1024), esp_err_to_name(err));
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
             return ESP_OK;
         }
         received += (size_t)r;
+        if (received >= next_log) {
+            ESP_LOGI(TAG, "OTA progress: %u/%u KB (%u%%)",
+                     (unsigned)(received / 1024), (unsigned)(total / 1024),
+                     (unsigned)(received * 100 / total));
+            next_log += 128 * 1024;
+        }
     }
     free(buf);
 
+    const int64_t recv_ms = (esp_timer_get_time() - t_start) / 1000;
+    ESP_LOGI(TAG, "OTA receive complete: %u KB in %llds (%u KB/s)",
+             (unsigned)(total / 1024), (long long)(recv_ms / 1000),
+             recv_ms > 0 ? (unsigned)((uint64_t)(total / 1024) * 1000 / recv_ms) : 0);
+
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA FAILED: esp_ota_end — %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
+    ESP_LOGI(TAG, "OTA image written + finalized (esp_ota_end ok) — verifying");
 
     // V2.3.13: validate the just-written app's chip_id and project_name BEFORE
     // committing the boot partition. The bootloader does its own chip-ID check
@@ -2349,13 +2369,18 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
 
     err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA FAILED: esp_ota_set_boot_partition — %s", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
 
     main_request_restart();
-    ESP_LOGW(TAG, "OTA written (%u bytes) — restart flagged", (unsigned)total);
+    ESP_LOGW(TAG, "OTA SUCCESS: %s -> %.32s (%u bytes) — boot set to %s, rebooting in ~2s",
+             VERSION_STR, new_desc.version, (unsigned)total, target->label);
+    // V2.5.28: syslog send is fire-and-forget (MSG_DONTWAIT). The main loop's
+    // 2 s pre-restart delay already covers the flush, but yield briefly here
+    // too so the SUCCESS line is on the wire before this handler returns.
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     const char *ok = "OTA OK — restarting in ~2s";
     httpd_resp_set_type(req, "text/plain; charset=utf-8");

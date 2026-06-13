@@ -9,6 +9,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.28 — OTA logging reaches the syslog server (detailed flash trace)
+
+**What:** The full firmware-update process is now visible on the syslog server — a start line, **128 KB progress ticks** (`OTA progress: 512/1289 KB (40%)`), a receive-complete line with elapsed time + throughput, the verify/commit steps, and a final **`OTA SUCCESS: V2.5.27 -> V2.5.28 (N bytes) — rebooting in ~2s`**. Every failure path now logs a greppable **`OTA FAILED: <stage> — <reason>`** headline.
+
+**Why:** The OTA-prep teardown called `syslog_stop()` *before* the flash, so the rich logging that already existed in `update_post()` only ever reached the device ring buffer + serial — never the server. Failed OTAs in particular were invisible to server-side forensics. The teardown's actual heap win is `mqtt_stop()` (~50 KB TLS) + `log_ftp_pause()`; the syslog UDP socket is a few hundred bytes, so keeping it open through the flash is negligible and does not reintroduce the OTA-OOM the teardown was built to prevent.
+
+**How:** Dropped `syslog_stop()` from the teardown (`http_server.c`) so the socket survives the whole flash; `mqtt_stop` / `log_ftp_pause` / `tube_pcnt_stop` are unchanged. Added wall-clock telemetry around the receive loop (`esp_timer_get_time()` start, a 128 KB progress gate, a receive-complete summary), relabelled the terminal error logs with an `OTA FAILED:` prefix, added an `esp_ota_end ok — verifying` phase marker, and rewrote the commit log line as `OTA SUCCESS: <running> -> <new>`. The existing 2 s main-loop pre-restart delay flushes the final line; a 100 ms yield after it adds belt-and-suspenders margin since syslog send is fire-and-forget (`MSG_DONTWAIT`).
+
+**Also (boot-slot visibility):** the boot banner now reports the running OTA partition (`… Reset reason: … - Partition: ota_1 - Board: …`) via `esp_ota_get_running_partition()`, and the OTA success line names the target slot (`… boot set to ota_1 …`). Together they close the OTA loop: write → `boot set to ota_1` → after reboot the banner's `Partition:` confirms the switch stuck (or exposes a bootloader rollback if it shows the other slot).
+
+**Also (syslog timestamp, local instead of UTC):** when the clock is synced, the RFC 5424 timestamp is now **local time with the numeric UTC offset** (e.g. `2026-06-13T20:45:50+10:00`) instead of UTC `Z` — so on a collector you don't control the header matches the device's in-message time and the status-page/NTP line. The dead `ntp_localtime_str()` helper was repurposed to emit that format (one `strftime` with `%z` + a colon splice, DST-aware via the configured TZ string), and `syslog.c`'s timestamp block collapses to `ntp_time_valid() ? ntp_localtime_str() : "-"` (replacing the V2.5.27 UTC branch). Pre-sync still emits NILVALUE `-`.
+
 ## V2.5.27 — syslog RFC 5424 framing (pre-NTP NILVALUE timestamp)
 
 **What:** The UDP syslog client now frames messages as **RFC 5424** instead of RFC 3164. Before the wall clock is valid, the timestamp field is emitted as the NILVALUE `-`; once NTP has synced (or a soft-reboot RTC carry-over is sane) it carries a real RFC 3339 UTC timestamp (e.g. `2026-06-13T09:00:34Z`).

@@ -32,6 +32,7 @@
 #include "hal.h"               // BOARD_NAME
 #include "coredump.h"          // coredump_have_dump
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
+#include "esp_ota_ops.h"       // esp_ota_get_running_partition — boot slot in banner
 
 static const char *TAG = "syslog";
 
@@ -100,12 +101,17 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     const char *model = chip_model_str(chip.model);
+    // V2.5.28: which OTA slot did we actually boot from? Pairs with the OTA
+    // "boot set to <label>" success line — if the banner's Partition matches,
+    // the OTA stuck; if it shows the other slot, the bootloader rolled back.
+    const esp_partition_t *run_part = esp_ota_get_running_partition();
     ESP_LOGI("boot",
-             "Firmware %s (IDF %s) - Reset reason: %s - Board: %s - "
+             "Firmware %s (IDF %s) - Reset reason: %s - Partition: %s - Board: %s - "
              "Chip: %s rev v%d.%d (%d cores) - Coredump: %s - "
              "Free heap: %lu B (largest %lu B)",
              VERSION_STR, esp_get_idf_version(),
              reset_reason_str(esp_reset_reason()),
+             run_part ? run_part->label : "?",
              BOARD_NAME,
              model, chip.revision / 100, chip.revision % 100, chip.cores,
              coredump_have_dump() ? "PRESENT (/coredump.elf)" : "none",
@@ -168,23 +174,13 @@ static void emit_packet(const char *line, size_t len) {
     // collector "no reliable time" and it falls back to receive time on its
     // own — correct on a stock rsyslog, no server-side template change needed.
     //
-    // Once the clock is real (NTP-synced, or RTC carry-over across a soft
-    // reboot — ntp_time_valid()), emit a true RFC 3339 stamp. We use UTC
-    // ("...Z") rather than local time so there's no offset/DST arithmetic
-    // (and this newlib's struct tm has no tm_gmtoff anyway). The collector
-    // files by receive time regardless; this is just a friendly in-band
-    // stamp for stock collectors.
-    char ts[32];
-    if (ntp_time_valid()) {
-        time_t now = time(NULL);
-        struct tm gt;
-        gmtime_r(&now, &gt);
-        if (strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &gt) == 0) {
-            ts[0] = '-'; ts[1] = 0;     // unexpected — fall back to NILVALUE
-        }
-    } else {
-        ts[0] = '-'; ts[1] = 0;         // NILVALUE — collector uses receive time
-    }
+    // V2.5.28: once the clock is real (ntp_time_valid()), emit LOCAL RFC 3339
+    // with the numeric UTC offset (e.g. 2026-06-13T20:45:50+10:00) — the same
+    // TZ-string-driven local time the status page / NTP line show, so on a
+    // collector you don't control the header matches the in-message device
+    // time. ntp_localtime_str() owns that one-strftime format. Pre-sync stays
+    // NILVALUE "-" so the collector falls back to its own receive time.
+    const char *ts = ntp_time_valid() ? ntp_localtime_str() : "-";
 
     // Strip trailing newlines — rsyslog adds its own.
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {

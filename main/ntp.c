@@ -76,11 +76,21 @@ void ntp_poll(void) {
 }
 
 const char *ntp_localtime_str(void) {
-    static char buf[32];
+    static char buf[40];
     time_t t;
     time(&t);
     struct tm tm_local;
     localtime_r(&t, &tm_local);
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm_local);
+    // Local RFC 3339 with the numeric UTC offset that the TZ string + tzset()
+    // resolved (DST-aware: %z is +1000 in AEST, +1100 in AEDT). strftime emits
+    // the offset without the colon RFC 3339 requires ("...+1000"), so splice
+    // it in: "...+1000" -> "...+10:00".
+    size_t n = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &tm_local);
+    if (n >= 5 && (buf[n - 5] == '+' || buf[n - 5] == '-')) {
+        buf[n + 1] = '\0';
+        buf[n]     = buf[n - 1];   // shift offset minutes right by one
+        buf[n - 1] = buf[n - 2];
+        buf[n - 2] = ':';          // colon between offset hours and minutes
+    }
     return buf;
 }

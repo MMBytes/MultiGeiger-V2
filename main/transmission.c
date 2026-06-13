@@ -506,7 +506,7 @@ static int send_madavi(const tx_context_t *c) {
 // verified against the authoritative SENSOR_TYPES dict in
 // devices.sensor.community/webapp/default_settings.py AND airrohr-firmware/ext_def.h:
 //   X-PIN 19 — radiation (Si22G;  lowercase Luftdaten field names)
-//   X-PIN 11 — BME280    (lowercase temperature/humidity/pressure; pressure in hPa)
+//   X-PIN 11 — BME280    (lowercase temperature/humidity/pressure; pressure in Pa)
 //   X-PIN  1 — SPS30     (SPS30_* prefixed Luftdaten field names — PIN 1 is the
 //                         shared "particulate matter" pin used by every PM sensor:
 //                         SDS011, PMS-series, HPM, NPM, IPS-7100, HM3301, SPS30.
@@ -613,7 +613,18 @@ static void build_sensorc_pm_body(const tx_context_t *c, char *buf, size_t cap) 
 }
 
 static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap) {
-    float p_hpa = c->bme_pressure_pa / 100.0f;
+    // sensor.community expects pressure in PASCALS, not hPa. Confirmed against
+    // three independent sources: airrohr sends BME280_pressure as the raw Bosch
+    // Pa reading (its /100 is display-only, airrohr.ino:2214); the original
+    // MultiGeiger sends Adafruit_BME280::readPressure() which returns Pa; and
+    // SC's own example data uses Pa (e.g. "BMP_pressure":"100590"). Our Madavi
+    // and openSenseMap bodies already send c->bme_pressure_pa raw (Pa).
+    //
+    // BUG FIX: this body previously divided by 100 and sent hPa, so every value
+    // landed on the SC map ~100x too low (~1019 instead of ~101900). It never
+    // 400'd because SC doesn't range-check magnitude, so it was silently wrong
+    // for the whole BME-on-sensor.community history.
+    float p_pa = c->bme_pressure_pa;
     int n = tx_append(buf, cap, 0,
         "{\n"
         " \"software_version\": \"%s\",\n"
@@ -622,10 +633,11 @@ static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap)
         "  {\"value_type\": \"humidity\", \"value\": \"%.2f\"},\n"
         "  {\"value_type\": \"pressure\", \"value\": \"%.2f\"}",
         c->sw_version,
-        c->bme_temperature_c, c->bme_humidity_pct, p_hpa);
+        c->bme_temperature_c, c->bme_humidity_pct, p_pa);
     if (c->send_sealevel_pressure) {
-        // Barometric reduction to sea level: P0 = P * (1 - h * 0.0000226)^-5.257
-        float p_sl = p_hpa * powf(1.0f - c->station_altitude_m * 0.0000226f, -5.257f);
+        // Barometric reduction to sea level: P0 = P * (1 - h * 0.0000226)^-5.257.
+        // The factor is dimensionless, so Pa in -> Pa out (also fixed from hPa).
+        float p_sl = p_pa * powf(1.0f - c->station_altitude_m * 0.0000226f, -5.257f);
         n = tx_append(buf, cap, n,
             ",\n"
             "  {\"value_type\": \"altitude\", \"value\": \"%.1f\"},\n"

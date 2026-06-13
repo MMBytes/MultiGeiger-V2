@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.25 — sensor.community pressure unit fix (hPa → Pa)
+
+**What:** The barometric pressure POSTed to sensor.community is now in **pascals**, not hectopascals. `build_sensorc_bme_body` no longer divides `bme_pressure_pa` by 100; the optional sea-level-reduced `pressure_sealevel` is likewise emitted in Pa.
+
+**Why:** sensor.community expects pressure in Pa. Confirmed against three independent sources: airrohr sends `BME280_pressure` as the raw Bosch Pa reading (its `/100` is display-only), the original MultiGeiger sends `Adafruit_BME280::readPressure()` (Pa), and SC's own example payloads use Pa (e.g. `"BMP_pressure":"100590"`). Our Madavi / openSenseMap / aqi.eco bodies already sent the raw Pa value — only the sensor.community body had the stray `/100`, so every node reporting a BME/BMP to SC had been publishing pressure ~100× too low (~1019 instead of ~101900). It never errored because SC doesn't range-check magnitude (HTTP 201 throughout), so it was silently wrong for the entire BME-on-sensor.community history.
+
+**How:** Send `c->bme_pressure_pa` directly; the sea-level barometric factor is dimensionless so Pa-in → Pa-out. Field names and X-PINs unchanged — only the unit (value magnitude) changes. Verified against airrohr / original MultiGeiger and live `geiger/bme rc=201` on both radiation nodes.
+
 ## V2.5.24 — DRY cleanups + config-dump pacing
 
 Follow-up to the independent review of V2.5.22/23:

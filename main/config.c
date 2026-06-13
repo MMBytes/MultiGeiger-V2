@@ -136,54 +136,57 @@ void config_load(config_t *cfg) {
 // maintenance cost is one edit HERE per new field. Printed once per boot — see
 // config_load() (syslog off) and main.c (syslog on, after the UDP client is up).
 void config_log_summary(const config_t *cfg) {
-    ESP_LOGI(TAG, "config loaded (ssid=%s host=%s ap=%s tx=%lums)",
+    #define MASK(s) ((s)[0] ? "<set>" : "<empty>")
+    // PACE EVERY line (V2.5.29; was every ~5 lines in V2.5.24). The boot config
+    // dump is ~28 back-to-back ESP_LOG → syslog UDP sendto() calls. On the
+    // tight-heap heltec (plain ESP32, ~99 KB) the main task never yields between
+    // them, so the WiFi/lwIP task can't drain its UDP TX queue + free pbufs, and
+    // a large fraction of the dump is dropped on the WIRE (the device /log ring
+    // stays complete — V2.5.29 confirmed the loss is pure UDP burst pressure,
+    // not the line reassembly). A 1-tick yield after EACH line lets lwIP transmit
+    // between sends. ~28 ticks (~150-280 ms) on one boot event; no-op cost on the
+    // syslog-off path (no UDP to lose). LOG_PACED keeps the "one edit per field"
+    // property — just add another LOG_PACED line.
+    #define LOG_PACED(...) do { ESP_LOGI(TAG, __VA_ARGS__);          \
+                                vTaskDelay(pdMS_TO_TICKS(10)); } while (0)
+
+    LOG_PACED("config loaded (ssid=%s host=%s ap=%s tx=%lums)",
              cfg->wifi_ssid, cfg->wifi_hostname, cfg->ap_name,
              (unsigned long)cfg->tx_interval_ms);
-
-    #define MASK(s) ((s)[0] ? "<set>" : "<empty>")
-    ESP_LOGI(TAG, "  wifi:             ssid=%s pw=%s host=%s ap_name=%s",
+    LOG_PACED("  wifi:             ssid=%s pw=%s host=%s ap_name=%s",
              cfg->wifi_ssid, MASK(cfg->wifi_password), cfg->wifi_hostname, cfg->ap_name);
-    ESP_LOGI(TAG, "  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d",
+    LOG_PACED("  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d",
              cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled,
              cfg->use_external_antenna);
-    // PACE the emit (V2.5.24): on the tight-heap heltec (plain ESP32, ~99 KB)
-    // an unpaced 27-line dump loses ~1 in 5 syslog UDP packets — the main task's
-    // back-to-back ESP_LOG → sendto() calls never yield, so the WiFi/lwIP task
-    // can't get scheduled to drain its TX queue + free pbufs. A 1-tick yield
-    // every few lines lets it catch up. No-op cost on the S3 boards and on the
-    // syslog-off boot path (where there's no UDP to lose). See the diff in the
-    // V2.5.24 changelog.
-    vTaskDelay(pdMS_TO_TICKS(10));
-    ESP_LOGI(TAG, "  madavi:           enabled=%d https=%d",
+    LOG_PACED("  madavi:           enabled=%d https=%d",
              cfg->send_madavi, cfg->madavi_https);
-    ESP_LOGI(TAG, "  sensor.community: enabled=%d https=%d",
+    LOG_PACED("  sensor.community: enabled=%d https=%d",
              cfg->send_sensorc, cfg->sensorc_https);
-    ESP_LOGI(TAG, "  radmon:           enabled=%d https=%d user=%s pw=%s",
+    LOG_PACED("  radmon:           enabled=%d https=%d user=%s pw=%s",
              cfg->send_radmon, cfg->radmon_https,
              cfg->radmon_user[0] ? cfg->radmon_user : "<empty>",
              MASK(cfg->radmon_password));
-    ESP_LOGI(TAG, "  ntp:              server1=%s server2=%s server3=%s",
+    LOG_PACED("  ntp:              server1=%s server2=%s server3=%s",
              cfg->ntp_server[0]  ? cfg->ntp_server  : "<empty>",
              cfg->ntp_server2[0] ? cfg->ntp_server2 : "<empty>",
              cfg->ntp_server3[0] ? cfg->ntp_server3 : "<empty>");
-    ESP_LOGI(TAG, "  tz:               %s", cfg->tz_posix);
-    ESP_LOGI(TAG, "  web:              admin_pw=%s tx_interval=%lums",
+    LOG_PACED("  tz:               %s", cfg->tz_posix);
+    LOG_PACED("  web:              admin_pw=%s tx_interval=%lums",
              MASK(cfg->ap_password), (unsigned long)cfg->tx_interval_ms);
-    ESP_LOGI(TAG, "  heap-guard:       floor=%lukB (0=off)",
+    LOG_PACED("  heap-guard:       floor=%lukB (0=off)",
              (unsigned long)cfg->heap_guard_floor_kb);
-    ESP_LOGI(TAG, "  station:          altitude=%.1fm send_sealevel_pressure=%d",
+    LOG_PACED("  station:          altitude=%.1fm send_sealevel_pressure=%d",
              (double)cfg->station_altitude_m, cfg->send_sealevel_pressure);
-    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
-    ESP_LOGI(TAG, "  ftp:              enabled=%d tls=%d host=%s user=%s pw=%s",
+    LOG_PACED("  ftp:              enabled=%d tls=%d host=%s user=%s pw=%s",
              cfg->ftp_enabled, cfg->ftp_tls,
              cfg->ftp_host[0] ? cfg->ftp_host : "<empty>",
              cfg->ftp_user[0] ? cfg->ftp_user : "<empty>",
              MASK(cfg->ftp_password));
-    ESP_LOGI(TAG, "  ftp:              path=%s interval=%lumin ps_disabled=%d tls12_only=%d",
+    LOG_PACED("  ftp:              path=%s interval=%lumin ps_disabled=%d tls12_only=%d",
              cfg->ftp_path[0] ? cfg->ftp_path : "<empty>",
              (unsigned long)cfg->ftp_interval_min, cfg->ftp_ps_disabled,
              cfg->ftp_tls12_only);
-    ESP_LOGI(TAG, "  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d oled_brightness=%d%%",
+    LOG_PACED("  ui:               speaker_tick=%d led_tick=%d play_sound=%d show_display=%d oled_brightness=%d%%",
              cfg->speaker_tick, cfg->led_tick, cfg->play_sound, cfg->show_display,
              cfg->oled_brightness_pct);
     // display_mode is configured here; resolved (auto→radiation/rotation)
@@ -192,67 +195,65 @@ void config_log_summary(const config_t *cfg) {
         (cfg->display_mode == 0) ? "auto"      :
         (cfg->display_mode == 1) ? "radiation" :
         (cfg->display_mode == 2) ? "rotation"  : "?";
-    ESP_LOGI(TAG, "  display:          mode=%lu(%s)",
+    LOG_PACED("  display:          mode=%lu(%s)",
              (unsigned long)cfg->display_mode, disp_mode_str);
-    ESP_LOGI(TAG, "  tube:             enabled=%d", cfg->tube_enabled);
-    ESP_LOGI(TAG, "  pcnt-filter:      enabled=%d width=%luns",
+    LOG_PACED("  tube:             enabled=%d", cfg->tube_enabled);
+    LOG_PACED("  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
-    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing
     // an inert "pinout=0" on the other 4 boards (V2.5.20/L2).
 #if HAL_HAS_I2C_PINOUT_SWITCH
-    ESP_LOGI(TAG, "  i2c:              pinout=%d (0=onboard/STEMMA)",
+    LOG_PACED("  i2c:              pinout=%d (0=onboard/STEMMA)",
              cfg->i2c_pinout);
 #endif
-    ESP_LOGI(TAG, "  openSenseMap:     enabled=%d box_id=%s",
+    LOG_PACED("  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
-    ESP_LOGI(TAG, "  openSenseMap:     access_token=%s",
+    LOG_PACED("  openSenseMap:     access_token=%s",
              MASK(cfg->osm_access_token));
-    ESP_LOGI(TAG, "  openSenseMap STG: enabled=%d box_id=%s token=%s",
+    LOG_PACED("  openSenseMap STG: enabled=%d box_id=%s token=%s",
              cfg->send_osm_staging,
              cfg->osm_staging_box_id[0] ? cfg->osm_staging_box_id : "<empty>",
              MASK(cfg->osm_staging_token));
-    ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
+    LOG_PACED("  aqi.eco:          enabled=%d token=%s",
              cfg->send_aqi, MASK(cfg->aqi_token));
     // gmcmap account/geiger IDs are public-ish account identifiers (like
     // radmon_user above), not secrets — shown in clear. ThingSpeak write
     // keys ARE secrets → MASK()ed.
-    ESP_LOGI(TAG, "  gmcmap:           enabled=%d account=%s geiger=%s",
+    LOG_PACED("  gmcmap:           enabled=%d account=%s geiger=%s",
              cfg->send_gmc,
              cfg->gmc_account_id[0] ? cfg->gmc_account_id : "<empty>",
              cfg->gmc_geiger_id[0]  ? cfg->gmc_geiger_id  : "<empty>");
-    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
-    ESP_LOGI(TAG, "  thingspeak:       enabled=%d https=%d key=%s",
+    LOG_PACED("  thingspeak:       enabled=%d https=%d key=%s",
              cfg->send_thingspeak, cfg->thingspeak_https,
              MASK(cfg->thingspeak_api_key));
-    ESP_LOGI(TAG, "  thingspeak.pm:    enabled=%d https=%d key=%s",
+    LOG_PACED("  thingspeak.pm:    enabled=%d https=%d key=%s",
              cfg->send_thingspeak_pm, cfg->thingspeak_pm_https,
              MASK(cfg->thingspeak_pm_api_key));
-    ESP_LOGI(TAG, "  mqtt:             enabled=%d broker=%s:%lu user=%s pw=%s",
+    LOG_PACED("  mqtt:             enabled=%d broker=%s:%lu user=%s pw=%s",
              cfg->mqtt_enable,
              cfg->mqtt_broker[0] ? cfg->mqtt_broker : "<empty>",
              (unsigned long)cfg->mqtt_port,
              cfg->mqtt_user[0] ? cfg->mqtt_user : "<empty>",
              MASK(cfg->mqtt_password));
-    ESP_LOGI(TAG, "  mqtt:             topic_prefix=%s ha_discovery=%d",
+    LOG_PACED("  mqtt:             topic_prefix=%s ha_discovery=%d",
              cfg->mqtt_topic_prefix[0] ? cfg->mqtt_topic_prefix : "<empty>",
              cfg->mqtt_ha_discovery);
-    vTaskDelay(pdMS_TO_TICKS(10));   // pace — see top of function
     // mqtt_tls_mode legend: 0=A Mozilla CA bundle / 1=B custom CA / 2=D skip-verify
     const char *mqtt_tls_str =
         (cfg->mqtt_tls_mode == 0) ? "A:bundle"  :
         (cfg->mqtt_tls_mode == 1) ? "B:custom"  :
         (cfg->mqtt_tls_mode == 2) ? "D:skip"    : "?";
-    ESP_LOGI(TAG, "  mqtt.tls:         enabled=%d mode=%lu(%s) ca=%s",
+    LOG_PACED("  mqtt.tls:         enabled=%d mode=%lu(%s) ca=%s",
              cfg->mqtt_tls_enable,
              (unsigned long)cfg->mqtt_tls_mode, mqtt_tls_str,
              cfg->mqtt_tls_ca[0] ? "<set>" : "<empty>");
-    ESP_LOGI(TAG, "  syslog:           enabled=%d host=%s port=%lu",
+    LOG_PACED("  syslog:           enabled=%d host=%s port=%lu",
              cfg->syslog_enable,
              cfg->syslog_host[0] ? cfg->syslog_host : "<empty>",
              (unsigned long)cfg->syslog_port);
+    #undef LOG_PACED
     #undef MASK
 }
 

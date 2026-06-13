@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.29 — fix cross-task log-fragment interleaving (ring + syslog)
+
+**What:** Logical-line reassembly moved up into `applog_vprintf()`, so a complete log line is forwarded to **both** the `/log` ring and the UDP syslog at once. Fixes the cross-task splice where a second task logging between our fragments mixed its line into the middle of ours (the mangled `syslog: started` boot line).
+
+**Why:** ESP-IDF v6 splits one `ESP_LOG` into ~3 vprintf fragments, and `applog`'s mutex is taken/released *per fragment*. Pre-V2.5.29 each fragment was forwarded immediately: the `/log` ring concatenated fragments verbatim (so it spliced), and `syslog.c` re-joined them in its *own* accumulator — so the two surfaces could even disagree about the same boot. The interleaving was diagnosed via a separate design-review agent, which also showed the original "fix it in syslog only" idea was a trap (it would leave the ring — the primary forensics surface — still spliced).
+
+**How:** `applog_vprintf` accumulates fragments into a single BSS line buffer (reusing the existing `LOG_LINE_MAX` allocation — **~0 extra RAM**) and flushes to `ring_append` + `syslog_emit` only on end-of-line (or buffer-full). A `xTaskGetCurrentTaskHandle()` owner check flushes a *different* task's pending partial before appending, so fragments never mix. `syslog_emit()` collapses to a dumb framer — its `s_accum` accumulator is **deleted** (net code reduction). `strip_ansi`/`rewrite_boot_ts` now run once per whole line instead of per fragment. The interrupted line still splits into a stub + orphan tail (whole-line reassembly across an interruption would need per-task buffers — not worth the RAM on the tight-DRAM Heltec for a cosmetic, boot-mostly defect), but it is no longer *mixed* and both surfaces now agree.
+
+**Also (config-dump UDP pacing):** validating the reassembly on hardware showed the device `/log` ring holds the *complete* config dump while the syslog server was missing ~⅔ of it — i.e. pure UDP burst loss, not a reassembly bug. The ~28-packet boot dump overruns lwIP's pbuf pool on the tight-heap heltec faster than the V2.5.24 "yield every ~5 lines" pacing drains it. `config_log_summary()` now yields **one tick after every line** (a `LOG_PACED` macro replacing the 5 scattered `vTaskDelay`s), so lwIP transmits between sends — adds ~150–280 ms to one boot event, no-op on the syslog-off path.
+
 ## V2.5.28 — OTA logging reaches the syslog server (detailed flash trace)
 
 **What:** The full firmware-update process is now visible on the syslog server — a start line, **128 KB progress ticks** (`OTA progress: 512/1289 KB (40%)`), a receive-complete line with elapsed time + throughput, the verify/commit steps, and a final **`OTA SUCCESS: V2.5.27 -> V2.5.28 (N bytes) — rebooting in ~2s`**. Every failure path now logs a greppable **`OTA FAILED: <stage> — <reason>`** headline.

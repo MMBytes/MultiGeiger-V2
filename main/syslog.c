@@ -208,55 +208,18 @@ static void emit_packet(const char *line, size_t len) {
 }
 
 void syslog_emit(const char *line, size_t len) {
+    // V2.5.29: applog_vprintf() now reassembles the IDF-v6 vprintf fragments
+    // into one COMPLETE logical line before calling us (so the /log ring gets
+    // the same reassembly and the two surfaces agree), so we just frame + send.
+    // Pre-V2.5.29 we re-joined fragments here in a static accumulator — which
+    // left the ring spliced. emit_packet() strips the trailing newline.
+    //
+    // The s_in_emit guard stays: it stops an ESP_LOG fired from within sendto's
+    // call chain (lwIP error path) from re-entering and recursing.
     if (s_sock < 0 || s_in_emit) return;
     if (!line || len == 0) return;
 
     s_in_emit = true;
-
-    // V2.4.16: ESP-IDF v6.0 splits each ESP_LOG into multiple vprintf
-    // calls — typically one for the prefix (`I (ts) tag: `), one for the
-    // user format body, and one for the trailing newline. Pre-V2.4.16
-    // we emitted one UDP packet per fragment, producing 2-3 syslog rows
-    // per logical log line (annoying on the server side).
-    //
-    // Now we accumulate fragments here and only emit a packet when we
-    // see end-of-line (`\n`). Accumulator is static (BSS), safe because
-    // applog_vprintf serialises all calls into us via its mutex.
-    //
-    // V2.5.20 (review R10): sized for a genuinely worst-case full line —
-    // ~50 B ESP_LOG prefix + applog's LOG_LINE_MAX (1024 B) body + slack.
-    // The previous 768 B (sized against a misremembered 256 B line max)
-    // split long lines across two syslog rows. Pathological single
-    // fragments > the buffer still bypass and emit standalone — see the
-    // overflow branch below.
-    static char   s_accum[1100];
-    static size_t s_accum_len = 0;
-
-    size_t remain = sizeof(s_accum) - s_accum_len;
-    if (len >= remain) {
-        // This fragment doesn't fit. Flush whatever's accumulated first;
-        // then handle the fragment in isolation.
-        if (s_accum_len > 0) {
-            emit_packet(s_accum, s_accum_len);
-            s_accum_len = 0;
-        }
-        if (len >= sizeof(s_accum)) {
-            // Pathological huge single fragment — emit standalone, no
-            // accumulation possible.
-            emit_packet(line, len);
-            s_in_emit = false;
-            return;
-        }
-        // Fragment fits in an empty buffer; fall through to memcpy below.
-    }
-    memcpy(s_accum + s_accum_len, line, len);
-    s_accum_len += len;
-
-    // End-of-line reached → flush.
-    if (s_accum[s_accum_len - 1] == '\n') {
-        emit_packet(s_accum, s_accum_len);
-        s_accum_len = 0;
-    }
-
+    emit_packet(line, len);
     s_in_emit = false;
 }

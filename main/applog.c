@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"   // V2.5.29: xTaskGetCurrentTaskHandle (line-owner)
 #include "esp_log.h"
 #include "esp_heap_caps.h"   // V2.3.15: also used for boot-time ring-region log
 
@@ -154,6 +155,39 @@ static void ring_append(const char *data, size_t len) {
     }
 }
 
+// V2.5.29: logical-line reassembly state (see applog_vprintf). ESP-IDF v6
+// splits one ESP_LOG into ~3 vprintf fragments; we accumulate them here so a
+// COMPLETE line is forwarded to the ring + syslog at once. Touched only under
+// s_mtx → single-threaded by construction (same BSS-not-stack justification as
+// the old per-call line[] buffer: a 1 KB stack buffer in a logger any task can
+// call from any path overflowed the 8 KB httpd stack, V2.4.20).
+static char         s_line[LOG_LINE_MAX];
+static size_t       s_line_len   = 0;
+static TaskHandle_t s_line_owner = NULL;
+
+// Forward the assembled line to the /log ring + UDP syslog, then reset.
+// strip_ansi + rewrite_boot_ts run on the WHOLE line here (they used to run per
+// fragment). Must be called under s_mtx.
+static void applog_flush_line(void) {
+    if (s_line_len == 0) return;
+    strip_ansi(s_line);                       // drop colour codes from ring/syslog
+    rewrite_boot_ts(s_line, sizeof(s_line));
+    if (!is_excluded(s_line)) {
+        size_t len = strlen(s_line);
+        if (len > 0) {
+            ring_append(s_line, len);
+            // V2.4.15: also ship to UDP syslog (no-op if disabled or pre-init).
+            // Inside applog's mutex but safe — sendto is non-blocking
+            // (MSG_DONTWAIT) and syslog_emit's s_in_emit guard + its
+            // NEVER-call-ESP_LOG rule prevent any re-entry into vprintf.
+            syslog_emit(s_line, len);
+        }
+    }
+    s_line_len   = 0;
+    s_line[0]    = 0;
+    s_line_owner = NULL;
+}
+
 static int applog_vprintf(const char *fmt, va_list args) {
     // Without the mutex in place yet (very early boot), fall back to a
     // direct vprintf so the first few log lines still make it to UART.
@@ -172,36 +206,40 @@ static int applog_vprintf(const char *fmt, va_list args) {
     int rc = vprintf(fmt, args_echo);
     va_end(args_echo);
 
-    // V2.4.20: line[] moved from stack to BSS. Same V2.4.16 fix pattern
-    // as syslog_emit's buf[600]: a kilobyte of stack inside a logger that
-    // any task can call from any code path is fragile, and the httpd
-    // task's 8 KB stack is the tightest budget in the system. Concrete
-    // failure case: 2026-05-21 V2.4.19 GET /config from an unauth client
-    // → check_auth's locals (~250 B) + the vprintf/bufio/console_write/
-    // usb_serial_jtag_write chain stacked on top of this 1 KB buffer ran
-    // the httpd stack past its limit; corruption landed on the TCB and
-    // FreeRTOS's `xTaskPriorityDisinherit` assertion (uxMutexesHeld == 0)
-    // fired. Safe to move to BSS because s_mtx (taken above, released
-    // below at the end of this function) serialises all callers — only
-    // one task ever touches line at a time.
-    static char line[LOG_LINE_MAX];
-    int n = vsnprintf(line, sizeof(line), fmt, args);
+    // V2.5.29: reassemble the ~3 vprintf fragments IDF v6 emits per ESP_LOG
+    // into one logical line in s_line, and forward only the COMPLETE line to
+    // the ring + syslog. This kills cross-task fragment interleaving on BOTH
+    // surfaces: pre-V2.5.29 each fragment was forwarded immediately, so a
+    // different task logging between our fragments spliced its line into the
+    // middle of ours — and the /log ring showed the same splice (ring_append
+    // concatenates fragments verbatim) while syslog.c re-joined them in its
+    // own accumulator, leaving the two surfaces disagreeing. (UART echo above
+    // stays per fragment — the mutex prevents char-level interleave there.)
+    TaskHandle_t me = xTaskGetCurrentTaskHandle();
+    // A different task interrupting our partial line → flush ITS pending
+    // fragment(s) first so they don't mix with ours. The interrupted line
+    // still splits into a prefix stub + an orphan tail, but it is no longer
+    // MIXED and the ring + syslog now agree. Whole-line reassembly across an
+    // interruption would need per-task buffers — deliberately not worth the
+    // RAM on the tight-DRAM Heltec for a cosmetic, boot-mostly defect.
+    // (Stale-handle corner: if the owner task is deleted mid-line and its TCB
+    // address is reused before the next fragment, the mismatch flush is
+    // skipped once — degrades to the old single mixed line, never a crash.)
+    if (s_line_len > 0 && s_line_owner != me) {
+        applog_flush_line();
+    }
+    s_line_owner = me;
+
+    // Append this fragment in place — no second buffer. vsnprintf NUL-
+    // terminates within `remain` and returns the would-be length.
+    size_t remain = sizeof(s_line) - s_line_len;
+    int n = vsnprintf(s_line + s_line_len, remain, fmt, args);
     if (n > 0) {
-        if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
-        line[n] = 0;
-        strip_ansi(line);
-        rewrite_boot_ts(line, sizeof(line));
-        if (!is_excluded(line)) {
-            size_t len = strlen(line);
-            if (len > 0) {
-                ring_append(line, len);
-                // V2.4.15: also ship to UDP syslog (no-op if disabled or
-                // pre-init). Inside applog's mutex but harmless — sendto
-                // is non-blocking (MSG_DONTWAIT) and syslog_emit's own
-                // s_in_emit guard plus its NEVER-calling-ESP_LOG rule
-                // prevent any re-entry into vprintf.
-                syslog_emit(line, len);
-            }
+        s_line_len += ((size_t)n >= remain) ? (remain - 1) : (size_t)n;
+        // Flush on end-of-line, or when a single line overran the buffer
+        // (pathological > LOG_LINE_MAX — emit the truncated head).
+        if (s_line[s_line_len - 1] == '\n' || s_line_len >= sizeof(s_line) - 1) {
+            applog_flush_line();
         }
     }
 

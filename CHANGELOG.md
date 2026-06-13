@@ -9,14 +9,6 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.5.26 — Madavi: drop fields it silently discards
-
-**What:** `build_madavi_env_body` no longer emits the `SPS30_*` PM block (`P0/P2/P4/P1/N05..N10/TS`, 10 fields) or the `DNMS_noise_*` block (3 fields) to Madavi.
-
-**Why:** Madavi's 2017-vintage `data.php` has a hardcoded value_type whitelist with no `$has_sps30` check and no noise support (verified against the `opendata-stuttgart/madavi-api` source). Both blocks were silently dropped server-side — ~700 B/cycle of dead payload for nothing graphed. Same cleanup V2.4.27 applied to the dead `Si22G_*` Madavi body. Nothing is lost on Madavi: PM10/PM2.5 still reach it via the `SDS_P1`/`SDS_P2` alias (all Madavi can graph for PM), and noise was never graphed. sensor.community (X-PIN 1 / 15), openSenseMap and aqi.eco are untouched — they still receive the full `SPS30_*` set and DNMS noise via their own body builders.
-
-**Also:** corrected a misleading comment that claimed Madavi "requires" the `DNMS_noise_*` prefix — it actually drops it.
-
 ## V2.5.25 — sensor.community pressure unit fix (hPa → Pa)
 
 **What:** The barometric pressure POSTed to sensor.community is now in **pascals**, not hectopascals. `build_sensorc_bme_body` no longer divides `bme_pressure_pa` by 100; the optional sea-level-reduced `pressure_sealevel` is likewise emitted in Pa.

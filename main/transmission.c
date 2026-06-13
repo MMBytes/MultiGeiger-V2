@@ -326,20 +326,19 @@ static int tx_append(char *buf, size_t cap, int n, const char *fmt, ...) {
 }
 
 // --- Madavi -----------------------------------------------------------------
-// Single POST per cycle carrying only what Madavi's value_type whitelist
-// actually graphs: BME280_* (T/H/P), SDS_P1/SDS_P2 (PM10/PM2.5, aliased from
-// SPS30), pulse stats (samples / min_micro / max_micro) and signal (RSSI).
-// Madavi routes by field-name prefix (not X-PIN), so a single combined body is
-// the canonical form (matches dusty-code's approach).
+// Single POST per cycle carrying everything Madavi's value_type whitelist
+// recognises: BME280_* (T/H/P), SPS30_* aliased as SDS_* (PM), DNMS_noise_*
+// (noise — actually outside the whitelist but harmless extras), pulse stats
+// (samples / min_micro / max_micro) and signal (RSSI). Madavi routes by
+// field-name prefix (not X-PIN), so a single combined body is the canonical
+// form (matches dusty-code's approach).
 //
-// V2.4.27: removed the dead Si22G_* "geiger" body — none of it is in Madavi's
-// hardcoded value_type whitelist, so it was pure wasted bandwidth.
-// V2.5.26: same cleanup for the SPS30_* mass+number-concentration block and the
-// DNMS_noise_* block. Madavi's 2017-vintage data.php has no $has_sps30 and no
-// noise support, so both were silently dropped at the server (~700 B/cycle of
-// dead payload). See [[reference_madavi]] — Madavi knows DHT/HTU21D/BME280/BMP/
-// SDS/PMS/HPM/PPD42NS/GPS only. PM still reaches Madavi via the SDS_P1/SDS_P2
-// alias below; the pulse stats and signal that DO get graphed follow.
+// V2.4.27: removed the dedicated "geiger" body. It only carried Si22G_*
+// fields, none of which appear in Madavi's hardcoded value_type whitelist
+// (see [[reference_madavi]] — Madavi knows DHT/HTU21D/BME280/BMP/SDS/PMS/HPM/
+// PPD42NS/GPS only). Every Si22G_* field was silently dropped at the server,
+// making the POST pure wasted bandwidth + TLS overhead. The pulse stats and
+// signal that DO get graphed are emitted in the env body below.
 
 // Build the Madavi "environmental" body (renamed from thp). Combines every
 // non-radiation source into one POST, plus pulse-stats and signal at the end.
@@ -407,30 +406,54 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         }
     }
     if (c->pm_valid) {
-        // Madavi graphs SDS011/PMS-style PM only, NOT SPS30_* — its 2017-vintage
-        // data.php has no $has_sps30 check (verified against the madavi-api
-        // source, see [[reference_madavi]]). So we emit ONLY the SDS alias:
-        // PM10 → SDS_P1, PM2.5 → SDS_P2. That makes Madavi's $has_sds011 fire and
-        // creates an SDS011-typed RRD per device with the right values plotted.
-        // Field-name convention follows dusty-code's SDS011 driver
-        // (sds011.cpp:524-526) and Madavi's data.php:49 detection
-        // (`isset($values["SDS_P1"]) && isset($values["SDS_P2"])`).
-        //
-        // V2.5.26: dropped the SPS30_* mass+number-concentration block
-        // (P0/P2/P4/P1/N05..N10/TS) that used to precede this — Madavi silently
-        // discarded all of it (~600 B/cycle of dead payload). PM1/PM4/N-counts
-        // have no Madavi slot. sensor.community (X-PIN 1) and openSenseMap/
-        // aqi.eco (build_luftdaten_body) still receive the full SPS30_* set;
-        // only this Madavi-only body was trimmed.
+        // SPS30_* prefix matches Madavi's field-prefix routing convention
+        // — keeps the PM RRDs separate from BME280_* in the back-end.
         COMMA();
         n = tx_append(buf, cap, n,
+            "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_P1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N05\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N1\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N25\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N4\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_N10\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
+            c->pm.pm1_0, c->pm.pm2_5, c->pm.pm4_0, c->pm.pm10,
+            c->pm.nc0_5, c->pm.nc1_0, c->pm.nc2_5, c->pm.nc4_0, c->pm.nc10,
+            c->pm.typ_size_um);
+
+        // HACK (Madavi-only): also emit SDS_P1 / SDS_P2 with the same PM10 /
+        // PM2.5 values. Madavi's data.php is a 2017-vintage backend that
+        // recognises SDS011 (and BME280) only — there is no $has_sps30 check,
+        // so all the SPS30_* fields above are silently dropped from the RRDs
+        // and graphs. Mapping our PM10 → SDS_P1 and PM2.5 → SDS_P2 makes
+        // Madavi's $has_sds011 fire, which creates an SDS011-typed RRD per
+        // device with the right values plotted. Field-name convention follows
+        // dusty-code's SDS011 driver (sds011.cpp:524-526) and matches Madavi's
+        // data.php:49 detection: `isset($values["SDS_P1"]) && isset($values["SDS_P2"])`.
+        // This is a Madavi-specific workaround — sensor.community gets the
+        // proper SPS30 fields on X-PIN 12; openSenseMap and aqi.eco continue
+        // to receive SPS30_* only (their parsers handle the prefix natively).
+        // Mirror of the existing BME280_* relabel hack for SHT45+BMP581 data.
+        n = tx_append(buf, cap, n,
+            ",\n"
             "  {\"value_type\": \"SDS_P1\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SDS_P2\", \"value\": \"%.2f\"}",
             c->pm.pm10, c->pm.pm2_5);
     }
-    // No DNMS_noise_* block for Madavi (V2.5.26): noise is not in its whitelist,
-    // so the server silently dropped it (verified against the madavi-api source).
-    // sensor.community (X-PIN 15) and openSenseMap/aqi.eco still receive it.
+    if (c->noise_valid) {
+        // DNMS_noise_* prefix is the canonical airrohr / dusty naming —
+        // Madavi's prefix-based routing requires it; sensor.community uses
+        // the same naming on its dedicated X-PIN 15 POST.
+        COMMA();
+        n = tx_append(buf, cap, n,
+            "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
+            "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
+            c->noise.laeq, c->noise.la_min, c->noise.la_max);
+    }
     if (have_pulse_stats) {
         COMMA();
         n = tx_append(buf, cap, n,

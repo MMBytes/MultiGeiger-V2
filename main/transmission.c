@@ -46,7 +46,7 @@ static tx_target_stats_t s_stats[TX_TARGET_COUNT] = {0};
 static portMUX_TYPE      s_stats_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *s_target_names[TX_TARGET_COUNT] = {
     "Madavi", "sensor.community", "Radmon", "openSenseMap", "aqi.eco",
-    "GMC", "ThingSpeak", "ThingSpeak PM"
+    "GMC", "ThingSpeak", "ThingSpeak PM", "openSenseMap STAGING"
 };
 
 const char *tx_target_name(tx_target_id_t id) {
@@ -76,6 +76,7 @@ static const struct {
                                "https://api.thingspeak.com/update" },
     [TX_TARGET_THINGSPEAK_PM] = { "http://api.thingspeak.com/update",
                                   "https://api.thingspeak.com/update" },
+    [TX_TARGET_OSM_STAGING] = { NULL, NULL },   // dynamic — see send_osm_staging()
 };
 
 void tx_target_configure(tx_target_t *out, tx_target_id_t id,
@@ -1037,20 +1038,24 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     #undef COMMA
 }
 
-// --- openSenseMap -----------------------------------------------------------
-// Single HTTPS POST per cycle to ingress.opensensemap.org. The path
-// /boxes/<BOX_ID>/data?luftdaten=1 routes the Luftdaten body into the box's
-// existing channels (mapping is configured per-box in the openSenseMap UI).
-// Success = HTTP 201; any other status counts as a soft failure.
-static int send_osm(const tx_context_t *c) {
-    if (c->osm_box_id[0] == 0) {   // array field — never NULL (V2.5.20 R8)
-        ESP_LOGW(TAG, "openSenseMap: box_id empty, skipping");
+// --- openSenseMap (production + staging share this core) ---------------------
+// Single HTTPS POST per cycle to <host>/boxes/<BOX_ID>/data?luftdaten=1, which
+// routes the Luftdaten body into the box's existing channels (mapping is
+// configured per-box in the openSenseMap UI). Success = HTTP 201/200; any other
+// status counts as a soft failure. V2.5.26: factored out of send_osm() so the
+// production (ingress.opensensemap.org) and staging/beta
+// (upload.staging.opensensemap.org) targets share one code path — only the
+// host + per-box credentials differ. Thin wrappers follow.
+static int send_osm_to(const tx_context_t *c, const char *host,
+                       const char *box_id, const char *token, bool use_insecure) {
+    if (box_id[0] == 0) {   // array field — never NULL (V2.5.20 R8)
+        ESP_LOGW(TAG, "openSenseMap[%s]: box_id empty, skipping", host);
         return -3;
     }
     char url[160];
     snprintf(url, sizeof(url),
-             "https://ingress.opensensemap.org/boxes/%s/data?luftdaten=1",
-             c->osm_box_id);
+             "https://%s/boxes/%s/data?luftdaten=1",
+             host, box_id);
 
     char body[1600];
     build_luftdaten_body(c, body, sizeof(body), false);
@@ -1077,9 +1082,9 @@ static int send_osm(const tx_context_t *c) {
     // handler quirk (`esp_http_client.c:1966`), not "we forgot to send
     // the header". OSM was receiving our header all along; it just had
     // the wrong format.
-    bool have_token = (c->osm_access_token[0] != 0);   // array field — never NULL
+    bool have_token = (token[0] != 0);   // array field — never NULL
     char authz[80];
-    if (have_token) snprintf(authz, sizeof(authz), "%s", c->osm_access_token);
+    if (have_token) snprintf(authz, sizeof(authz), "%s", token);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
@@ -1094,8 +1099,8 @@ static int send_osm(const tx_context_t *c) {
             .buffer_size_tx = 1024,
             .transport_type = HTTP_TRANSPORT_OVER_SSL,
         };
-        if (!c->osm.use_insecure) cfg.crt_bundle_attach = esp_crt_bundle_attach;
-        else                       cfg.skip_cert_common_name_check = true;
+        if (!use_insecure) cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        else                cfg.skip_cert_common_name_check = true;
 
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (!client) {
@@ -1123,6 +1128,21 @@ static int send_osm(const tx_context_t *c) {
     }
     ESP_LOGW(TAG, "openSenseMap: all retries exhausted");
     return -1;
+}
+
+// Production openSenseMap — ingress.opensensemap.org.
+static int send_osm(const tx_context_t *c) {
+    return send_osm_to(c, "ingress.opensensemap.org",
+                       c->osm_box_id, c->osm_access_token, c->osm.use_insecure);
+}
+
+// Staging / beta "new openSenseMap" — upload.staging.opensensemap.org (HTTPS
+// only; the read API is api.staging.opensensemap.org). Same Luftdaten body and
+// raw-token auth as prod; verified 2026-06-13 to accept our format unchanged.
+static int send_osm_staging(const tx_context_t *c) {
+    return send_osm_to(c, "upload.staging.opensensemap.org",
+                       c->osm_staging_box_id, c->osm_staging_token,
+                       c->osm_staging.use_insecure);
 }
 
 // --- aqi.eco ----------------------------------------------------------------
@@ -1215,6 +1235,8 @@ static const tx_dispatch_t TX_TABLE[] = {
       "openSenseMap: skipping (no payload)" },
     { TX_TARGET_AQI,           offsetof(tx_context_t, aqi),           send_aqi,           200, 201, GATE_ANY_PAYLOAD, -1,
       "aqi.eco: skipping (no payload)" },
+    { TX_TARGET_OSM_STAGING,   offsetof(tx_context_t, osm_staging),   send_osm_staging,   201, 200, GATE_ANY_PAYLOAD, -1,
+      "openSenseMap STAGING: skipping (no payload)" },
 };
 
 // Run one table entry: identical to each old hand-written block. `fail_streak`

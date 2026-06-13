@@ -9,6 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.26 — new TX target: openSenseMap STAGING (beta)
+
+**What:** A ninth upload target, **"openSenseMap STAGING (HTTPS only)"**, on the `/config` page directly below the existing openSenseMap block. Independent Box ID + Access Token; posts the standard Luftdaten body to `upload.staging.opensensemap.org/boxes/<id>/data?luftdaten=1`.
+
+**Why:** The "new openSenseMap" public beta runs a separate staging stack. This lets a node mirror to production *and* staging at once during the beta without disturbing the prod openSenseMap config. Verified 2026-06-13 that our existing upload format is accepted unchanged by the staging endpoint (201 "Measurements saved in box").
+
+**How:** `send_osm()` refactored into a shared `send_osm_to(host, box_id, token, use_insecure)` core — production (`ingress.opensensemap.org`) and staging (`upload.staging.opensensemap.org`) are now thin wrappers over it. New `TX_TARGET_OSM_STAGING` + config fields `send_osm_staging`/`osm_staging_box_id`/`osm_staging_token` (X-macro schema), wired through the dispatch table, the status-page Uploads block, and the config boot-dump. HTTPS-only (no plaintext staging endpoint).
+
 ## V2.5.25 — sensor.community pressure unit fix (hPa → Pa)
 
 **What:** The barometric pressure POSTed to sensor.community is now in **pascals**, not hectopascals. `build_sensorc_bme_body` no longer divides `bme_pressure_pa` by 100; the optional sea-level-reduced `pressure_sealevel` is likewise emitted in Pa.

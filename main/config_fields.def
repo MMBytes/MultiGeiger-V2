@@ -86,6 +86,14 @@ X_BOOL(send_osm,               "send_osm",   false)
 X_STR (osm_box_id,         CFG_OSM_BOX_MAX   + 1,  "osm_box",    "")
 X_STR (osm_access_token,   CFG_TOKEN_MAX     + 1,  "osm_tok",    "")
 
+// openSenseMap STAGING (beta "new openSenseMap") — independent box-id/token,
+// posts to upload.staging.opensensemap.org. HTTPS-only (no plaintext staging
+// endpoint). Separate from `send_osm` so a node can mirror to prod + staging
+// at once during the beta. V2.5.26.
+X_BOOL(send_osm_staging,       "send_osm_st", false)
+X_STR (osm_staging_box_id, CFG_OSM_BOX_MAX   + 1,  "osm_st_box", "")
+X_STR (osm_staging_token,  CFG_TOKEN_MAX     + 1,  "osm_st_tok", "")
+
 X_BOOL(send_aqi,               "send_aqi",   false)
 X_STR (aqi_token,          CFG_TOKEN_MAX     + 1,  "aqi_tok",    "")
 

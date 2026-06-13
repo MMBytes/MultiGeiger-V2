@@ -210,6 +210,10 @@ void config_log_summary(const config_t *cfg) {
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
     ESP_LOGI(TAG, "  openSenseMap:     access_token=%s",
              MASK(cfg->osm_access_token));
+    ESP_LOGI(TAG, "  openSenseMap STG: enabled=%d box_id=%s token=%s",
+             cfg->send_osm_staging,
+             cfg->osm_staging_box_id[0] ? cfg->osm_staging_box_id : "<empty>",
+             MASK(cfg->osm_staging_token));
     ESP_LOGI(TAG, "  aqi.eco:          enabled=%d token=%s",
              cfg->send_aqi, MASK(cfg->aqi_token));
     // gmcmap account/geiger IDs are public-ish account identifiers (like

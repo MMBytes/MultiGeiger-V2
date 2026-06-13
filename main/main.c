@@ -227,6 +227,7 @@ bool main_target_enabled(int target_id) {
         case TX_TARGET_SENSORC: return g_cfg.send_sensorc;
         case TX_TARGET_RADMON:  return g_cfg.send_radmon;
         case TX_TARGET_OSM:     return g_cfg.send_osm;
+        case TX_TARGET_OSM_STAGING: return g_cfg.send_osm_staging;
         case TX_TARGET_AQI:     return g_cfg.send_aqi;
         default: return false;
     }
@@ -445,6 +446,14 @@ static void build_tx_context(tx_context_t *ctx,
     tx_target_configure(&ctx->osm, TX_TARGET_OSM, g_cfg.send_osm, /*use_https=*/true);
     safe_strcpy(ctx->osm_box_id,       g_cfg.osm_box_id,       sizeof(ctx->osm_box_id));
     safe_strcpy(ctx->osm_access_token, g_cfg.osm_access_token, sizeof(ctx->osm_access_token));
+
+    // V2.5.26: openSenseMap STAGING — HTTPS-only beta target, independent creds.
+    tx_target_configure(&ctx->osm_staging, TX_TARGET_OSM_STAGING,
+                        g_cfg.send_osm_staging, /*use_https=*/true);
+    safe_strcpy(ctx->osm_staging_box_id, g_cfg.osm_staging_box_id,
+                sizeof(ctx->osm_staging_box_id));
+    safe_strcpy(ctx->osm_staging_token,  g_cfg.osm_staging_token,
+                sizeof(ctx->osm_staging_token));
 
     tx_target_configure(&ctx->aqi, TX_TARGET_AQI, g_cfg.send_aqi, /*use_https=*/true);
     safe_strcpy(ctx->aqi_token, g_cfg.aqi_token, sizeof(ctx->aqi_token));

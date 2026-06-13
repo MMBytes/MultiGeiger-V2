@@ -839,6 +839,7 @@ static bool target_enabled(tx_target_id_t id) {
         case TX_TARGET_SENSORC: return s_cfg->send_sensorc;
         case TX_TARGET_RADMON:  return s_cfg->send_radmon;
         case TX_TARGET_OSM:     return s_cfg->send_osm;
+        case TX_TARGET_OSM_STAGING: return s_cfg->send_osm_staging;
         case TX_TARGET_AQI:     return s_cfg->send_aqi;
         case TX_TARGET_GMC:        return s_cfg->send_gmc;
         case TX_TARGET_THINGSPEAK: return s_cfg->send_thingspeak;
@@ -1222,6 +1223,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     static char e_apn[96], e_host[96];
     static char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
     static char e_osm[80], e_osm_tok[160], e_aqi[160];
+    static char e_osm_st[80], e_osm_st_tok[160];   // V2.5.26: OSM staging
     // V2.4.4: MQTT fields. e_mhost generously sized — html_esc 4x worst case
     // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
     // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
@@ -1257,6 +1259,8 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->ftp_path,      e_fpath, sizeof(e_fpath));
     html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
     html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
+    html_esc(s_cfg->osm_staging_box_id, e_osm_st,     sizeof(e_osm_st));
+    html_esc(s_cfg->osm_staging_token,  e_osm_st_tok, sizeof(e_osm_st_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
     // V2.5.1: GMCMap + ThingSpeak. Numeric/hex fields, but escape for safety.
     char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
@@ -1409,6 +1413,13 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
         "<label>Access Token (optional &mdash; only if your box has authentication enabled)"
         "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm_st\" %s> "
+        "openSenseMap STAGING (HTTPS only)</label></div>"
+        "<div class=\"cfg\">"
+        "<label>Staging Box ID (beta &mdash; per-device on staging.opensensemap.org)"
+        "<input type=\"text\" name=\"osm_st_box\" value=\"%s\" maxlength=\"25\"></label>"
+        "<label>Staging Access Token (optional)"
+        "<input type=\"password\" name=\"osm_st_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
         "aqi.eco (HTTPS only)</label></div>"
         "<div class=\"cfg\">"
@@ -1634,6 +1645,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->send_osm ? "checked" : "",
         e_osm,
         e_osm_tok,
+        s_cfg->send_osm_staging ? "checked" : "",
+        e_osm_st,
+        e_osm_st_tok,
         s_cfg->send_aqi ? "checked" : "",
         e_aqi,
         s_cfg->send_gmc ? "checked" : "",

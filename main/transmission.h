@@ -122,6 +122,14 @@ typedef struct {
     // on opensensemap.org.
     char osm_access_token[CFG_TOKEN_MAX + 1];
 
+    // openSenseMap STAGING (beta "new openSenseMap") — same Luftdaten POST as
+    // `osm` above but to the staging ingest host upload.staging.opensensemap.org.
+    // HTTPS-only. Independent box-id/token so a node can mirror to prod +
+    // staging simultaneously during the beta. V2.5.26.
+    tx_target_t osm_staging;    // url_http/url_https stay NULL (dynamic per-box URL)
+    char osm_staging_box_id[CFG_OSM_BOX_MAX + 1];
+    char osm_staging_token[CFG_TOKEN_MAX + 1];
+
     // aqi.eco — single HTTPS POST per cycle to api.aqi.eco/update/<token>.
     // Body is the standard Luftdaten payload prefixed with an esp8266id
     // field (legacy field name, accepts our esp32-N chip ID format).
@@ -198,6 +206,7 @@ typedef enum {
     TX_TARGET_GMC,          // V2.5.1: gmcmap.com (radiation-only, HTTP)
     TX_TARGET_THINGSPEAK,   // V2.5.1: ThingSpeak channel update (radiation)
     TX_TARGET_THINGSPEAK_PM, // V2.5.4: ThingSpeak channel update (SPS30 PM)
+    TX_TARGET_OSM_STAGING,  // V2.5.26: openSenseMap beta (upload.staging.opensensemap.org)
     TX_TARGET_COUNT
 } tx_target_id_t;
 

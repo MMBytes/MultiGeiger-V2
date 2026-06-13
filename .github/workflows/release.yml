@@ -131,7 +131,7 @@ jobs:
       - name: Build firmware + merged bin
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v6.0
+          esp_idf_version: v6.0.1
           # Mirrors CMakeLists.txt's IDF_TARGET selection.
           # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.
           target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}

@@ -6,8 +6,10 @@
 #
 # Uses the official Espressif CI action (espressif/esp-idf-ci-action),
 # which spins up the IDF Docker image and runs idf.py inside it. The
-# IDF version pinned to v6.0 matches the local dev toolchain at
-# C:\esp\v6.0\esp-idf (see [[reference_geiger_environment.md]]).
+# IDF version pinned to v6.0.1 matches the local dev toolchain at
+# C:\esp\v6.0\esp-idf (in-place upgraded to v6.0.1; see
+# [[reference_geiger_environment.md]]). Must be >= the idf_component.yml
+# `idf: ">=6.0.1"` constraint or the component manager fails the build.
 #
 # Added in V2.4.1 (T2 — code-review item) — see CHANGELOG.md.
 
@@ -177,7 +179,7 @@ jobs:
       - name: Build firmware
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v6.0
+          esp_idf_version: v6.0.1
           # Determine target chip from BOARD (mirrors CMakeLists.txt's
           # IDF_TARGET selection — kept in sync manually).
           # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.

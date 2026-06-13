@@ -65,12 +65,15 @@
     // still plenty for diagnosing a TX cycle. FeatherS3-D / QT Py rings
     // are in PSRAM and not affected.
     #define HAL_LOG_RING_BYTES      (45 * 1024)  // Internal SRAM only — keep small
-    // V2.4.6: /config form render buffer. 16 KB on Heltec (internal-DRAM-only,
-    // tight). FeatherS3-D / QT Py override to 32 KB to leave room for the
-    // V2.4.6 MQTT TLS PEM textarea on a future config push (PSRAM-backed
-    // boards can afford the transient). Bump cap on Heltec means a single
-    // CA cert + every other field still fits with ~5 KB of slack.
-    #define HAL_CFG_FORM_BUF_SIZE   (16 * 1024)
+    // V2.4.6: /config form render buffer. 24 KB on Heltec (internal-DRAM-only,
+    // tight; was 16 KB pre-fix). FeatherS3-D / QT Py / XIAO override to
+    // 32 KB (PSRAM-backed, can afford the transient). V2.5.29: bumped 16→24 KB —
+    // the openSenseMap-staging rows (V2.5.26) + a custom MQTT-TLS CA cert pushed
+    // the worst-case page to ~16.9 KB, past the old 16 KB ceiling, truncating the
+    // heltec /config tail (page is one malloc'd buffer; the PSRAM boards' 32 KB
+    // hid it). 24 KB gives ~7 KB slack incl. a 2.4 KB CA cert; the transient
+    // malloc is fine against the heltec's ~64 KB largest free block.
+    #define HAL_CFG_FORM_BUF_SIZE   (24 * 1024)
     // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
     // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient
     // demand ~99 KB) so internal-DRAM headroom matters. Realistic writes

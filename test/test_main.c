@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "util.h"
+#include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 
 static int g_failures = 0;
 
@@ -406,6 +407,159 @@ static int test_html_esc_tiny_buffer(void) {
 }
 
 // ----------------------------------------------------------------------------
+// url_encode_query_value  (V2.5.20 R2 — was shipped with NO regression test)
+// ----------------------------------------------------------------------------
+
+static int test_urlenc_unreserved_passthrough(void) {
+    // RFC 3986 §2.3 unreserved set passes through verbatim.
+    char out[80] = {0};
+    url_encode_query_value(out, sizeof(out),
+                           "AZaz09-._~");
+    EXPECT_STREQ(out, "AZaz09-._~");
+    return 1;
+}
+
+static int test_urlenc_reserved_chars(void) {
+    // The exact chars that broke the raw Radmon submit URL (& = + %) plus space.
+    char out[80] = {0};
+    url_encode_query_value(out, sizeof(out), "a&b=c+d%e f");
+    EXPECT_STREQ(out, "a%26b%3Dc%2Bd%25e%20f");
+    return 1;
+}
+
+static int test_urlenc_empty(void) {
+    char out[8] = "XXXXXXX";
+    url_encode_query_value(out, sizeof(out), "");
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_urlenc_high_byte(void) {
+    // Bytes >= 0x80 must encode as upper-case hex %XX (cast-to-unsigned path).
+    char out[16] = {0};
+    char src[2] = { (char)0xC3, 0 };
+    url_encode_query_value(out, sizeof(out), src);
+    EXPECT_STREQ(out, "%C3");
+    return 1;
+}
+
+static int test_urlenc_truncates_on_full_buffer(void) {
+    // dstsz too small to hold a full %XX escape → stop early, stay terminated,
+    // never write past dst[dstsz-1]. "&" needs 3 bytes; with dstsz=3 the
+    // `o + 3 >= dstsz` guard refuses to start it, so output is empty.
+    char out[3] = { 'Z', 'Z', 'Z' };
+    url_encode_query_value(out, sizeof(out), "&");
+    EXPECT_STREQ(out, "");
+    EXPECT_INT(out[0], 0);
+    return 1;
+}
+
+static int test_urlenc_partial_then_truncate(void) {
+    // "ab&" into dstsz=4: 'a','b' fit (o=2), then '&' needs o+3=5 >= 4 → stop.
+    char out[4];
+    memset(out, 'X', sizeof(out));
+    url_encode_query_value(out, sizeof(out), "ab&");
+    EXPECT_STREQ(out, "ab");
+    EXPECT_INT(out[2], 0);
+    return 1;
+}
+
+static int test_urlenc_zero_dstsz(void) {
+    // dstsz == 0 must be a no-op (no buffer to terminate).
+    char out[2] = { 'Q', 'Q' };
+    url_encode_query_value(out, 0, "hello");
+    EXPECT_INT(out[0], 'Q');   // untouched
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// clamp_u32  (V2.5.31 — saturating uint64->uint32 µs-delta cast, tube_logic.h)
+// ----------------------------------------------------------------------------
+
+static int test_clamp_u32_below_max(void) {
+    EXPECT_INT(clamp_u32(0), 0);
+    EXPECT_INT(clamp_u32(190), 190);
+    EXPECT_INT(clamp_u32(UINT32_MAX - 1), (long)(UINT32_MAX - 1));
+    return 1;
+}
+
+static int test_clamp_u32_at_max(void) {
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX), (long)UINT32_MAX);
+    return 1;
+}
+
+static int test_clamp_u32_above_max_saturates(void) {
+    // The >71.6-min wrap case: a bare (uint32_t) cast would wrap to a small
+    // value; clamp_u32 must saturate to UINT32_MAX so the edge reads as
+    // "maximally separated" and never spuriously trips the dead-time guard.
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1), (long)UINT32_MAX);
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1000000), (long)UINT32_MAX);
+    EXPECT_INT(clamp_u32(0xFFFFFFFFFFFFFFFFull), (long)UINT32_MAX);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// gmc_classify  (V2.5.30 dead-time-guard decision, extracted V2.5.31)
+// ----------------------------------------------------------------------------
+
+static int test_gmc_guard_off_counts_when_past_gate(void) {
+    // guard_us==0 disables the guard: past_gate decides count vs reject.
+    EXPECT_INT(gmc_classify(100, true,  0), GMC_COUNT);
+    EXPECT_INT(gmc_classify(100, false, 0), GMC_REJECT);
+    return 1;
+}
+
+static int test_gmc_first_edge_never_guarded(void) {
+    // First-ever edge: edt == UINT32_MAX → never <= any guard window → counts.
+    EXPECT_INT(gmc_classify(UINT32_MAX, true, 3000), GMC_COUNT);
+    return 1;
+}
+
+static int test_gmc_guard_blocks_inside_window(void) {
+    // Edge inside the guard window AND past the 190µs gate = a real count the
+    // guard cost us → GUARD_REMOVED (the guard's true marginal effect).
+    EXPECT_INT(gmc_classify(2000, true, 3000), GMC_GUARD_REMOVED);
+    // Boundary: edt == guard_us is INSIDE the window (<=), so still blocked.
+    EXPECT_INT(gmc_classify(3000, true, 3000), GMC_GUARD_REMOVED);
+    return 1;
+}
+
+static int test_gmc_guard_block_subgate_is_reject_not_removed(void) {
+    // Inside the guard window but NOT past the gate (sub-190µs afterpulse): the
+    // fixed gate already owns it, so it's a plain REJECT, not GUARD_REMOVED —
+    // this is exactly the "don't double-credit" fix from review #1.
+    EXPECT_INT(gmc_classify(120, false, 3000), GMC_REJECT);
+    return 1;
+}
+
+static int test_gmc_outside_window_counts(void) {
+    // edt beyond the guard window and past the gate → normal count.
+    EXPECT_INT(gmc_classify(3001, true, 3000), GMC_COUNT);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// guard_effective_us  (V2.5.30 mutual-exclusion policy; pcnt_filter wins)
+// ----------------------------------------------------------------------------
+
+static int test_guard_eff_disabled_is_zero(void) {
+    EXPECT_INT(guard_effective_us(false, false, 3000), 0);
+    return 1;
+}
+
+static int test_guard_eff_pcnt_wins(void) {
+    // Enabled but pcnt_filter on → guard suppressed (pcnt is authoritative).
+    EXPECT_INT(guard_effective_us(true, true, 3000), 0);
+    return 1;
+}
+
+static int test_guard_eff_enabled_returns_window(void) {
+    EXPECT_INT(guard_effective_us(true, false, 3000), 3000);
+    EXPECT_INT(guard_effective_us(true, false, 200), 200);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
 
@@ -463,6 +617,32 @@ int main(void) {
     RUN(test_html_esc_empty);
     RUN(test_html_esc_truncates_safely);
     RUN(test_html_esc_tiny_buffer);
+
+    printf("== url_encode_query_value ==\n");
+    RUN(test_urlenc_unreserved_passthrough);
+    RUN(test_urlenc_reserved_chars);
+    RUN(test_urlenc_empty);
+    RUN(test_urlenc_high_byte);
+    RUN(test_urlenc_truncates_on_full_buffer);
+    RUN(test_urlenc_partial_then_truncate);
+    RUN(test_urlenc_zero_dstsz);
+
+    printf("== clamp_u32 ==\n");
+    RUN(test_clamp_u32_below_max);
+    RUN(test_clamp_u32_at_max);
+    RUN(test_clamp_u32_above_max_saturates);
+
+    printf("== gmc_classify ==\n");
+    RUN(test_gmc_guard_off_counts_when_past_gate);
+    RUN(test_gmc_first_edge_never_guarded);
+    RUN(test_gmc_guard_blocks_inside_window);
+    RUN(test_gmc_guard_block_subgate_is_reject_not_removed);
+    RUN(test_gmc_outside_window_counts);
+
+    printf("== guard_effective_us ==\n");
+    RUN(test_guard_eff_disabled_is_zero);
+    RUN(test_guard_eff_pcnt_wins);
+    RUN(test_guard_eff_enabled_returns_window);
 
     printf("\n");
     if (g_failures == 0) {

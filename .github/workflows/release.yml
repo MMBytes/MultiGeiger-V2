@@ -1,28 +1,18 @@
-# Release workflow — fire on tag push, build all 5 boards, create the
-# GitHub Release with all 25 artefacts attached.
+# Release workflow — fire on tag push, build all 5 boards, create the GitHub
+# Release with all 25 artefacts attached, and publish the web flasher to Pages.
 #
 # Trigger:
 #   git tag V2.4.2 && git push --tags
-#       OR
-#   Actions tab → "release" → "Run workflow" → enter the existing tag
+#       OR  Actions tab → "release" → "Run workflow" → enter the existing tag
 #
-# What happens:
-#   1. build matrix (5 boards in parallel via espressif/esp-idf-ci-action)
-#      compiles + runs `idf.py merge-bin` + stages the 5 board-suffixed
-#      artefacts (geiger_v2_<board>.bin, geiger_v2_merged_<board>.bin,
-#      bootloader_<board>.bin, partition-table_<board>.bin,
-#      ota_data_initial_<board>.bin) per the V2.2.0+ convention.
-#   2. release job downloads all 25 artefacts, extracts the matching
-#      section from CHANGELOG.md for the tag, creates the GitHub Release.
+# Gates run cheapest-first so a bad tag fails in seconds, not after a 5-board
+# build: cppcheck + changelog preflight → build (merge + stage) → release → pages.
+# The cppcheck gate and the board matrix are reusable workflows shared with
+# build.yml (_cppcheck.yml / _build-boards.yml) so the two pipelines can't drift.
 #
-# Pre-flight check: don't push the tag until `build.yml` is green on the
-# same commit. If a release-job build fails AFTER the tag is pushed, the
-# tag exists with no release — recoverable by deleting the tag, fixing,
-# re-pushing.
-#
-# Replaces the previous manual ceremony (per-board `_build.cmd`
-# invocations + `_merge.cmd` + N-file `gh release create`). Added
-# post-V2.4.1.
+# Pre-flight: don't push the tag until build.yml is green on the same commit. If
+# a build fails AFTER the tag is pushed, the tag exists with no release —
+# recoverable by deleting the tag, fixing, re-pushing.
 
 name: release
 
@@ -36,170 +26,59 @@ on:
         description: 'Existing tag to release (e.g. V2.4.2)'
         required: true
 
-# See build.yml for the Node 20 → 24 deprecation rationale.
+# See build.yml for the Node 20 → 24 deprecation rationale. (Reusable workflows
+# don't inherit this — each repeats it.)
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  # V2.4.17: cppcheck runs FIRST as a hard gate before the build matrix and
-  # release-creation job. Pre-V2.4.17, cppcheck only ran inside `build.yml`
-  # (triggered by the commit push), and `release.yml` (triggered by the tag
-  # push on the same commit) ran in parallel — so a tag push could publish
-  # a release even if the same commit's cppcheck job had failed (observed
-  # V2.4.15 → V2.4.15-with-cppcheck-warning shipped). Mirroring the job
-  # from build.yml here makes release.yml self-contained.
+  # Hard gate, shared with build.yml. Checks out the tag being released so the
+  # released commit's source is the one analysed.
   cppcheck:
-    name: cppcheck
+    uses: ./.github/workflows/_cppcheck.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
+  # V2.5.31: fail FAST if CHANGELOG.md has no section for this tag. Pre-V2.5.31
+  # this only surfaced as a warning in the release job AFTER all 5 boards built
+  # (minutes), shipping a placeholder release body (bit us on V2.4.2/.3). This
+  # cheap check mirrors the heading match the extract step uses below.
+  changelog-check:
+    name: changelog preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Install cppcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
-
-      - name: Run cppcheck on main/
-        # Keep flags + suppressions in sync with build.yml's cppcheck step.
-        # If you tune one, tune the other — they should be identical so
-        # commit-push runs and tag-push runs evaluate the same baseline.
-        run: |
-          set +e
-          cppcheck \
-            --enable=warning,style,performance,portability \
-            --inline-suppr \
-            --suppress=missingIncludeSystem \
-            --suppress=unusedFunction \
-            --suppress=unusedStructMember \
-            --suppress=internalAstError \
-            --suppress=unknownMacro \
-            --error-exitcode=1 \
-            --quiet \
-            --std=c11 \
-            -DESP_PLATFORM=1 \
-            -DBOARD_HELTEC_V2=1 \
-            -I main \
-            main/ 2>&1 | tee cppcheck.out
-          RC=${PIPESTATUS[0]}
-          {
-            echo "## cppcheck findings"
-            if [ -s cppcheck.out ]; then
-              echo '```'
-              cat cppcheck.out
-              echo '```'
-            else
-              echo "_(clean — no findings at warning/style/performance/portability levels)_"
-            fi
-            echo ""
-            echo "cppcheck exit code: $RC (0=clean)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit $RC
-
-      - name: Upload cppcheck output as artifact
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: cppcheck-${{ github.sha }}
-          path: cppcheck.out
-          if-no-files-found: ignore
-          retention-days: 14
-
-  build:
-    name: build / ${{ matrix.board }}
-    needs: cppcheck    # V2.4.17: hard gate — no builds run on a dirty cppcheck.
-    runs-on: ubuntu-latest
-    strategy:
-      # Keep all boards building even if one fails so the user can see the
-      # full breakage picture in one CI run.
-      fail-fast: false
-      matrix:
-        board:
-          - heltec_v2
-          - heltec_v2_4mb
-          - feathers3_d
-          - adafruit_qtpy_esp32_pico
-          - seeed_xiao_esp32s3
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          # For manual workflow_dispatch, check out the tag the user
-          # entered; for tag-push events, github.ref already points at it.
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Build firmware + merged bin
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v6.0.1
-          # Mirrors CMakeLists.txt's IDF_TARGET selection.
-          # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.
-          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
-          path: '.'
-          # Two-step: build, then merge-bin with the same -o filename the
-          # local _merge.cmd uses so paths are predictable across local
-          # and CI flows.
-          command: idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} build && idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} merge-bin -o geiger_v2_merged_${{ matrix.board }}.bin
-
-      - name: Verify VERSION_STR embedded
+      - name: Verify CHANGELOG.md has a section for the tag
         run: |
           set -e
-          VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          if [ "$VER" != "$TAG" ]; then
-            echo "::error::main/version.h VERSION_STR='$VER' does not match the tag '$TAG'"
-            echo "Bump VERSION_STR and re-tag before releasing."
+          # Use the SAME heading match the extract step (release job) uses, so
+          # this preflight passes if and only if the extractor will find a
+          # non-empty body — they can't disagree. (Both accept a bare "## TAG"
+          # heading or "## TAG <sep> title"; the [^0-9A-Za-z] boundary stops
+          # V2.4.1 matching V2.4.10.)
+          if awk -v ver="$TAG" '
+            /^## / && ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { found=1; exit }
+            END { exit(found ? 0 : 1) }
+          ' CHANGELOG.md; then
+            echo "::notice::CHANGELOG.md section for ${TAG} present"
+          else
+            echo "::error::CHANGELOG.md has no '## ${TAG}' section — add release notes before tagging (the release body is extracted from it)."
             exit 1
           fi
-          if ! strings "build_${{ matrix.board }}/geiger_v2.bin" | grep -qF "$VER"; then
-            echo "::error::VERSION_STR '$VER' not found in build_${{ matrix.board }}/geiger_v2.bin"
-            exit 1
-          fi
-          echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER (matches tag)"
 
-      - name: Stage board-suffixed artefacts
-        run: |
-          set -e
-          B=${{ matrix.board }}
-          BD=build_$B
-          mkdir -p stage
-          # Verify every expected output exists before renaming. Loud
-          # failure here is way better than a silent missing-file in
-          # the eventual GH release.
-          for src in \
-              "$BD/geiger_v2.bin" \
-              "$BD/geiger_v2_merged_$B.bin" \
-              "$BD/bootloader/bootloader.bin" \
-              "$BD/partition_table/partition-table.bin" \
-              "$BD/ota_data_initial.bin"
-          do
-              if [ ! -f "$src" ]; then
-                  echo "::error::missing build output: $src"
-                  echo "Directory contents:"
-                  ls -la "$BD" "$BD/bootloader" "$BD/partition_table" 2>/dev/null || true
-                  exit 1
-              fi
-          done
-          cp "$BD/geiger_v2.bin"                       "stage/geiger_v2_$B.bin"
-          cp "$BD/geiger_v2_merged_$B.bin"             "stage/geiger_v2_merged_$B.bin"
-          cp "$BD/bootloader/bootloader.bin"           "stage/bootloader_$B.bin"
-          cp "$BD/partition_table/partition-table.bin" "stage/partition-table_$B.bin"
-          cp "$BD/ota_data_initial.bin"                "stage/ota_data_initial_$B.bin"
-          echo "Staged 5 artefacts for $B:"
-          ls -la stage/
-
-      - name: Upload staged artefacts for release aggregation
-        uses: actions/upload-artifact@v5
-        with:
-          # `release-<board>` so the release job can collect them all
-          # under one pattern. Per-board names keep download separation
-          # if anyone needs to grab just one board.
-          name: release-${{ matrix.board }}
-          path: stage/*
-          if-no-files-found: error
-          # Short retention — the release job consumes these immediately
-          # and the permanent home is the GitHub Release itself.
-          retention-days: 3
+  # Reusable board matrix; release:true → build + merge-bin + VERSION_STR==tag
+  # check + staged board-suffixed artefacts (release-<board>) for the release job.
+  build:
+    needs: [cppcheck, changelog-check]
+    uses: ./.github/workflows/_build-boards.yml
+    with:
+      release: true
+      ref: ${{ github.event.inputs.tag || github.ref }}
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
 
   release:
     name: create GitHub release
@@ -219,21 +98,20 @@ jobs:
         with:
           path: artefacts/
           pattern: release-*
-          # All 4 jobs' stages collapse into one flat artefacts/ dir.
+          # All boards' stages collapse into one flat artefacts/ dir.
           merge-multiple: true
 
       - name: Verify all artefacts present
         run: |
           set -e
-          # KEEP IN SYNC with the build matrix at the top of this file.
-          # Each board contributes exactly 5 .bin files: geiger_v2, _merged,
-          # bootloader, partition-table, ota_data_initial. When adding or
-          # removing a board, update EXPECTED_BOARDS below to match.
+          # KEEP IN SYNC with the matrix in _build-boards.yml. Each board
+          # contributes exactly 5 .bin files: geiger_v2, _merged, bootloader,
+          # partition-table, ota_data_initial. Independent guard on the count.
           EXPECTED_BOARDS=5
           EXPECTED=$(( EXPECTED_BOARDS * 5 ))
           COUNT=$(find artefacts -maxdepth 1 -type f -name '*.bin' | wc -l)
           if [ "$COUNT" != "$EXPECTED" ]; then
-            echo "::error::expected $EXPECTED .bin artefacts ($EXPECTED_BOARDS boards × 5 per board), found $COUNT — update EXPECTED_BOARDS in release.yml if the matrix changed"
+            echo "::error::expected $EXPECTED .bin artefacts ($EXPECTED_BOARDS boards × 5 per board), found $COUNT — update EXPECTED_BOARDS in release.yml if the matrix in _build-boards.yml changed"
             ls -la artefacts/
             exit 1
           fi
@@ -248,18 +126,16 @@ jobs:
           #
           # Match two heading shapes:
           #   * "## V2.4.2"           — heading with no trailing text
-          #     (the common case in our CHANGELOG.md)
           #   * "## V2.4.2 — title"   — heading with a separator + label
-          #     (the trailing `[^0-9A-Za-z]` check on the next char
-          #     prevents V2.4.1 from also matching V2.4.10).
-          # The bug pre-V2.4.4 was matching only the second shape, so
-          # bare-heading sections (V2.4.2 + V2.4.3) released with the
-          # "Release notes not yet added" placeholder.
+          #     (the trailing `[^0-9A-Za-z]` check on the next char prevents
+          #     V2.4.1 from also matching V2.4.10).
+          # The bug pre-V2.4.4 was matching only the second shape, so bare-
+          # heading sections released with the placeholder. The changelog-check
+          # job above fails the run before here if the section is missing.
           #
-          # `sed` post-processor: drop any trailing `---` horizontal-rule
-          # separator + blank lines that sit between version sections in
-          # our CHANGELOG layout, since they look like noise at the
-          # bottom of a release page.
+          # `sed` post-processor: drop any trailing `---` horizontal rule +
+          # blank lines between version sections so they don't look like noise
+          # at the bottom of the release page.
           awk -v ver="$TAG" '
             /^## / {
               if (in_section) exit
@@ -287,8 +163,8 @@ jobs:
         run: |
           set -e
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          # If a release already exists for this tag (re-run scenario),
-          # upload assets to it instead of creating a duplicate.
+          # If a release already exists for this tag (re-run scenario), upload
+          # assets to it instead of creating a duplicate.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::notice::release $TAG already exists, uploading assets (--clobber)"
             gh release upload "$TAG" artefacts/*.bin --clobber
@@ -302,31 +178,18 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Publish the browser "web flasher" (docs/) + the 5 merged firmware images to
-  # GitHub Pages, so https://<owner>.github.io/<repo>/ always serves an
-  # install page wired to THIS release's binaries.
+  # GitHub Pages, so https://<owner>.github.io/<repo>/ always serves an install
+  # page wired to THIS release's binaries.
   #
   # Why Pages and not the release assets directly: ESP Web Tools fetches each
-  # firmware part with a cross-origin `fetch()` and needs an
-  # `Access-Control-Allow-Origin` header on the response. GitHub *release*
-  # assets (release-assets.githubusercontent.com) send no CORS header, so the
-  # browser blocks the read; GitHub *Pages* serves `ACAO: *`. Publishing the
-  # merged bins onto Pages alongside the page makes the fetch same-origin and
-  # CORS becomes a non-issue. The manifests point at `../firmware/<bin>`
-  # (relative to docs/manifests/), which resolves to the firmware/ dir we
-  # assemble below.
+  # firmware part with a cross-origin fetch() and needs Access-Control-Allow-
+  # Origin. GitHub *release* assets send no CORS header; GitHub *Pages* serves
+  # `ACAO: *`. Publishing the merged bins onto Pages makes the fetch same-origin.
   #
-  # "Latest" is automatic: the manifest paths are stable, and this job
-  # overwrites what lives at those paths with the freshly-built bins on every
-  # release. No manifest edits, no per-release copying.
-  #
-  # ONE-TIME SETUP (repo owner): Settings → Pages → Build and deployment →
-  # Source = "GitHub Actions". Without that, deploy-pages has nowhere to push.
-  #
-  # Artifact-based deploy (upload-pages-artifact) — the ~1.4 MB bins are
-  # published from the build artifacts and never committed to git history.
+  # ONE-TIME SETUP (repo owner): Settings → Pages → Source = "GitHub Actions".
   pages:
     name: deploy web flasher to Pages
-    needs: build          # needs the merged bins; build itself gates on cppcheck
+    needs: build          # needs the merged bins; build itself gates on cppcheck + changelog
     runs-on: ubuntu-latest
     permissions:
       pages: write        # deploy-pages
@@ -340,15 +203,12 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout
-        # NB: unlike the build/release jobs, this checkout intentionally does
-        # NOT use inputs.tag. docs/ (the web UI + manifests + vendored
-        # esp-web-tools) is a *current* web asset, not versioned firmware, so it
-        # tracks the workflow ref — the default branch on a workflow_dispatch,
-        # or the tag on a real release tag-push — both of which contain docs/.
-        # Checking out inputs.tag would 404 here when dispatching an OLDER tag
-        # that predates docs/ (e.g. V2.5.13). The published firmware is still
-        # version-correct: the bins come from the build job's artefacts, which
-        # built inputs.tag's source.
+        # NB: unlike build/release, this checkout intentionally does NOT use
+        # inputs.tag. docs/ (web UI + manifests + vendored esp-web-tools) is a
+        # *current* asset, not versioned firmware, so it tracks the workflow ref.
+        # Checking out an older inputs.tag would 404 here when dispatching a tag
+        # that predates docs/. The published firmware is still version-correct:
+        # the bins come from the build job's artefacts of inputs.tag's source.
         uses: actions/checkout@v5
 
       - name: Download built artefacts (for the merged bins)
@@ -367,9 +227,8 @@ jobs:
           cp -r docs/. _site/
           # Only the merged (full-flash) images are what the web flasher writes.
           cp artefacts/geiger_v2_merged_*.bin _site/firmware/
-          # Stamp the real version into the served manifests (repo files keep
-          # the literal "latest"; only the published copies get the tag, so the
-          # ESP Web Tools dialog shows e.g. "V2.5.13" instead of "latest").
+          # Stamp the real version into the served manifests (repo files keep the
+          # literal "latest"; only the published copies get the tag).
           sed -i "s/\"version\": \"latest\"/\"version\": \"$TAG\"/" _site/manifests/*.json
           echo "Published site tree:"
           find _site -maxdepth 2 -type f | sort

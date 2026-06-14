@@ -1,17 +1,14 @@
-# GitHub Actions: build all 4 board targets on every push + PR.
+# GitHub Actions: host tests + static analysis + build all 5 board targets on
+# every push to main + PR.
 #
-# Catches "broke board X while testing on Y" before a manual flash. Each
-# job runs in parallel — failure of one board doesn't cancel the others
-# (fail-fast: false), so a single push shows the full breakage matrix.
+# Catches "broke board X while testing on Y" before a manual flash. The cppcheck
+# gate and the board matrix live in reusable workflows (_cppcheck.yml /
+# _build-boards.yml) shared with release.yml, so the two pipelines can't drift.
 #
-# Uses the official Espressif CI action (espressif/esp-idf-ci-action),
-# which spins up the IDF Docker image and runs idf.py inside it. The
-# IDF version pinned to v6.0.1 matches the local dev toolchain at
-# C:\esp\v6.0\esp-idf (in-place upgraded to v6.0.1; see
-# [[reference_geiger_environment.md]]). Must be >= the idf_component.yml
-# `idf: ">=6.0.1"` constraint or the component manager fails the build.
+# The IDF version is pinned in _build-boards.yml to v6.0.1 (matches the local
+# dev toolchain). Must be >= idf_component.yml's `idf: ">=6.0.1"` constraint.
 #
-# Added in V2.4.1 (T2 — code-review item) — see CHANGELOG.md.
+# Added in V2.4.1 (T2); reusable-workflow refactor + concurrency in V2.5.31.
 
 name: build
 
@@ -37,24 +34,30 @@ on:
   workflow_dispatch: {}   # allow manual triggering from the Actions tab
 
 # Force all JavaScript-based actions (checkout, upload-artifact,
-# esp-idf-ci-action, ...) to run under Node.js 24 instead of the
-# default Node.js 20. GitHub deprecates Node 20 on the runners
-# 2026-06-02 (forced default) / 2026-09-16 (removed). Setting the
-# opt-in env var here covers every JS action without having to chase
-# per-action version bumps. Drop this line once Node 24 is the default
-# and all our actions are known-compatible.
+# esp-idf-ci-action, ...) to run under Node.js 24 instead of the default
+# Node.js 20. GitHub deprecates Node 20 on the runners 2026-06-02 (forced
+# default) / 2026-09-16 (removed). Setting the opt-in env here covers every JS
+# action without per-action version bumps. Drop once Node 24 is the default.
+# NB: reusable workflows don't inherit this — it's repeated in each.
 # See: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# V2.5.31: cancel a superseded in-flight run when a newer commit lands on the
+# same branch/PR — no point finishing a 5-board build for code already replaced.
+# (release.yml deliberately has NO cancel-in-progress: never abort a release.)
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # V2.4.1+ (T1): host-side unit tests for the pure helpers in main/util.h.
-  # Runs first because it's cheap (~10 s) and a regression here likely
-  # means the IDF builds will also fail — fail-fast on the cheap signal.
-  # See test/test_main.c for the test cases.
+  # V2.4.1+ (T1): host-side unit tests for the pure helpers in main/util.h +
+  # main/tube_logic.h. Runs first because it's cheap (~10 s) and a regression
+  # here likely means the IDF builds will also fail — fail-fast on the cheap
+  # signal. See test/test_main.c for the cases.
   #
-  # V2.4.1+ extension: valgrind sweep on the same binary catches leaks /
-  # use-after-free / uninit-reads in the 5 pure helpers for free.
+  # The valgrind sweep on the same binary catches leaks / use-after-free /
+  # uninit-reads in the pure helpers for free.
   host-test:
     name: host-test (pure helpers + valgrind)
     runs-on: ubuntu-latest
@@ -85,146 +88,17 @@ jobs:
                    --errors-for-leak-kinds=all \
                    ./test/run
 
-  # V2.4.1+ (T3): cppcheck static analysis on main/. Pure C analysis,
-  # no IDF headers needed. Originally landed as informational; promoted
-  # to a hard CI gate once the baseline went clean (2026-05-17). New
-  # findings now fail the job — fix them or add an inline
-  # `cppcheck-suppress <id>` comment with a reason.
-  static-analysis:
-    name: cppcheck
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+  # V2.4.1+ (T3): cppcheck static analysis — reusable gate shared with
+  # release.yml so the baseline can't drift. Informational until 2026-05-17,
+  # now a hard gate (new findings fail the job).
+  cppcheck:
+    uses: ./.github/workflows/_cppcheck.yml
 
-      - name: Install cppcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
-
-      - name: Run cppcheck on main/
-        run: |
-          set +e
-          # --enable: include warning/style/performance/portability findings.
-          # Suppressions:
-          #   missingIncludeSystem  — we don't ship IDF headers in this check
-          #   unusedFunction        — many entry points are IDF/FreeRTOS
-          #                            callbacks cppcheck can't see being called
-          #   unusedStructMember    — struct members read via memcpy or by
-          #                            external IDF code
-          #   internalAstError      — known cppcheck issue with some macros
-          #   unknownMacro          — IDF-defined macros (MACSTR, IP2STR, ...)
-          #                            that cppcheck has no header for
-          # -DESP_PLATFORM=1 + -DBOARD_HELTEC_V2=1 mirror the real build
-          # so hal.h enters a real branch instead of the fallback #error.
-          cppcheck \
-            --enable=warning,style,performance,portability \
-            --inline-suppr \
-            --suppress=missingIncludeSystem \
-            --suppress=unusedFunction \
-            --suppress=unusedStructMember \
-            --suppress=internalAstError \
-            --suppress=unknownMacro \
-            --quiet \
-            --error-exitcode=1 \
-            -DESP_PLATFORM=1 \
-            -DBOARD_HELTEC_V2=1 \
-            -I main \
-            main/ 2>&1 | tee cppcheck.out
-          RC=${PIPESTATUS[0]}
-          {
-            echo "## cppcheck findings"
-            if [ -s cppcheck.out ]; then
-              echo '```'
-              cat cppcheck.out
-              echo '```'
-            else
-              echo "_(clean — no findings at warning/style/performance/portability levels)_"
-            fi
-            echo ""
-            echo "cppcheck exit code: $RC (0=clean)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # Hard gate: cppcheck's exit code is honored. Fix new findings
-          # at source, or add an inline `// cppcheck-suppress <id>` with
-          # a reason explaining why the warning is a false positive in
-          # this context.
-          exit $RC
-
-      - name: Upload cppcheck output as artifact
-        # Run even on cppcheck failure so the user can download the
-        # findings from the failed run page.
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: cppcheck-${{ github.sha }}
-          path: cppcheck.out
-          if-no-files-found: ignore
-          retention-days: 14
-
+  # V2.4.1+ (T2): build all board targets. Reusable matrix shared with
+  # release.yml; release:false → CI build (size report + per-board artefacts,
+  # no merge-bin / staging). Independent of host-test/cppcheck so one run shows
+  # every signal in parallel.
   build:
-    name: build / ${{ matrix.board }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        board:
-          - heltec_v2
-          - heltec_v2_4mb
-          - feathers3_d
-          - adafruit_qtpy_esp32_pico
-          - seeed_xiao_esp32s3
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Build firmware
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v6.0.1
-          # Determine target chip from BOARD (mirrors CMakeLists.txt's
-          # IDF_TARGET selection — kept in sync manually).
-          # ESP32-S3: feathers3_d, seeed_xiao_esp32s3. Everything else: esp32.
-          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
-          path: '.'
-          # idf.py invocation — same form as local _build.cmd. Build dir
-          # is per-board so multiple jobs on the same runner (if matrix
-          # ever runs sequentially) don't clobber each other.
-          command: idf.py -B build_${{ matrix.board }} -DBOARD=${{ matrix.board }} build
-
-      - name: Report binary size
-        run: |
-          set -e
-          BIN="build_${{ matrix.board }}/geiger_v2.bin"
-          if [ ! -f "$BIN" ]; then
-            echo "::error::binary not produced at $BIN"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$BIN")
-          HEX=$(printf '0x%x' "$SIZE")
-          echo "::notice::${{ matrix.board }} geiger_v2.bin = $SIZE bytes ($HEX)"
-          echo "## ${{ matrix.board }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "geiger_v2.bin: **$SIZE bytes** ($HEX)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Verify VERSION_STR embedded
-        run: |
-          set -e
-          # Sanity check: the binary really has the version string from
-          # main/version.h baked in. Catches the cache-staleness bug from
-          # V2.3.10/.11 (App version skew) before it reaches a flash.
-          VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
-          if ! strings "build_${{ matrix.board }}/geiger_v2.bin" | grep -qF "$VER"; then
-            echo "::error::expected VERSION_STR '$VER' not found in binary"
-            exit 1
-          fi
-          echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
-
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: geiger_v2_${{ matrix.board }}_${{ github.sha }}
-          path: |
-            build_${{ matrix.board }}/geiger_v2.bin
-            build_${{ matrix.board }}/bootloader/bootloader.bin
-            build_${{ matrix.board }}/partition_table/partition-table.bin
-            build_${{ matrix.board }}/ota_data_initial.bin
-          if-no-files-found: error
-          retention-days: 14
+    uses: ./.github/workflows/_build-boards.yml
+    with:
+      release: false

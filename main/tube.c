@@ -1,4 +1,5 @@
 #include "tube.h"
+#include "tube_logic.h"
 
 #include <string.h>
 #include "driver/gpio.h"
@@ -12,15 +13,11 @@
 
 static const char *TAG = "tube";
 
-// V2.5.30: saturating uint64->uint32 cast for µs timestamp deltas. now-X deltas
-// are uint64 µs; a gap over 2^32 µs (~71.6 min) overflows a bare uint32 cast and
-// wraps to a small value — mis-binning the edge and (worse) tricking the count
-// ISR's dead-time guard into blocking a genuine well-separated pulse. always_inline
-// so it folds into the IRAM count ISR at zero call cost and stays in IRAM (the ISR
-// runs with the flash cache disabled, so it must not call into flash).
-__attribute__((always_inline)) static inline uint32_t clamp_u32(uint64_t v) {
-    return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
-}
+// V2.5.31: clamp_u32() (saturating uint64->uint32 cast for µs deltas) and the
+// gmc_classify() count/guard decision moved to the pure, host-testable
+// tube_logic.h. Both are always_inline so they still fold into the IRAM count
+// ISR at zero call cost and stay in IRAM (the ISR runs with the flash cache
+// disabled, so it must not call into flash).
 
 // Runtime enable flag. Set once at boot from tube_setup(enabled). When false,
 // no GPIO interrupts or recharge gptimer are installed, and tube_read() short-
@@ -196,14 +193,6 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     }
     isr_last_edge_us = now;
 
-    // V2.5.30: retriggerable dead-time guard (opt-in; isr_guard_us==0 disables).
-    // Keys on `edt` (gap since the PREVIOUS edge) so the window is RETRIGGERABLE:
-    // every edge in a burst — counted or not — keeps the channel dead, collapsing
-    // the whole train to the single leading count. Reaches the 1-5ms re-trigger
-    // population the GMC_DEAD_TIME_US (190µs) gate is too short for. The first-ever
-    // edge has edt == UINT32_MAX (above), so it is never blocked.
-    bool guard_block = (isr_guard_us != 0) && (edt <= isr_guard_us);
-
     // dt = gap since the last COUNTED pulse (clamp_u32, same wrap guard as edt).
     // past_gate = would this edge clear the fixed 190µs dead-time gate? The
     // first-ever edge (last==0) has no prior pulse and always passes.
@@ -217,22 +206,34 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
         past_gate = (dt > GMC_DEAD_TIME_US);
     }
 
-    if (guard_block) {
-        // Tally ONLY the edges the guard actually cost us a count — those that
-        // would have cleared the 190µs gate. Sub-190µs edges are already owned by
-        // that gate (they show up in `rejected`), so excluding them makes
-        // guard_removed the guard's TRUE marginal effect, a clean subset of
-        // rejected: counts_without_guard = counts + guard_removed. (Review #1.)
-        if (past_gate) isr_guard_removed++;
-    } else if (past_gate) {
-        isr_gmc_counts++;
-        isr_gmc_total++;            // V2.5.6: monotonic history counter
-        if (last != 0) {           // inter-pulse stats only between two counted pulses
-            if (dt < isr_min_us_between) isr_min_us_between = dt;
-            if (dt > isr_max_us_between) isr_max_us_between = dt;
-        }
-        isr_last_pulse_us = now;
-        counted = true;
+    // V2.5.31: the count / guard / reject decision lives in the pure, host-tested
+    // gmc_classify() (tube_logic.h). The opt-in retriggerable guard (isr_guard_us,
+    // 0 = OFF) keys on `edt` (gap since the PREVIOUS edge), so every edge in a
+    // burst — counted or not — keeps the channel dead and the whole afterpulse /
+    // re-trigger train collapses to its single leading count; the first-ever edge
+    // has edt == UINT32_MAX (above) and is never blocked. See tube_logic.h for the
+    // full truth table.
+    switch (gmc_classify(edt, past_gate, isr_guard_us)) {
+        case GMC_GUARD_REMOVED:
+            // Tally ONLY the edges the guard actually cost us a count — those that
+            // would have cleared the 190µs gate. Sub-190µs edges are already owned
+            // by that gate (they show up in `rejected`), so this keeps
+            // guard_removed the guard's TRUE marginal effect, a clean subset of
+            // rejected: counts_without_guard = counts + guard_removed. (Review #1.)
+            isr_guard_removed++;
+            break;
+        case GMC_COUNT:
+            isr_gmc_counts++;
+            isr_gmc_total++;            // V2.5.6: monotonic history counter
+            if (last != 0) {           // inter-pulse stats only between two counted pulses
+                if (dt < isr_min_us_between) isr_min_us_between = dt;
+                if (dt > isr_max_us_between) isr_max_us_between = dt;
+            }
+            isr_last_pulse_us = now;
+            counted = true;
+            break;
+        case GMC_REJECT:
+            break;
     }
     portEXIT_CRITICAL_ISR(&mux_gmc);
     if (counted) {

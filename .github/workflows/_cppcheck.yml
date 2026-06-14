@@ -1,0 +1,93 @@
+# Reusable cppcheck gate — called by BOTH build.yml (commit / PR) and
+# release.yml (tag push) via `uses:`. Single source of the static-analysis
+# baseline so the two callers can never drift.
+#
+# V2.5.31: extracted from the two near-identical inline copies that had ALREADY
+# drifted — only release.yml's copy passed `--std=c11`, so a commit-push run and
+# the tag-push run for the SAME commit evaluated slightly different baselines,
+# the exact failure the old "keep in sync" comments warned against. Tune flags
+# or suppressions HERE, once.
+name: cppcheck (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (default: the caller's triggering ref)."
+        type: string
+        default: ''
+        required: false
+
+# Reusable workflows do NOT inherit the caller's env, so the Node 20→24
+# deprecation opt-in (see build.yml) must be repeated here.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install cppcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
+
+      - name: Run cppcheck on main/
+        run: |
+          set +e
+          # --enable: include warning/style/performance/portability findings.
+          # Suppressions:
+          #   missingIncludeSystem  — we don't ship IDF headers in this check
+          #   unusedFunction        — many entry points are IDF/FreeRTOS
+          #                            callbacks cppcheck can't see being called
+          #   unusedStructMember    — struct members read via memcpy or by
+          #                            external IDF code
+          #   internalAstError      — known cppcheck issue with some macros
+          #   unknownMacro          — IDF-defined macros (MACSTR, IP2STR, ...)
+          #                            that cppcheck has no header for
+          # -DESP_PLATFORM=1 + -DBOARD_HELTEC_V2=1 mirror the real build so
+          # hal.h enters a real branch instead of the fallback #error.
+          cppcheck \
+            --enable=warning,style,performance,portability \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=unusedStructMember \
+            --suppress=internalAstError \
+            --suppress=unknownMacro \
+            --error-exitcode=1 \
+            --quiet \
+            --std=c11 \
+            -DESP_PLATFORM=1 \
+            -DBOARD_HELTEC_V2=1 \
+            -I main \
+            main/ 2>&1 | tee cppcheck.out
+          RC=${PIPESTATUS[0]}
+          {
+            echo "## cppcheck findings"
+            if [ -s cppcheck.out ]; then
+              echo '```'
+              cat cppcheck.out
+              echo '```'
+            else
+              echo "_(clean — no findings at warning/style/performance/portability levels)_"
+            fi
+            echo ""
+            echo "cppcheck exit code: $RC (0=clean)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Hard gate: fix new findings at source, or add an inline
+          # `// cppcheck-suppress <id>` with a reason for a false positive.
+          exit $RC
+
+      - name: Upload cppcheck output as artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cppcheck-${{ github.sha }}
+          path: cppcheck.out
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,189 @@
+# Reusable board-build matrix — the SINGLE source of the 5-board list, called
+# by build.yml (release:false → CI build) and release.yml (release:true → build
+# + merge-bin + version==tag check + staged artefacts). Adding/removing a board
+# now means editing the matrix HERE only (plus EXPECTED_BOARDS in release.yml's
+# count check, which is deliberately kept as an independent guard).
+#
+# V2.5.31: extracted from the two duplicated build jobs (build.yml + release.yml
+# each carried their own copy of the matrix). Also adds:
+#   - dependency-resolution RETRY: the IDF Component Manager occasionally fails
+#     to reach the registry mid-run (observed V2.5.30, heltec_v2 only). The
+#     network-touching step (reconfigure = resolve + fetch) is retried; the
+#     subsequent build needs no network. We deliberately do NOT commit
+#     dependencies.lock — it churns esp32<->esp32s3 per board (gitignored in
+#     V2.5.13); reproducibility is pinned via `==1.0.0` in idf_component.yml.
+#   - ccache: CCACHE_DIR lives inside the mounted workspace (/app/<repo>/.ccache,
+#     forwarded into the container via extra_docker_args) so actions/cache can
+#     persist it across runs — re-pushes of unchanged code recompile from cache.
+name: build-boards (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: 'true = also merge-bin + verify VERSION_STR==tag + stage release artefacts.'
+        type: boolean
+        default: false
+        required: false
+      ref:
+        description: "Git ref to check out (default: the caller's triggering ref)."
+        type: string
+        default: ''
+        required: false
+      tag:
+        description: 'Release tag to verify VERSION_STR against (release mode only).'
+        type: string
+        default: ''
+        required: false
+
+# Reusable workflows do not inherit caller env — repeat the Node 24 opt-in.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: build / ${{ matrix.board }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Keep all boards building even if one fails, so one run shows the full
+      # breakage matrix instead of stopping at the first red board.
+      fail-fast: false
+      matrix:
+        board:
+          - heltec_v2
+          - heltec_v2_4mb
+          - feathers3_d
+          - adafruit_qtpy_esp32_pico
+          - seeed_xiao_esp32s3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Empty ref → checkout's default (the triggering commit/tag). Release
+          # passes the tag so a workflow_dispatch of an older tag builds it.
+          ref: ${{ inputs.ref }}
+
+      - name: Restore ccache
+        # After checkout (which cleans untracked files) so it isn't wiped. Key is
+        # per-board + per-commit; restore-keys falls back to the latest prior
+        # cache for the same board.
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.board }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.board }}-
+
+      - name: Build firmware${{ inputs.release && ' + merged bin' || '' }}
+        # Pinned to the v1.2.0 release commit (not the moving @v1 branch) for
+        # supply-chain stability — bump the SHA + comment together on upgrade.
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v6.0.1
+          # Mirrors CMakeLists.txt's IDF_TARGET selection (kept in sync manually):
+          # ESP32-S3 for feathers3_d + seeed_xiao_esp32s3, esp32 for the rest.
+          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
+          path: '.'
+          # Forward ccache config into the build container. CCACHE_DIR is a path
+          # inside the mounted workspace so writes persist to the host for caching.
+          extra_docker_args: -e IDF_CCACHE_ENABLE=1 -e CCACHE_DIR=/app/${{ github.repository }}/.ccache
+          # NOTE: this string is injected into the action's `bash -c '... && <cmd>'`,
+          # so it must contain NO single quotes. `;`-separated one-liner (folded by
+          # `>-`). reconfigure (network) is retried; build/merge then run offline.
+          command: >-
+            set -e;
+            B=${{ matrix.board }};
+            for i in 1 2 3; do
+            idf.py -B build_$B -DBOARD=$B reconfigure && break;
+            echo "::warning::component-manager reconfigure attempt $i failed (registry?); retry in 15s";
+            sleep 15;
+            done;
+            idf.py -B build_$B -DBOARD=$B build;
+            if [ "${{ inputs.release }}" = "true" ]; then idf.py -B build_$B -DBOARD=$B merge-bin -o geiger_v2_merged_$B.bin; fi
+
+      - name: Report binary size
+        if: ${{ !inputs.release }}
+        run: |
+          set -e
+          BIN="build_${{ matrix.board }}/geiger_v2.bin"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::binary not produced at $BIN"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$BIN")
+          HEX=$(printf '0x%x' "$SIZE")
+          echo "::notice::${{ matrix.board }} geiger_v2.bin = $SIZE bytes ($HEX)"
+          echo "## ${{ matrix.board }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "geiger_v2.bin: **$SIZE bytes** ($HEX)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify VERSION_STR embedded
+        run: |
+          set -e
+          VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
+          # Release mode: the version baked in MUST equal the tag being released.
+          if [ "${{ inputs.release }}" = "true" ]; then
+            TAG="${{ inputs.tag }}"
+            if [ "$VER" != "$TAG" ]; then
+              echo "::error::main/version.h VERSION_STR='$VER' does not match the tag '$TAG' — bump VERSION_STR and re-tag before releasing."
+              exit 1
+            fi
+          fi
+          # Both modes: the string must actually be present in the binary (catches
+          # the cache-staleness bug from V2.3.10/.11).
+          if ! strings "build_${{ matrix.board }}/geiger_v2.bin" | grep -qF "$VER"; then
+            echo "::error::VERSION_STR '$VER' not found in build_${{ matrix.board }}/geiger_v2.bin"
+            exit 1
+          fi
+          echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
+
+      - name: Stage board-suffixed artefacts
+        if: ${{ inputs.release }}
+        run: |
+          set -e
+          B=${{ matrix.board }}
+          BD=build_$B
+          mkdir -p stage
+          # Verify every expected output exists before renaming — loud failure
+          # here beats a silent missing file in the eventual GH release.
+          for src in \
+              "$BD/geiger_v2.bin" \
+              "$BD/geiger_v2_merged_$B.bin" \
+              "$BD/bootloader/bootloader.bin" \
+              "$BD/partition_table/partition-table.bin" \
+              "$BD/ota_data_initial.bin"
+          do
+              if [ ! -f "$src" ]; then
+                  echo "::error::missing build output: $src"
+                  ls -la "$BD" "$BD/bootloader" "$BD/partition_table" 2>/dev/null || true
+                  exit 1
+              fi
+          done
+          cp "$BD/geiger_v2.bin"                       "stage/geiger_v2_$B.bin"
+          cp "$BD/geiger_v2_merged_$B.bin"             "stage/geiger_v2_merged_$B.bin"
+          cp "$BD/bootloader/bootloader.bin"           "stage/bootloader_$B.bin"
+          cp "$BD/partition_table/partition-table.bin" "stage/partition-table_$B.bin"
+          cp "$BD/ota_data_initial.bin"                "stage/ota_data_initial_$B.bin"
+          echo "Staged 5 artefacts for $B:"
+          ls -la stage/
+
+      - name: Upload firmware artefacts (CI build)
+        if: ${{ !inputs.release }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: geiger_v2_${{ matrix.board }}_${{ github.sha }}
+          path: |
+            build_${{ matrix.board }}/geiger_v2.bin
+            build_${{ matrix.board }}/bootloader/bootloader.bin
+            build_${{ matrix.board }}/partition_table/partition-table.bin
+            build_${{ matrix.board }}/ota_data_initial.bin
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload staged artefacts (release)
+        if: ${{ inputs.release }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ matrix.board }}
+          path: stage/*
+          if-no-files-found: error
+          retention-days: 3

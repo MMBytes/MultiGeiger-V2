@@ -10,6 +10,7 @@
 
 #include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH — gate the i2c-route dump line
 #include "util.h"
+#include "tube_logic.h"   // guard_effective_us() — single-source guard on/off policy
 
 static const char *TAG = "config";
 static const char *NS  = "geiger";
@@ -270,9 +271,11 @@ uint32_t config_effective_guard_us(const config_t *cfg) {
     // V2.5.30: 0 (off) when the enable is clear OR pcnt_filter is on (pcnt_filter
     // makes the PCNT hardware path authoritative, which the ISR guard can't reach
     // — so the two are mutually exclusive, pcnt_filter wins). Single source of the
-    // policy; both the boot path and the live /config apply call this.
-    if (!cfg->deadtime_guard || cfg->pcnt_filter) return 0;
-    return cfg->deadtime_guard_us;
+    // policy; both the boot path and the live /config apply call this. V2.5.31:
+    // the rule itself lives in the pure, host-tested guard_effective_us()
+    // (tube_logic.h); this is the config_t adapter over it.
+    return guard_effective_us(cfg->deadtime_guard, cfg->pcnt_filter,
+                              cfg->deadtime_guard_us);
 }
 
 esp_err_t config_save(const config_t *cfg) {

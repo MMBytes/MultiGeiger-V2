@@ -9,6 +9,22 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.31 — CI hardening + host-testable count logic (no firmware behaviour change)
+
+**What:** A test/CI-only release that adds host coverage for previously-untested pure logic and removes long-standing duplication and flake sources from the GitHub Actions pipeline. The firmware is **behaviourally inert** vs V2.5.30 — the only `main/` change is a pure refactor that extracts existing decision logic into a testable header.
+
+**Why:** Two real gaps surfaced reviewing the pipeline: (1) `url_encode_query_value()` was shipped in V2.5.20 (R2, to fix raw-credential mangling in the Radmon URL) with **zero** tests, and the V2.5.30 dead-time-guard decision lived buried in the IRAM count ISR where it could not be unit-tested despite taking two MAX reviews to get right; (2) the `build.yml` and `release.yml` cppcheck steps had **already drifted** (only the release copy passed `--std=c11`) despite a "keep in sync" comment, the board matrix was duplicated across both files, and a transient component-registry outage had reddened a release build (V2.5.30).
+
+**How:**
+- **New `main/tube_logic.h`** (pure, no IDF/FreeRTOS/HW) holds `clamp_u32()` (moved from `tube.c`), the new `gmc_classify()` — the count / guard-removed / reject decision extracted verbatim from `gmc_count_isr()` — and `guard_effective_us()`, the guard on/off policy `config_effective_guard_us()` now wraps. All `always_inline`, so they still fold into the IRAM ISR at zero cost and stay in IRAM. The ISR and `config.c` call into them; behaviour is byte-identical (verified by a real `heltec_v2` build).
+- **+18 host tests** in `test/test_main.c`: `url_encode_query_value` (unreserved passthrough, every reserved char, high byte, empty, zero-dstsz, two truncation boundaries), `clamp_u32` (below / at / above the 2³² wrap), `gmc_classify` (guard-off, first-edge-never-guarded, in-window GUARD_REMOVED with inclusive boundary, sub-gate-is-reject-not-removed, outside-window count), and `guard_effective_us` (disabled / pcnt-wins / enabled).
+- **Reusable workflows** `_cppcheck.yml` + `_build-boards.yml` are now the single source of the cppcheck gate and the 5-board matrix, called by both `build.yml` and `release.yml` — the `--std=c11` drift is now structurally impossible. `_build-boards.yml` toggles merge-bin / version==tag / staging via a `release` input.
+- **Pipeline resilience:** the network-touching IDF Component Manager step (`reconfigure`) is **retried** 3× (the durable fix for the V2.5.30 registry flake — we deliberately do **not** commit `dependencies.lock`, gitignored in V2.5.13 for per-board `target:` churn); **ccache** is wired through `extra_docker_args` with `CCACHE_DIR` inside the mounted workspace so `actions/cache` persists it across runs; `esp-idf-ci-action` is pinned to the **v1.2.0 commit** (`e6f5c74`) instead of the moving `@v1` branch; `build.yml` gained **concurrency cancel-in-progress** (release never cancels); and a **CHANGELOG preflight** job fails a tag release in seconds (using the extractor's exact matcher) instead of after a 5-board build with a placeholder body.
+
+**Note:** the reusable-workflow refactor renames the CI status checks (e.g. `build / heltec_v2` → `build / build / heltec_v2`); update any required-status-check rules on `main` to match.
+
+---
+
 ## V2.5.30 — opt-in dead-time guard (afterpulse / re-trigger burst-collapse)
 
 **What:** New opt-in dead-time guard — a `deadtime_guard` checkbox + a `deadtime_guard_us` window (µs), modelled on the `pcnt_filter` checkbox+width pair. A *retriggerable* refractory layered on top of the fixed 190 µs ISR dead-time gate: an edge can only start a new count after a quiet gap longer than the window; edges arriving inside it extend the dead zone and are dropped, collapsing an afterpulse / re-trigger **train** to a single count. The per-cycle count of suppressed edges is surfaced on the `DIAG:` line as `guard_removed=N`. **Mutually exclusive with `pcnt_filter`** (see below).

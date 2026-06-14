@@ -158,7 +158,7 @@ void syslog_get_stats(uint32_t *sent, uint32_t *dropped) {
 // `vPortYieldFromInt`. Moving to BSS eliminates the stack contribution.
 static void emit_packet(const char *line, size_t len) {
     // V2.5.20 (review R10): 600 → 1200 B so a full LOG_LINE_MAX (1024 B)
-    // applog line + the RFC 3164 header fits in one frame. Still well under
+    // applog line + the RFC 5424 header fits in one frame. Still well under
     // the 1500 B LAN MTU (no IP fragmentation). BSS, single-threaded by
     // construction (applog mutex) — same justification as before.
     static char s_emit_buf[1200];

@@ -163,10 +163,17 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     portENTER_CRITICAL_ISR(&mux_gmc);
 
     // V2.5.12: profile every raw edge BEFORE the dead-time gate below.
+    // V2.5.30: clamp the edge delta to UINT32_MAX. now/le are uint64 µs; a quiet
+    // gap exceeding 2^32 µs (~71.6 min) would otherwise wrap the uint32 to a small
+    // value — binning the edge as a near-coincidence and (worse) tricking the
+    // guard below into blocking a genuine well-separated pulse. Clamped, it bins
+    // as ">=500k" and never spuriously guard-blocks. edt is reused by the guard.
     isr_raw_edges++;
     uint64_t le = isr_last_edge_us;
+    uint32_t edt = 0;
     if (le != 0) {
-        uint32_t edt = (uint32_t)(now - le);
+        uint64_t e = now - le;
+        edt = (e > UINT32_MAX) ? UINT32_MAX : (uint32_t)e;
         uint32_t b;
         if      (edt <     50) b = 0;
         else if (edt <    190) b = 1;
@@ -184,29 +191,42 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     // `le` is the PREVIOUS edge's timestamp (captured above before the update),
     // so testing against it makes the window RETRIGGERABLE: every edge in a burst
     // — counted or not — keeps the channel dead, so the whole train collapses to
-    // the single leading count. This catches the 1-5ms re-trigger population the
-    // GMC_DEAD_TIME_US (190µs) gate is too short to reach. (le==0 only on the very
-    // first edge, which the last==0 branch counts regardless.)
-    bool guard_block = (isr_guard_us != 0) && (le != 0) &&
-                       ((uint32_t)(now - le) <= isr_guard_us);
-    if (guard_block) isr_guard_removed++;
+    // the single leading count. Reaches the 1-5ms re-trigger population the
+    // GMC_DEAD_TIME_US (190µs) gate is too short for. `edt` is reused from the
+    // histogram (no recompute); the `le != 0` term is LOAD-BEARING — edt defaults
+    // to 0, which would otherwise spuriously block the first-ever edge.
+    bool guard_block = (isr_guard_us != 0) && (le != 0) && (edt <= isr_guard_us);
 
+    // dt = gap since the last COUNTED pulse, same UINT32_MAX clamp as edt.
+    // past_gate = would this edge clear the fixed 190µs dead-time gate? The
+    // first-ever edge (last==0) has no prior pulse and always passes.
     uint64_t last = isr_last_pulse_us;
+    uint32_t dt = 0;
+    bool past_gate;
     if (last == 0) {
+        past_gate = true;
+    } else {
+        uint64_t d = now - last;
+        dt = (d > UINT32_MAX) ? UINT32_MAX : (uint32_t)d;
+        past_gate = (dt > GMC_DEAD_TIME_US);
+    }
+
+    if (guard_block) {
+        // Tally ONLY the edges the guard actually cost us a count — those that
+        // would have cleared the 190µs gate. Sub-190µs edges are already owned by
+        // that gate (they show up in `rejected`), so excluding them makes
+        // guard_removed the guard's TRUE marginal effect, a clean subset of
+        // rejected: counts_without_guard = counts + guard_removed. (Review #1.)
+        if (past_gate) isr_guard_removed++;
+    } else if (past_gate) {
         isr_gmc_counts++;
         isr_gmc_total++;            // V2.5.6: monotonic history counter
-        isr_last_pulse_us = now;
-        counted = true;
-    } else if (!guard_block) {
-        uint32_t dt = (uint32_t)(now - last);
-        if (dt > GMC_DEAD_TIME_US) {
-            isr_gmc_counts++;
-            isr_gmc_total++;        // V2.5.6: monotonic history counter
+        if (last != 0) {           // inter-pulse stats only between two counted pulses
             if (dt < isr_min_us_between) isr_min_us_between = dt;
             if (dt > isr_max_us_between) isr_max_us_between = dt;
-            isr_last_pulse_us = now;
-            counted = true;
         }
+        isr_last_pulse_us = now;
+        counted = true;
     }
     portEXIT_CRITICAL_ISR(&mux_gmc);
     if (counted) {

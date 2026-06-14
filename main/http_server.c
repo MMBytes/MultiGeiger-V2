@@ -1327,6 +1327,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
         "use <b>Save and restart</b> at the bottom when changing these.</p>"
         "<form method=\"post\" action=\"/config\">"
+        "<h3>Network</h3>"
         "<label>WiFi SSID <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
         "<label>WiFi password <span class=\"r\">*</span>"
@@ -1335,6 +1336,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<input type=\"text\" name=\"wifi_host\" value=\"%s\" maxlength=\"32\"></label>"
         "<label>AP SSID (used in AP / fallback mode) <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
+        // V2.5.30: moved here (below AP SSID) from the old "Other" section.
+        "<label>Web admin and access point password"
+        "<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
         "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span></label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
@@ -1366,7 +1370,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         // tube is off; it can't run without count pulses).
         "<div class=\"cfg\">"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filt\" "
-        "id=\"pcnt_filt\" %s> "
+        "id=\"pcnt_filt\" onchange=\"syncGuard()\" %s> "
         "PCNT pulse-width filter &mdash; drops count-line pulses narrower than the "
         "width below (removes the ESP32-S3 narrow-pulse over-count). When ON it "
         "<b>changes the counted CPM</b> (dose/uploads use the filtered count); the log "
@@ -1376,13 +1380,20 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
         "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
         "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label>"
-        // V2.5.30: dead-time guard — retriggerable refractory that collapses
-        // 1-5ms afterpulse/re-trigger trains to one count (reaches what the 4µs
-        // width filter can't). Diagnostic: alters dead-time loss + only removes
-        // the spurious part of the board gap. 0 = off. Tube-gated, reboot-required.
-        "<label>Dead-time guard (&micro;s, 0 = off; else 200&ndash;20000, ~3000 typical) "
+        // V2.5.30: dead-time guard — checkbox + window, indented under the tube
+        // enable alongside the PCNT filter. MUTUALLY EXCLUSIVE with PCNT: syncGuard()
+        // greys+unticks this when PCNT is on (pcnt_filter wins — it makes the PCNT
+        // hardware path authoritative, bypassing the ISR guard). Live-applied (no
+        // `*`). Time-domain twin of the width filter: collapses 1-5ms re-triggers.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"dt_guard\" "
+        "id=\"dt_guard\" %s> "
+        "Dead-time guard &mdash; collapses 1-5ms afterpulse/re-trigger trains to one "
+        "count (time domain; reaches what the width filter can't). <b>Mutually "
+        "exclusive with the PCNT width filter above</b> &mdash; if PCNT is on it "
+        "takes the count and this is forced off.</label></div>"
+        "<label>Guard window (&micro;s, 200&ndash;20000; ~3000 typical) "
         "<input type=\"text\" inputmode=\"numeric\" name=\"dt_guard_us\" "
-        "id=\"dt_guard_us\" value=\"%lu\"> <span class=\"r\">*</span></label></div>"
+        "id=\"dt_guard_us\" value=\"%lu\"></label></div>"
         // V2.5.19: I²C pin-out route toggle. Board-gated like the antenna switch
         // (greyed + force-off on boards without HAL_HAS_I2C_PINOUT_SWITCH). 3 %s
         // slots: disabled-attr, checked-attr, trailing note.
@@ -1390,6 +1401,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
         "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
         "<span class=\"r\">*</span>%s</label></div>"
+        // V2.5.30: heap-guard floor moved here to the BOTTOM of the Hardware
+        // section (was in "Other"). No asterisk — read live each TX cycle by
+        // tx_heap_guard() (V2.5.18), so it applies on plain Save (no reboot).
+        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\">"
+        " <small>Unattended long-uptime nodes only: reboots the device if the "
+        "internal largest-free block stays below this floor (the OTA-stall / "
+        "long-tail-OOM precursor). 0 disables. ~44 is a sane starting floor; a "
+        "2h arm-delay + 6h rate-limit prevent boot-loops.</small></label>"
         // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
         // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
         // configure here. See the "GNSS / Position" card on /status.
@@ -1398,6 +1418,10 @@ static esp_err_t config_get(httpd_req_t *req) {
         // sea-level toggle live under sensor.community (its only consumer — the
         // old standalone "BME280 (environmental)" section was retired).
         "<h3>Transmission targets</h3>"
+        // V2.5.30: TX interval moved here to the TOP of Transmission targets
+        // (was in "Other").
+        "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
@@ -1480,12 +1504,26 @@ static esp_err_t config_get(httpd_req_t *req) {
         // tube" is off (server-side enforcement in config_post mirrors this).
         "function syncTube(){"
         "var t=document.getElementById('tube_en');"
-        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w','dt_guard_us'];"
+        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
         "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
         "if(!e)continue;"
         "if(t.checked){e.disabled=false;}"
         "else{e.checked=false;e.disabled=true;}}"
-        "}syncTube();</script>"
+        "syncGuard();"
+        "}"
+        // V2.5.30: dead-time guard is mutually exclusive with the PCNT width filter
+        // (pcnt_filter wins — it makes the PCNT path authoritative, bypassing the
+        // ISR guard). Greyed + unticked when the tube is off OR PCNT is on. Mirrors
+        // the server-side force-clear in config_post.
+        "function syncGuard(){"
+        "var t=document.getElementById('tube_en');"
+        "var p=document.getElementById('pcnt_filt');"
+        "var g=document.getElementById('dt_guard');"
+        "var gw=document.getElementById('dt_guard_us');"
+        "if(!t.checked||p.checked){g.checked=false;g.disabled=true;gw.disabled=true;}"
+        "else{g.disabled=false;gw.disabled=false;}"
+        "}"
+        "syncTube();</script>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
         "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
         "<h3>MQTT (Home Assistant / Mosquitto)</h3>"
@@ -1539,7 +1577,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         // ring buffer (visible via /log). See [[reference_syslog_pi_setup]].
         "<h3>Syslog (UDP)</h3>"
         "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">"
-        "Per-line UDP shipping (RFC 3164) of every device log entry to a LAN "
+        "Per-line UDP shipping (RFC 5424) of every device log entry to a LAN "
         "syslog server (e.g. <code>rsyslog</code> on the same Pi running the "
         "MQTT broker). Plaintext — for trusted-LAN use only. Tiny heap "
         "footprint (~0 KB persistent) and zero retry/buffer state, making it "
@@ -1571,7 +1609,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Display brightness "
         "<select name=\"oled_bright\">%s</select>"
         " <small>(live — applies on Save without reboot)</small></label>"
-        "<h3>Other</h3>"
+        "<h3>Time</h3>"
         "<label>NTP server 1 <span class=\"r\">*</span>"
         "<input type=\"text\" name=\"ntp\" value=\"%s\"></label>"
         "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
@@ -1583,18 +1621,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<small>e.g. <code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney), "
         "<code>CET-1CEST,M3.5.0,M10.5.0/3</code> (Germany), "
         "<code>UTC0</code> (UTC). See <code>man tzset</code>.</small></label>"
-        "<label>Web admin and access point password<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
-        "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
-        // V2.5.14: heap-guard auto-reboot floor. No asterisk — read live each
-        // TX cycle by tx_heap_guard() (V2.5.18), so it applies on plain Save
-        // (no reboot).
-        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\">"
-        " <small>Unattended long-uptime nodes only: reboots the device if the "
-        "internal largest-free block stays below this floor (the OTA-stall / "
-        "long-tail-OOM precursor). 0 disables. ~44 is a sane starting floor; a "
-        "2h arm-delay + 6h rate-limit prevent boot-loops.</small></label>"
+        // V2.5.30: ap_pw moved to Network (below AP SSID), tx_int_ms to the top of
+        // Transmission targets, heap_guard to the bottom of Hardware — leaving this
+        // section Time-only (header renamed from "Other" to "Time" above).
         // V2.3.24: two submit buttons. The clicked button's name=value is the
         // only one included in the POST body (standard HTML form behaviour),
         // so the handler distinguishes via the "save_restart" key. Plain
@@ -1614,7 +1643,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<p><a href=\"/\">Back to status</a> &middot; "
         "<a href=\"/update\">Firmware update</a></p>"
         "</body></html>",
-        e_ssid, e_pw, e_host, e_apn,
+        e_ssid, e_pw, e_host, e_apn, e_ap,   // V2.5.30: e_ap (ap_pw) moved to Network
         s_cfg->wifi_11bg_only   ? "checked" : "",
         s_cfg->wifi_ht20_only   ? "checked" : "",
         s_cfg->wifi_ps_disabled ? "checked" : "",
@@ -1631,7 +1660,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->tube_enabled ? "checked" : "",
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
         (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
-        (unsigned long)s_cfg->deadtime_guard_us,     // V2.5.30: dead-time guard µs
+        s_cfg->deadtime_guard ? "checked" : "",      // V2.5.30: guard enable checkbox
+        (unsigned long)s_cfg->deadtime_guard_us,     // V2.5.30: guard window µs
 #if HAL_HAS_I2C_PINOUT_SWITCH
         "",                                          // not disabled on this board
         s_cfg->i2c_pinout ? "checked" : "",          // current state
@@ -1641,6 +1671,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "",                                          // never checked on this board
         " <small>(not available on this board)</small>",
 #endif
+        (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
+        (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",
         s_cfg->send_sensorc ? "checked" : "",
@@ -1703,9 +1735,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->display_mode == 1 ? " selected" : "",
         s_cfg->display_mode == 2 ? " selected" : "",
         br_opts,
-        e_ntp1, e_ntp2, e_ntp3, e_tz, e_ap,
-        (unsigned long)s_cfg->tx_interval_ms,
-        (unsigned long)s_cfg->heap_guard_floor_kb);   // V2.5.14 heap-guard floor
+        e_ntp1, e_ntp2, e_ntp3, e_tz);   // V2.5.30: ap_pw/tx_int/heap_guard relocated above
 
     // V2.3.33: snprintf returns the would-have-been length on truncation,
     // not the bytes actually written. If n >= buffer size the page tail was
@@ -1861,7 +1891,15 @@ static esp_err_t config_post(httpd_req_t *req) {
         next.send_gmc = false;
         next.send_thingspeak = false;
         next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
-        next.deadtime_guard_us = 0; // V2.5.30: dead-time guard needs count pulses
+        next.deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
+    }
+
+    // V2.5.30: dead-time guard is mutually exclusive with pcnt_filter — the guard
+    // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
+    // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
+    // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
+    if (next.pcnt_filter) {
+        next.deadtime_guard = false;
     }
 
     *s_cfg = next;
@@ -1883,6 +1921,15 @@ static esp_err_t config_post(httpd_req_t *req) {
     // reconnect/reboot. No-op when MQTT isn't running.
     if (mqtt_is_initialized()) {
         mqtt_apply_config(s_cfg);
+    }
+
+    // V2.5.30 (review #4): live-apply the dead-time guard. The GMC ISR reads the
+    // window (a volatile uint32) on every edge, so a /config change takes effect
+    // immediately — no reboot, unlike the hardware-latched pcnt_filter. No-op when
+    // the tube wasn't started at boot (the count ISR isn't installed). When tube
+    // is off, the value was already force-cleared to 0 above.
+    if (tube_is_enabled()) {
+        tube_set_guard_us(config_effective_guard_us(s_cfg));
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");

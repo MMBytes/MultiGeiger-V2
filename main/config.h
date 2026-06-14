@@ -93,6 +93,17 @@ void config_log_summary(const config_t *cfg);
 /** @brief Persist cfg to NVS. Returns esp_err from nvs_commit. */
 esp_err_t config_save(const config_t *cfg);
 
+/** @brief Effective dead-time-guard window (µs) to hand to tube_set_guard_us().
+ *
+ *  Single source of the guard's on/off policy (V2.5.30): 0 (off) when the
+ *  `deadtime_guard` enable is clear OR when `pcnt_filter` is on — the latter
+ *  makes the PCNT hardware path authoritative for the uploaded count, which the
+ *  ISR guard cannot reach, so the two are mutually exclusive (pcnt_filter wins).
+ *  Otherwise returns `deadtime_guard_us`. Used by both the boot path (main.c) and
+ *  the live /config apply (http_server.c) so the rule lives in exactly one place.
+ */
+uint32_t config_effective_guard_us(const config_t *cfg);
+
 /** @brief Pre-clear all bool fields in `next`.
  *
  *  Helper for the HTTP POST handler: form submissions only include

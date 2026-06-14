@@ -572,9 +572,12 @@ static void do_tx_cycle(void) {
         // two = real.
         uint32_t diag_rejected =
             (diag_raw_edges >= counts_raw) ? (diag_raw_edges - counts_raw) : 0;
-        // V2.5.30: guard_removed = edges the optional dead-time guard suppressed
-        // this cycle (0 when off). Placed after rejected so the trailing edt_us
-        // histogram block stays positionally last for log parsers.
+        // V2.5.30: guard_removed = REAL counts the dead-time guard suppressed this
+        // cycle (only edges past the 190µs gate — its true marginal effect, so
+        // counts_without_guard = counts + guard_removed). It is a SUBSET of
+        // `rejected`, NOT an orthogonal column — do not sum the two. 0 when off.
+        // Placed after rejected so the trailing edt_us block stays positionally
+        // last for log parsers.
         ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu "
                  "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
@@ -1070,14 +1073,15 @@ void app_main(void) {
         tube_pcnt_init(g_cfg.pcnt_filter_width_ns);
     }
 
-    // V2.5.30: optional dead-time guard / burst-collapse (off by default —
-    // deadtime_guard_us==0). A retriggerable refractory on top of the 190µs ISR
-    // gate that collapses 1-5ms afterpulse/re-trigger trains to a single count.
+    // V2.5.30: optional dead-time guard / burst-collapse (off by default — the
+    // deadtime_guard checkbox is unchecked). A retriggerable refractory on top of
+    // the 190µs ISR gate that collapses 1-5ms afterpulse/re-trigger trains to one.
+    // config_effective_guard_us() returns 0 when off OR when pcnt_filter supersedes.
     // Diagnostic only (alters dead-time loss; doesn't reach the genuine ~40% of
-    // the board gap) — see config_fields.def. Tube-gated; set once here, so a
-    // /config change needs a reboot (mirrors the PCNT filter).
+    // the board gap) — see config_fields.def. Tube-gated. Set here at boot;
+    // also live-applied from config_post on /config Save (review #4).
     if (g_cfg.tube_enabled) {
-        tube_set_guard_us(g_cfg.deadtime_guard_us);
+        tube_set_guard_us(config_effective_guard_us(&g_cfg));
     }
 
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)

@@ -247,7 +247,7 @@ X_STR (mqtt_tls_ca,        CFG_MQTT_CA_CERT_MAX + 1, "mqtt_tls_ca", "")
 
 // --- Syslog (V2.4.15) -------------------------------------------------------
 //
-// UDP syslog client (RFC 3164 framing) — ships every ESP_LOG line emitted
+// UDP syslog client (RFC 5424 framing) — ships every ESP_LOG line emitted
 // after the syslog client comes up (post-GOT_IP) to a LAN syslog server.
 // Pairs with rsyslog on the Pi broker host or any other syslog receiver.
 //
@@ -333,16 +333,24 @@ X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 // rescale the 44205 µSv constant. Use on a NEW node with no archive, or to prove
 // (with a check source) that the 1-5ms population is artifact.
 //
-// 0 = OFF (default — legacy behaviour, only the 190µs gate runs). When on, a
-// sane window is ~3000-5000µs (covers the 1-5ms band). Bounded 200..20000µs.
-// Tube-gated; reboot-required (set at tube_setup). The per-cycle count of edges
-// it suppresses is logged on the DIAG line as guard_removed.
+// Enable via the `deadtime_guard` checkbox; `deadtime_guard_us` is the window
+// (200-20000µs, ~3000 typical). The GMC ISR reads the window each edge, so both
+// are LIVE-APPLIED on /config Save — no reboot, unlike the hardware-latched
+// pcnt_filter. Tube-gated. The per-cycle count of REAL counts it suppresses —
+// only edges that would have cleared the 190µs gate, i.e. its true marginal
+// effect, a SUBSET of the DIAG `rejected` (don't sum the two) — is logged on the
+// DIAG line as guard_removed.
 //
-// INTERACTION with pcnt_filter: the guard acts on the ISR count. When
-// pcnt_filter is ON the authoritative per-cycle count comes from the separate
-// PCNT hardware path (no dead-time gate), so the guard then only affects the
-// logged PRE-filter value, not the uploaded CPM. In practice they don't overlap:
-// pcnt_filter targets the ESP32-S3 narrow-pulse (width) population, the guard
-// targets the time-domain re-trigger population (e.g. the classic-ESP32 QT Py,
-// where the narrow population is ~0 and pcnt_filter is pointless).
-X_U32 (deadtime_guard_us,      "dt_guard_us", 0,        0,       20000)
+// MUTUALLY EXCLUSIVE with pcnt_filter (ENFORCED, pcnt_filter wins): the guard
+// runs in the GMC ISR, but pcnt_filter makes the separate PCNT hardware path
+// authoritative for the uploaded count — which the ISR guard cannot reach. So
+// enabling both would let the guard silently affect only the logged pre-filter
+// value, not the real CPM (observed live: QT Py "raw CPM 90 -> filtered 97" =
+// guard pulled the ISR count to 90 while 97, the PCNT value, was uploaded). The
+// exclusion is enforced three ways: config_post force-clears deadtime_guard when
+// pcnt_filter is set, the /config UI greys+unticks the guard box (syncGuard()),
+// and config_effective_guard_us() returns 0. They target different physics anyway
+// (pcnt_filter = ESP32-S3 narrow-WIDTH pulses; guard = time-domain 1-5ms
+// re-triggers, e.g. the classic-ESP32 QT Py where pcnt_filter is pointless).
+X_BOOL(deadtime_guard,         "dt_guard",    false)
+X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)

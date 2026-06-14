@@ -202,8 +202,9 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  tube:             enabled=%d", cfg->tube_enabled);
     LOG_PACED("  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
-    LOG_PACED("  deadtime-guard:   us=%lu (0=off)",
-             (unsigned long)cfg->deadtime_guard_us);
+    LOG_PACED("  deadtime-guard:   enabled=%d window=%luus%s",
+             cfg->deadtime_guard, (unsigned long)cfg->deadtime_guard_us,
+             (cfg->deadtime_guard && cfg->pcnt_filter) ? " (superseded by pcnt-filter)" : "");
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing
@@ -259,6 +260,15 @@ void config_log_summary(const config_t *cfg) {
              (unsigned long)cfg->syslog_port);
     #undef LOG_PACED
     #undef MASK
+}
+
+uint32_t config_effective_guard_us(const config_t *cfg) {
+    // V2.5.30: 0 (off) when the enable is clear OR pcnt_filter is on (pcnt_filter
+    // makes the PCNT hardware path authoritative, which the ISR guard can't reach
+    // — so the two are mutually exclusive, pcnt_filter wins). Single source of the
+    // policy; both the boot path and the live /config apply call this.
+    if (!cfg->deadtime_guard || cfg->pcnt_filter) return 0;
+    return cfg->deadtime_guard_us;
 }
 
 esp_err_t config_save(const config_t *cfg) {

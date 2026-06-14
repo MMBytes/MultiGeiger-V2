@@ -1,7 +1,7 @@
 #pragma once
 
 /** @file
- *  @brief V2.4.15: UDP syslog client (RFC 3164 framing).
+ *  @brief V2.4.15: UDP syslog client (RFC 5424 framing since V2.5.27).
  *
  *  Fire-and-forget per-line shipping to a LAN syslog receiver (rsyslog or
  *  syslog-ng on a server, typically the same Pi already running Mosquitto).

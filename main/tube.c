@@ -12,6 +12,16 @@
 
 static const char *TAG = "tube";
 
+// V2.5.30: saturating uint64->uint32 cast for µs timestamp deltas. now-X deltas
+// are uint64 µs; a gap over 2^32 µs (~71.6 min) overflows a bare uint32 cast and
+// wraps to a small value — mis-binning the edge and (worse) tricking the count
+// ISR's dead-time guard into blocking a genuine well-separated pulse. always_inline
+// so it folds into the IRAM count ISR at zero call cost and stays in IRAM (the ISR
+// runs with the flash cache disabled, so it must not call into flash).
+__attribute__((always_inline)) static inline uint32_t clamp_u32(uint64_t v) {
+    return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+}
+
 // Runtime enable flag. Set once at boot from tube_setup(enabled). When false,
 // no GPIO interrupts or recharge gptimer are installed, and tube_read() short-
 // circuits to zeros. We intentionally store this here rather than threading
@@ -163,17 +173,16 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     portENTER_CRITICAL_ISR(&mux_gmc);
 
     // V2.5.12: profile every raw edge BEFORE the dead-time gate below.
-    // V2.5.30: clamp the edge delta to UINT32_MAX. now/le are uint64 µs; a quiet
-    // gap exceeding 2^32 µs (~71.6 min) would otherwise wrap the uint32 to a small
-    // value — binning the edge as a near-coincidence and (worse) tricking the
-    // guard below into blocking a genuine well-separated pulse. Clamped, it bins
-    // as ">=500k" and never spuriously guard-blocks. edt is reused by the guard.
+    // V2.5.30: edt = gap since the previous edge, clamped (clamp_u32) so a >71.6
+    // min quiet gap can't wrap the uint32 and mis-bin / spuriously guard-block.
+    // Defaults to UINT32_MAX so the first-ever edge (le==0) reads as "maximally
+    // separated" — it can never satisfy edt <= isr_guard_us, so the guard below
+    // needs no special first-edge term. Reused by the guard (no recompute).
     isr_raw_edges++;
     uint64_t le = isr_last_edge_us;
-    uint32_t edt = 0;
+    uint32_t edt = UINT32_MAX;
     if (le != 0) {
-        uint64_t e = now - le;
-        edt = (e > UINT32_MAX) ? UINT32_MAX : (uint32_t)e;
+        edt = clamp_u32(now - le);
         uint32_t b;
         if      (edt <     50) b = 0;
         else if (edt <    190) b = 1;
@@ -188,16 +197,14 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     isr_last_edge_us = now;
 
     // V2.5.30: retriggerable dead-time guard (opt-in; isr_guard_us==0 disables).
-    // `le` is the PREVIOUS edge's timestamp (captured above before the update),
-    // so testing against it makes the window RETRIGGERABLE: every edge in a burst
-    // — counted or not — keeps the channel dead, so the whole train collapses to
-    // the single leading count. Reaches the 1-5ms re-trigger population the
-    // GMC_DEAD_TIME_US (190µs) gate is too short for. `edt` is reused from the
-    // histogram (no recompute); the `le != 0` term is LOAD-BEARING — edt defaults
-    // to 0, which would otherwise spuriously block the first-ever edge.
-    bool guard_block = (isr_guard_us != 0) && (le != 0) && (edt <= isr_guard_us);
+    // Keys on `edt` (gap since the PREVIOUS edge) so the window is RETRIGGERABLE:
+    // every edge in a burst — counted or not — keeps the channel dead, collapsing
+    // the whole train to the single leading count. Reaches the 1-5ms re-trigger
+    // population the GMC_DEAD_TIME_US (190µs) gate is too short for. The first-ever
+    // edge has edt == UINT32_MAX (above), so it is never blocked.
+    bool guard_block = (isr_guard_us != 0) && (edt <= isr_guard_us);
 
-    // dt = gap since the last COUNTED pulse, same UINT32_MAX clamp as edt.
+    // dt = gap since the last COUNTED pulse (clamp_u32, same wrap guard as edt).
     // past_gate = would this edge clear the fixed 190µs dead-time gate? The
     // first-ever edge (last==0) has no prior pulse and always passes.
     uint64_t last = isr_last_pulse_us;
@@ -206,8 +213,7 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     if (last == 0) {
         past_gate = true;
     } else {
-        uint64_t d = now - last;
-        dt = (d > UINT32_MAX) ? UINT32_MAX : (uint32_t)d;
+        dt = clamp_u32(now - last);
         past_gate = (dt > GMC_DEAD_TIME_US);
     }
 
@@ -361,10 +367,12 @@ uint32_t tube_get_total_counts(void) {
 }
 
 void tube_set_guard_us(uint32_t guard_us) {
-    // V2.5.30: set the retriggerable dead-time-guard window. 0 disables.
-    // Single volatile uint32_t the ISR reads on the hot path; take mux_gmc for
-    // consistency with the other ISR-shared writers in this file. Called once at
-    // boot from main.c (reboot-required, like the PCNT filter).
+    // V2.5.30: set the retriggerable dead-time-guard window (effective µs from
+    // config_effective_guard_us; 0 disables). Single volatile uint32_t the ISR
+    // reads on the hot path; take mux_gmc for consistency with the other ISR-shared
+    // writers. Called at boot AND live from config_post on /config Save — the ISR
+    // re-reads the volatile each edge, so it applies WITHOUT a reboot (unlike the
+    // hardware-latched PCNT filter).
     portENTER_CRITICAL(&mux_gmc);
     isr_guard_us = guard_us;
     portEXIT_CRITICAL(&mux_gmc);

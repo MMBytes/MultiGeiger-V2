@@ -202,9 +202,13 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  tube:             enabled=%d", cfg->tube_enabled);
     LOG_PACED("  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
+    // "superseded" derived from the single-source policy (config_effective_guard_us
+    // returns 0 when enabled-but-superseded), so the label can't drift from the
+    // actual on/off rule if that rule ever broadens.
     LOG_PACED("  deadtime-guard:   enabled=%d window=%luus%s",
              cfg->deadtime_guard, (unsigned long)cfg->deadtime_guard_us,
-             (cfg->deadtime_guard && cfg->pcnt_filter) ? " (superseded by pcnt-filter)" : "");
+             (cfg->deadtime_guard && config_effective_guard_us(cfg) == 0)
+                 ? " (superseded by pcnt-filter)" : "");
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing

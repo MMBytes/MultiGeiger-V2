@@ -202,6 +202,8 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  tube:             enabled=%d", cfg->tube_enabled);
     LOG_PACED("  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
+    LOG_PACED("  deadtime-guard:   us=%lu (0=off)",
+             (unsigned long)cfg->deadtime_guard_us);
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing

@@ -40,6 +40,18 @@ static volatile uint32_t isr_raw_edges    = 0;
 static volatile uint64_t isr_last_edge_us = 0;
 static volatile uint32_t isr_dt_hist[TUBE_DIAG_NBUCKETS] = {0};
 
+// --- V2.5.30: opt-in retriggerable dead-time guard / burst-collapse ---
+// isr_guard_us (0 = OFF) is a refractory window LAYERED on top of the fixed
+// GMC_DEAD_TIME_US gate. An edge can start a new count only if it follows a
+// quiet gap > isr_guard_us; edges inside the window (each within guard of the
+// PRIOR edge) extend the dead zone and are dropped, collapsing an afterpulse /
+// re-trigger train to one count. Set once at boot via tube_set_guard_us() (read
+// from config), so a plain volatile read in the ISR is all the hot path costs.
+// isr_guard_removed tallies the suppressed edges, snapshot+reset per cycle in
+// tube_get_diag() and surfaced on the DIAG log line. See config_fields.def.
+static volatile uint32_t isr_guard_us      = 0;
+static volatile uint32_t isr_guard_removed = 0;
+
 // --- HV charge state ---
 static volatile uint32_t isr_hv_pulses    = 0;
 static volatile bool     isr_hv_error     = false;
@@ -168,13 +180,24 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     }
     isr_last_edge_us = now;
 
+    // V2.5.30: retriggerable dead-time guard (opt-in; isr_guard_us==0 disables).
+    // `le` is the PREVIOUS edge's timestamp (captured above before the update),
+    // so testing against it makes the window RETRIGGERABLE: every edge in a burst
+    // — counted or not — keeps the channel dead, so the whole train collapses to
+    // the single leading count. This catches the 1-5ms re-trigger population the
+    // GMC_DEAD_TIME_US (190µs) gate is too short to reach. (le==0 only on the very
+    // first edge, which the last==0 branch counts regardless.)
+    bool guard_block = (isr_guard_us != 0) && (le != 0) &&
+                       ((uint32_t)(now - le) <= isr_guard_us);
+    if (guard_block) isr_guard_removed++;
+
     uint64_t last = isr_last_pulse_us;
     if (last == 0) {
         isr_gmc_counts++;
         isr_gmc_total++;            // V2.5.6: monotonic history counter
         isr_last_pulse_us = now;
         counted = true;
-    } else {
+    } else if (!guard_block) {
         uint32_t dt = (uint32_t)(now - last);
         if (dt > GMC_DEAD_TIME_US) {
             isr_gmc_counts++;
@@ -317,16 +340,29 @@ uint32_t tube_get_total_counts(void) {
     return v;
 }
 
-void tube_get_diag(uint32_t *raw_edges, uint32_t hist[TUBE_DIAG_NBUCKETS]) {
+void tube_set_guard_us(uint32_t guard_us) {
+    // V2.5.30: set the retriggerable dead-time-guard window. 0 disables.
+    // Single volatile uint32_t the ISR reads on the hot path; take mux_gmc for
+    // consistency with the other ISR-shared writers in this file. Called once at
+    // boot from main.c (reboot-required, like the PCNT filter).
+    portENTER_CRITICAL(&mux_gmc);
+    isr_guard_us = guard_us;
+    portEXIT_CRITICAL(&mux_gmc);
+}
+
+void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
+                   uint32_t hist[TUBE_DIAG_NBUCKETS]) {
     // V2.5.12: snapshot + reset under the same lock as the ISR writer,
     // mirroring tube_read()'s window-reset discipline so the diag window tiles
-    // cleanly cycle-to-cycle.
+    // cleanly cycle-to-cycle. V2.5.30: guard_removed rides the same snapshot.
     portENTER_CRITICAL(&mux_gmc);
-    *raw_edges = isr_raw_edges;
+    *raw_edges     = isr_raw_edges;
+    *guard_removed = isr_guard_removed;
     for (int i = 0; i < TUBE_DIAG_NBUCKETS; i++) {
         hist[i] = isr_dt_hist[i];
         isr_dt_hist[i] = 0;
     }
-    isr_raw_edges = 0;
+    isr_raw_edges     = 0;
+    isr_guard_removed = 0;
     portEXIT_CRITICAL(&mux_gmc);
 }

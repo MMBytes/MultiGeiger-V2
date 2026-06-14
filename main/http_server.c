@@ -1375,7 +1375,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<span class=\"r\">*</span></label></div>"
         "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
         "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
-        "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label></div>"
+        "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label>"
+        // V2.5.30: dead-time guard — retriggerable refractory that collapses
+        // 1-5ms afterpulse/re-trigger trains to one count (reaches what the 4µs
+        // width filter can't). Diagnostic: alters dead-time loss + only removes
+        // the spurious part of the board gap. 0 = off. Tube-gated, reboot-required.
+        "<label>Dead-time guard (&micro;s, 0 = off; else 200&ndash;20000, ~3000 typical) "
+        "<input type=\"text\" inputmode=\"numeric\" name=\"dt_guard_us\" "
+        "id=\"dt_guard_us\" value=\"%lu\"> <span class=\"r\">*</span></label></div>"
         // V2.5.19: I²C pin-out route toggle. Board-gated like the antenna switch
         // (greyed + force-off on boards without HAL_HAS_I2C_PINOUT_SWITCH). 3 %s
         // slots: disabled-attr, checked-attr, trailing note.
@@ -1473,7 +1480,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         // tube" is off (server-side enforcement in config_post mirrors this).
         "function syncTube(){"
         "var t=document.getElementById('tube_en');"
-        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
+        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w','dt_guard_us'];"
         "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
         "if(!e)continue;"
         "if(t.checked){e.disabled=false;}"
@@ -1624,6 +1631,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->tube_enabled ? "checked" : "",
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
         (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
+        (unsigned long)s_cfg->deadtime_guard_us,     // V2.5.30: dead-time guard µs
 #if HAL_HAS_I2C_PINOUT_SWITCH
         "",                                          // not disabled on this board
         s_cfg->i2c_pinout ? "checked" : "",          // current state
@@ -1853,6 +1861,7 @@ static esp_err_t config_post(httpd_req_t *req) {
         next.send_gmc = false;
         next.send_thingspeak = false;
         next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
+        next.deadtime_guard_us = 0; // V2.5.30: dead-time guard needs count pulses
     }
 
     *s_cfg = next;

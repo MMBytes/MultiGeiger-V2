@@ -65,19 +65,34 @@ bool tube_is_enabled(void);
  */
 uint32_t tube_get_total_counts(void);
 
+/** @brief V2.5.30: set the opt-in retriggerable dead-time-guard window (µs).
+ *
+ *  Layered on top of the fixed GMC_DEAD_TIME_US gate: once set, an edge can
+ *  start a new count only after a quiet gap longer than @p guard_us; edges
+ *  inside the window extend the dead zone and are dropped, collapsing an
+ *  afterpulse / re-trigger TRAIN to a single count (reaches the 1-5ms band the
+ *  190µs gate is too short for). 0 = OFF (default; legacy behaviour). Set once
+ *  at boot from config (reboot-required, like the PCNT filter). Diagnostic only
+ *  — it alters the dead-time loss; see config_fields.def / tube.c.
+ */
+void tube_set_guard_us(uint32_t guard_us);
+
 /** @brief V2.5.12: snapshot + reset the raw-edge count profiler.
  *
  *  Permanent diagnostic on the Geiger count path, emitted as the per-cycle
  *  DIAG log line — distinguishes clean counting from count-node ringing/noise.
- *  @param raw_edges  Out: every GMC ISR entry since the last call, counted
- *                    BEFORE the dead-time gate. raw_edges - counts isolates
- *                    edges suppressed as ringing/double-counts (< GMC_DEAD_TIME_US).
- *  @param hist       Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
- *                    (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
- *                    ~1.2 cps pulses land in the top two bins; a fat low-bin
- *                    population is count-node ringing/noise.
+ *  @param raw_edges     Out: every GMC ISR entry since the last call, counted
+ *                       BEFORE the dead-time gate. raw_edges - counts isolates
+ *                       edges suppressed as ringing/double-counts (< GMC_DEAD_TIME_US).
+ *  @param guard_removed Out: V2.5.30 — edges suppressed by the optional dead-time
+ *                       guard since the last call (0 when the guard is off).
+ *  @param hist          Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
+ *                       (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
+ *                       ~1.2 cps pulses land in the top two bins; a fat low-bin
+ *                       population is count-node ringing/noise.
  */
-void tube_get_diag(uint32_t *raw_edges, uint32_t hist[TUBE_DIAG_NBUCKETS]);
+void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
+                   uint32_t hist[TUBE_DIAG_NBUCKETS]);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

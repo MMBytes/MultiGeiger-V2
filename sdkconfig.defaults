@@ -147,10 +147,16 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
 # CONFIG_MBEDTLS_DEBUG is not set
 
 # NOTE on CONFIG_MBEDTLS_DYNAMIC_BUFFER: enabled in V2.4.5 on the Heltec
-# overlays ONLY (sdkconfig.defaults.heltec_v2 + .heltec_v2_4mb). The
-# FeatherS3-D and QT Py have abundant PSRAM heap so the per-record
-# alloc/free CPU overhead isn't worth paying there; only the Heltec's
-# tight internal-DRAM budget actually benefits.
+# overlays ONLY, REVERTED in V2.4.7 (FTPS-reconnect TLSF heap corruption).
+# V2.5.30 RE-TESTED on heltec_v2 against the ESP-IDF 6.0.1 mbedTLS dynamic-buffer
+# fix — BOTH variants (DYNAMIC_BUFFER alone, then all three with FREE_CONFIG_DATA
+# + FREE_CA_CERT) STILL CRASHED (same TLSF heap-corruption panic on the first
+# FTPS upload, free site wandering across 3 runs = heap corruption upstream of
+# session_reset). REVERTED again, stays OFF on all overlays — it's our hand-rolled
+# log_ftp.c teardown, not IDF; don't re-test the kconfig on future bumps. See the
+# detailed post-mortem in sdkconfig.defaults.heltec_v2. The FeatherS3-D and QT Py have abundant
+# PSRAM heap so the per-record alloc/free CPU overhead isn't worth paying there;
+# only the Heltec's tight internal-DRAM budget would have benefited.
 
 # V2.4.18: enable ESP-IDF core dump to flash for over-the-air panic
 # recovery. Pairs with the 64 KB `coredump` partition row added to

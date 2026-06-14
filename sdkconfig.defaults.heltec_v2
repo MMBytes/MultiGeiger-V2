@@ -19,13 +19,38 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 # mbedtls_ssl_session_reset → mbedtls_ssl_session_reset_msg_layer → mbedtls_free,
 # panicking the device. esp_tls / esp_http_client clients (HTTPS uploads,
 # MQTT TLS) were unaffected because they don't expose mbedTLS internals.
-# The 15-20 KB transient gain is not worth the regression in the
-# load-bearing FTPS path. The V2.4.5 log-ring trim (60→45 KB) stays —
-# that's an independent change and is fine.
 #
-# To re-enable in the future, the log_ftp.c io_close / session-reset
-# path needs auditing to handle the dynamic-buffer free pattern (likely
-# a missing buffer-pointer reset or a double-free trigger).
+# V2.5.30 RE-TEST on ESP-IDF 6.0.1 — two variants:
+#
+# TEST 1 (DYNAMIC_BUFFER only = the Kconfig-canonical config; both FREE_* default
+# off): FAILED. Flashed to heltec_v2 (.52, chip 12276328, FTPS live) and it
+# PANICKED on the FIRST FTPS upload (uptime 360 s) — TLSF
+# `block_next ... !block_is_last(block)` heap-corruption assert inside
+# mbedtls_ssl_session_reset, called from our hand-rolled log_ftp.c::io_close.
+# Coredump decoded + saved: Geiger_Log/coredump_heltec_v2_V2.5.30_dynbuf_decoded.txt.
+# The assert was in the peer-cert free path (ssl_clear_peer_cert -> x509_crt_free
+# -> asn1_sequence_free) vs V2.4.5's msg-layer free, but same root: heap already
+# corrupted before session_reset's free chain runs (session_reset is the victim,
+# not the corrupter; the overrun is upstream in the dynamic-buffer transfer churn).
+#
+# TEST 2 (all three on — adds FREE_CONFIG_DATA + FREE_CA_CERT, the aggressive
+# ~20-30 KB variant): ALSO FAILED. Flashed to .52, PANICKED on the first FTPS
+# upload (uptime 371 s) with the SAME TLSF block_is_last assert in
+# io_close→session_reset — but the free site moved a THIRD time, now the cipher
+# transform keys (mbedtls_ssl_transform_free→psa_destroy_key→...→
+# mbedtls_zeroize_and_free). Coredump saved: Geiger_Log/
+# coredump_heltec_v2_V2.5.30_dynbuf_ALL3_decoded.txt.
+#
+# CONCLUSION (3 runs, 3 different free sites, 1 root cause): the wandering crash
+# site = heap corruption, not a single-object double-free. The corrupter is
+# UPSTREAM in the dynamic-buffer transfer churn; session_reset is only where the
+# poison is detected. The FREE_* options change WHICH objects get freed (hence the
+# new PSA-key site) but not the root => dynamic-buffer is incompatible with the
+# hand-rolled FTPS path on 6.0.1 in ANY config. ALL THREE REVERTED (V2.4.7
+# baseline). To ever re-enable: rewrite log_ftp.c teardown (skip session_reset,
+# use mbedtls_ssl_free only — we never reuse the session) OR wrap FTPS in esp_tls;
+# both necessary-but-maybe-not-sufficient until the upstream overrun is found.
+# Do NOT re-test the kconfig alone on a future IDF bump — it's our code, not IDF.
 # CONFIG_MBEDTLS_DYNAMIC_BUFFER is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT is not set

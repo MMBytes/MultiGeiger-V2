@@ -312,3 +312,37 @@ X_BOOL(pcnt_filter,           "pcnt_filt",   false)
 // to stay under the APB glitch-filter ceiling (~12.8µs). Reboot-required (the
 // glitch filter is set at unit init). Only meaningful when pcnt_filter is on.
 X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
+
+// --- Dead-time guard / burst-collapse (V2.5.30) -----------------------------
+//
+// Opt-in RETRIGGERABLE refractory layered ON TOP of the fixed GMC_DEAD_TIME_US
+// (190µs) ISR gate. When > 0, an edge can only start a NEW count if it follows
+// a quiet gap longer than this window; edges arriving inside the window (each
+// within `guard` of the PRIOR edge) extend the dead zone and are dropped — so
+// an afterpulse / re-trigger TRAIN collapses to a single count regardless of how
+// long the train is. The histogram-based dead-time gate (190µs) only catches the
+// 50-190µs afterpulse; this reaches the 1-5ms re-trigger population that the 4µs
+// PCNT width filter cannot (a width filter is 3 orders of magnitude too short in
+// time). See reference_radiation_data_analysis (2026-06-14 overnight: ~60% of the
+// QT Py over-count is exactly this 1-5ms burst, the other ~40% is genuine and
+// unfilterable).
+//
+// DIAGNOSTIC / characterisation tool, NOT a production "fix": it introduces a
+// board-dependent dead-time-loss term (steps the multi-year archive) and only
+// removes the spurious ~60% of the gap. Keep Heltec as the dose baseline; do not
+// rescale the 44205 µSv constant. Use on a NEW node with no archive, or to prove
+// (with a check source) that the 1-5ms population is artifact.
+//
+// 0 = OFF (default — legacy behaviour, only the 190µs gate runs). When on, a
+// sane window is ~3000-5000µs (covers the 1-5ms band). Bounded 200..20000µs.
+// Tube-gated; reboot-required (set at tube_setup). The per-cycle count of edges
+// it suppresses is logged on the DIAG line as guard_removed.
+//
+// INTERACTION with pcnt_filter: the guard acts on the ISR count. When
+// pcnt_filter is ON the authoritative per-cycle count comes from the separate
+// PCNT hardware path (no dead-time gate), so the guard then only affects the
+// logged PRE-filter value, not the uploaded CPM. In practice they don't overlap:
+// pcnt_filter targets the ESP32-S3 narrow-pulse (width) population, the guard
+// targets the time-domain re-trigger population (e.g. the classic-ESP32 QT Py,
+// where the narrow population is ~0 and pcnt_filter is pointless).
+X_U32 (deadtime_guard_us,      "dt_guard_us", 0,        0,       20000)

@@ -484,8 +484,9 @@ static void do_tx_cycle(void) {
     // count window and raw-edge window align (so raw_edges >= counts). Dumped
     // in the DIAG log line below when the tube is enabled.
     uint32_t diag_raw_edges = 0;
+    uint32_t diag_guard_removed = 0;   // V2.5.30: edges dropped by the dead-time guard
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
-    tube_get_diag(&diag_raw_edges, diag_hist);
+    tube_get_diag(&diag_raw_edges, &diag_guard_removed, diag_hist);
 
     // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read
     // advances each unit's per-cycle delta base, so re-reading would zero the
@@ -571,9 +572,13 @@ static void do_tx_cycle(void) {
         // two = real.
         uint32_t diag_rejected =
             (diag_raw_edges >= counts_raw) ? (diag_raw_edges - counts_raw) : 0;
-        ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu "
+        // V2.5.30: guard_removed = edges the optional dead-time guard suppressed
+        // this cycle (0 when off). Placed after rejected so the trailing edt_us
+        // histogram block stays positionally last for log parsers.
+        ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu "
                  "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
+                 (unsigned long)diag_guard_removed,
                  (unsigned long)diag_hist[0], (unsigned long)diag_hist[1],
                  (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
@@ -1063,6 +1068,16 @@ void app_main(void) {
     // pointless without count pulses.
     if (g_cfg.tube_enabled && g_cfg.pcnt_filter) {
         tube_pcnt_init(g_cfg.pcnt_filter_width_ns);
+    }
+
+    // V2.5.30: optional dead-time guard / burst-collapse (off by default —
+    // deadtime_guard_us==0). A retriggerable refractory on top of the 190µs ISR
+    // gate that collapses 1-5ms afterpulse/re-trigger trains to a single count.
+    // Diagnostic only (alters dead-time loss; doesn't reach the genuine ~40% of
+    // the board gap) — see config_fields.def. Tube-gated; set once here, so a
+    // /config change needs a reboot (mirrors the PCNT filter).
+    if (g_cfg.tube_enabled) {
+        tube_set_guard_us(g_cfg.deadtime_guard_us);
     }
 
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)

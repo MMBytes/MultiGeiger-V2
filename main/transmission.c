@@ -1232,12 +1232,19 @@ static const tx_dispatch_t TX_TABLE[] = {
       "ThingSpeak: skipping (no payload)" },
     { TX_TARGET_THINGSPEAK_PM, offsetof(tx_context_t, thingspeak_pm), send_thingspeak_pm, 200, 0,   GATE_PM,          -1,
       "ThingSpeak PM: skipping (no PM reading)" },
-    { TX_TARGET_OSM,           offsetof(tx_context_t, osm),           send_osm,           201, 200, GATE_ANY_PAYLOAD, -1,
-      "openSenseMap: skipping (no payload)" },
     { TX_TARGET_AQI,           offsetof(tx_context_t, aqi),           send_aqi,           200, 201, GATE_ANY_PAYLOAD, -1,
       "aqi.eco: skipping (no payload)" },
+    // V2.5.x: openSenseMap targets deliberately LAST. The dispatch loop runs
+    // each send() synchronously, so a slow/hung target blocks every row below
+    // it. OSM's ingress has been the worst offender for connect-timeouts
+    // (ESP_ERR_HTTP_EAGAIN) and 502s — at ~16-18 s/attempt × 4 retries that is
+    // ~70 s a cycle. Running OSM after the reliable targets means their data is
+    // already away before OSM is allowed to spend the time budget. Staging
+    // (normally disabled) sits above prod so prod OSM is the very last row.
     { TX_TARGET_OSM_STAGING,   offsetof(tx_context_t, osm_staging),   send_osm_staging,   201, 200, GATE_ANY_PAYLOAD, -1,
       "openSenseMap STAGING: skipping (no payload)" },
+    { TX_TARGET_OSM,           offsetof(tx_context_t, osm),           send_osm,           201, 200, GATE_ANY_PAYLOAD, -1,
+      "openSenseMap: skipping (no payload)" },
 };
 
 // Run one table entry: identical to each old hand-written block. `fail_streak`

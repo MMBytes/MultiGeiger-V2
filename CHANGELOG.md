@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.32 — openSenseMap dispatched last (slow-target isolation)
+
+**What:** Reorder the `TX_TABLE[]` dispatch so the production openSenseMap target runs **last** of the upload targets (staging, normally disabled, sits just above it). No other behaviour change.
+
+**Why:** The TX dispatch loop runs each target's `send()` **synchronously**, so a slow or hung target stalls every target listed below it. OSM's ingress has been the worst offender for connect-timeouts (`ESP_ERR_HTTP_EAGAIN`, "Connection timed out before data was ready") and `502`s — at ~16–18 s/attempt × 4 retries that is ~70 s of a cycle spent blocked. Observed live on 2026-06-16 (~04:00–04:32 UTC). With OSM dispatched after the reliable targets (Madavi, sensor.community, Radmon, GMC, ThingSpeak, aqi.eco), their data is already away before OSM is allowed to spend the time budget.
+
+**How:** Pure data reorder of the V2.5.5 table-driven dispatch — the prod `TX_TARGET_OSM` row moved to the end of `TX_TABLE[]`. Safe because the circuit-breaker, fail-streak, and per-target stats are all indexed by `tx_target_id_t`, not array position, so failure tracking and the `/status` display are unchanged. OSM's OLED slot is `-1` (no display slot), so there is no UI ordering to disturb either.
+
+---
+
 ## V2.5.31 — CI hardening + host-testable count logic (no firmware behaviour change)
 
 **What:** A test/CI-only release that adds host coverage for previously-untested pure logic and removes long-standing duplication and flake sources from the GitHub Actions pipeline. The firmware is **behaviourally inert** vs V2.5.30 — the only `main/` change is a pure refactor that extracts existing decision logic into a testable header.

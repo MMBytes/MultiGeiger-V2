@@ -9,6 +9,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.33 — heap-guard root-cause fix: PSRAM offload + configurable confirm window
+
+**What:** Two related changes to stop the heap-guard auto-reboot from firing prematurely on `.198` (and any PSRAM board):
+1. **Tier-1 PSRAM offload** (all PSRAM boards — feathers3_d, QT Py PICO, XIAO S3; Heltec excluded, no PSRAM): WiFi/lwIP pbufs+PCBs and mbedTLS record buffers now allocate from PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`), and the malloc internal-only threshold drops 16384 → 4096.
+2. **Configurable heap-guard confirm window** — new `/config` field "Heap-guard confirm cycles" (`hg_confirm`, default 10, range 1–240), replacing the hard-coded 5. The heap-guard log line now also reports node **uptime**. The explanatory blurb under the floor field was removed.
+
+**Why:** Field forensics on esp32-5965048 (`.198`) showed the guard was rebooting on a **transient, self-healing** fragmentation dip, not the slow month-scale creep it was designed for. The INTERNAL largest-free block sat steady at 68 KB for 37 h, then a single inbound `/config` (plus per-cycle outbound TLS churn) left a small long-lived buffer mid-arena that bisected it to 39 KB — below the 44 KB floor. The dip self-heals in 3–5 cycles (observed coalescing back to 68 KB), but the 5-cycle confirm window occasionally caught it and rebooted for nothing. Routing those network/TLS buffers to PSRAM removes the bisecting allocator at the source (the real fix); the confirm-window bump to 10 rides out any residual transient (the belt-and-braces); the uptime line lets the syslog reader tell a genuine slow creep from a same-day false-positive at a glance.
+
+**How:** `tx_heap_guard()` takes `confirm_cycles` from the new config field (wired through `config_fields.def` → `tx_context_t` → `main.c`) and appends `Uptime: Nd HHh MMm` (via `esp_timer_get_time()`) to the reboot log line. PSRAM knobs added to each `sdkconfig.defaults.<board>` for the three PSRAM boards only. The 4 MB `/log` ring was already PSRAM-resident (V2.3.18) and is unaffected. ESP32-PICO-V3-02 is rev-3 silicon so the rev<3 PSRAM cache workaround does not apply.
+
+---
+
 ## V2.5.32 — openSenseMap dispatched last (slow-target isolation)
 
 **What:** Reorder the `TX_TABLE[]` dispatch so the production openSenseMap target runs **last** of the upload targets (staging, normally disabled, sits just above it). No other behaviour change.

@@ -1405,11 +1405,10 @@ static esp_err_t config_get(httpd_req_t *req) {
         // section (was in "Other"). No asterisk — read live each TX cycle by
         // tx_heap_guard() (V2.5.18), so it applies on plain Save (no reboot).
         "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\">"
-        " <small>Unattended long-uptime nodes only: reboots the device if the "
-        "internal largest-free block stays below this floor (the OTA-stall / "
-        "long-tail-OOM precursor). 0 disables. ~44 is a sane starting floor; a "
-        "2h arm-delay + 6h rate-limit prevent boot-loops.</small></label>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\"></label>"
+        // V2.5.33: confirm window now configurable (was a hard-coded 5).
+        "<label>Heap-guard confirm cycles"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"hg_confirm\" value=\"%lu\"></label>"
         // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
         // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
         // configure here. See the "GNSS / Position" card on /status.
@@ -1672,6 +1671,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         " <small>(not available on this board)</small>",
 #endif
         (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
+        (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
         (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",

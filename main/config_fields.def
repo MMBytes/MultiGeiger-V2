@@ -273,8 +273,8 @@ X_U32 (syslog_port,            "syslog_p",    514,      1,       65535)
 // INTERNAL largest 71.7K -> 62.5K over 4.8 days despite the refresh. When > 0,
 // transmission.c::tx_heap_guard() reboots the node once INTERNAL largest-free
 // stays below this floor (KB) WHILE total free stays > 2x the floor (the
-// fragmentation signature) for 5 consecutive TX cycles, via the clean
-// main_request_restart() path. Reboot is the only certain reset of
+// fragmentation signature) for heap_guard_confirm_cycles consecutive TX cycles,
+// via the clean main_request_restart() path. Reboot is the only certain reset of
 // fragmentation. V2.5.18 moved this off the 1 Hz periodic tick onto the
 // per-cycle resting heap snapshot so it no longer misfires on the transient
 // largest-free dip an inbound /log fetch causes. 0 = OFF (default — opt-in per
@@ -282,6 +282,14 @@ X_U32 (syslog_port,            "syslog_p",    514,      1,       65535)
 // is a sane starting floor; validate
 // it against an actual OTA's contiguous-alloc need before trusting in the field.
 X_U32 (heap_guard_floor_kb,    "heap_guard",  0,        0,       200)
+//
+// V2.5.33: the confirm window above is now configurable. The inbound-/config and
+// outbound-TLS buffer churn produces a transient INTERNAL-largest dip (68K->39K
+// observed on esp32-5965048) that self-heals in 3-5 TX cycles — so a 5-cycle
+// confirm occasionally tripped a needless reboot. Default 10 cycles (~30 min at
+// the 180 s interval) rides out that transient while still catching a genuine
+// sustained collapse. Min 1 (never reboot on a single sample).
+X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     1,       240)
 
 // --- PCNT pulse-width FILTER + diagnostic (V2.5.16) --------------------------
 //

@@ -15,6 +15,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"         // V2.5.33: uptime in the heap-guard log line
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -1328,18 +1329,24 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
 // (the OTA-stall / long-tail-OOM precursor). The `free_total > 2*floor` arm is
 // the load-bearing transient filter — a connection that grabs net buffers drops
 // BOTH largest AND free, so it fails this arm and never counts; only genuine
-// fragmentation (largest low, free high) does. 5 consecutive cycles (~15 min)
+// fragmentation (largest low, free high) does. confirm_cycles consecutive cycles
 // must qualify before we reboot via the same path /reboot uses.
+//
+// V2.5.33: confirm_cycles is configurable (was a hard-coded 5). Inbound /config
+// and outbound-TLS buffer churn produces a transient INTERNAL-largest dip that
+// self-heals in 3-5 cycles (68K->39K->68K observed on esp32-5965048); a 5-cycle
+// confirm occasionally caught that benign transient and rebooted for nothing.
+// Default 10 rides it out while still catching a genuine sustained collapse.
 //
 // No persistence is needed: a production node (no PCNT comb) boots with a
 // healthy largest block and cannot reach this state, so it can't boot-loop. The
 // ONE residual loop risk is the experimental PCNT width-comb taking an unlucky
 // INTERNAL boot-split — acceptable on the bench (pcnt_filter is off by default).
-static void tx_heap_guard(uint32_t floor_kb) {
+static void tx_heap_guard(uint32_t floor_kb, uint32_t confirm_cycles) {
     if (floor_kb == 0) { return; }            // feature off (default)
+    if (confirm_cycles < 1) { confirm_cycles = 1; }   // never reboot on one sample
 
     static int s_below = 0;
-    const int  CONFIRM_CYCLES = 5;
 
     uint32_t largest    = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     uint32_t free_total = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -1350,13 +1357,19 @@ static void tx_heap_guard(uint32_t floor_kb) {
         return;
     }
 
-    if (++s_below < CONFIRM_CYCLES) { return; }
+    if ((uint32_t)++s_below < confirm_cycles) { return; }
 
+    // V2.5.33: include uptime so the syslog reader can tell a slow month-scale
+    // creep from a same-day transient false-positive at a glance.
+    uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
     ESP_LOGW(TAG,
              "HEAP GUARD: INTERNAL largest=%u < floor=%u (%lukB) with free=%u "
-             "for %d cycles — rebooting to defragment",
+             "for %d cycles — Uptime: %lud %02luh %02lum — rebooting to defragment",
              (unsigned)largest, (unsigned)floor_b, (unsigned long)floor_kb,
-             (unsigned)free_total, s_below);
+             (unsigned)free_total, s_below,
+             (unsigned long)(up_s / 86400u),
+             (unsigned long)((up_s / 3600u) % 24u),
+             (unsigned long)((up_s / 60u) % 60u));
     main_request_restart();
 }
 
@@ -1398,7 +1411,7 @@ static void tx_run(const tx_context_t *c) {
 
     // V2.5.18: fragmentation auto-reboot, judged on the resting snapshot just
     // logged above (not a 1 Hz sample that catches inbound-/log transients).
-    tx_heap_guard(c->heap_guard_floor_kb);
+    tx_heap_guard(c->heap_guard_floor_kb, c->heap_guard_confirm_cycles);
 
     // Madavi and sensor.community accept a mix of radiation + env (THP) + PM +
     // noise payloads, so they're called whenever ANY source is live. Radmon is

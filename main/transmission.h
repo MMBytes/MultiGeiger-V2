@@ -162,6 +162,10 @@ typedef struct {
     // the true resting floor it reports, not the inbound-/log transient that
     // misfired the old per-tick V2.5.14 guard. See tx_run()/tx_heap_guard().
     uint32_t heap_guard_floor_kb;
+
+    // V2.5.33: consecutive below-floor cycles required before the guard reboots.
+    // Default 10 — rides out the self-healing TLS/inbound-buffer transient dip.
+    uint32_t heap_guard_confirm_cycles;
 } tx_context_t;
 
 /** @brief Create the worker task and queue. Call once at boot. */

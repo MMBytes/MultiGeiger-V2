@@ -176,8 +176,9 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  tz:               %s", cfg->tz_posix);
     LOG_PACED("  web:              admin_pw=%s tx_interval=%lums",
              MASK(cfg->ap_password), (unsigned long)cfg->tx_interval_ms);
-    LOG_PACED("  heap-guard:       floor=%lukB (0=off)",
-             (unsigned long)cfg->heap_guard_floor_kb);
+    LOG_PACED("  heap-guard:       floor=%lukB (0=off) confirm=%lu cycles",
+             (unsigned long)cfg->heap_guard_floor_kb,
+             (unsigned long)cfg->heap_guard_confirm_cycles);
     LOG_PACED("  station:          altitude=%.1fm send_sealevel_pressure=%d",
              (double)cfg->station_altitude_m, cfg->send_sealevel_pressure);
     LOG_PACED("  ftp:              enabled=%d tls=%d host=%s user=%s pw=%s",

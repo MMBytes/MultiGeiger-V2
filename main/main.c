@@ -428,6 +428,7 @@ static void build_tx_context(tx_context_t *ctx,
     // fragmentation auto-reboot can be evaluated on the TX worker right where
     // the per-cycle heap line is logged (relocated from periodic_loop).
     ctx->heap_guard_floor_kb = g_cfg.heap_guard_floor_kb;
+    ctx->heap_guard_confirm_cycles = g_cfg.heap_guard_confirm_cycles;  // V2.5.33
 
     // V2.4.1 (C9): URLs moved to transmission.c. main.c just passes the
     // per-cycle config flags; the helper fills the URL pair + insecure=false.

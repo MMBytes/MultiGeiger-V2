@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /** @brief Bounded string copy with guaranteed null termination.
  *
@@ -153,4 +154,24 @@ static inline void html_esc(const char *in, char *out, size_t bufsz) {
         in++;
     }
     out[o] = 0;
+}
+
+/** @brief Format an uptime in seconds as a compact "Nd HHh MMm" / "HHh MMm SSs".
+ *
+ *  Below one day shows seconds for precision ("06h 12m 30s"); at or above a
+ *  day, days lead and seconds drop ("2d 23h 59m"). Always null-terminated.
+ *
+ *  V2.5.33: lifted from http_server.c (was `static` there) so the heap-guard
+ *  reboot log line in transmission.c can render uptime with the SAME formatting
+ *  the /status page uses, instead of a second inline copy of the d/h/m maths.
+ */
+static inline void format_uptime(unsigned long s, char *out, size_t sz) {
+    unsigned long m = s / 60;
+    unsigned long h = m / 60;
+    unsigned long d = h / 24;
+    if (d > 0) {
+        snprintf(out, sz, "%lud %02luh %02lum", d, h % 24, m % 60);
+    } else {
+        snprintf(out, sz, "%02luh %02lum %02lus", h, m % 60, s % 60);
+    }
 }

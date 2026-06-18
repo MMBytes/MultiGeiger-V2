@@ -1344,9 +1344,14 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
 // INTERNAL boot-split — acceptable on the bench (pcnt_filter is off by default).
 static void tx_heap_guard(uint32_t floor_kb, uint32_t confirm_cycles) {
     if (floor_kb == 0) { return; }            // feature off (default)
-    if (confirm_cycles < 1) { confirm_cycles = 1; }   // never reboot on one sample
+    // Enforce the documented >=2 floor so the guard never reboots on a SINGLE
+    // below-floor sample. The config range min is 2, but config_load() does NOT
+    // re-clamp an NVS value to range, so a stale/garbage stored value below 2
+    // could still reach here — this clamp is the real guard against that, not
+    // dead defensiveness.
+    if (confirm_cycles < 2) { confirm_cycles = 2; }
 
-    static int s_below = 0;
+    static uint32_t s_below = 0;
 
     uint32_t largest    = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     uint32_t free_total = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -1357,19 +1362,19 @@ static void tx_heap_guard(uint32_t floor_kb, uint32_t confirm_cycles) {
         return;
     }
 
-    if ((uint32_t)++s_below < confirm_cycles) { return; }
+    if (++s_below < confirm_cycles) { return; }
 
     // V2.5.33: include uptime so the syslog reader can tell a slow month-scale
-    // creep from a same-day transient false-positive at a glance.
+    // creep from a same-day transient false-positive at a glance. Rendered with
+    // the same helper the /status page uses (format_uptime in util.h).
     uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+    char uptime_buf[32];
+    format_uptime(up_s, uptime_buf, sizeof(uptime_buf));
     ESP_LOGW(TAG,
              "HEAP GUARD: INTERNAL largest=%u < floor=%u (%lukB) with free=%u "
-             "for %d cycles — Uptime: %lud %02luh %02lum — rebooting to defragment",
+             "for %u cycles — Uptime: %s — rebooting to defragment",
              (unsigned)largest, (unsigned)floor_b, (unsigned long)floor_kb,
-             (unsigned)free_total, s_below,
-             (unsigned long)(up_s / 86400u),
-             (unsigned long)((up_s / 3600u) % 24u),
-             (unsigned long)((up_s / 60u) % 60u));
+             (unsigned)free_total, (unsigned)s_below, uptime_buf);
     main_request_restart();
 }
 

@@ -288,8 +288,9 @@ X_U32 (heap_guard_floor_kb,    "heap_guard",  0,        0,       200)
 // observed on esp32-5965048) that self-heals in 3-5 TX cycles — so a 5-cycle
 // confirm occasionally tripped a needless reboot. Default 10 cycles (~30 min at
 // the 180 s interval) rides out that transient while still catching a genuine
-// sustained collapse. Min 1 (never reboot on a single sample).
-X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     1,       240)
+// sustained collapse. Min 2 — the guard requires >=2 consecutive below-floor
+// cycles, so it never reboots on a single sample.
+X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     2,       240)
 
 // --- PCNT pulse-width FILTER + diagnostic (V2.5.16) --------------------------
 //

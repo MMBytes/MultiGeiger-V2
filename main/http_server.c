@@ -231,16 +231,8 @@ static void set_security_headers(httpd_req_t *req) {
 
 // --- GET / (status, no auth) -------------------------------------------------
 
-static void format_uptime(unsigned long s, char *out, size_t sz) {
-    unsigned long m = s / 60;
-    unsigned long h = m / 60;
-    unsigned long d = h / 24;
-    if (d > 0) {
-        snprintf(out, sz, "%lud %02luh %02lum", d, h % 24, m % 60);
-    } else {
-        snprintf(out, sz, "%02luh %02lum %02lus", h, m % 60, s % 60);
-    }
-}
+// V2.5.33: format_uptime() moved to util.h (static inline) so transmission.c's
+// heap-guard reboot log line can reuse the exact /status uptime formatting.
 
 // Decode wifi_auth_mode_t to a short label. Names match what most APs use in
 // their admin UI (the IDF enum names like AUTH_WPA2_PSK are too jargon-y).

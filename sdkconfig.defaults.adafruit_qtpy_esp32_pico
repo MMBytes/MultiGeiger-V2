@@ -20,25 +20,23 @@ CONFIG_XTAL_FREQ_AUTO=y
 
 # In-package PSRAM. Per ESP32-PICO-V3-02 datasheet, the 2 MB PSRAM is wired
 # internally via SDIO (not external QSPI). Use the 32 Mbit type and standard
-# clock. CONFIG_SPIRAM_USE_MALLOC joins it to the global heap; allocs ≤4 KB stay
-# internal first, bigger ones spill into PSRAM. RESERVE_INTERNAL keeps DRAM
-# headroom for IRAM-required allocations.
+# clock. CONFIG_SPIRAM_USE_MALLOC joins it to the global heap. The spill
+# thresholds and the V2.5.33 network/TLS PSRAM-offload knobs are common to all
+# PSRAM boards and live in the shared sdkconfig.defaults "PSRAM heap policy"
+# section. PSRAM here is 2 MB @ 40 MHz — ample for net/TLS buffers, just slower
+# than the S3 boards' 80 MHz, fine for these non-hot-path allocations.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_TYPE_ESPPSRAM32=y
 CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=40960
 
-# --- V2.5.33: route the fragmenting network/TLS allocations to PSRAM ----------
-# Same heap-spill policy as the S3 boards. WiFi/lwIP pbufs+PCBs and mbedTLS
-# record buffers move to PSRAM so the small internal arena stops fragmenting
-# (the heap-guard auto-reboot root cause). ESP32-PICO-V3-02 is rev-3 silicon, so
-# the rev<3 PSRAM cache bug (CONFIG_SPIRAM_CACHE_WORKAROUND) does NOT apply.
-# PSRAM here is 2 MB @ 40 MHz — ample for net/TLS buffers, just slower than the
-# S3 boards' 80 MHz, which is fine for these non-hot-path allocations.
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# V2.5.33: pin the build to rev-3 silicon. Adafruit ships the QT Py ESP32 with
+# ESP32-PICO-V3-02 (rev 3), where the original-ESP32 PSRAM cache errata is fixed
+# — so IDF drops CONFIG_SPIRAM_CACHE_WORKAROUND (smaller/faster) and the
+# PSRAM-resident WiFi/TLS buffers from the shared policy are cache-safe without
+# it. A board carrying pre-V3 silicon will refuse to boot (fail-fast) rather
+# than risk PSRAM cache corruption.
+CONFIG_ESP32_REV_MIN_3=y
 
 # Console / flashing path: UART0 via the CH9102F or CP2102N USB bridge.
 # (Original ESP32 has no built-in USB peripheral — USB-C on the QT Py is the

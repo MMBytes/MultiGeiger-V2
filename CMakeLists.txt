@@ -36,14 +36,14 @@ elseif(BOARD STREQUAL "feathers3_d")
     # upload stats). PSRAM-equipped board, heap headroom is plenty. See
     # mqtt.c::mqtt_publish_state() and mqtt_discovery.c for the gated sections.
     add_compile_definitions(BOARD_FEATHERS3_D=1 MQTT_RICH_STATE=1)
-    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.feathers3_d")
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.feathers3_d")
 elseif(BOARD STREQUAL "adafruit_qtpy_esp32_pico")
     # Adafruit QT Py ESP32-PICO (PID 5395). Original ESP32 LX6 SiP with
     # in-package 8 MB flash + 2 MB PSRAM. NeoPixel-equipped, no piezo, drops
     # OLED + speaker via HAL_HAS_OLED=0 / HAL_HAS_SPEAKER=0 in hal.h.
     set(IDF_TARGET "esp32" CACHE STRING "")
     add_compile_definitions(BOARD_ADAFRUIT_QTPY_ESP32_PICO=1 MQTT_RICH_STATE=1)
-    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.adafruit_qtpy_esp32_pico")
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_qtpy_esp32_pico")
 elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     # Seeed Studio XIAO ESP32-S3 (SKU 113991054). ESP32-S3 LX7 dual-core, 8 MB
     # QSPI flash + 8 MB OPI (octal-mode) PSRAM, native USB-C. Intended as an
@@ -51,7 +51,7 @@ elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     # BOARD_SEEED_XIAO_ESP32S3 for pin map and the "intended use" rationale.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1 MQTT_RICH_STATE=1)
-    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.seeed_xiao_esp32s3")
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3")
 else()
     message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3")
 endif()

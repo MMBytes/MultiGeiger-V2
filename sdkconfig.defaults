@@ -18,9 +18,12 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Keep CONFIG_LWIP_DHCP_RESTORE_LAST_IP default (y) — REBOOTING fast path on 2nd+ boot.
 
-# DHCP debug off for overnight soak (was filling log at ~10 KB/s).
+# DHCP debug off for overnight soak (was filling log at ~10 KB/s). The lwIP
+# master debug switch below being off already forces every lwIP sub-debug
+# (DHCP included) off, so we don't list the children — an explicit child
+# assignment is redundant and kconfig flags it as a "disabled symbol with a
+# user-set value".
 # CONFIG_LWIP_DEBUG is not set
-# CONFIG_LWIP_DHCP_DEBUG is not set
 
 # Log level: INFO by default, can bump to DEBUG via menuconfig if needed
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

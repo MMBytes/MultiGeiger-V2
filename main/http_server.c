@@ -1944,47 +1944,42 @@ static esp_err_t config_post(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
-    // V2.5.34: build the out-of-range notice once (empty string when nothing was
-    // rejected) and log it — previously an out-of-range value was kept silently
+    // V2.5.34: single render path for both result pages — they differ only in the
+    // <h1> + body text, so pick those with a ternary and build the page once. The
+    // out-of-range notice (when any field was kept) is appended inline, so there's
+    // no separate warn[] buffer. Previously an out-of-range value was kept silently
     // with no feedback, so a too-large ftp_int looked like the save did nothing.
-    char warn[320];
-    warn[0] = 0;
     if (rejected[0]) {
         ESP_LOGW(TAG, "config POST: out-of-range value(s) NOT saved (kept prior): %s",
                  rejected);
-        append_safe(warn, sizeof(warn), 0,
+    }
+    if (restart_after_save) main_request_restart();
+    ESP_LOGI(TAG, "config saved via POST — %s",
+             restart_after_save ? "restart flagged" : "no restart requested");
+
+    const char *h1   = restart_after_save ? "Saved. Restarting..." : "Saved.";
+    const char *body = restart_after_save
+        ? "<p>Device will restart in ~2 seconds. Your browser will drop the "
+          "connection; reconnect to the new WiFi settings if you changed them.</p>"
+          "<p><a href=\"/\">Back to status</a></p>"
+        : "<p>New settings persisted to NVS and applied live. If you changed "
+          "any field marked with <span style=\"color:#c00;font-weight:bold\">*</span> "
+          "(reboot-required) the new value won't take effect until the next "
+          "restart.</p>"
+          "<p><a href=\"/config\">Back to configuration</a> &middot; "
+          "<a href=\"/\">Back to status</a></p>";
+
+    char page[1024];
+    int n = append_safe(page, sizeof(page), 0,
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>Saved</title></head><body><h1>%s</h1>", h1);
+    if (rejected[0]) {
+        n = append_safe(page, sizeof(page), n,
             "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were out "
             "of range and were NOT saved (previous value kept): %s</p>", rejected);
     }
-
-    char page[1024];
-    if (restart_after_save) {
-        main_request_restart();
-        ESP_LOGI(TAG, "config saved via POST — restart flagged");
-        append_safe(page, sizeof(page), 0,
-            "<!doctype html><html><head><meta charset=\"utf-8\">"
-            "<title>Saved</title></head><body>"
-            "<h1>Saved. Restarting...</h1>%s"
-            "<p>Device will restart in ~2 seconds. Your browser will drop the "
-            "connection; reconnect to the new WiFi settings if you changed them.</p>"
-            "<p><a href=\"/\">Back to status</a></p>"
-            "</body></html>", warn);
-        return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
-    } else {
-        ESP_LOGI(TAG, "config saved via POST — no restart requested");
-        append_safe(page, sizeof(page), 0,
-            "<!doctype html><html><head><meta charset=\"utf-8\">"
-            "<title>Saved</title></head><body>"
-            "<h1>Saved.</h1>%s"
-            "<p>New settings persisted to NVS and applied live. If you changed "
-            "any field marked with <span style=\"color:#c00;font-weight:bold\">*</span> "
-            "(reboot-required) the new value won't take effect until the next "
-            "restart.</p>"
-            "<p><a href=\"/config\">Back to configuration</a> &middot; "
-            "<a href=\"/\">Back to status</a></p>"
-            "</body></html>", warn);
-        return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
-    }
+    append_safe(page, sizeof(page), n, "%s</body></html>", body);
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 // --- POST /reboot (manual restart button) ----------------------------------

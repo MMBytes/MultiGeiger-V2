@@ -1193,21 +1193,32 @@ void app_main(void) {
                 continue;
             }
 #if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
-            // V2.5.34: on PSRAM boards the ESP-IDF roaming app owns reconnection.
-            // Its default-handler hook (roam_sta_disconnected) calls
-            // esp_wifi_connect() itself, and on a low-RSSI roam it re-scans and
-            // picks the strongest BSSID. Driving connect from here too would give
-            // the supplicant two reconnect owners on every disconnect — a connect
-            // race (the same "multiple lifecycle owners → emergent timing" trap).
-            // So we defer: the disconnect was already logged in on_wifi_event, and
-            // the roaming app brings the link back (and may move us to a better AP).
-            ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app");
-#else
+            // V2.5.34: on PSRAM boards the ESP-IDF roaming app owns reconnection —
+            // BUT only ONCE we've associated at least once. Its disconnect hook
+            // (roam_sta_disconnected) calls esp_wifi_connect() itself (and on a
+            // low-RSSI roam re-scans to the strongest BSSID); driving connect from
+            // here too would give the supplicant two reconnect owners — a connect
+            // race (the "multiple lifecycle owners → emergent timing" trap). HOWEVER
+            // the roaming app's allow_reconnect flag is false until the FIRST
+            // successful STA_CONNECTED, so before that it ignores disconnects. If we
+            // also did nothing, a failed first connect (AP down/slow at boot) would
+            // be retried by NOBODY until the 10-min startup watchdog reboots — worse
+            // than the pre-roaming behaviour. So defer only after n_connects>0 (the
+            // exact point allow_reconnect flips true); until then keep our own retry,
+            // which can't race the app (it's idle pre-association). mark_attempt() on
+            // BOTH paths so n_attempts tracks reconnect activity either way (review
+            // #3) — when deferring it timestamps the cycle for the next assoc-time.
+            if (n_connects > 0) {
+                mark_attempt();
+                ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app (attempt #%" PRIu64 ")",
+                         n_attempts);
+                continue;
+            }
+#endif
             vTaskDelay(pdMS_TO_TICKS(500));
             mark_attempt();
             ESP_LOGI(TAG, "retry connect (attempt #%" PRIu64 ")", n_attempts);
             esp_wifi_connect();
-#endif
             continue;
         }
 

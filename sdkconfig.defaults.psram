@@ -1,0 +1,30 @@
+# ============================================================================
+# Shared PSRAM-board defaults — consumed by feathers3_d, adafruit_qtpy_esp32_pico
+# and seeed_xiao_esp32s3 via CMakeLists.txt SDKCONFIG_DEFAULTS; NOT by Heltec.
+# Home for config that applies to every PSRAM board but has NO Kconfig dependency
+# on CONFIG_SPIRAM (so it can't live in the shared sdkconfig.defaults, which the
+# non-PSRAM Heltec also reads). ONE source of truth — this block was previously
+# triplicated verbatim across the three board overlays (V2.5.34 review finding).
+# ============================================================================
+
+# --- V2.5.34: ESP-IDF Wi-Fi roaming app -------------------------------------
+# Fixes a node getting STUCK on a weak/distant mesh BSSID after a beacon-timeout
+# reconnect (observed on .198: stuck at -82 dBm for ~75 min until a lucky 2nd
+# disconnect landed it on -31 dBm). LOW-RSSI trigger + LEGACY roam (forcible
+# disconnect->reconnect to a stronger BSSID — works WITHOUT AP 802.11k/v, which
+# this mesh lacks: pmf:0). Threshold -72 dBm (healthy APs here are -29..-31, so
+# only act when genuinely degraded). Periodic-scan monitor OFF (active scans every
+# 30 s would punch holes in the 180 s TX cycle); 802.11v/BTM is forced off anyway
+# by its unmet WNM_SUPPORT dependency, so we don't set it explicitly (avoids a
+# "disabled symbol with user-set value" kconfig advisory). Hysteresis + 15 s
+# backoff = IDF defaults. main.c hands reconnect ownership to the app *after the
+# first association* under CONFIG_ESP_WIFI_ENABLE_ROAMING_APP so our loop doesn't
+# double-drive connect (and still drives the pre-first-association retry itself).
+# NOTE: Espressif flags this EXPERIMENTAL (gated by IDF_EXPERIMENTAL_FEATURES) —
+# bench-validate on ONE node before fleet OTA.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y
+CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_ROAMING=y
+CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_THRESHOLD=-72
+CONFIG_ESP_WIFI_ROAMING_PERIODIC_SCAN_MONITOR=n
+CONFIG_ESP_WIFI_ROAMING_LEGACY_ROAMING=y

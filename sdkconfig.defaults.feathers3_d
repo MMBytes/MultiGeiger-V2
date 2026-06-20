@@ -29,26 +29,5 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # UART0 still routed but secondary — leave RX/TX (IO44/IO43) free for
 # external probing; firmware does not use them as a console.
 
-# ============================================================================
-# V2.5.34: ESP-IDF Wi-Fi roaming app (PSRAM boards only — Heltec excluded; the
-# app's scan/candidate machinery wants heap headroom). Fixes a node getting STUCK
-# on a weak/distant mesh BSSID after a beacon-timeout reconnect (observed on .198:
-# stuck at -82 dBm for ~75 min until a lucky 2nd disconnect landed it on -31 dBm).
-#
-# Config: LOW-RSSI trigger + LEGACY roam (forcible disconnect->reconnect to a
-# stronger BSSID — works WITHOUT AP 802.11k/v, which this mesh lacks: pmf:0).
-# Threshold -72 dBm (healthy APs here are -29..-31, so only act when genuinely
-# degraded). Periodic-scan monitor OFF (active scans every 30 s would punch holes
-# in the 180 s TX cycle); 802.11v/BTM OFF (needs AP support). Hysteresis + 15 s
-# backoff = IDF defaults. main.c hands reconnect ownership to the app under
-# CONFIG_ESP_WIFI_ENABLE_ROAMING_APP so our loop doesn't double-drive connect.
-# NOTE: Espressif flags this EXPERIMENTAL (gated by IDF_EXPERIMENTAL_FEATURES) —
-# bench-validate on ONE node before fleet OTA.
-# ============================================================================
-CONFIG_IDF_EXPERIMENTAL_FEATURES=y
-CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y
-CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_ROAMING=y
-CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_THRESHOLD=-72
-CONFIG_ESP_WIFI_ROAMING_PERIODIC_SCAN_MONITOR=n
-CONFIG_ESP_WIFI_ROAMING_LEGACY_ROAMING=y
-CONFIG_ESP_WIFI_ROAMING_NETWORK_ASSISTED_ROAM=n
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

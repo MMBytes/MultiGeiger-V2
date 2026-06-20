@@ -150,7 +150,7 @@ X_STR (ftp_host,           CFG_FTP_HOST_MAX  + 1,  "ftp_host",   "")
 X_STR (ftp_user,           CFG_USER_NAME_MAX + 1,  "ftp_user",   "")
 X_STR (ftp_password,       CFG_PASSWORD_MAX  + 1,  "ftp_pw",     "")
 X_STR (ftp_path,           CFG_FTP_PATH_MAX  + 1,  "ftp_path",   "")
-X_U32 (ftp_interval_min,       "ftp_int",    60,       1,       1440)
+X_U32 (ftp_interval_min,       "ftp_int",    60,       1,       10090)
 X_BOOL(ftp_ps_disabled,        "ftp_ps_dis", false)
 X_BOOL(ftp_tls12_only,         "ftp_t12only", false)
 

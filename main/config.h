@@ -116,13 +116,18 @@ void config_post_preclear_bools(config_t *next);
 /** @brief Try to apply one form field to `next`.
  *
  *  Returns true if `key` matched a known schema field (regardless of
- *  whether the value passed validation — out-of-range numerics are
- *  silently ignored and the field keeps its prior value). Returns
- *  false if `key` is unknown — caller can then check for non-schema
- *  keys (e.g. `save`, `save_restart`) or ignore.
+ *  whether the value passed validation — out-of-range numerics keep
+ *  their prior value). Returns false if `key` is unknown — caller can
+ *  then check for non-schema keys (e.g. `save`, `save_restart`) or ignore.
+ *
+ *  V2.5.34: when the key matched but the numeric value was out of range
+ *  (so the prior value was kept), `*out_rejected` is set true — lets the
+ *  caller surface "field not saved" feedback instead of a silent no-op.
+ *  Untouched on a clean apply or an unknown key. Pass NULL to ignore.
  *
  *  Specialised validators (e.g. OLED brightness step constraint) are
  *  applied by the caller BEFORE calling this — if the special handler
  *  consumed the key, don't call here.
  */
-bool config_post_apply_field(config_t *next, const char *key, const char *val);
+bool config_post_apply_field(config_t *next, const char *key, const char *val,
+                             bool *out_rejected);

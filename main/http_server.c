@@ -1480,7 +1480,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
         "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
         "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
-        "<label>Upload interval (minutes)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
+        "<label>Upload interval (minutes) (Max 10090)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
         "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
         "(prevents DTIM-delayed TCP ACKs; auto-cleared if WiFi PS is already disabled above)</label></div>"
@@ -1804,6 +1804,16 @@ static esp_err_t config_post(httpd_req_t *req) {
     // running.
     bool restart_after_save = false;
 
+    // V2.5.34: collect the form keys of fields that matched but whose value was
+    // out of range (so the prior value was kept). Reported on the result page +
+    // logged, instead of the prior silent no-save that made an out-of-range entry
+    // (e.g. ftp_int > its max) look like nothing happened. Only known field keys
+    // ever land here (set inside the schema dispatch), so the contents are a fixed
+    // allowlist — safe to echo into the result HTML without escaping.
+    char rejected[160];
+    rejected[0] = 0;
+    int rej_n = 0;
+
     // Start from the current config; pre-clear every bool (forms only POST
     // ticked checkboxes, so an absent key means "unticked"). Schema-derived
     // — see config.c::config_post_preclear_bools.
@@ -1825,19 +1835,27 @@ static esp_err_t config_post(httpd_req_t *req) {
         // it FIRST so the generic dispatch never sees this key.
         // V2.3.32: 0 (OFF) accepted — display_set_contrast interprets as
         // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
+        bool oor = false;   // matched a known field but value out of range/step
         if (strcmp(p, "oled_bright") == 0) {
             long v = strtol(val, NULL, 10);
             if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
                 next.oled_brightness_pct = (uint8_t)v;
+            } else {
+                oor = true;   // V2.5.34: out-of-step value kept prior — report it
             }
-            // Out-of-step values silently keep the prior value.
         }
         // Generic schema dispatch. Returns true if `p` matched a known
-        // field (out-of-range numerics silently keep prior value).
-        else if (!config_post_apply_field(&next, p, val)) {
+        // field; out-of-range numerics keep prior value and set `oor`.
+        else if (!config_post_apply_field(&next, p, val, &oor)) {
             // Non-schema control keys.
             if (strcmp(p, "save_restart") == 0) restart_after_save = true;
             // Plain "save" and any unknown keys are silently ignored.
+        }
+
+        // V2.5.34: accumulate any rejected field's key (comma-separated).
+        if (oor) {
+            rej_n = append_safe(rejected, sizeof(rejected), rej_n,
+                                "%s%s", rej_n ? ", " : "", p);
         }
 
         if (!amp) break;
@@ -1926,32 +1944,46 @@ static esp_err_t config_post(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
+    // V2.5.34: build the out-of-range notice once (empty string when nothing was
+    // rejected) and log it — previously an out-of-range value was kept silently
+    // with no feedback, so a too-large ftp_int looked like the save did nothing.
+    char warn[320];
+    warn[0] = 0;
+    if (rejected[0]) {
+        ESP_LOGW(TAG, "config POST: out-of-range value(s) NOT saved (kept prior): %s",
+                 rejected);
+        append_safe(warn, sizeof(warn), 0,
+            "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were out "
+            "of range and were NOT saved (previous value kept): %s</p>", rejected);
+    }
+
+    char page[1024];
     if (restart_after_save) {
         main_request_restart();
         ESP_LOGI(TAG, "config saved via POST — restart flagged");
-        const char *ok =
+        append_safe(page, sizeof(page), 0,
             "<!doctype html><html><head><meta charset=\"utf-8\">"
             "<title>Saved</title></head><body>"
-            "<h1>Saved. Restarting...</h1>"
+            "<h1>Saved. Restarting...</h1>%s"
             "<p>Device will restart in ~2 seconds. Your browser will drop the "
             "connection; reconnect to the new WiFi settings if you changed them.</p>"
             "<p><a href=\"/\">Back to status</a></p>"
-            "</body></html>";
-        return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+            "</body></html>", warn);
+        return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     } else {
         ESP_LOGI(TAG, "config saved via POST — no restart requested");
-        const char *ok =
+        append_safe(page, sizeof(page), 0,
             "<!doctype html><html><head><meta charset=\"utf-8\">"
             "<title>Saved</title></head><body>"
-            "<h1>Saved.</h1>"
+            "<h1>Saved.</h1>%s"
             "<p>New settings persisted to NVS and applied live. If you changed "
             "any field marked with <span style=\"color:#c00;font-weight:bold\">*</span> "
             "(reboot-required) the new value won't take effect until the next "
             "restart.</p>"
             "<p><a href=\"/config\">Back to configuration</a> &middot; "
             "<a href=\"/\">Back to status</a></p>"
-            "</body></html>";
-        return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+            "</body></html>", warn);
+        return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     }
 }
 

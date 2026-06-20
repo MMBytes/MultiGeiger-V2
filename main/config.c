@@ -354,10 +354,13 @@ void config_post_preclear_bools(config_t *next) {
     #undef X_U8
 }
 
-bool config_post_apply_field(config_t *next, const char *key, const char *val) {
+bool config_post_apply_field(config_t *next, const char *key, const char *val,
+                             bool *out_rejected) {
     // Generated per-field dispatch. Each branch returns true when the
     // key matches, regardless of whether the value passed validation —
-    // out-of-range numerics keep the prior field value silently.
+    // out-of-range numerics keep the prior field value. V2.5.34: a
+    // matched-but-out-of-range numeric sets *out_rejected (if non-NULL)
+    // so the caller can report the silent no-save instead of hiding it.
     #define X_STR(name, size, k, def)                            \
         if (strcmp(key, k) == 0) {                               \
             safe_strcpy(next->name, val, (size));                \
@@ -373,6 +376,7 @@ bool config_post_apply_field(config_t *next, const char *key, const char *val) {
             long _v = strtol(val, NULL, 10);                     \
             if (_v >= (long)(lo) && _v <= (long)(hi))            \
                 next->name = (uint32_t)_v;                       \
+            else if (out_rejected) *out_rejected = true;         \
             return true;                                         \
         }
     #define X_F32(name, k, def, lo, hi)                          \
@@ -380,6 +384,7 @@ bool config_post_apply_field(config_t *next, const char *key, const char *val) {
             float _v = strtof(val, NULL);                        \
             if (_v >= (lo) && _v <= (hi))                        \
                 next->name = _v;                                 \
+            else if (out_rejected) *out_rejected = true;         \
             return true;                                         \
         }
     #define X_U8(name, k, def, lo, hi)                           \
@@ -387,6 +392,7 @@ bool config_post_apply_field(config_t *next, const char *key, const char *val) {
             long _v = strtol(val, NULL, 10);                     \
             if (_v >= (long)(lo) && _v <= (long)(hi))            \
                 next->name = (uint8_t)_v;                        \
+            else if (out_rejected) *out_rejected = true;         \
             return true;                                         \
         }
     #include "config_fields.def"

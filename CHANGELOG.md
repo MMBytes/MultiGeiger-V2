@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.5.34 — FTP upload interval max 1440 → 10090; /config reports out-of-range fields
+
+**What:** Three small `/config` changes: (1) the FTP log-upload interval ceiling (`ftp_int`) is raised from **1440** (24 h) to **10090** minutes (~7 days); (2) its form label now reads "Upload interval (minutes) (Max 10090)"; (3) the `/config` POST result page now lists any field whose value was **out of range and therefore not saved** (prior value kept), and logs it via `ESP_LOGW`.
+
+**Why:** A value above a field's max was discarded silently — the X-macro dispatcher keeps the prior value and still returns "handled", so an entry like `ftp_int=1450` produced a "Saved." page with no change and **no log line**, looking like a broken save. Hit on two nodes (`.193` on V2.5.29, `.198` on V2.5.33) — and confirmed not version-specific (the apply path is unchanged across V2.5.29..V2.5.33). The ceiling bump covers realistic >24 h cadences; the result-page notice + warning log turn the silent no-save into explicit feedback.
+
+**How:** `ftp_interval_min`'s `hi` bound in `config_fields.def` → 10090 (struct / NVS / POST all auto-follow the X-macro; the field stays `type="text"` per the V2.3.x wheel-scroll fix, so the server-side range is the single enforcement point — now a visible one). `config_post_apply_field()` gained a `bool *out_rejected` out-param that the `X_U32` / `X_F32` / `X_U8` macros set when a key matched a field but the value failed its range test (X_STR / X_BOOL never reject). `config_post()` accumulates those keys — plus the OLED-brightness step special-case — and renders a red "out of range … NOT saved (previous value kept): …" banner built with the existing `append_safe()` clamped accumulator, plus an `ESP_LOGW`. Only fixed schema keys can reach the echoed list, so no escaping is needed.
+
+---
+
 ## V2.5.33 — heap-guard root-cause fix: PSRAM offload + configurable confirm window
 
 **What:** Two related changes to stop the heap-guard auto-reboot from firing prematurely on `.198` (and any PSRAM board):

@@ -539,17 +539,21 @@ static void do_tx_cycle(void) {
 
     // Two CYCLE log line shapes — the long one (Geiger active) carries radiation
     // metrics, the short one (tube disabled) keeps just dt + rssi so logs stay
-    // readable on PM-only deployments.
+    // readable on PM-only deployments. Both now trail the connected AP's BSSID +
+    // channel (V2.5.34): per-cycle rssi alone can't reveal a node stuck on a weak
+    // or wrong mesh BSSID after a reconnect — the BSSID makes it visible in syslog
+    // (and lets us watch the roaming app actually move the node, see below).
     uint32_t i2c_errs = diag_i2c_errors();   // V2.4.28: cumulative since boot
     if (g_cfg.tube_enabled) {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
                  "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu "
-                 "rssi=%ddBm i2c_err=%lu",
+                 "rssi=%ddBm i2c_err=%lu bssid=" MACSTR " ch=%d",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms,
                  (unsigned long)counts, (unsigned long)cpm, usvph,
                  (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
-                 (unsigned long)max_us, rssi, (unsigned long)i2c_errs);
+                 (unsigned long)max_us, rssi, (unsigned long)i2c_errs,
+                 MAC2STR(ap_rec.bssid), ap_rec.primary);
 
         // V2.5.16: when filtering, the CYCLE line above carries the POST-filter
         // count/cpm (what's uploaded); surface the PRE-filter ISR values here so
@@ -606,9 +610,10 @@ static void do_tx_cycle(void) {
                      (unsigned long)drop);
         }
     } else {
-        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu",
+        ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu "
+                 "bssid=" MACSTR " ch=%d",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,
-                 (unsigned long)i2c_errs);
+                 (unsigned long)i2c_errs, MAC2STR(ap_rec.bssid), ap_rec.primary);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.
@@ -1187,10 +1192,22 @@ void app_main(void) {
             if (!g_sta_connect_allowed) {
                 continue;
             }
+#if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
+            // V2.5.34: on PSRAM boards the ESP-IDF roaming app owns reconnection.
+            // Its default-handler hook (roam_sta_disconnected) calls
+            // esp_wifi_connect() itself, and on a low-RSSI roam it re-scans and
+            // picks the strongest BSSID. Driving connect from here too would give
+            // the supplicant two reconnect owners on every disconnect — a connect
+            // race (the same "multiple lifecycle owners → emergent timing" trap).
+            // So we defer: the disconnect was already logged in on_wifi_event, and
+            // the roaming app brings the link back (and may move us to a better AP).
+            ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app");
+#else
             vTaskDelay(pdMS_TO_TICKS(500));
             mark_attempt();
             ESP_LOGI(TAG, "retry connect (attempt #%" PRIu64 ")", n_attempts);
             esp_wifi_connect();
+#endif
             continue;
         }
 

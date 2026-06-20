@@ -42,3 +42,16 @@ CONFIG_ESP32_REV_MIN_3=y
 # (Original ESP32 has no built-in USB peripheral — USB-C on the QT Py is the
 # UART bridge's USB.)
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# V2.5.34: ESP-IDF Wi-Fi roaming app — low-RSSI + LEGACY roam, threshold -72,
+# periodic-scan + BTM off. PSRAM boards only; recovers from sticky weak-AP after a
+# reconnect. Rationale + the reconnect-ownership handoff are documented in full in
+# sdkconfig.defaults.feathers3_d. EXPERIMENTAL (IDF_EXPERIMENTAL_FEATURES) —
+# bench-validate on one node before fleet OTA.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y
+CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_ROAMING=y
+CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_THRESHOLD=-72
+CONFIG_ESP_WIFI_ROAMING_PERIODIC_SCAN_MONITOR=n
+CONFIG_ESP_WIFI_ROAMING_LEGACY_ROAMING=y
+CONFIG_ESP_WIFI_ROAMING_NETWORK_ASSISTED_ROAM=n

@@ -9,13 +9,23 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.5.34 — FTP upload interval max 1440 → 10090; /config reports out-of-range fields
+## V2.5.34 — FTP interval max 10090 + out-of-range reporting; Wi-Fi roaming app + BSSID logging
+
+### FTP interval ceiling + `/config` out-of-range reporting
 
 **What:** Three small `/config` changes: (1) the FTP log-upload interval ceiling (`ftp_int`) is raised from **1440** (24 h) to **10090** minutes (~7 days); (2) its form label now reads "Upload interval (minutes) (Max 10090)"; (3) the `/config` POST result page now lists any field whose value was **out of range and therefore not saved** (prior value kept), and logs it via `ESP_LOGW`.
 
 **Why:** A value above a field's max was discarded silently — the X-macro dispatcher keeps the prior value and still returns "handled", so an entry like `ftp_int=1450` produced a "Saved." page with no change and **no log line**, looking like a broken save. Hit on two nodes (`.193` on V2.5.29, `.198` on V2.5.33) — and confirmed not version-specific (the apply path is unchanged across V2.5.29..V2.5.33). The ceiling bump covers realistic >24 h cadences; the result-page notice + warning log turn the silent no-save into explicit feedback.
 
 **How:** `ftp_interval_min`'s `hi` bound in `config_fields.def` → 10090 (struct / NVS / POST all auto-follow the X-macro; the field stays `type="text"` per the V2.3.x wheel-scroll fix, so the server-side range is the single enforcement point — now a visible one). `config_post_apply_field()` gained a `bool *out_rejected` out-param that the `X_U32` / `X_F32` / `X_U8` macros set when a key matched a field but the value failed its range test (X_STR / X_BOOL never reject). `config_post()` accumulates those keys — plus the OLED-brightness step special-case — and renders a red "out of range … NOT saved (previous value kept): …" banner built with the existing `append_safe()` clamped accumulator, plus an `ESP_LOGW`. Only fixed schema keys can reach the echoed list, so no escaping is needed.
+
+### Wi-Fi roaming app (PSRAM boards) + per-cycle BSSID logging
+
+**What:** Enable the ESP-IDF Wi-Fi roaming app on the PSRAM boards (FeatherS3-D, QT Py PICO, XIAO S3; Heltec **excluded**) with low-RSSI + legacy roaming, and append the connected AP's `bssid`/`ch` to every `CYCLE` log line.
+
+**Why:** A node (`esp32-5965048`, `.198`) lost its strong AP to a beacon timeout (`reason=200`), reconnected to a **−82 dBm** mesh BSSID, and **stuck there for ~75 minutes** (≈1 in 3 uploads failing — `HTTP_EAGAIN`, connect timeouts, TLS `Socket is not connected`) until a second beacon timeout *luckily* landed it on a −31 dBm AP. Connect-time selection was already optimal (`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL`), but nothing re-evaluated the link **while associated**, so a node that lands on a weak BSSID never recovers until a full disconnect. The per-cycle line logged `rssi` but not *which* AP, so the pattern was invisible in syslog.
+
+**How:** Per-board `sdkconfig.defaults` (PSRAM only) set `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y` (with its `IDF_EXPERIMENTAL_FEATURES` gate): **low-RSSI trigger** (threshold −72 dBm; healthy APs here are −29..−31) + **legacy roam** (forcible disconnect→reconnect to a stronger BSSID — works without AP 802.11k/v, which this mesh lacks: `pmf:0`); **periodic-scan monitor OFF** (active scans every 30 s would punch holes in the 180 s TX cycle) and **802.11v/BTM OFF**. The app runs in the supplicant `eloop` (no new task) and auto-wires through the default `esp_netif_create_default_wifi_sta` handlers we already use. **Reconnect ownership:** the roaming app's disconnect hook calls `esp_wifi_connect()` itself, so under `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP` `main.c` now **defers** its own `EV_DISCONNECTED → esp_wifi_connect()` (avoiding two lifecycle owners racing the supplicant); non-PSRAM Heltec keeps the hand-rolled reconnect via the `#else`. Both `CYCLE` log shapes now trail `bssid=… ch=…` so a roam (or a stuck weak link) is visible in syslog. **⚠️ Espressif marks the roaming app EXPERIMENTAL — bench-validate on one node before fleet OTA.**
 
 ---
 

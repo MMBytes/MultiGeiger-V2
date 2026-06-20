@@ -8,20 +8,13 @@
 # ============================================================================
 
 # --- V2.5.34: ESP-IDF Wi-Fi roaming app -------------------------------------
-# Fixes a node getting STUCK on a weak/distant mesh BSSID after a beacon-timeout
-# reconnect (observed on .198: stuck at -82 dBm for ~75 min until a lucky 2nd
-# disconnect landed it on -31 dBm). LOW-RSSI trigger + LEGACY roam (forcible
-# disconnect->reconnect to a stronger BSSID — works WITHOUT AP 802.11k/v, which
-# this mesh lacks: pmf:0). Threshold -72 dBm (healthy APs here are -29..-31, so
-# only act when genuinely degraded). Periodic-scan monitor OFF (active scans every
-# 30 s would punch holes in the 180 s TX cycle); 802.11v/BTM is forced off anyway
-# by its unmet WNM_SUPPORT dependency, so we don't set it explicitly (avoids a
-# "disabled symbol with user-set value" kconfig advisory). Hysteresis + 15 s
-# backoff = IDF defaults. main.c hands reconnect ownership to the app *after the
-# first association* under CONFIG_ESP_WIFI_ENABLE_ROAMING_APP so our loop doesn't
-# double-drive connect (and still drives the pre-first-association retry itself).
-# NOTE: Espressif flags this EXPERIMENTAL (gated by IDF_EXPERIMENTAL_FEATURES) —
-# bench-validate on ONE node before fleet OTA.
+# Recovers a node stuck on a weak/distant mesh BSSID after a beacon-timeout
+# reconnect. Keys below: low-RSSI trigger @ -72 dBm + LEGACY roam (works without
+# AP 802.11k/v); periodic-scan monitor off; 802.11v/BTM left off via its unmet
+# WNM_SUPPORT dependency (setting it would trip a kconfig advisory). Full rationale
+# + the reconnect-ownership handoff live in CHANGELOG.md (V2.5.34) and main.c's
+# EV_DISCONNECTED comment — kept there to avoid a third drifting copy.
+# EXPERIMENTAL (gated by IDF_EXPERIMENTAL_FEATURES) — bench-validate on one node.
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y
 CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_ROAMING=y

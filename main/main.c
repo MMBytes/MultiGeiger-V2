@@ -241,6 +241,13 @@ bool main_target_enabled(int target_id) {
 // after the first GOT_IP — subsequent disconnects retry STA forever.
 #define AP_WINDOW_US           (120 * 1000000LL)
 #define STA_STARTUP_TIMEOUT_US (600 * 1000000LL)   // 10 min
+#if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
+// V2.5.34 safety-net (PSRAM/roaming builds only): post-association we delegate
+// reconnects to the experimental roaming app. If it ever stalls, force our own
+// esp_wifi_connect() after this long with no IP. Far longer than a normal roam/
+// reconnect (ms–seconds) so it never races the app — only fires on a genuine stall.
+#define ROAM_RECONNECT_SAFETY_NET_US (30 * 1000000LL)   // 30 s
+#endif
 static int64_t  boot_time_us       = 0;
 static int64_t  sta_transition_us  = 0;
 static bool     g_have_sta_creds   = false;
@@ -1154,6 +1161,13 @@ void app_main(void) {
     const TickType_t tx_interval = pdMS_TO_TICKS(g_cfg.tx_interval_ms);
     TickType_t next_tx = xTaskGetTickCount() + tx_interval;
 
+#if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
+    // When we defer a disconnect to the roaming app, the time we started waiting
+    // for it to bring the link back (0 = currently connected). Drives the
+    // reconnect safety-net below. app_main never returns, so a plain local persists.
+    int64_t t_roam_defer_us = 0;
+#endif
+
     while (1) {
         TickType_t now = xTaskGetTickCount();
         TickType_t wait = (next_tx > now) ? (next_tx - now) : 1;
@@ -1187,6 +1201,9 @@ void app_main(void) {
             // and when already connected. Closes the ~10 s tail-lag seen
             // after a router reboot where STA held an IP but MQTT sat idle.
             mqtt_kick_reconnect();
+#if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
+            t_roam_defer_us = 0;   // back online — disarm the reconnect safety-net
+#endif
         }
         if (bits & EV_DISCONNECTED) {
             if (!g_sta_connect_allowed) {
@@ -1210,6 +1227,7 @@ void app_main(void) {
             // #3) — when deferring it timestamps the cycle for the next assoc-time.
             if (n_connects > 0) {
                 mark_attempt();
+                if (t_roam_defer_us == 0) t_roam_defer_us = esp_timer_get_time();
                 ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app (attempt #%" PRIu64 ")",
                          n_attempts);
                 continue;
@@ -1336,6 +1354,25 @@ void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(500));
             esp_restart();
         }
+
+#if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
+        // V2.5.34 reconnect safety-net: post-association (n_got_ip>0, so the
+        // startup watchdog above is disarmed) we hand reconnects to the roaming
+        // app. If it ever stalls — fails to bring the link back — nobody else
+        // would, so after ROAM_RECONNECT_SAFETY_NET_US with no IP force one
+        // esp_wifi_connect() ourselves and re-arm to retry. Cleared on GOT_IP.
+        // The long window means this never races the app's normal ms–seconds
+        // reconnect; it only fires on a genuine stall (defence-in-depth for the
+        // experimental roaming app).
+        if (g_sta_connect_allowed && n_got_ip > 0 && t_roam_defer_us > 0 &&
+            (esp_timer_get_time() - t_roam_defer_us) > ROAM_RECONNECT_SAFETY_NET_US) {
+            ESP_LOGW(TAG, "roaming app did not reconnect within %llds — forcing connect",
+                     (long long)(ROAM_RECONNECT_SAFETY_NET_US / 1000000));
+            mark_attempt();
+            esp_wifi_connect();
+            t_roam_defer_us = esp_timer_get_time();   // re-arm for the next interval
+        }
+#endif
 
         // Defer config-save / OTA restart until the TX worker has drained
         // its current job — killing an HTTPS POST mid-handshake would lose

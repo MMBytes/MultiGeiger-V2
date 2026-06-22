@@ -64,6 +64,27 @@ X_BOOL(use_external_antenna,   "wifi_ext_a", false)
 
 X_BOOL(tube_enabled,           "tube_en",    true)
 
+// V2.6.1: Geiger-Müller TUBE TYPE — selects the cps→µSv/h dose conversion factor,
+// the only tube-dependent term in the radiation pipeline (pulse counting, the
+// dead-time gate and the HV charge loop are all tube-agnostic, so changing this
+// leaves CPM untouched and only re-scales µSv/h / nSv/h). Index matches
+// tube_type_t in transmission.h:
+//   0 = Unknown  (no conversion — dose forced to 0.0)
+//   1 = SBM-20   (cps→µSv/h = 1/2.47,    datasheet)
+//   2 = SBM-19   (cps→µSv/h = 1/9.81888, datasheet)
+//   3 = Si22G    (cps→µSv/h = 1/12.2792, empirical vs odlinfo.bfs.de — DEFAULT)
+// Factors are the upstream MultiGeiger calibration table (ecocurious2 / t-pi
+// tube.cpp). Default 3 (Si22G) reproduces the historical hardcoded
+// SI22G_CPS_TO_USVPH behaviour byte-for-byte. Read each TX cycle when dose is
+// computed, so a /config Save applies LIVE — no reboot.
+//
+// NOTE: the sensor.community / openSenseMap / aqi value_type field NAMES (e.g.
+// "Si22G_counts_per_minute") are intentionally NOT derived from this — they are
+// wire-format identifiers tied to the multi-year upload archive, and renaming
+// them would split historical graphs server-side. Only the physical dose value
+// changes. See reference_radiation_data_analysis.
+X_U32 (tube_type,              "tube_type",  3,        0,       3)
+
 // V2.5.10: the GNSS receiver is now AUTO-DETECTED at boot (gnss_init sniffs
 // for live NMEA at the shared 0x10 address, binds u-blox 0x42 unambiguously),
 // so the former `gnss_enable` toggle was removed — nothing to configure. The

@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.1 — selectable Geiger tube type (SBM-20 / SBM-19 / Si22G)
+
+**What:** The Geiger-Müller tube is now a runtime `/config` setting ("Geiger tube type", `tube_type`, 0–3) instead of a hard-coded Si22G calibration. Four options — **Unknown** (no dose conversion), **SBM-20**, **SBM-19**, **Si22G** (default) — each carrying the upstream MultiGeiger cps→µSv/h factor. The selected tube is shown on the `/status` Radiation card and in the boot config dump. Default is Si22G, so existing nodes are unchanged.
+
+**Why:** The firmware previously baked the Si22G conversion factor (`SI22G_CPS_TO_USVPH = 1/12.2792`) into five dose computations, so connecting any other tube (e.g. an **SBM-19**) reported correct CPM but a wrong µSv/h — the dose is the *only* tube-dependent quantity, off by the tube's sensitivity ratio (an SBM-19 read through the Si22G factor under-reports dose by ~20 %). Making it a config field lets one firmware serve a mixed fleet (Si22G + SBM-19 + SBM-20) and pick the tube per node without a rebuild.
+
+**How:** New `X_U32 tube_type` (default 3 = Si22G) in `config_fields.def`; a `tube_type_t` enum + `k_tubes[]` characteristics table + `tube_cps_to_usvph()` / `tube_type_name()` helpers in `transmission.{h,c}` replacing the lone `#define`. The factor table is the validated ecocurious2 / t-pi `tube.cpp` calibration (SBM-20 1/2.47, SBM-19 1/9.81888, Si22G 1/12.2792). `tx_context_t` gained a `tube_type` field snapshotted in `build_tx_context()` so the worker derives dose with a stable factor across a cycle; the five former `SI22G_CPS_TO_USVPH` sites (`main.c` live dose + Madavi/Radmon/ThingSpeak/OSM-aqi in `transmission.c`) now call `tube_cps_to_usvph()`. The `/config` page renders a four-option dropdown mirroring the display-mode select; dose is recomputed each cycle so a Save applies **live** (no reboot). **Deliberately unchanged:** the sensor.community / OSM / aqi `value_type` field *names* (e.g. `Si22G_counts_per_minute`) stay fixed — they are wire-format identifiers tied to the multi-year upload archive, and renaming them would split historical graphs server-side.
+
+---
+
 ## V2.5.34 — FTP interval max 10090 + out-of-range reporting; Wi-Fi roaming app + BSSID logging
 
 ### FTP interval ceiling + `/config` out-of-range reporting

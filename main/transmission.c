@@ -56,6 +56,30 @@ const char *tx_target_name(tx_target_id_t id) {
     return s_target_names[id];
 }
 
+// V2.6.1: Geiger-Müller tube characteristics, indexed by tube_type_t. The
+// cps→µSv/h factor is the sole tube-dependent quantity in the dose pipeline
+// (counting/HV are tube-agnostic). Factors are the upstream MultiGeiger
+// calibration (ecocurious2 / t-pi tube.cpp): SBM-20/SBM-19 from datasheet, Si22G
+// empirical vs odlinfo.bfs.de. TUBE_TYPE_SI22G keeps the exact 1/12.2792 that the
+// old hardcoded Si22G #define carried, so the default config is a no-op change.
+static const struct {
+    const char *name;
+    float       cps_to_usvph;
+} k_tubes[TUBE_TYPE_COUNT] = {
+    [TUBE_TYPE_UNKNOWN] = { "Unknown", 0.0f            },
+    [TUBE_TYPE_SBM20]   = { "SBM-20",  1.0f / 2.47f    },
+    [TUBE_TYPE_SBM19]   = { "SBM-19",  1.0f / 9.81888f },
+    [TUBE_TYPE_SI22G]   = { "Si22G",   1.0f / 12.2792f },
+};
+
+float tube_cps_to_usvph(uint32_t tube_type) {
+    return (tube_type < TUBE_TYPE_COUNT) ? k_tubes[tube_type].cps_to_usvph : 0.0f;
+}
+
+const char *tube_type_name(uint32_t tube_type) {
+    return (tube_type < TUBE_TYPE_COUNT) ? k_tubes[tube_type].name : "Unknown";
+}
+
 // V2.4.1 (C9): static URL table for the three "fixed-URL" upload targets.
 // Pre-V2.4.1 these literals lived inline in main.c::build_tx_context, which
 // leaked endpoint knowledge to the wrong layer. OSM and aqi.eco are absent
@@ -521,7 +545,7 @@ static int send_madavi(const tx_context_t *c) {
 // set the X-PIN header per-perform but never close the socket.
 
 static void build_sensorc_geiger_body(const tx_context_t *c, char *buf, size_t cap) {
-    float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;  // mSv/h
+    float msi = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type) / 1000.0f;  // mSv/h
     snprintf(buf, cap,
         "{\n"
         " \"software_version\": \"%s\",\n"
@@ -766,7 +790,7 @@ static int send_gmc(const tx_context_t *c) {
         ESP_LOGW(TAG, "GMC: account/counter ID empty, skipping.");
         return -3;
     }
-    float usv = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH;   // µSv/h
+    float usv = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type);   // µSv/h
     char url[256];
     snprintf(url, sizeof(url),
              "%s?AID=%s&GID=%s&CPM=%lu&ACPM=%lu&uSV=%.4f",
@@ -807,7 +831,7 @@ static int send_thingspeak(const tx_context_t *c) {
     }
     const char *base = c->thingspeak.use_https ? c->thingspeak.url_https
                                                : c->thingspeak.url_http;
-    float usv = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH;   // µSv/h
+    float usv = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type);   // µSv/h
     char url[320];
     int n = snprintf(url, sizeof(url),
              "%s?api_key=%s&field1=%lu&field2=%.4f&field3=%lu&field4=%lu",
@@ -949,7 +973,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     // radiation column), so skip the entire block for aqi.eco. openSenseMap
     // can route Si22G data to a configured per-box channel.
     if (c->tube_enabled && !prefix_aqi_id) {
-        float msi = (c->cpm / 60.0f) * SI22G_CPS_TO_USVPH / 1000.0f;
+        float msi = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type) / 1000.0f;
         COMMA();
         n = tx_append(buf, cap, n,
             "  {\"value_type\": \"Si22G_counts_per_minute\", \"value\": \"%lu\"},\n"

@@ -609,12 +609,13 @@ static void format_radiation(char *out, size_t sz) {
 
     snprintf(out, sz,
         "<div class=\"info\"><h3>Radiation</h3>"
-        "<b>Tube:</b> enabled%s<br>"
+        "<b>Tube:</b> enabled &middot; %s%s<br>"
         "<b>CPM:</b> %lu<br>"
         "%s"
         "<b>Dose rate:</b> %.3f µSv/h<br>"
         "<b>HV pulses:</b> %s"
         "</div>",
+        tube_type_name(s_cfg->tube_type),   // V2.6.1: show the selected tube
         st.last_hv_error ? " &middot; <span style='color:#c00;font-weight:bold'>HV ERROR</span>" : "",
         (unsigned long)st.last_cpm, filt_line, st.last_usvph,
         hv_line);
@@ -1357,6 +1358,18 @@ static esp_err_t config_get(httpd_req_t *req) {
         "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
+        // V2.6.1: tube type — picks the cps→µSv/h dose conversion factor (the only
+        // tube-dependent term; CPM is unchanged). 4 <option selected> markers,
+        // order 0/1/2/3 = Unknown/SBM-20/SBM-19/Si22G. Live-applied (no `*`):
+        // dose is recomputed each cycle from the saved tube_type.
+        "<label>Geiger tube type "
+        "<select name=\"tube_type\" id=\"tube_type\">"
+        "<option value=\"0\"%s>Unknown &mdash; no dose conversion (&micro;Sv/h = 0)</option>"
+        "<option value=\"1\"%s>SBM-20 (1/2.47)</option>"
+        "<option value=\"2\"%s>SBM-19 (1/9.81888)</option>"
+        "<option value=\"3\"%s>Si22G (1/12.2792) &mdash; default</option>"
+        "</select> <small>(sets the CPM&rarr;&micro;Sv/h factor; CPM unaffected; "
+        "live on Save)</small></label>"
         // V2.5.16: PCNT pulse-width filter — indented under the tube enable like
         // the TX sub-options, and tube-gated via syncTube() (greyed when the
         // tube is off; it can't run without count pulses).
@@ -1649,6 +1662,11 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
         e_chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
+        // V2.6.1: tube type dropdown — 4 selected markers (0/1/2/3).
+        s_cfg->tube_type == 0 ? " selected" : "",
+        s_cfg->tube_type == 1 ? " selected" : "",
+        s_cfg->tube_type == 2 ? " selected" : "",
+        s_cfg->tube_type == 3 ? " selected" : "",
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
         (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
         s_cfg->deadtime_guard ? "checked" : "",      // V2.5.30: guard enable checkbox

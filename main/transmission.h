@@ -18,8 +18,28 @@
 #include "pm_sensor.h"      // pm_sample_t
 #include "noise_sensor.h"   // noise_sample_t
 
-// Si22G calibration: µSv/h = cps / 12.2792 (empirical vs. odlinfo.bfs.de reference).
-#define SI22G_CPS_TO_USVPH (1.0f / 12.2792f)
+// V2.6.1: Geiger-Müller tube types. Replaces the former compile-time-only
+// SI22G_CPS_TO_USVPH constant with a runtime-selectable table (config_t.tube_type,
+// see config_fields.def). The cps→µSv/h factor is the ONLY tube-dependent term in
+// the dose pipeline — counting, the dead-time gate and the HV loop are all
+// tube-agnostic. Enumerator values ARE the config indices (0..3); keep them in
+// sync with the dropdown in http_server.c and the k_tubes[] table in
+// transmission.c. Factors: upstream MultiGeiger calibration (ecocurious2 / t-pi
+// tube.cpp) — SBM-20/SBM-19 from datasheet, Si22G empirical vs odlinfo.bfs.de.
+typedef enum {
+    TUBE_TYPE_UNKNOWN = 0,   // no conversion — dose forced to 0.0
+    TUBE_TYPE_SBM20   = 1,   // cps→µSv/h = 1/2.47
+    TUBE_TYPE_SBM19   = 2,   // cps→µSv/h = 1/9.81888
+    TUBE_TYPE_SI22G   = 3,   // cps→µSv/h = 1/12.2792 (default — the dose baseline)
+    TUBE_TYPE_COUNT
+} tube_type_t;
+
+/** @brief cps→µSv/h conversion factor for a tube_type index (0..3).
+ *         Out-of-range or Unknown → 0.0f (dose suppressed). */
+float tube_cps_to_usvph(uint32_t tube_type);
+
+/** @brief Short human tube label ("Si22G", "SBM-19", …). Never NULL. */
+const char *tube_type_name(uint32_t tube_type);
 
 // Circuit breaker applied to all three upload targets (Madavi, sensor.community,
 // Radmon): 3 consecutive all-retry failures trip the breaker; the target is then
@@ -58,6 +78,13 @@ typedef struct {
     // Mirrors config_t.tube_enabled — copied into the context at snapshot
     // time so the worker task sees a stable value across the cycle.
     bool tube_enabled;
+
+    // V2.6.1: tube type index (tube_type_t) driving the cps→µSv/h dose factor.
+    // Snapshotted from config_t.tube_type alongside tube_enabled so the worker
+    // task derives dose with a stable factor even if /config Save swaps the tube
+    // mid-cycle. Used by send_sensorcommunity / send_radmon / send_thingspeak /
+    // send_osm via tube_cps_to_usvph().
+    uint32_t tube_type;
 
     // BME280 environmental readings. bme_valid = false means the sensor is
     // absent or the last read failed — skip the T/H/P fields in the payloads.

@@ -416,6 +416,7 @@ static void build_tx_context(tx_context_t *ctx,
     ctx->sw_version   = VERSION_STR;
     ctx->chip_id      = g_chip_id;
     ctx->tube_enabled = g_cfg.tube_enabled;
+    ctx->tube_type    = g_cfg.tube_type;   // V2.6.1: drives the dose conversion factor
     ctx->pm_valid     = pm_valid;
     if (pm_valid && pm) ctx->pm = *pm;
     ctx->noise_valid  = noise_valid;
@@ -539,7 +540,7 @@ static void do_tx_cycle(void) {
     s_last_uploaded_hv_pulses = hv_pulses;
 
     float cps = (dt_ms > 0) ? (counts * 1000.0f / dt_ms) : 0.0f;
-    float usvph = cps * SI22G_CPS_TO_USVPH;
+    float usvph = cps * tube_cps_to_usvph(g_cfg.tube_type);
     uint32_t cpm = (dt_ms > 0) ? (uint32_t)(((uint64_t)counts * 60000ULL) / dt_ms) : 0;
     wifi_ap_record_t ap_rec = { 0 };
     int rssi = (esp_wifi_sta_get_ap_info(&ap_rec) == ESP_OK) ? ap_rec.rssi : -127;

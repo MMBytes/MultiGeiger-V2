@@ -201,7 +201,15 @@ void config_log_summary(const config_t *cfg) {
         (cfg->display_mode == 2) ? "rotation"  : "?";
     LOG_PACED("  display:          mode=%lu(%s)",
              (unsigned long)cfg->display_mode, disp_mode_str);
-    LOG_PACED("  tube:             enabled=%d", cfg->tube_enabled);
+    // V2.6.1: tube type drives the cps→µSv/h dose factor. Labelled inline (like
+    // disp_mode_str above) to keep config.c free of a transmission.h dependency.
+    const char *tube_type_str =
+        (cfg->tube_type == 0) ? "Unknown" :
+        (cfg->tube_type == 1) ? "SBM-20"  :
+        (cfg->tube_type == 2) ? "SBM-19"  :
+        (cfg->tube_type == 3) ? "Si22G"   : "?";
+    LOG_PACED("  tube:             enabled=%d type=%lu(%s)",
+             cfg->tube_enabled, (unsigned long)cfg->tube_type, tube_type_str);
     LOG_PACED("  pcnt-filter:      enabled=%d width=%luns",
              cfg->pcnt_filter, (unsigned long)cfg->pcnt_filter_width_ns);
     // "superseded" derived from the single-source policy (config_effective_guard_us

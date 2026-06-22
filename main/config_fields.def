@@ -68,7 +68,7 @@ X_BOOL(tube_enabled,           "tube_en",    true)
 // the only tube-dependent term in the radiation pipeline (pulse counting, the
 // dead-time gate and the HV charge loop are all tube-agnostic, so changing this
 // leaves CPM untouched and only re-scales µSv/h / nSv/h). Index matches
-// tube_type_t in transmission.h:
+// tube_type_t in tube_types.h:
 //   0 = Unknown  (no conversion — dose forced to 0.0)
 //   1 = SBM-20   (cps→µSv/h = 1/2.47,    datasheet)
 //   2 = SBM-19   (cps→µSv/h = 1/9.81888, datasheet)

@@ -1291,6 +1291,19 @@ static esp_err_t config_get(httpd_req_t *req) {
                          v);
     }
 
+    // V2.6.1: tube-type dropdown options built from the shared tube_types table
+    // (single source of truth) instead of hardcoded <option> lines + per-option
+    // selected-marker args. append_safe keeps the accumulation truncation-safe.
+    char tube_opts[384];
+    int tube_n = 0;
+    for (uint32_t t = 0; t < TUBE_TYPE_COUNT; t++) {
+        tube_n = append_safe(tube_opts, sizeof(tube_opts), tube_n,
+                             "<option value=\"%lu\"%s>%s%s</option>",
+                             (unsigned long)t,
+                             (s_cfg->tube_type == t) ? " selected" : "",
+                             tube_type_name(t), tube_type_menu_suffix(t));
+    }
+
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Config — MultiGeiger V2</title>"
@@ -1359,15 +1372,12 @@ static esp_err_t config_get(httpd_req_t *req) {
         "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
         "<span class=\"r\">*</span></label></div>"
         // V2.6.1: tube type — picks the cps→µSv/h dose conversion factor (the only
-        // tube-dependent term; CPM is unchanged). 4 <option selected> markers,
-        // order 0/1/2/3 = Unknown/SBM-20/SBM-19/Si22G. Live-applied (no `*`):
+        // tube-dependent term; CPM is unchanged). Options are pre-built into
+        // `tube_opts` from the shared tube_types table above. Live-applied (no `*`):
         // dose is recomputed each cycle from the saved tube_type.
         "<label>Geiger tube type "
         "<select name=\"tube_type\" id=\"tube_type\">"
-        "<option value=\"0\"%s>Unknown &mdash; no dose conversion (&micro;Sv/h = 0)</option>"
-        "<option value=\"1\"%s>SBM-20 (1/2.47)</option>"
-        "<option value=\"2\"%s>SBM-19 (1/9.81888)</option>"
-        "<option value=\"3\"%s>Si22G (1/12.2792) &mdash; default</option>"
+        "%s"
         "</select> <small>(sets the CPM&rarr;&micro;Sv/h factor; CPM unaffected; "
         "live on Save)</small></label>"
         // V2.5.16: PCNT pulse-width filter — indented under the tube enable like
@@ -1662,11 +1672,7 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
         e_chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
-        // V2.6.1: tube type dropdown — 4 selected markers (0/1/2/3).
-        s_cfg->tube_type == 0 ? " selected" : "",
-        s_cfg->tube_type == 1 ? " selected" : "",
-        s_cfg->tube_type == 2 ? " selected" : "",
-        s_cfg->tube_type == 3 ? " selected" : "",
+        tube_opts,                              // V2.6.1: table-driven tube dropdown
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
         (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
         s_cfg->deadtime_guard ? "checked" : "",      // V2.5.30: guard enable checkbox

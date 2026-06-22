@@ -5,6 +5,7 @@ idf_component_register(
         "http_server.c"
         "tube.c"
         "tube_pcnt.c"
+        "tube_types.c"
         "history.c"
         "ntp.c"
         "gnss.c"

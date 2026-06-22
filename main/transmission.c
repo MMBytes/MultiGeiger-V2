@@ -56,29 +56,9 @@ const char *tx_target_name(tx_target_id_t id) {
     return s_target_names[id];
 }
 
-// V2.6.1: Geiger-Müller tube characteristics, indexed by tube_type_t. The
-// cps→µSv/h factor is the sole tube-dependent quantity in the dose pipeline
-// (counting/HV are tube-agnostic). Factors are the upstream MultiGeiger
-// calibration (ecocurious2 / t-pi tube.cpp): SBM-20/SBM-19 from datasheet, Si22G
-// empirical vs odlinfo.bfs.de. TUBE_TYPE_SI22G keeps the exact 1/12.2792 that the
-// old hardcoded Si22G #define carried, so the default config is a no-op change.
-static const struct {
-    const char *name;
-    float       cps_to_usvph;
-} k_tubes[TUBE_TYPE_COUNT] = {
-    [TUBE_TYPE_UNKNOWN] = { "Unknown", 0.0f            },
-    [TUBE_TYPE_SBM20]   = { "SBM-20",  1.0f / 2.47f    },
-    [TUBE_TYPE_SBM19]   = { "SBM-19",  1.0f / 9.81888f },
-    [TUBE_TYPE_SI22G]   = { "Si22G",   1.0f / 12.2792f },
-};
-
-float tube_cps_to_usvph(uint32_t tube_type) {
-    return (tube_type < TUBE_TYPE_COUNT) ? k_tubes[tube_type].cps_to_usvph : 0.0f;
-}
-
-const char *tube_type_name(uint32_t tube_type) {
-    return (tube_type < TUBE_TYPE_COUNT) ? k_tubes[tube_type].name : "Unknown";
-}
+// V2.6.1: the tube characteristics table + tube_cps_to_usvph() / tube_type_name()
+// moved to the dependency-light tube_types.{c,h} leaf module (shared with config.c
+// and http_server.c). Reached here via transmission.h → tube_types.h.
 
 // V2.4.1 (C9): static URL table for the three "fixed-URL" upload targets.
 // Pre-V2.4.1 these literals lived inline in main.c::build_tx_context, which

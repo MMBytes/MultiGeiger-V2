@@ -16,8 +16,11 @@ static const char *TAG = "ntp";
 // "now" — rejecting it (→ wait for a proper sync) is the safer sanity floor.
 #define EPOCH_2026 1767225600L
 
-static volatile bool     sync_pending = false;
-static volatile time_t   sync_tv_sec  = 0;
+static volatile bool     sync_pending    = false;
+// Sync timestamp stored as uint32_t offset from EPOCH_2026 (seconds).
+// uint32_t = single atomic store/load on 32-bit Xtensa — written by the SNTP
+// lwIP timer callback, read by ntp_poll() on the main task; no mutex needed.
+static volatile uint32_t sync_tv_sec_off = 0;
 
 // Boot epoch stored as a uint32_t offset from EPOCH_2026 (seconds).
 // uint32_t = single atomic store/load on 32-bit Xtensa — no mutex needed.
@@ -29,7 +32,8 @@ static volatile uint32_t s_boot_epoch_off = 0;
 // which uses non-const `struct timeval *`. We don't mutate *tv.
 // cppcheck-suppress constParameterCallback
 static void sync_cb(struct timeval *tv) {
-    sync_tv_sec = tv->tv_sec;
+    if (tv->tv_sec > EPOCH_2026)
+        sync_tv_sec_off = (uint32_t)(tv->tv_sec - EPOCH_2026);
     sync_pending = true;
     // Update boot epoch on every sync — eliminates crystal drift and allows
     // recovery from a bad first-sync timestamp. EPOCH_2026 rejects stale
@@ -87,7 +91,8 @@ void ntp_poll(void) {
     if (!sync_pending) return;
     sync_pending = false;
     char buf[32];
-    time_t t = sync_tv_sec;
+    uint32_t off = sync_tv_sec_off;
+    time_t t = off ? (EPOCH_2026 + (time_t)off) : (time_t)time(NULL);
     // V2.5.20 (review): localtime_r — the non-reentrant localtime() returns a
     // shared static struct tm; every other call site in the tree already uses
     // the _r form, so make these two stragglers consistent.

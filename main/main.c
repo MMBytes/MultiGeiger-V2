@@ -1,6 +1,6 @@
 #include <string.h>
 #include <stdio.h>
-#include <inttypes.h>   // PRIu64 for the reconnect counters
+#include <inttypes.h>   // PRIu32/PRIu64 for counter format macros
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -117,14 +117,10 @@ bool main_ota_in_progress(void) {
 // --- Soak diagnostics (carried over) ---
 static int64_t  t_attempt_start_us = 0;
 static int64_t  t_sta_connected_us = 0;
-static int64_t  t_last_got_ip_us   = 0;
-// Future-V2.4.23: uint32_t → uint64_t. Was uint32_t which wraps at 4.3 B —
-// theoretically reachable on a node with marginal WiFi over years. Wrap was
-// harmless (display rolls over) but the audit flagged it as "do once". 64 bits
-// gives 584 million years of headroom at 1 ns increments; zero perf cost.
-// `main_status_t.reconnects` stays uint32_t (consumers don't care about
-// post-wrap precision) — truncating cast on assignment.
-static uint64_t n_attempts = 0, n_connects = 0, n_got_ip = 0;
+// uint32_t — written on the WiFi event task, read on the main task; on 32-bit
+// Xtensa a uint64_t store is two instructions (torn-read hazard). Wraps after
+// 4.3 billion events (~136 years at 1/s) — sufficient for display use.
+static uint32_t n_attempts = 0, n_connects = 0, n_got_ip = 0;
 // uint32_t — written on the WiFi event task, read on the TX task; on 32-bit
 // Xtensa a uint64_t store is two instructions (torn-read hazard). Wraps after
 // 4.3 billion disconnects (~136 years at 1/s) — sufficient for display use.
@@ -324,7 +320,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_AP);
         } else {
             mark_attempt();
-            ESP_LOGI(TAG, "STA_START, calling connect (attempt #%" PRIu64 ")", n_attempts);
+            ESP_LOGI(TAG, "STA_START, calling connect (attempt #%" PRIu32 ")", n_attempts);
             display_set_status(DSP_STATUS_WIFI, DSP_WIFI_CONNECTING);
             esp_wifi_connect();
         }
@@ -334,7 +330,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         t_sta_connected_us = esp_timer_get_time();
         last_assoc_s = (t_sta_connected_us - t_attempt_start_us) / 1e6f;
         n_connects++;
-        ESP_LOGI(TAG, "STA_CONNECTED #%" PRIu64 ": ch=%d auth=%d bssid=" MACSTR " assoc=%.3fs",
+        ESP_LOGI(TAG, "STA_CONNECTED #%" PRIu32 ": ch=%d auth=%d bssid=" MACSTR " assoc=%.3fs",
                  n_connects, e->channel, e->authmode,
                  MAC2STR(e->bssid), last_assoc_s);
         break;
@@ -370,12 +366,11 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
     int64_t now = esp_timer_get_time();
     last_dhcp_s = (now - t_sta_connected_us) / 1e6f;
-    t_last_got_ip_us = now;
     n_got_ip++;
     esp_netif_dns_info_t d1 = { 0 }, d2 = { 0 };
     esp_netif_get_dns_info(e->esp_netif, ESP_NETIF_DNS_MAIN,   &d1);
     esp_netif_get_dns_info(e->esp_netif, ESP_NETIF_DNS_BACKUP, &d2);
-    ESP_LOGI(TAG, "GOT_IP #%" PRIu64 ": " IPSTR " gw=" IPSTR
+    ESP_LOGI(TAG, "GOT_IP #%" PRIu32 ": " IPSTR " gw=" IPSTR
              " dns=" IPSTR " dns2=" IPSTR " dhcp=%.3fs",
              n_got_ip, IP2STR(&e->ip_info.ip),
              IP2STR(&e->ip_info.gw),
@@ -1241,14 +1236,14 @@ void app_main(void) {
             if (n_connects > 0) {
                 mark_attempt();
                 if (t_roam_defer_us == 0) t_roam_defer_us = esp_timer_get_time();
-                ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app (attempt #%" PRIu64 ")",
+                ESP_LOGI(TAG, "disconnected — reconnect owned by roaming app (attempt #%" PRIu32 ")",
                          n_attempts);
                 continue;
             }
 #endif
             vTaskDelay(pdMS_TO_TICKS(500));
             mark_attempt();
-            ESP_LOGI(TAG, "retry connect (attempt #%" PRIu64 ")", n_attempts);
+            ESP_LOGI(TAG, "retry connect (attempt #%" PRIu32 ")", n_attempts);
             esp_wifi_connect();
             continue;
         }

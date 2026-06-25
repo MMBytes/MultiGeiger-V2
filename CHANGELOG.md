@@ -9,6 +9,20 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.3 — atomic WiFi counters: n_attempts/n_connects/n_got_ip uint64→uint32, sync_tv_sec offset, dead code removal
+
+**What:** Four torn-read hazards and one dead variable removed, found by a post-V2.6.2 sweep of all cross-task 64-bit globals.
+
+1. **`n_attempts`, `n_connects`, `n_got_ip` demoted `uint64_t` → `uint32_t`** — all three are written by the WiFi event task and read by the main task with no mutex. On 32-bit Xtensa (ESP32/S3), a 64-bit store is two `S32I` instructions; a reader on the other core can see one half of one write and one half of the next (torn read). `uint32_t` is a single instruction. Wraps after ~136 years at 1 event/s. All five `PRIu64` format specifiers updated to `PRIu32`.
+2. **`sync_tv_sec` in `ntp.c` demoted `volatile time_t` → `volatile uint32_t` EPOCH_2026 offset** — this variable carries the timestamp from the SNTP lwIP timer callback to `ntp_poll()` on the main task. `time_t` is 64-bit on IDF newlib (same torn-read hazard). Fixed using the same `(uint32_t)(tv_sec - EPOCH_2026)` offset pattern as `s_boot_epoch_off`. `ntp_poll()` reconstructs via `EPOCH_2026 + off`.
+3. **`t_last_got_ip_us` deleted** — declared as `static int64_t`, written in `on_ip_event`, but never read by any code path. Dead write removed along with the declaration.
+
+**Why now:** The V2.6.2 MAX review established the `uint32_t`-offset-for-atomic-stores pattern. A follow-up sweep confirmed the three WiFi counters and the SNTP timestamp variable had the same structural hazard. The V2.6.2 `n_disconnects` fix was the template; this release applies it to the remaining unprotected cross-task 64-bit stores.
+
+**No behaviour change** under normal operation. A torn read on `n_got_ip` or `n_connects` could briefly delay MQTT startup or roaming-app deference by one main-loop tick (~1 s); a torn read on `sync_tv_sec` could produce a garbled NTP sync log line (cosmetic). Neither manifests reliably.
+
+---
+
 ## V2.6.2 — boot-epoch hardening: atomic storage, per-sync refresh, clamped uptime helper
 
 **What:** Seven correctness fixes and two cleanups to the `ntp_boot_epoch()` infrastructure introduced in V2.5.22 / V2.6.1, surfaced by a MAX independent code review. No user-visible behaviour change under normal conditions; the fixes only kick in under adverse NTP conditions or on a warm reboot.

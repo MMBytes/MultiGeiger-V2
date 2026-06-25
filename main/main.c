@@ -552,16 +552,30 @@ static void do_tx_cycle(void) {
     // or wrong mesh BSSID after a reconnect — the BSSID makes it visible in syslog
     // (and lets us watch the roaming app actually move the node, see below).
     uint32_t i2c_errs = diag_i2c_errors();   // V2.4.28: cumulative since boot
+
+    // Uptime for CYCLE log lines — wall-clock based when NTP has synced
+    // (matches /status page), crystal fallback before first sync.
+    char cycle_uptime[20];
+    {
+        time_t be = ntp_boot_epoch();
+        unsigned long up_s = be
+            ? (unsigned long)((time_t)time(NULL) - be)
+            : (unsigned long)(esp_timer_get_time() / 1000000LL);
+        format_uptime_hm(up_s, cycle_uptime, sizeof(cycle_uptime));
+    }
+
     if (g_cfg.tube_enabled) {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
                  "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu "
-                 "rssi=%ddBm i2c_err=%lu bssid=" MACSTR " ch=%d",
+                 "rssi=%ddBm i2c_err=%lu bssid=" MACSTR " ch=%d "
+                 "reconnects=%lu uptime=%s",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms,
                  (unsigned long)counts, (unsigned long)cpm, usvph,
                  (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
                  (unsigned long)(min_us == UINT32_MAX ? 0 : min_us),
                  (unsigned long)max_us, rssi, (unsigned long)i2c_errs,
-                 MAC2STR(ap_rec.bssid), ap_rec.primary);
+                 MAC2STR(ap_rec.bssid), ap_rec.primary,
+                 (unsigned long)n_disconnects, cycle_uptime);
 
         // V2.5.16: when filtering, the CYCLE line above carries the POST-filter
         // count/cpm (what's uploaded); surface the PRE-filter ISR values here so
@@ -619,9 +633,10 @@ static void do_tx_cycle(void) {
         }
     } else {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu "
-                 "bssid=" MACSTR " ch=%d",
+                 "bssid=" MACSTR " ch=%d reconnects=%lu uptime=%s",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,
-                 (unsigned long)i2c_errs, MAC2STR(ap_rec.bssid), ap_rec.primary);
+                 (unsigned long)i2c_errs, MAC2STR(ap_rec.bssid), ap_rec.primary,
+                 (unsigned long)n_disconnects, cycle_uptime);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.

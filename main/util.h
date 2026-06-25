@@ -175,3 +175,17 @@ static inline void format_uptime(unsigned long s, char *out, size_t sz) {
         snprintf(out, sz, "%02luh %02lum %02lus", h, m % 60, s % 60);
     }
 }
+
+/** @brief Same as format_uptime() but always omits seconds ("Nd HHh MMm" or
+ *  "HHh MMm"). Used where seconds add no diagnostic value (e.g. per-cycle log
+ *  lines) and keeping the field short matters for log readability. */
+static inline void format_uptime_hm(unsigned long s, char *out, size_t sz) {
+    unsigned long m = s / 60;
+    unsigned long h = m / 60;
+    unsigned long d = h / 24;
+    if (d > 0) {
+        snprintf(out, sz, "%lud %02luh %02lum", d, h % 24, m % 60);
+    } else {
+        snprintf(out, sz, "%02luh %02lum", h, m % 60);
+    }
+}

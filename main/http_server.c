@@ -452,15 +452,15 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
         snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");
     }
 
-    // V2.5.22: append the boot wall-clock to the Uptime line — boot instant =
-    // now - uptime. Gated on the same >2025 sanity check as the NTP line so we
-    // never print a pre-sync "Started 1970-..." (uptime alone shows until first
-    // sync). Local time, matching the rest of the page. Separate suffix buffer
-    // (not an append into uptime_buf) keeps it a single bounded snprintf.
+    // V2.5.22: append the boot wall-clock to the Uptime line. Boot epoch is
+    // captured once at first NTP sync (ntp_boot_epoch()) so it never drifts:
+    // recomputing now-uptime on every page load walks ~1s per few hours because
+    // esp_timer counts raw crystal ticks while time(NULL) is NTP-slewed.
     char started_suffix[48] = "";
-    if (ntp_time_valid()) {
+    time_t boot_epoch = ntp_boot_epoch();
+    if (boot_epoch) {
         char started[24];
-        format_wallclock((int64_t)now - (int64_t)uptime_s, started, sizeof(started));
+        format_wallclock((int64_t)boot_epoch, started, sizeof(started));
         snprintf(started_suffix, sizeof(started_suffix), " (Started %s)", started);
     }
 
@@ -1119,8 +1119,17 @@ static esp_err_t status_get(httpd_req_t *req) {
     // function fills buf then sends each block before next overwrite.
     static char buf[1600];
     int64_t       now_us    = esp_timer_get_time();
-    unsigned long uptime_s  = (unsigned long)(now_us / 1000000LL);
+    // uptime_ms stays crystal-based (esp_timer) because format_cycle compares
+    // it against last_cycle_ms which is also esp_timer — mixing time bases
+    // there would corrupt the "Next cycle in Xs" display.
     unsigned long uptime_ms = (unsigned long)(now_us / 1000LL);
+    // uptime_s for display only: derive from boot_epoch (NTP wall clock) so
+    // "Uptime: Xd Yh Zm" and "Started: <timestamp>" are consistent — both
+    // rooted in the same frozen reference point.
+    time_t boot_epoch = ntp_boot_epoch();
+    unsigned long uptime_s = boot_epoch
+        ? (unsigned long)((time_t)time(NULL) - boot_epoch)
+        : (unsigned long)(now_us / 1000000LL);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
 

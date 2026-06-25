@@ -33,3 +33,9 @@ void ntp_poll(void);
  *  "2026-06-13T20:45:50+10:00" (DST-aware via the configured TZ).
  *  Static buffer — not reentrant. */
 const char *ntp_localtime_str(void);
+
+/** @brief Boot epoch captured once at first NTP sync (wall_time - uptime).
+ *  Returns 0 if the first sync has not occurred yet.
+ *  Frozen after first capture so crystal drift never shifts the displayed
+ *  "Started" time on the status page. */
+time_t ntp_boot_epoch(void);

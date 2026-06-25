@@ -6,6 +6,7 @@
 #include <time.h>
 #include "esp_log.h"
 #include "esp_sntp.h"
+#include "esp_timer.h"
 
 static const char *TAG = "ntp";
 
@@ -18,12 +19,22 @@ static const char *TAG = "ntp";
 static volatile bool     sync_pending = false;
 static volatile time_t   sync_tv_sec  = 0;
 
+// Boot epoch captured once at first NTP sync: ntp_wall_time - esp_uptime.
+// Frozen so it never drifts as the crystal accumulates error vs. real time.
+static volatile time_t   s_boot_epoch = 0;
+
 // Signature is dictated by IDF's `sntp_set_time_sync_notification_cb_t`,
 // which uses non-const `struct timeval *`. We don't mutate *tv.
 // cppcheck-suppress constParameterCallback
 static void sync_cb(struct timeval *tv) {
     sync_tv_sec = tv->tv_sec;
     sync_pending = true;
+    // Capture boot epoch on first sync only — this is the moment both clocks
+    // are freshest and accumulated crystal drift is minimal.
+    if (s_boot_epoch == 0 && tv->tv_sec > EPOCH_2026) {
+        int64_t uptime_s = esp_timer_get_time() / 1000000LL;
+        s_boot_epoch = tv->tv_sec - (time_t)uptime_s;
+    }
 }
 
 void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_posix) {
@@ -101,4 +112,8 @@ const char *ntp_localtime_str(void) {
         buf[n - 2] = ':';          // colon between offset hours and minutes
     }
     return buf;
+}
+
+time_t ntp_boot_epoch(void) {
+    return s_boot_epoch;
 }

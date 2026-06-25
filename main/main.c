@@ -124,7 +124,11 @@ static int64_t  t_last_got_ip_us   = 0;
 // gives 584 million years of headroom at 1 ns increments; zero perf cost.
 // `main_status_t.reconnects` stays uint32_t (consumers don't care about
 // post-wrap precision) — truncating cast on assignment.
-static uint64_t n_attempts = 0, n_connects = 0, n_got_ip = 0, n_disconnects = 0;
+static uint64_t n_attempts = 0, n_connects = 0, n_got_ip = 0;
+// uint32_t — written on the WiFi event task, read on the TX task; on 32-bit
+// Xtensa a uint64_t store is two instructions (torn-read hazard). Wraps after
+// 4.3 billion disconnects (~136 years at 1/s) — sufficient for display use.
+static uint32_t n_disconnects = 0;
 static uint32_t last_disconnect_reason = 0;
 static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 
@@ -339,7 +343,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
         last_disconnect_reason = e->reason;
         n_disconnects++;
-        ESP_LOGW(TAG, "STA_DISCONNECTED #%" PRIu64 ": reason=%d",
+        ESP_LOGW(TAG, "STA_DISCONNECTED #%" PRIu32 ": reason=%d",
                  n_disconnects, e->reason);
         display_set_status(DSP_STATUS_WIFI, DSP_WIFI_ERROR);
         xEventGroupSetBits(s_events, EV_DISCONNECTED);
@@ -553,22 +557,15 @@ static void do_tx_cycle(void) {
     // (and lets us watch the roaming app actually move the node, see below).
     uint32_t i2c_errs = diag_i2c_errors();   // V2.4.28: cumulative since boot
 
-    // Uptime for CYCLE log lines — wall-clock based when NTP has synced
-    // (matches /status page), crystal fallback before first sync.
+    // Uptime for CYCLE log lines — NTP-accurate when synced, crystal fallback.
     char cycle_uptime[20];
-    {
-        time_t be = ntp_boot_epoch();
-        unsigned long up_s = be
-            ? (unsigned long)((time_t)time(NULL) - be)
-            : (unsigned long)(esp_timer_get_time() / 1000000LL);
-        format_uptime_hm(up_s, cycle_uptime, sizeof(cycle_uptime));
-    }
+    format_uptime_hm(ntp_uptime_s(), cycle_uptime, sizeof(cycle_uptime));
 
     if (g_cfg.tube_enabled) {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums counts=%lu cpm=%lu %.3fµSv/h "
                  "hv_pulses=%lu (cum=%lu) hv_err=%d min_us=%lu max_us=%lu "
                  "rssi=%ddBm i2c_err=%lu bssid=" MACSTR " ch=%d "
-                 "reconnects=%lu uptime=%s",
+                 "disconnects=%lu uptime=%s",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms,
                  (unsigned long)counts, (unsigned long)cpm, usvph,
                  (unsigned long)hv_pulses_delta, (unsigned long)hv_pulses, hv_error,
@@ -633,7 +630,7 @@ static void do_tx_cycle(void) {
         }
     } else {
         ESP_LOGI(TAG, "CYCLE #%lu: dt=%lums (tube disabled) rssi=%ddBm i2c_err=%lu "
-                 "bssid=" MACSTR " ch=%d reconnects=%lu uptime=%s",
+                 "bssid=" MACSTR " ch=%d disconnects=%lu uptime=%s",
                  (unsigned long)++tx_cycles, (unsigned long)dt_ms, rssi,
                  (unsigned long)i2c_errs, MAC2STR(ap_rec.bssid), ap_rec.primary,
                  (unsigned long)n_disconnects, cycle_uptime);

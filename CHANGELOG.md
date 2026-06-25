@@ -9,6 +9,32 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.2 — boot-epoch hardening: atomic storage, per-sync refresh, clamped uptime helper
+
+**What:** Seven correctness fixes and two cleanups to the `ntp_boot_epoch()` infrastructure introduced in V2.5.22 / V2.6.1, surfaced by a MAX independent code review. No user-visible behaviour change under normal conditions; the fixes only kick in under adverse NTP conditions or on a warm reboot.
+
+**Fixes:**
+
+1. **Atomic boot-epoch storage** (`ntp.c`): `s_boot_epoch` was a `volatile time_t` (64-bit `__int_least64_t` on ESP32 newlib). On 32-bit Xtensa, a 64-bit write compiles to two `S32I` instructions — not atomic. HTTP and TX workers on core 1 could observe a torn 64-bit value if a sync fired on the tcpip thread (core 0) between the two stores. Changed to `volatile uint32_t s_boot_epoch_off` (seconds since `EPOCH_2026`): a 32-bit store/load is a single atomic instruction on Xtensa, requires no mutex, and covers dates to ~2162.
+
+2. **Per-sync epoch refresh** (`ntp.c`): The `if (s_boot_epoch_off == 0)` write-once guard meant a plausible-but-wrong first NTP response (pool server fallback while GPS stratum-1 is offline, GPS rollover, leap-second error) permanently corrupted the "Started" timestamp and every `CYCLE log` `uptime=` field for the device's lifetime. Removing the guard so every hourly SNTP poll (CONFIG_LWIP_SNTP_UPDATE_DELAY = 3600 s) refreshes the epoch caps crystal drift at < 1 s per sync interval and allows self-correction from a bad first sync. Inner guard `if (epoch > EPOCH_2026)` prevents storing a negative offset when a very long pre-sync crystal run pushes `(tv_sec - uptime_s)` below the epoch floor.
+
+3. **Warm-reboot regression** (`http_server.c`): The V2.6.1 "Started" gate changed from `ntp_time_valid()` (true immediately from RTC carryover on warm reboot) to `boot_epoch_off != 0` (requires an SNTP callback), so `/status` showed "NTP: synced · clock now \<time\>" but no "Started" suffix for ~60 s after a warm reboot. Resolved by fix #2 (the re-sync that fires ~60 s in now refreshes `s_boot_epoch_off`).
+
+4. **Unsigned-wrap on step-back** (`ntp.c`, `http_server.c`, `main.c`, `transmission.c`): `(time_t)time(NULL) - boot_epoch` cast to `uint32_t`/`unsigned long` with no clamp: a negative result (NTP clock step-back after a bad first sync is corrected) wrapped to ~4 billion seconds (~136-year uptime). New `ntp_uptime_s()` helper clamps negative results to 0 before returning; all three callers now use it.
+
+5. **Triplicated fallback pattern → `ntp_uptime_s()`** (`ntp.h/c`, `http_server.c`, `main.c`, `transmission.c`): The `boot_epoch ? time(NULL)-boot_epoch : crystal_fallback` pattern was copy-pasted in three files with inconsistent cast types (`unsigned long` vs `uint32_t`). Centralised in `ntp_uptime_s()` (returns clamped `unsigned long`); each call site is now a single line.
+
+6. **`n_disconnects` torn read** (`main.c`): Was `uint64_t` — two 32-bit stores on a 32-bit CPU. Written on the Wi-Fi event task, read on the TX task without a lock; a disconnect firing mid-read produced a torn counter in the `CYCLE` log line. Demoted to `uint32_t` (wraps after 4.3 billion disconnects ≈ 136 years at 1/s — display use only) which is a single atomic store on Xtensa.
+
+7. **`disconnects=` field rename** (`main.c`): The `CYCLE` log field `reconnects=%lu` counted **disconnect events** (`WIFI_EVENT_STA_DISCONNECTED`), not successful reconnects — overcounting by 1 while the node was mid-reconnect. Renamed to `disconnects=%lu` to match the counter semantics. (Syslog parsers watching `reconnects=` will need updating.)
+
+8. **Consistent "clock now" / "Started + Uptime" timestamps** (`http_server.c`): `status_get()` and `format_system()` each called `time(NULL)` independently, so "Started + Uptime" and "clock now" could differ by up to 1 s. `now_wall = time(NULL)` is now captured once at the top of `status_get()` and threaded through to `format_system()`.
+
+9. **`format_uptime_hm` d>0 branch dedup** (`util.h`): The day-resolution branch was byte-identical to `format_uptime()`'s d>0 branch — two copies that could silently diverge. The branch now delegates to `format_uptime()` (outputs are identical for d>0; only the d==0 branch differs by omitting seconds).
+
+---
+
 ## V2.6.1 — selectable Geiger tube type (SBM-20 / SBM-19 / Si22G)
 
 **What:** The Geiger-Müller tube is now a runtime `/config` setting ("Geiger tube type", `tube_type`, 0–3) instead of a hard-coded Si22G calibration. Four options — **Unknown** (no dose conversion), **SBM-20**, **SBM-19**, **Si22G** (default) — each carrying the upstream MultiGeiger cps→µSv/h factor. The selected tube is shown on the `/status` Radiation card and in the boot config dump. Default is Si22G, so existing nodes are unchanged.

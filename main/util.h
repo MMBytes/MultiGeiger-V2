@@ -184,7 +184,9 @@ static inline void format_uptime_hm(unsigned long s, char *out, size_t sz) {
     unsigned long h = m / 60;
     unsigned long d = h / 24;
     if (d > 0) {
-        snprintf(out, sz, "%lud %02luh %02lum", d, h % 24, m % 60);
+        // d>0 branch omits seconds — identical output to format_uptime; delegate
+        // so any future change to the day/hour format stays in one place.
+        format_uptime(s, out, sz);
     } else {
         snprintf(out, sz, "%02luh %02lum", h, m % 60);
     }

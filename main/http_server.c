@@ -430,7 +430,7 @@ static void format_wallclock(int64_t unix_t, char *out, size_t sz) {
     strftime(out, sz, "%Y-%m-%d %H:%M:%S", &tm);
 }
 
-static void format_system(char *out, size_t sz, unsigned long uptime_s) {
+static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t now_wall) {
     uint32_t free_heap = esp_get_free_heap_size();
     uint32_t min_free  = esp_get_minimum_free_heap_size();
     uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
@@ -442,7 +442,9 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s) {
     // refreshes infrequently. Better: just check whether the wall clock looks
     // sane (same predicate ntp_time_valid uses) and show the most recent
     // localtime sample.
-    time_t now = time(NULL);
+    // now_wall is captured once in status_get so "clock now" and "Started+Uptime"
+    // are rooted in the same timestamp — their arithmetic is always consistent.
+    time_t now = now_wall;
     char ntp_line[96];
     if (ntp_time_valid()) {     // clock is real (NTP-synced or sane RTC carry-over)
         char ts[24];
@@ -1123,13 +1125,14 @@ static esp_err_t status_get(httpd_req_t *req) {
     // it against last_cycle_ms which is also esp_timer — mixing time bases
     // there would corrupt the "Next cycle in Xs" display.
     unsigned long uptime_ms = (unsigned long)(now_us / 1000LL);
-    // uptime_s for display only: derive from boot_epoch (NTP wall clock) so
-    // "Uptime: Xd Yh Zm" and "Started: <timestamp>" are consistent — both
-    // rooted in the same frozen reference point.
-    time_t boot_epoch = ntp_boot_epoch();
-    unsigned long uptime_s = boot_epoch
-        ? (unsigned long)((time_t)time(NULL) - boot_epoch)
-        : (unsigned long)(now_us / 1000000LL);
+    // Capture wall clock once so "clock now" in format_system and "Started +
+    // Uptime" below are always rooted in the same timestamp.
+    time_t        now_wall   = time(NULL);
+    time_t        boot_ep    = ntp_boot_epoch();
+    time_t        uptime_t   = boot_ep
+        ? now_wall - boot_ep
+        : (time_t)(now_us / 1000000LL);
+    unsigned long uptime_s   = uptime_t > 0 ? (unsigned long)uptime_t : 0UL;
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
 
@@ -1141,7 +1144,7 @@ static esp_err_t status_get(httpd_req_t *req) {
 
     format_device     (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_net_info   (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
-    format_system     (buf, sizeof(buf), uptime_s);  if (!send_block(req, buf)) goto fail;
+    format_system     (buf, sizeof(buf), uptime_s, now_wall);  if (!send_block(req, buf)) goto fail;
     format_cycle      (buf, sizeof(buf), uptime_ms); if (!send_block(req, buf)) goto fail;
     format_radiation  (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     // V2.5.6: CPM-history graph — radiation nodes only. Data object first, then

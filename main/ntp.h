@@ -34,8 +34,14 @@ void ntp_poll(void);
  *  Static buffer — not reentrant. */
 const char *ntp_localtime_str(void);
 
-/** @brief Boot epoch captured once at first NTP sync (wall_time - uptime).
- *  Returns 0 if the first sync has not occurred yet.
- *  Frozen after first capture so crystal drift never shifts the displayed
- *  "Started" time on the status page. */
+/** @brief Boot epoch (wall_time - uptime), refreshed on every SNTP sync.
+ *  Returns 0 if no sync has occurred yet this session.
+ *  Updating each hourly sync self-corrects a bad first-sync timestamp and
+ *  keeps crystal drift < 1 s between syncs. */
 time_t ntp_boot_epoch(void);
+
+/** @brief NTP-accurate uptime in seconds, clamped to 0.
+ *  Uses ntp_boot_epoch() when available; falls back to raw esp_timer when
+ *  no sync has occurred. Clamped so an NTP step-back never wraps to ~136yr
+ *  when the caller casts to unsigned. */
+unsigned long ntp_uptime_s(void);

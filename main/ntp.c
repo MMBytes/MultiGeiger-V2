@@ -19,9 +19,11 @@ static const char *TAG = "ntp";
 static volatile bool     sync_pending = false;
 static volatile time_t   sync_tv_sec  = 0;
 
-// Boot epoch captured once at first NTP sync: ntp_wall_time - esp_uptime.
-// Frozen so it never drifts as the crystal accumulates error vs. real time.
-static volatile time_t   s_boot_epoch = 0;
+// Boot epoch stored as a uint32_t offset from EPOCH_2026 (seconds).
+// uint32_t = single atomic store/load on 32-bit Xtensa — no mutex needed.
+// 0 means "not yet captured". Refreshed on every SNTP sync (hourly) so a
+// bad first-sync timestamp self-corrects and crystal drift stays < 1 s/sync.
+static volatile uint32_t s_boot_epoch_off = 0;
 
 // Signature is dictated by IDF's `sntp_set_time_sync_notification_cb_t`,
 // which uses non-const `struct timeval *`. We don't mutate *tv.
@@ -29,11 +31,16 @@ static volatile time_t   s_boot_epoch = 0;
 static void sync_cb(struct timeval *tv) {
     sync_tv_sec = tv->tv_sec;
     sync_pending = true;
-    // Capture boot epoch on first sync only — this is the moment both clocks
-    // are freshest and accumulated crystal drift is minimal.
-    if (s_boot_epoch == 0 && tv->tv_sec > EPOCH_2026) {
+    // Update boot epoch on every sync — eliminates crystal drift and allows
+    // recovery from a bad first-sync timestamp. EPOCH_2026 rejects stale
+    // server times; the inner guard stops a negative offset when uptime_s
+    // exceeds (tv_sec - EPOCH_2026) (e.g. very long crystal-only run).
+    if (tv->tv_sec > EPOCH_2026) {
         int64_t uptime_s = esp_timer_get_time() / 1000000LL;
-        s_boot_epoch = tv->tv_sec - (time_t)uptime_s;
+        time_t  epoch    = tv->tv_sec - (time_t)uptime_s;
+        if (epoch > EPOCH_2026) {
+            s_boot_epoch_off = (uint32_t)(epoch - EPOCH_2026);
+        }
     }
 }
 
@@ -115,5 +122,13 @@ const char *ntp_localtime_str(void) {
 }
 
 time_t ntp_boot_epoch(void) {
-    return s_boot_epoch;
+    uint32_t off = s_boot_epoch_off;
+    return off ? (EPOCH_2026 + (time_t)off) : 0;
+}
+
+unsigned long ntp_uptime_s(void) {
+    uint32_t off = s_boot_epoch_off;
+    if (!off) return (unsigned long)(esp_timer_get_time() / 1000000LL);
+    time_t uptime = (time_t)time(NULL) - (EPOCH_2026 + (time_t)off);
+    return uptime > 0 ? (unsigned long)uptime : 0UL;
 }

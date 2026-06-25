@@ -10,13 +10,12 @@
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
 #include "syslog.h"             // V2.5.29: syslog_get_stats (per-cycle UDP drop report)
 #include "main_status.h"        // V2.5.18: main_request_restart (heap-guard reboot)
-#include "ntp.h"                // V2.6.2: boot epoch for NTP-accurate uptime in heap-guard log
+#include "ntp.h"                // V2.6.2: ntp_uptime_s() for NTP-accurate uptime in heap-guard log
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_timer.h"          // fallback uptime before first NTP sync
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -1372,15 +1371,10 @@ static void tx_heap_guard(uint32_t floor_kb, uint32_t confirm_cycles) {
     // V2.5.33: include uptime so the syslog reader can tell a slow month-scale
     // creep from a same-day transient false-positive at a glance. Rendered with
     // the same helper the /status page uses (format_uptime in util.h).
-    // V2.6.2: use ntp_boot_epoch() (frozen at first NTP sync) so the value
-    // matches the /status page. Falls back to raw crystal ticks if the epoch
-    // isn't set yet (pre-NTP boot, extremely unlikely at heap-guard time).
-    time_t boot_epoch = ntp_boot_epoch();
-    uint32_t up_s = boot_epoch
-        ? (uint32_t)((time_t)time(NULL) - boot_epoch)
-        : (uint32_t)(esp_timer_get_time() / 1000000LL);
+    // V2.6.2: ntp_uptime_s() — NTP-accurate when synced, crystal fallback,
+    // clamped so an NTP step-back never wraps to ~136-year output.
     char uptime_buf[32];
-    format_uptime(up_s, uptime_buf, sizeof(uptime_buf));
+    format_uptime(ntp_uptime_s(), uptime_buf, sizeof(uptime_buf));
     ESP_LOGW(TAG,
              "HEAP GUARD: INTERNAL largest=%u < floor=%u (%lukB) with free=%u "
              "for %u cycles — Uptime: %s — rebooting to defragment",

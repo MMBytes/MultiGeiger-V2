@@ -444,11 +444,10 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t n
     // localtime sample.
     // now_wall is captured once in status_get so "clock now" and "Started+Uptime"
     // are rooted in the same timestamp — their arithmetic is always consistent.
-    time_t now = now_wall;
     char ntp_line[96];
     if (ntp_time_valid()) {     // clock is real (NTP-synced or sane RTC carry-over)
         char ts[24];
-        format_wallclock((int64_t)now, ts, sizeof(ts));
+        format_wallclock((int64_t)now_wall, ts, sizeof(ts));
         snprintf(ntp_line, sizeof(ntp_line), "synced &middot; clock now %s", ts);
     } else {
         snprintf(ntp_line, sizeof(ntp_line), "<span style='color:#c80'>not synced yet</span>");

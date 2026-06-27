@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.4 — fix stack overflow on POST /config (heap-allocate config_t in config_post)
+
+**What:** `config_t next = *s_cfg` in `config_post` (`http_server.c`) put a ~4 KB struct on the IDF httpd task's 8 KB stack. The struct is dominated by `mqtt_tls_ca[2401]` (added in V2.4.6). Combined with `char page[1024]` at the response-build step and ~800 bytes of IDF httpd framework overhead, the 8 KB budget was exhausted and the task stack-overflowed on POST /config — confirmed via coredump: `***ERROR*** A stack overflow in task http has been detected.`
+
+**Fix:** Change `config_t next = *s_cfg` to `config_t *cfg_next = malloc(sizeof(*cfg_next))`, copy the current config into it, and operate via pointer throughout. `free(cfg_next)` immediately after the final `*s_cfg = *cfg_next` copy, before `config_save()`. Removes ~4 KB from the 8 KB httpd stack; on PSRAM boards (FeatherS3-D) the allocation comes from the 8 MB PSRAM heap at zero DRAM cost. On Heltec (no PSRAM) it borrows from internal heap and is freed in the same handler call.
+
+**Why now:** Latent since V2.4.6 (mqtt_tls_ca field). The V2.6.x rebuild (slightly different register/stack layout from recompilation) pushed it over the edge. Triggered by a user POST /config that panicked the device.
+
+---
+
 ## V2.6.3 — atomic WiFi counters: n_attempts/n_connects/n_got_ip uint64→uint32, sync_tv_sec offset, dead code removal
 
 **What:** Four torn-read hazards and one dead variable removed, found by a post-V2.6.2 sweep of all cross-task 64-bit globals.

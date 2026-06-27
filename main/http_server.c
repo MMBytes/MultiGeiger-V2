@@ -1852,8 +1852,18 @@ static esp_err_t config_post(httpd_req_t *req) {
     // Start from the current config; pre-clear every bool (forms only POST
     // ticked checkboxes, so an absent key means "unticked"). Schema-derived
     // — see config.c::config_post_preclear_bools.
-    config_t next = *s_cfg;
-    config_post_preclear_bools(&next);
+    //
+    // V2.6.4: heap-allocate instead of stack — config_t is ~4 KB (dominated by
+    // mqtt_tls_ca[2401]) and putting that on the 8 KB httpd stack alongside
+    // char page[1024] and IDF framework overhead caused a stack overflow on POST.
+    config_t *cfg_next = malloc(sizeof(*cfg_next));
+    if (!cfg_next) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_OK;
+    }
+    *cfg_next = *s_cfg;
+    config_post_preclear_bools(cfg_next);
 
     char *p = buf;
     while (*p) {
@@ -1874,14 +1884,14 @@ static esp_err_t config_post(httpd_req_t *req) {
         if (strcmp(p, "oled_bright") == 0) {
             long v = strtol(val, NULL, 10);
             if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
-                next.oled_brightness_pct = (uint8_t)v;
+                cfg_next->oled_brightness_pct = (uint8_t)v;
             } else {
                 oor = true;   // V2.5.34: out-of-step value kept prior — report it
             }
         }
         // Generic schema dispatch. Returns true if `p` matched a known
         // field; out-of-range numerics keep prior value and set `oor`.
-        else if (!config_post_apply_field(&next, p, val, &oor)) {
+        else if (!config_post_apply_field(cfg_next, p, val, &oor)) {
             // Non-schema control keys.
             if (strcmp(p, "save_restart") == 0) restart_after_save = true;
             // Plain "save" and any unknown keys are silently ignored.
@@ -1904,26 +1914,26 @@ static esp_err_t config_post(httpd_req_t *req) {
     // A disabled checkbox doesn't POST, so the form may send wifi_ht20=0
     // even while the UI showed it ticked; enforce the invariant here so
     // the stored state matches what the user saw.
-    if (next.wifi_11bg_only) next.wifi_ht20_only = true;
+    if (cfg_next->wifi_11bg_only) cfg_next->wifi_ht20_only = true;
 
     // External-antenna switch: silently force-disable on boards without the
     // hardware. Defence-in-depth — the UI already greys the checkbox, but a
     // hand-crafted POST could still set it.
 #if !HAL_HAS_ANTENNA_SWITCH
-    next.use_external_antenna = false;
+    cfg_next->use_external_antenna = false;
 #endif
 
     // V2.5.19: same defence-in-depth for the I²C pin-out route — force-disable
     // on boards without the alternate pads (UI already greys it).
 #if !HAL_HAS_I2C_PINOUT_SWITCH
-    next.i2c_pinout = false;
+    cfg_next->i2c_pinout = false;
 #endif
 
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
     // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the
     // previously saved value rather than clobbering it to false — that way
     // the user's preference survives a round-trip through "global PS off".
-    if (next.wifi_ps_disabled) next.ftp_ps_disabled = s_cfg->ftp_ps_disabled;
+    if (cfg_next->wifi_ps_disabled) cfg_next->ftp_ps_disabled = s_cfg->ftp_ps_disabled;
 
     // V2.5.4: the radiation-only upload targets (Radmon, GMCMap, ThingSpeak)
     // are meaningless without the Geiger tube. The UI greys + force-unchecks
@@ -1931,23 +1941,24 @@ static esp_err_t config_post(httpd_req_t *req) {
     // invariant here so a hand-crafted POST can't enable them, and so the
     // stored config stays honest. Unlike ftp_ps_dis we do NOT preserve the
     // prior choice — "tube off" genuinely turns these off, not just hides them.
-    if (!next.tube_enabled) {
-        next.send_radmon = false;
-        next.send_gmc = false;
-        next.send_thingspeak = false;
-        next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
-        next.deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
+    if (!cfg_next->tube_enabled) {
+        cfg_next->send_radmon = false;
+        cfg_next->send_gmc = false;
+        cfg_next->send_thingspeak = false;
+        cfg_next->pcnt_filter = false;   // V2.5.16: width filter needs count pulses
+        cfg_next->deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
     }
 
     // V2.5.30: dead-time guard is mutually exclusive with pcnt_filter — the guard
     // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
     // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
     // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
-    if (next.pcnt_filter) {
-        next.deadtime_guard = false;
+    if (cfg_next->pcnt_filter) {
+        cfg_next->deadtime_guard = false;
     }
 
-    *s_cfg = next;
+    *s_cfg = *cfg_next;
+    free(cfg_next);
     esp_err_t err = config_save(s_cfg);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));

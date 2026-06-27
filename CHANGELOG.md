@@ -9,13 +9,17 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.4 — fix stack overflow on POST /config (heap-allocate config_t in config_post)
+## V2.6.4 — fix stack overflow on POST /config + config_save ordering + static sweep
 
-**What:** `config_t next = *s_cfg` in `config_post` (`http_server.c`) put a ~4 KB struct on the IDF httpd task's 8 KB stack. The struct is dominated by `mqtt_tls_ca[2401]` (added in V2.4.6). Combined with `char page[1024]` at the response-build step and ~800 bytes of IDF httpd framework overhead, the 8 KB budget was exhausted and the task stack-overflowed on POST /config — confirmed via coredump: `***ERROR*** A stack overflow in task http has been detected.`
+**Stack overflow (primary):** `config_t next = *s_cfg` in `config_post` (`http_server.c`) put a ~4 KB struct on the IDF httpd task's 8 KB stack. The struct is dominated by `mqtt_tls_ca[2401]` (added in V2.4.6). Combined with `char page[1024]` and ~800 bytes of IDF httpd framework overhead the 8 KB budget was exhausted — confirmed via coredump: `***ERROR*** A stack overflow in task http has been detected.`
 
-**Fix:** Change `config_t next = *s_cfg` to `config_t *cfg_next = malloc(sizeof(*cfg_next))`, copy the current config into it, and operate via pointer throughout. `free(cfg_next)` immediately after the final `*s_cfg = *cfg_next` copy, before `config_save()`. Removes ~4 KB from the 8 KB httpd stack; on PSRAM boards (FeatherS3-D) the allocation comes from the 8 MB PSRAM heap at zero DRAM cost. On Heltec (no PSRAM) it borrows from internal heap and is freed in the same handler call.
+**Fix:** `config_t next` → `static config_t cfg_next` (BSS). Safe because `esp_http_server` runs all URI handlers serially on one task (documented at `http_server_start`), so `config_post` is never re-entered. Every call reinitialises with `cfg_next = *s_cfg` before any field read. Follows the same pattern established by V2.4.22 for `config_get`'s `e_*` escape buffers and `br_opts`.
 
-**Why now:** Latent since V2.4.6 (mqtt_tls_ca field). The V2.6.x rebuild (slightly different register/stack layout from recompilation) pushed it over the edge. Triggered by a user POST /config that panicked the device.
+**config_save ordering (pre-existing fix):** Previously `*s_cfg = next` committed the new config to the live in-memory struct before `config_save()` wrote it to NVS. If the NVS write failed, the device would run the new config in RAM but revert to the old config on the next reboot (silent split-brain). Fixed: `config_save(&cfg_next)` is called first; `*s_cfg = cfg_next` only executes on success.
+
+**Static sweep — config_get post-V2.4.22 regressions (secondary):** The V2.4.22 comment claimed all large locals in `config_get` were moved to BSS, but four `e_*` arrays added in V2.5.1 / V2.5.4 (`e_gmc_aid`, `e_gmc_gid`, `e_ts_key`, `e_ts_pm_key`) and the V2.6.1 `tube_opts[384]` were left on the stack. All five are now `static`. The `char page[1024]` response buffer in `config_post` is also made static.
+
+**Why now:** Overflow latent since V2.4.6 (mqtt_tls_ca field). The V2.6.x rebuild (slightly different register/stack layout) pushed it over the edge. Triggered by a user POST /config that panicked the device; confirmed and root-caused via coredump decode.
 
 ---
 

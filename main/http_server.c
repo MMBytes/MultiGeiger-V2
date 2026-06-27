@@ -1267,10 +1267,11 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->osm_staging_token,  e_osm_st_tok, sizeof(e_osm_st_tok));
     html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
     // V2.5.1: GMCMap + ThingSpeak. Numeric/hex fields, but escape for safety.
-    char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
-    char e_gmc_gid[CFG_USER_NAME_MAX * 3 + 4];
-    char e_ts_key [CFG_TOKEN_MAX     * 3 + 4];
-    char e_ts_pm_key [CFG_TOKEN_MAX  * 3 + 4];   // V2.5.4: ThingSpeak PM key
+    // V2.6.4: static — same justification as the e_* block above (V2.4.22).
+    static char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
+    static char e_gmc_gid[CFG_USER_NAME_MAX * 3 + 4];
+    static char e_ts_key [CFG_TOKEN_MAX     * 3 + 4];
+    static char e_ts_pm_key [CFG_TOKEN_MAX  * 3 + 4];   // V2.5.4: ThingSpeak PM key
     html_esc(s_cfg->gmc_account_id,     e_gmc_aid, sizeof(e_gmc_aid));
     html_esc(s_cfg->gmc_geiger_id,      e_gmc_gid, sizeof(e_gmc_gid));
     html_esc(s_cfg->thingspeak_api_key, e_ts_key,  sizeof(e_ts_key));
@@ -1305,7 +1306,8 @@ static esp_err_t config_get(httpd_req_t *req) {
     // V2.6.1: tube-type dropdown options built from the shared tube_types table
     // (single source of truth) instead of hardcoded <option> lines + per-option
     // selected-marker args. append_safe keeps the accumulation truncation-safe.
-    char tube_opts[384];
+    // V2.6.4: static — same justification as e_* + br_opts (V2.4.22).
+    static char tube_opts[384];
     int tube_n = 0;
     for (uint32_t t = 0; t < TUBE_TYPE_COUNT; t++) {
         tube_n = append_safe(tube_opts, sizeof(tube_opts), tube_n,
@@ -1853,17 +1855,15 @@ static esp_err_t config_post(httpd_req_t *req) {
     // ticked checkboxes, so an absent key means "unticked"). Schema-derived
     // — see config.c::config_post_preclear_bools.
     //
-    // V2.6.4: heap-allocate instead of stack — config_t is ~4 KB (dominated by
-    // mqtt_tls_ca[2401]) and putting that on the 8 KB httpd stack alongside
-    // char page[1024] and IDF framework overhead caused a stack overflow on POST.
-    config_t *cfg_next = malloc(sizeof(*cfg_next));
-    if (!cfg_next) {
-        free(buf);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
-        return ESP_OK;
-    }
-    *cfg_next = *s_cfg;
-    config_post_preclear_bools(cfg_next);
+    // V2.6.4: static instead of stack — config_t is ~4 KB (dominated by
+    // mqtt_tls_ca[2401]) and putting that on the 8 KB httpd stack caused a stack
+    // overflow on POST (confirmed via coredump). Static is safe: httpd runs all
+    // handlers serially on one task (see http_server_start), so config_post is
+    // never re-entered. Every call reinitialises via cfg_next = *s_cfg before any
+    // read. Follows the same pattern as config_get's e_* + br_opts (V2.4.22).
+    static config_t cfg_next;
+    cfg_next = *s_cfg;
+    config_post_preclear_bools(&cfg_next);
 
     char *p = buf;
     while (*p) {
@@ -1884,14 +1884,14 @@ static esp_err_t config_post(httpd_req_t *req) {
         if (strcmp(p, "oled_bright") == 0) {
             long v = strtol(val, NULL, 10);
             if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
-                cfg_next->oled_brightness_pct = (uint8_t)v;
+                cfg_next.oled_brightness_pct = (uint8_t)v;
             } else {
                 oor = true;   // V2.5.34: out-of-step value kept prior — report it
             }
         }
         // Generic schema dispatch. Returns true if `p` matched a known
         // field; out-of-range numerics keep prior value and set `oor`.
-        else if (!config_post_apply_field(cfg_next, p, val, &oor)) {
+        else if (!config_post_apply_field(&cfg_next, p, val, &oor)) {
             // Non-schema control keys.
             if (strcmp(p, "save_restart") == 0) restart_after_save = true;
             // Plain "save" and any unknown keys are silently ignored.
@@ -1914,26 +1914,26 @@ static esp_err_t config_post(httpd_req_t *req) {
     // A disabled checkbox doesn't POST, so the form may send wifi_ht20=0
     // even while the UI showed it ticked; enforce the invariant here so
     // the stored state matches what the user saw.
-    if (cfg_next->wifi_11bg_only) cfg_next->wifi_ht20_only = true;
+    if (cfg_next.wifi_11bg_only) cfg_next.wifi_ht20_only = true;
 
     // External-antenna switch: silently force-disable on boards without the
     // hardware. Defence-in-depth — the UI already greys the checkbox, but a
     // hand-crafted POST could still set it.
 #if !HAL_HAS_ANTENNA_SWITCH
-    cfg_next->use_external_antenna = false;
+    cfg_next.use_external_antenna = false;
 #endif
 
     // V2.5.19: same defence-in-depth for the I²C pin-out route — force-disable
     // on boards without the alternate pads (UI already greys it).
 #if !HAL_HAS_I2C_PINOUT_SWITCH
-    cfg_next->i2c_pinout = false;
+    cfg_next.i2c_pinout = false;
 #endif
 
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
     // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the
     // previously saved value rather than clobbering it to false — that way
     // the user's preference survives a round-trip through "global PS off".
-    if (cfg_next->wifi_ps_disabled) cfg_next->ftp_ps_disabled = s_cfg->ftp_ps_disabled;
+    if (cfg_next.wifi_ps_disabled) cfg_next.ftp_ps_disabled = s_cfg->ftp_ps_disabled;
 
     // V2.5.4: the radiation-only upload targets (Radmon, GMCMap, ThingSpeak)
     // are meaningless without the Geiger tube. The UI greys + force-unchecks
@@ -1941,29 +1941,31 @@ static esp_err_t config_post(httpd_req_t *req) {
     // invariant here so a hand-crafted POST can't enable them, and so the
     // stored config stays honest. Unlike ftp_ps_dis we do NOT preserve the
     // prior choice — "tube off" genuinely turns these off, not just hides them.
-    if (!cfg_next->tube_enabled) {
-        cfg_next->send_radmon = false;
-        cfg_next->send_gmc = false;
-        cfg_next->send_thingspeak = false;
-        cfg_next->pcnt_filter = false;   // V2.5.16: width filter needs count pulses
-        cfg_next->deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
+    if (!cfg_next.tube_enabled) {
+        cfg_next.send_radmon = false;
+        cfg_next.send_gmc = false;
+        cfg_next.send_thingspeak = false;
+        cfg_next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
+        cfg_next.deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
     }
 
     // V2.5.30: dead-time guard is mutually exclusive with pcnt_filter — the guard
     // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
     // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
     // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
-    if (cfg_next->pcnt_filter) {
-        cfg_next->deadtime_guard = false;
+    if (cfg_next.pcnt_filter) {
+        cfg_next.deadtime_guard = false;
     }
 
-    *s_cfg = *cfg_next;
-    free(cfg_next);
-    esp_err_t err = config_save(s_cfg);
+    // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
+    // stays unchanged so the device continues on the old in-memory config
+    // and the user can retry without a RAM/NVS split-brain until next reboot.
+    esp_err_t err = config_save(&cfg_next);
     if (err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
+    *s_cfg = cfg_next;
 
     // V2.3.30: live-apply OLED/SerLCD brightness (no reboot for this field).
     // No-op if the panel is dark (show_display=false) or if the value didn't
@@ -2015,7 +2017,7 @@ static esp_err_t config_post(httpd_req_t *req) {
           "<p><a href=\"/config\">Back to configuration</a> &middot; "
           "<a href=\"/\">Back to status</a></p>";
 
-    char page[1024];
+    static char page[1024];
     int n = append_safe(page, sizeof(page), 0,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Saved</title></head><body><h1>%s</h1>", h1);

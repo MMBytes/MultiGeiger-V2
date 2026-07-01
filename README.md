@@ -171,6 +171,13 @@ The merged image bundles the bootloader, partition table, OTA slot pointer, and 
 
 The device comes up as an open WiFi AP named after its chip ID (derived from the MAC). Connect to it, browse to `http://192.168.4.1/config`, and set WiFi credentials, admin password, and back-end choices. After the 2-minute boot window or a manual reboot, it joins your network in STA mode.
 
+Default web credentials (change these on first login):
+
+| Field | Default |
+|---|---|
+| Username | `admin` |
+| Password | `ESP32Geiger` |
+
 ## Build from source
 
 Needed only if you want to modify the firmware.

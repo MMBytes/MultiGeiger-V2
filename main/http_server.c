@@ -2369,9 +2369,9 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     }
     free(buf);
 
-    const int64_t recv_ms = (esp_timer_get_time() - t_start) / 1000;
-    ESP_LOGI(TAG, "OTA receive complete: %u KB in %llds (%u KB/s)",
-             (unsigned)(total / 1024), (long long)(recv_ms / 1000),
+    const uint32_t recv_ms = (uint32_t)((esp_timer_get_time() - t_start) / 1000);
+    ESP_LOGI(TAG, "OTA receive complete: %u KB in %us (%u KB/s)",
+             (unsigned)(total / 1024), (unsigned)(recv_ms / 1000),
              recv_ms > 0 ? (unsigned)((uint64_t)(total / 1024) * 1000 / recv_ms) : 0);
 
     err = esp_ota_end(ota);

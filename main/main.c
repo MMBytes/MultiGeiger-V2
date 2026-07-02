@@ -115,7 +115,18 @@ bool main_ota_in_progress(void) {
 }
 
 // --- Soak diagnostics (carried over) ---
+// t_attempt_start_us is written by mark_attempt() from BOTH the main task
+// (retry/roaming-safety-net paths) and the WiFi event task (STA_START), then
+// read back on the event task in on_wifi_event to compute last_assoc_s — a
+// genuine cross-task int64_t (two-instruction store on 32-bit Xtensa, torn-
+// read hazard). Guarded with its own spinlock rather than demoted to 32-bit
+// (as n_attempts/sync_tv_sec were) because the consumer needs sub-second
+// precision; follows the g_last_cycle_at_mux precedent below.
 static int64_t  t_attempt_start_us = 0;
+static portMUX_TYPE t_attempt_start_mux = portMUX_INITIALIZER_UNLOCKED;
+// t_sta_connected_us: written and read only within on_wifi_event/on_ip_event,
+// both on the single default-event-loop task — never touched by the main
+// task, so no cross-task hazard and no lock needed.
 static int64_t  t_sta_connected_us = 0;
 // uint32_t — written on the WiFi event task, read on the main task; on 32-bit
 // Xtensa a uint64_t store is two instructions (torn-read hazard). Wraps after
@@ -244,9 +255,13 @@ bool main_target_enabled(int target_id) {
 #if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
 // V2.5.34 safety-net (PSRAM/roaming builds only): post-association we delegate
 // reconnects to the experimental roaming app. If it ever stalls, force our own
-// esp_wifi_connect() after this long with no IP. Far longer than a normal roam/
-// reconnect (ms–seconds) so it never races the app — only fires on a genuine stall.
-#define ROAM_RECONNECT_SAFETY_NET_US (30 * 1000000LL)   // 30 s
+// esp_wifi_connect() after this long with no IP. Deliberately long (minutes,
+// not seconds) so the app is left to fully own ordinary roams/reconnects —
+// a router reboot can keep it retrying for 1-2 min before it succeeds on its
+// own (observed 2026-07-01), and firing this mid-retry only adds a spurious
+// disconnect/reconnect. This is a last-resort backstop for a genuine stall,
+// not a speed guarantee.
+#define ROAM_RECONNECT_SAFETY_NET_US (300 * 1000000LL)   // 5 min
 #endif
 static int64_t  boot_time_us       = 0;
 static int64_t  sta_transition_us  = 0;
@@ -254,7 +269,9 @@ static bool     g_have_sta_creds   = false;
 static volatile bool g_sta_connect_allowed = false;
 
 static void mark_attempt(void) {
+    portENTER_CRITICAL(&t_attempt_start_mux);
     t_attempt_start_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&t_attempt_start_mux);
     n_attempts++;
 }
 
@@ -328,7 +345,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case WIFI_EVENT_STA_CONNECTED: {
         wifi_event_sta_connected_t *e = (wifi_event_sta_connected_t *)data;
         t_sta_connected_us = esp_timer_get_time();
-        last_assoc_s = (t_sta_connected_us - t_attempt_start_us) / 1e6f;
+        portENTER_CRITICAL(&t_attempt_start_mux);
+        int64_t attempt_start_us = t_attempt_start_us;
+        portEXIT_CRITICAL(&t_attempt_start_mux);
+        last_assoc_s = (t_sta_connected_us - attempt_start_us) / 1e6f;
         n_connects++;
         ESP_LOGI(TAG, "STA_CONNECTED #%" PRIu32 ": ch=%d auth=%d bssid=" MACSTR " assoc=%.3fs",
                  n_connects, e->channel, e->authmode,
@@ -1369,9 +1389,11 @@ void app_main(void) {
         // app. If it ever stalls — fails to bring the link back — nobody else
         // would, so after ROAM_RECONNECT_SAFETY_NET_US with no IP force one
         // esp_wifi_connect() ourselves and re-arm to retry. Cleared on GOT_IP.
-        // The long window means this never races the app's normal ms–seconds
-        // reconnect; it only fires on a genuine stall (defence-in-depth for the
-        // experimental roaming app).
+        // The multi-minute window is deliberate: it lets the app own ordinary
+        // roams/reconnects end to end (a router reboot alone can take 1-2 min
+        // of its own retries to resolve) without this backstop racing it and
+        // forcing a spurious disconnect mid-retry; it only fires on a genuine
+        // stall (defence-in-depth for the experimental roaming app).
         if (g_sta_connect_allowed && n_got_ip > 0 && t_roam_defer_us > 0 &&
             (esp_timer_get_time() - t_roam_defer_us) > ROAM_RECONNECT_SAFETY_NET_US) {
             ESP_LOGW(TAG, "roaming app did not reconnect within %llds — forcing connect",

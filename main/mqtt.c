@@ -600,12 +600,12 @@ void mqtt_publish_state(const main_status_t *st,
         log_ftp_get_stats(&f);
         APPEND(",\"ftp_ok\":%s",       f.have_last && f.last_ok ? "true" : "false");
         APPEND(",\"ftp_bytes\":%" PRIu32, f.last_bytes);
-        int64_t age_s = 0;
+        int32_t age_s = 0;
         if (f.have_last && f.last_at > 0) {
             time_t now = time(NULL);
-            if (now > (time_t)f.last_at) age_s = (int64_t)now - f.last_at;
+            if (now > (time_t)f.last_at) age_s = (int32_t)((int64_t)now - f.last_at);
         }
-        APPEND(",\"ftp_age_s\":%" PRId64, age_s);
+        APPEND(",\"ftp_age_s\":%" PRId32, age_s);
     }
 #endif
 

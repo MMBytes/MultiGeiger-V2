@@ -9,6 +9,21 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.5 — roaming-app safety-net widened to 5 min; t_attempt_start_us torn-read fix; three int64→32-bit demotions
+
+**Roaming-app reconnect safety-net widened 30 s → 5 min** (`main.c`, `ROAM_RECONNECT_SAFETY_NET_US`): A 2026-07-01 router restart on a live node showed the 30 s backstop firing four times while the ESP-IDF roaming app was still legitimately retrying (all `reason=201`, AP unreachable during the router's own reboot) — three were harmless no-ops (`sta is connecting, return error`), but one collided with a link the roaming app had just re-established, forcing a spurious extra disconnect/reconnect (`sta is connected, disconnect before connecting to new ap`). The roaming app went on to resolve the reconnect itself in ~111 s. Widened to 5 min so the experimental roaming app is left to fully own ordinary roams/reconnects (a router reboot alone can take 1-2 min of its own retries); the safety-net now only fires on a genuine stall. No other watchdog is affected — `STA_STARTUP_TIMEOUT_US` (10 min) only guards the *first* post-boot connection and disarms permanently after it, and MQTT's own `reconnect_timeout_ms` (30 s) is independent of WiFi link state.
+
+**`t_attempt_start_us` torn-read fix** (`main.c`): Investigating the safety-net incident above surfaced a torn-read hazard the V2.6.3 sweep missed: `t_attempt_start_us` (`int64_t`) is written by `mark_attempt()` from *both* the main task (retry / roaming-safety-net paths) and the WiFi event task (`STA_START`), then read back on the WiFi event task to compute `last_assoc_s` — a genuine two-instruction-store race on 32-bit Xtensa. Unlike the V2.6.3 counters, this feeds a sub-second diagnostic (`assoc=2.503s`), so it wasn't a demotion candidate; guarded instead with a dedicated `portMUX_TYPE` (`t_attempt_start_mux`), following the existing `g_last_cycle_at_mux` precedent. A follow-up full-codebase sweep of every cross-task 64-bit variable found no other unprotected instances — the rest of the codebase already carries this lesson consistently (spinlock-guarded, demoted, single-task-only, or write-once-at-boot).
+
+**Three bounded-duration `int64_t` → 32-bit demotions** (found by a general "does this need 64 bits" sweep, independent of thread-safety):
+- `mqtt.c`: `ftp_age_s` (seconds since last FTP upload, MQTT state payload) → `int32_t`.
+- `http_server.c`: OTA-upload `recv_ms` (elapsed receive time) → `uint32_t`, dropping the `(long long)` print cast.
+- `ntp.c`: `uptime_s` inside `sync_cb()` → `uint32_t`, matching the `sync_tv_sec_off`/`s_boot_epoch_off` convention two lines above it in the same function — the closest thing to an actual inconsistency found. All three are bounded durations (at most weeks), nowhere near the ~136-year range of `uint32_t`; wall-clock `time_t` epochs and absolute `esp_timer_get_time()` microsecond timestamps elsewhere were deliberately left 64-bit (Y2038 safety / multi-day uptime range).
+
+**Why now:** Prompted by reviewing a real router-restart log; each fix led to the next (safety-net tuning → torn-read audit → general 64-bit sweep) rather than being separately planned.
+
+---
+
 ## V2.6.4 — fix stack overflow on POST /config + config_save ordering + static sweep
 
 **Stack overflow (primary):** `config_t next = *s_cfg` in `config_post` (`http_server.c`) put a ~4 KB struct on the IDF httpd task's 8 KB stack. The struct is dominated by `mqtt_tls_ca[2401]` (added in V2.4.6). Combined with `char page[1024]` and ~800 bytes of IDF httpd framework overhead the 8 KB budget was exhausted — confirmed via coredump: `***ERROR*** A stack overflow in task http has been detected.`

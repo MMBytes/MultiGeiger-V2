@@ -40,8 +40,8 @@ static void sync_cb(struct timeval *tv) {
     // server times; the inner guard stops a negative offset when uptime_s
     // exceeds (tv_sec - EPOCH_2026) (e.g. very long crystal-only run).
     if (tv->tv_sec > EPOCH_2026) {
-        int64_t uptime_s = esp_timer_get_time() / 1000000LL;
-        time_t  epoch    = tv->tv_sec - (time_t)uptime_s;
+        uint32_t uptime_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+        time_t   epoch    = tv->tv_sec - (time_t)uptime_s;
         if (epoch > EPOCH_2026) {
             s_boot_epoch_off = (uint32_t)(epoch - EPOCH_2026);
         }

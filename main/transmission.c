@@ -1420,16 +1420,24 @@ static void tx_run(const tx_context_t *c) {
                  (unsigned long)slog_tx, (unsigned long)slog_drops);
     }
 
-    // V2.6.6: standing requirement — log battery status every TX cycle
-    // when a battery is attached. Gated on fuel_gauge_present() so a
-    // no-battery FeatherS3-D (and every other board) pays only the one
-    // cheap VCELL presence-check read already happening — no extra I²C
-    // traffic, no log line, when absent.
-    if (fuel_gauge_present()) {
+    // V2.6.6: standing requirement — log power-supply status every
+    // TX cycle on boards with the MAX17048. Gated on fuel_gauge_ready()
+    // (chip present at init) rather than fuel_gauge_present() (VCELL
+    // threshold): bench testing found the threshold false-positives
+    // whenever USB power is present with no LiPo attached — the onboard
+    // charger IC's unloaded output floats near ~4.2V, indistinguishable
+    // from a real battery by voltage alone (see fuel_gauge.h). Labelled
+    // "Power supply/Battery" rather than "battery" for the same reason —
+    // this is a raw VCELL/SoC/rate reading, not a verified battery report.
+    // VBUS status alongside it gives the context needed to interpret it:
+    // VBUS present + no separate battery config = expect charger float,
+    // not a real reading.
+    if (fuel_gauge_ready()) {
         float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
         if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {
-            ESP_LOGI(TAG, "battery: %.3fV %.1f%% %+.2f%%/hr",
-                     (double)batt_v, (double)batt_soc, (double)batt_rate);
+            ESP_LOGI(TAG, "Power supply/Battery: %.3fV %.1f%% %+.2f%%/hr (VBUS %s)",
+                     (double)batt_v, (double)batt_soc, (double)batt_rate,
+                     fuel_gauge_vbus_present() ? "present" : "absent");
         }
     }
 

@@ -183,6 +183,14 @@
     // if the config flag is set; harmless if not.
     #define PIN_LED_BUILTIN         13
 
+    // V2.6.6: VBUS-present detect (digital only — ESP32-S3 ADCs only cover
+    // GPIO 1-20). High = USB 5V present. Read alongside the fuel gauge so
+    // the power-supply log line can report *why* VCELL might be sitting at
+    // a plausible-looking voltage with no LiPo attached (charger IC output
+    // floats near its ~4.2V regulation setpoint when unloaded, which is
+    // indistinguishable from a real battery by voltage alone).
+    #define PIN_VBUS_DETECT         34
+
     // I2C bus = STEMMA QT / Qwiic connector (the env sensor breakout plugs in
     // here directly via a Qwiic cable; no I2C wiring lands on the PCB).
     #define PIN_I2C_SDA              8

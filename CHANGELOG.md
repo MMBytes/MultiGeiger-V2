@@ -31,6 +31,20 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   battery is attached (standing requirement, independent of presence-
   detection cost — every other board and a no-battery FeatherS3-D pay
   nothing extra).
+- **Post-ship bench correction**: real hardware testing on two FeatherS3-D
+  units (USB-powered, no LiPo attached) found VCELL sitting at 4.2–4.4V
+  instead of the assumed ~0V — the onboard LiPo charger IC's output
+  floats up near its own ~4.2V regulation setpoint when unloaded, which
+  is indistinguishable from a real near-full battery by voltage alone.
+  `fuel_gauge_present()`'s threshold is therefore unreliable whenever
+  VBUS is present (the common case) and is left as-is for now — `/status`,
+  MQTT, and HA discovery still gate on it. The per-TX-cycle log line is
+  changed to be honest about this: it now gates on a new
+  `fuel_gauge_ready()` (chip present at init, not a VCELL guess) instead
+  of `fuel_gauge_present()`, is relabelled from `"battery"` to `"Power
+  supply/Battery"`, and reports VBUS state (new `fuel_gauge_vbus_present()`,
+  digital read on new `PIN_VBUS_DETECT`/GPIO34) alongside the reading so
+  the ambiguity is visible rather than silently resolved.
 
 ## V2.6.5 — roaming-app safety-net widened to 5 min; t_attempt_start_us torn-read fix; three int64→32-bit demotions
 

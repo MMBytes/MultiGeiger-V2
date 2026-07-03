@@ -7,6 +7,7 @@
 #if HAL_HAS_FUEL_GAUGE
 
 #include "esp_log.h"
+#include "driver/gpio.h"
 
 static const char *TAG = "fuel_gauge";
 
@@ -65,7 +66,21 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     // here regardless of whether a LiPo is attached.
     s_ready = true;
     ESP_LOGI(TAG, "MAX17048 ready at 0x%02X", MAX17048_ADDR);
+
+    // VBUS-present detect — plain digital input, driven by dedicated board
+    // circuitry (not a strap, no pull needed).
+    gpio_set_direction(PIN_VBUS_DETECT, GPIO_MODE_INPUT);
+
     return ESP_OK;
+}
+
+bool fuel_gauge_ready(void) {
+    return s_ready;
+}
+
+bool fuel_gauge_vbus_present(void) {
+    if (!s_ready) return false;
+    return gpio_get_level(PIN_VBUS_DETECT) != 0;
 }
 
 bool fuel_gauge_present(void) {
@@ -116,6 +131,8 @@ esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) 
 #else   // HAL_HAS_FUEL_GAUGE == 0 → no-op stubs
 
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) { (void)bus; return ESP_OK; }
+bool      fuel_gauge_ready(void)                       { return false; }
+bool      fuel_gauge_vbus_present(void)                { return false; }
 bool      fuel_gauge_present(void)                     { return false; }
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
     (void)volts; (void)soc_pct; (void)rate_pct_per_hr;

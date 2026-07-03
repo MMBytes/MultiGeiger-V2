@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log
+
+- New `fuel_gauge.c`/`.h` driver for the onboard MAX17048 (I²C 0x36,
+  FeatherS3-D's STEMMA1/primary bus only — every other board compiles a
+  zero-cost stub).
+- Battery presence is auto-detected from VCELL (present > 2000 mV,
+  absent < 1500 mV, hysteresis in between) — no config toggle, no NVS
+  key. The chip lives on the always-on 3.3V rail so it ACKs on I²C
+  regardless of battery state; the threshold distinguishes a real cell
+  from the ~0V no-battery reading with wide margin on both sides.
+- `/status` gains a Battery block (voltage / charge % / rate) when a
+  battery is present.
+- MQTT rich-state JSON gains `batt_v` / `batt_soc` / `batt_rate`,
+  published only when a battery is attached.
+- Three new Home Assistant discovery entities: Battery voltage (V,
+  device_class `voltage`), Battery (%, device_class `battery`), Battery
+  charge rate (%/h) — the first entities in this codebase to use HA's
+  `battery`/`voltage` device classes.
+- One `ESP_LOGI` line per TX cycle reporting voltage/SoC/rate whenever a
+  battery is attached (standing requirement, independent of presence-
+  detection cost — every other board and a no-battery FeatherS3-D pay
+  nothing extra).
+
 ## V2.6.5 — roaming-app safety-net widened to 5 min; t_attempt_start_us torn-read fix; three int64→32-bit demotions
 
 **Roaming-app reconnect safety-net widened 30 s → 5 min** (`main.c`, `ROAM_RECONNECT_SAFETY_NET_US`): A 2026-07-01 router restart on a live node showed the 30 s backstop firing four times while the ESP-IDF roaming app was still legitimately retrying (all `reason=201`, AP unreachable during the router's own reboot) — three were harmless no-ops (`sta is connecting, return error`), but one collided with a link the roaming app had just re-established, forcing a spurious extra disconnect/reconnect (`sta is connected, disconnect before connecting to new ap`). The roaming app went on to resolve the reconnect itself in ~111 s. Widened to 5 min so the experimental roaming app is left to fully own ordinary roams/reconnects (a router reboot alone can take 1-2 min of its own retries); the safety-net now only fires on a genuine stall. No other watchdog is affected — `STA_STARTUP_TIMEOUT_US` (10 min) only guards the *first* post-boot connection and disarms permanently after it, and MQTT's own `reconnect_timeout_ms` (30 s) is independent of WiFi link state.

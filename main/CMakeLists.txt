@@ -19,6 +19,7 @@ idf_component_register(
         "i2c_bus.c"
         "als.c"
         "veml7700.c"
+        "fuel_gauge.c"
         "pm_sensor.c"
         "sps30.c"
         "noise_sensor.c"

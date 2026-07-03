@@ -36,6 +36,7 @@
 #include "display.h"           // V2.3.30: live-apply OLED brightness via display_set_contrast
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
+#include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
 #include "tube.h"
 #include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
@@ -704,6 +705,32 @@ static void format_als(char *out, size_t sz) {
     append_safe(out, sz, n, "</div>");
 }
 
+// --- Battery (MAX17048 fuel gauge, FeatherS3-D only) -----------------------
+// V2.6.6: presence is auto-detected (VCELL threshold with hysteresis — see
+// fuel_gauge.h) so this block is simply absent on every other board and on
+// a FeatherS3-D with no LiPo attached. Read happens on every /status
+// request, same cost class as the ambient-light block above it.
+static void format_battery(char *out, size_t sz) {
+    if (!fuel_gauge_present()) { out[0] = 0; return; }
+
+    float volts = 0.0f, soc = 0.0f, rate = 0.0f;
+    if (fuel_gauge_read(&volts, &soc, &rate) != ESP_OK) {
+        int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
+        append_safe(out, sz, n, "<b>Sensor:</b> MAX17048 (I²C, 0x36)<br>read failed</div>");
+        return;
+    }
+
+    int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
+    n = append_safe(out, sz, n,
+        "<b>Sensor:</b> MAX17048 (I²C, 0x36)<br>"
+        "<b>Voltage:</b> %.3f V<br>"
+        "<b>Charge:</b> %.1f %%<br>"
+        "<b>Rate:</b> %+.2f %%/hr (%s)",
+        (double)volts, (double)soc, (double)rate,
+        rate > 0.0f ? "charging" : (rate < 0.0f ? "discharging" : "idle"));
+    append_safe(out, sz, n, "</div>");
+}
+
 // --- GNSS / position block --------------------------------------------------
 // V2.5.8: shown only when a GNSS receiver was auto-detected at boot. Reads the
 // cached fix snapshot — no I²C here; the receiver is drained on the main
@@ -1154,6 +1181,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     }
     format_environment(buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_als        (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_battery    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_gnss       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;

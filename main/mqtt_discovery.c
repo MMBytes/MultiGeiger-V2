@@ -34,6 +34,7 @@
 #include "noise_sensor.h"
 #include "pm_sensor.h"
 #include "veml7700.h"
+#include "fuel_gauge.h"   // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "version.h"
 
 static const char *TAG = "mqtt_disc";
@@ -55,6 +56,7 @@ static bool env_p_present_(void)         { return env_p_present(); }
 static bool pm_present_(void)            { return pm_sensor_present();  }
 static bool noise_present_(void)         { return noise_sensor_present(); }
 static bool any_light_present_(void)     { return veml7700_present() || als_present(); }
+static bool fuel_gauge_present_(void)    { return fuel_gauge_present(); }
 
 // Geiger-tube entities ride on a separate gate — main.c's cfg.tube_enabled
 // (passed in via mqtt_discovery_publish_all). Cached at module scope so
@@ -159,6 +161,15 @@ static const ha_entity_t ENTITIES[] = {
 
     // --- Ambient light (VEML7700 OR ALS-PT19) -----------------------------
     { "lux",        "lux",        "Illuminance",     "illuminance",    "lx",    "measurement",      NULL, NULL, any_light_present_, NULL },
+
+    // --- Battery (MAX17048 fuel gauge, FeatherS3-D only) -------------------
+    // V2.6.6: first entities in this table to use HA's standard "battery"
+    // and "voltage" device classes. Presence auto-detected — see
+    // fuel_gauge.h — so these are simply absent (not "unavailable") on
+    // every other board.
+    { "batt_v",    "battery_voltage", "Battery voltage",      "voltage", "V",   "measurement", NULL,                 NULL, fuel_gauge_present_, NULL },
+    { "batt_soc",  "battery",         "Battery",               "battery", "%",   "measurement", NULL,                 NULL, fuel_gauge_present_, NULL },
+    { "batt_rate", "battery_rate",    "Battery charge rate",   NULL,      "%/h", "measurement", "mdi:battery-clock",  NULL, fuel_gauge_present_, NULL },
 
     // --- V2.4.26: System diagnostics (all boards) --------------------------
     // All marked entity_category=diagnostic so HA tucks them under the

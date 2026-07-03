@@ -46,6 +46,7 @@
 #include "sysinfo.h"
 #include "transmission.h"
 #include "veml7700.h"
+#include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "version.h"
 
 // Internal hook from mqtt_discovery.c — used at init to seed the
@@ -528,6 +529,19 @@ void mqtt_publish_state(const main_status_t *st,
     }
     if (have_lux) {
         APPEND(",\"lux\":%.1f", lux);
+    }
+
+    // Battery (MAX17048, FeatherS3-D only). Auto-detected — see
+    // fuel_gauge.h for the presence-threshold rationale. Absent entirely
+    // from the JSON (not zeros) when no battery is attached, so HA shows
+    // "unavailable" rather than a misleading 0V/0%.
+    if (fuel_gauge_present()) {
+        float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
+        if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {
+            APPEND(",\"batt_v\":%.3f",    (double)batt_v);
+            APPEND(",\"batt_soc\":%.1f",  (double)batt_soc);
+            APPEND(",\"batt_rate\":%.2f", (double)batt_rate);
+        }
     }
 
     // --- V2.4.26: system stats (all boards) -------------------------------

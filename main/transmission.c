@@ -9,6 +9,7 @@
 #include <time.h>
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
 #include "syslog.h"             // V2.5.29: syslog_get_stats (per-cycle UDP drop report)
+#include "fuel_gauge.h"         // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "main_status.h"        // V2.5.18: main_request_restart (heap-guard reboot)
 #include "ntp.h"                // V2.6.2: ntp_uptime_s() for NTP-accurate uptime in heap-guard log
 #include "esp_crt_bundle.h"
@@ -1417,6 +1418,19 @@ static void tx_run(const tx_context_t *c) {
         syslog_get_stats(&slog_tx, &slog_drops);
         ESP_LOGI(TAG, "syslog udp: tx=%lu drops=%lu (since boot)",
                  (unsigned long)slog_tx, (unsigned long)slog_drops);
+    }
+
+    // V2.6.6: standing requirement — log battery status every TX cycle
+    // when a battery is attached. Gated on fuel_gauge_present() so a
+    // no-battery FeatherS3-D (and every other board) pays only the one
+    // cheap VCELL presence-check read already happening — no extra I²C
+    // traffic, no log line, when absent.
+    if (fuel_gauge_present()) {
+        float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
+        if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {
+            ESP_LOGI(TAG, "battery: %.3fV %.1f%% %+.2f%%/hr",
+                     (double)batt_v, (double)batt_soc, (double)batt_rate);
+        }
     }
 
     // V2.5.18: fragmentation auto-reboot, judged on the resting snapshot just

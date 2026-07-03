@@ -31,6 +31,12 @@
  *                            on PIN_ALS (FeatherS3-D's IO4); als.c is active
  *                            and /status renders an ambient-light row. 0 elsewhere
  *                            stubs the driver out.
+ *    HAL_HAS_FUEL_GAUGE      V2.6.6: 1 = onboard MAX17048 battery fuel gauge
+ *                            at I²C 0x36 on the primary bus (FeatherS3-D's
+ *                            STEMMA1/IO8-9); fuel_gauge.c is active and
+ *                            /status + MQTT + HA discovery gain battery
+ *                            rows once a battery is auto-detected. 0
+ *                            elsewhere stubs the driver out entirely.
  *    HAL_LOG_RING_BYTES      applog ring size — varies by available memory
  *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
  *                            small (6 KB) on internal-DRAM-only boards, larger
@@ -57,6 +63,7 @@
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
+    #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
     // permanent heap allocation on the Heltec, sitting in internal SRAM
     // forever. Dropping 15 KB gives that back to free heap (~140 KB → ~155 KB
@@ -115,6 +122,7 @@
     // is register-compatible with SSD1306.
     #define HAL_HAS_OLED            1   // External SSD1309 on STEMMA1 (optional — probe-detected)
     #define HAL_HAS_ALS             1   // V2.3.29: onboard ALS-PT19 ambient-light sensor on PIN_ALS
+    #define HAL_HAS_FUEL_GAUGE      1   // V2.6.6: onboard MAX17048 fuel gauge at I2C 0x36
     #define HAL_HAS_PSRAM           1   // 8 MB QSPI PSRAM
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No Vext gate — sensors powered via Qwiic 3V3
@@ -256,6 +264,7 @@
     // /config (auto / radiation / rotation). Auto on QT Py + SSD1306 still
     // picks radiation (small panel → single page).
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
+    #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
     // FeatherS3-D since the PSRAM cost is negligible.
@@ -349,6 +358,7 @@
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
+    #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — same generous margin as
     // FeatherS3-D / QT Py since the PSRAM cost is negligible.

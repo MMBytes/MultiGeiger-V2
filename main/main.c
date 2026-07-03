@@ -19,6 +19,7 @@
 
 #include "als.h"
 #include "veml7700.h"
+#include "fuel_gauge.h"   // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "gnss.h"               // V2.5.8: I²C GNSS (PA1010D / MAX-M10S)
 #include "applog.h"
 #include "coredump.h"
@@ -994,6 +995,11 @@ void app_main(void) {
     // (HAL_HAS_I2C_PINOUT_SWITCH); reboot-required by construction.
     i2c_bus_set_primary_pinout(g_cfg.i2c_pinout);
     i2c_master_bus_handle_t bus1 = i2c_bus_get_primary();
+
+    // V2.6.6: MAX17048 fuel gauge is a fixed onboard part on STEMMA1/
+    // primary — unlike the pluggable env/PM/noise sensors below, it never
+    // needs the secondary-bus fallback probe.
+    fuel_gauge_init(bus1);
 
     // Helper macro: try a sensor's init on bus 1; if no device bound,
     // try bus 2; if a device was found there, keep the bus alive.

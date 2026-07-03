@@ -79,7 +79,6 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     // No init register writes — the chip free-runs once powered, and it's
     // on the always-on 3.3V rail (independent of the battery), so it ACKs
     // here regardless of whether a LiPo is attached.
-    s_ready = true;
 
     // Diagnostic snapshot at startup — VERSION is the register Adafruit's
     // own MAX1704x libraries use as their sole "battery attached" sentinel
@@ -110,6 +109,10 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     // VBUS-present detect — plain digital input, driven by dedicated board
     // circuitry (not a strap, no pull needed).
     gpio_set_direction(PIN_VBUS_DETECT, GPIO_MODE_INPUT);
+
+    // Set only after the GPIO is actually configured, so no reader can ever
+    // observe s_ready==true with PIN_VBUS_DETECT still in its power-on state.
+    s_ready = true;
 
     return ESP_OK;
 }
@@ -143,18 +146,24 @@ bool fuel_gauge_present(void) {
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
     if (!s_ready) return ESP_FAIL;
 
+    // All requested registers are read into locals first, and the output
+    // pointers are only written once every read has succeeded — so a
+    // mid-sequence I2C failure never leaves the caller with a partially
+    // populated result (matches veml7700_read()'s all-or-nothing contract).
+    float v = 0.0f, s = 0.0f, r = 0.0f;
+
     if (volts) {
         uint16_t raw = 0;
         esp_err_t err = reg_read16(REG_VCELL, &raw);
         if (err != ESP_OK) return err;
-        *volts = (float)raw * 0.000078125f;   // 78.125 uV/LSB
+        v = (float)raw * 0.000078125f;   // 78.125 uV/LSB
     }
 
     if (soc_pct) {
         uint16_t raw = 0;
         esp_err_t err = reg_read16(REG_SOC, &raw);
         if (err != ESP_OK) return err;
-        *soc_pct = (float)raw / 256.0f;        // 1/256 %/LSB
+        s = (float)raw / 256.0f;        // 1/256 %/LSB
     }
 
     if (rate_pct_per_hr) {
@@ -162,8 +171,12 @@ esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) 
         esp_err_t err = reg_read16(REG_CRATE, &raw);
         if (err != ESP_OK) return err;
         // CRATE is signed — reinterpret the raw bit pattern before scaling.
-        *rate_pct_per_hr = (float)(int16_t)raw * 0.208f;  // 0.208 %/hr/LSB
+        r = (float)(int16_t)raw * 0.208f;  // 0.208 %/hr/LSB
     }
+
+    if (volts)          *volts           = v;
+    if (soc_pct)         *soc_pct         = s;
+    if (rate_pct_per_hr) *rate_pct_per_hr = r;
 
     return ESP_OK;
 }

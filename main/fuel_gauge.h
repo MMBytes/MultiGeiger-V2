@@ -48,8 +48,10 @@
  *  No-op (returns ESP_OK without touching the bus) on boards without
  *  HAL_HAS_FUEL_GAUGE.
  *
- *  Idempotent: safe to call multiple times; subsequent calls return
- *  ESP_OK without re-probing if already initialised.
+ *  Idempotent: safe to call multiple times. A second call is a hard no-op
+ *  — it returns ESP_OK immediately without re-probing the chip, re-adding
+ *  the I2C device, or reconfiguring PIN_VBUS_DETECT; it does not refresh
+ *  or re-validate any state.
  */
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus);
 
@@ -62,10 +64,9 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus);
 bool fuel_gauge_ready(void);
 
 /** @brief True if VBUS (USB 5V) is present, per the dedicated digital
- *  detect pin. Always true while running on USB power (the ESP32-S3 can't
- *  execute code on LiPo-only without it); reads false only when running
- *  purely off battery with USB unplugged. Always false on boards without
- *  HAL_HAS_FUEL_GAUGE.
+ *  detect pin. Always true while running on USB power; reads false only
+ *  when running purely off battery with USB unplugged. Always false on
+ *  boards without HAL_HAS_FUEL_GAUGE.
  */
 bool fuel_gauge_vbus_present(void);
 

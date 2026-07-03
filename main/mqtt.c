@@ -442,6 +442,11 @@ void mqtt_publish_state(const main_status_t *st,
     //     fails HA's parse for that publish — so keep real headroom here.
     //   - V2.5.6 added cpm5/cpm15 (~24 B) to the rich radiation block; still
     //     well within the ~380 B slack, so the 1792 B ceiling is unchanged.
+    //   - V2.6.6 added batt_v/batt_soc/batt_rate (~53 B worst case). Full
+    //     re-derivation of every field's worst-case width (all optional
+    //     blocks present, uint32-max counters, signed floats at their
+    //     widest) totals ~1466 B against this 1792 B buffer — ~326 B
+    //     (~18%) slack remains. 1792 B ceiling still unchanged.
     // Stack-allocated — cycle task has 4 KB+ stack, so 1792 / 768 B both fit.
 #ifdef MQTT_RICH_STATE
     char buf[1792];   // 8 upload targets + heap split + cpm5/15 + all sensors + FTP

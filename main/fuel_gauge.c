@@ -16,7 +16,14 @@ static const char *TAG = "fuel_gauge";
 // Register addresses (per Maxim/Analog Devices MAX17048/49 datasheet).
 #define REG_VCELL       0x02   // RO: 16-bit cell voltage, 78.125 uV/LSB
 #define REG_SOC         0x04   // RO: 16-bit state of charge, 1/256 %/LSB
+#define REG_VERSION     0x08   // RO: 16-bit chip/firmware version
+#define REG_HIBRT       0x0A   // R/W: 16-bit HibThr(hi)/ActThr(lo) hibernate thresholds
+#define REG_CONFIG      0x0C   // R/W: 16-bit RCOMP/sleep/alert config
+#define REG_VALERT      0x14   // R/W: 16-bit VALRT min(hi)/max(lo) alert thresholds
 #define REG_CRATE       0x16   // RO: 16-bit SIGNED charge rate, 0.208 %/hr/LSB
+#define REG_VRESET      0x18   // R/W: 8-bit reset-voltage threshold + comparator-disable
+#define REG_CHIPID      0x19   // RO: 8-bit chip ID
+#define REG_STATUS      0x1A   // R/W: 8-bit alert flags (RI/VH/VL/VR/HD/SC)
 
 // Presence hysteresis (mV). See fuel_gauge.h file header for the full
 // derivation — this dead zone sits between the empirical ~0V no-battery
@@ -37,6 +44,14 @@ static esp_err_t reg_read16(uint8_t reg, uint16_t *out) {
     esp_err_t err = i2c_master_transmit_receive(s_dev, &reg, 1, in, sizeof(in), 100);
     if (err != ESP_OK) return err;
     *out = ((uint16_t)in[0] << 8) | (uint16_t)in[1];
+    return ESP_OK;
+}
+
+static esp_err_t reg_read8(uint8_t reg, uint8_t *out) {
+    uint8_t in = 0;
+    esp_err_t err = i2c_master_transmit_receive(s_dev, &reg, 1, &in, 1, 100);
+    if (err != ESP_OK) return err;
+    *out = in;
     return ESP_OK;
 }
 
@@ -65,7 +80,32 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     // on the always-on 3.3V rail (independent of the battery), so it ACKs
     // here regardless of whether a LiPo is attached.
     s_ready = true;
-    ESP_LOGI(TAG, "MAX17048 ready at 0x%02X", MAX17048_ADDR);
+
+    // Diagnostic snapshot at startup — VERSION is the register Adafruit's
+    // own MAX1704x libraries use as their sole "battery attached" sentinel
+    // (0xFFFF if no response); logging it here lets us check whether that
+    // pattern ever shows up on our always-on-rail wiring. HIBRT/CONFIG/
+    // VALERT/VRESET are pure config registers we never write, so they stay
+    // at their power-on-reset defaults for the whole session — logged once
+    // here rather than per-TX. 0xFFFF/0xFF sentinels below mean "read
+    // failed", not "chip reported this value".
+    uint16_t version = 0xFFFF;
+    uint16_t hibrt   = 0xFFFF;
+    uint16_t config  = 0xFFFF;
+    uint16_t valert  = 0xFFFF;
+    uint8_t  vreset  = 0xFF;
+    uint8_t  chipid  = 0xFF;
+    uint8_t  status  = 0xFF;
+    reg_read16(REG_VERSION, &version);
+    reg_read16(REG_HIBRT, &hibrt);
+    reg_read16(REG_CONFIG, &config);
+    reg_read16(REG_VALERT, &valert);
+    reg_read8(REG_VRESET, &vreset);
+    reg_read8(REG_CHIPID, &chipid);
+    reg_read8(REG_STATUS, &status);
+    ESP_LOGI(TAG, "MAX17048 ready at 0x%02X (version=0x%04X hibrt=0x%04X config=0x%04X "
+                  "valert=0x%04X vreset=0x%02X chip_id=0x%02X status=0x%02X)",
+             MAX17048_ADDR, version, hibrt, config, valert, vreset, chipid, status);
 
     // VBUS-present detect — plain digital input, driven by dedicated board
     // circuitry (not a strap, no pull needed).
@@ -128,6 +168,22 @@ esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) 
     return ESP_OK;
 }
 
+esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status) {
+    if (!s_ready) return ESP_FAIL;
+
+    if (version) {
+        esp_err_t err = reg_read16(REG_VERSION, version);
+        if (err != ESP_OK) return err;
+    }
+
+    if (status) {
+        esp_err_t err = reg_read8(REG_STATUS, status);
+        if (err != ESP_OK) return err;
+    }
+
+    return ESP_OK;
+}
+
 #else   // HAL_HAS_FUEL_GAUGE == 0 → no-op stubs
 
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) { (void)bus; return ESP_OK; }
@@ -136,6 +192,10 @@ bool      fuel_gauge_vbus_present(void)                { return false; }
 bool      fuel_gauge_present(void)                     { return false; }
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
     (void)volts; (void)soc_pct; (void)rate_pct_per_hr;
+    return ESP_FAIL;
+}
+esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status) {
+    (void)version; (void)status;
     return ESP_FAIL;
 }
 

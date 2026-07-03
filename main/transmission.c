@@ -1435,9 +1435,13 @@ static void tx_run(const tx_context_t *c) {
     if (fuel_gauge_ready()) {
         float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
         if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {
-            ESP_LOGI(TAG, "Power supply/Battery: %.3fV %.1f%% %+.2f%%/hr (VBUS %s)",
+            uint16_t version = 0xFFFF;
+            uint8_t  status  = 0xFF;
+            fuel_gauge_read_diag(&version, &status);
+            ESP_LOGI(TAG, "Power supply/Battery: %.3fV %.1f%% %+.2f%%/hr (VBUS %s, version=0x%04X status=0x%02X)",
                      (double)batt_v, (double)batt_soc, (double)batt_rate,
-                     fuel_gauge_vbus_present() ? "present" : "absent");
+                     fuel_gauge_vbus_present() ? "present" : "absent",
+                     version, status);
         }
     }
 

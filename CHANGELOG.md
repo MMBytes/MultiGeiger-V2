@@ -45,6 +45,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   supply/Battery"`, and reports VBUS state (new `fuel_gauge_vbus_present()`,
   digital read on new `PIN_VBUS_DETECT`/GPIO34) alongside the reading so
   the ambiguity is visible rather than silently resolved.
+- **Diagnostic register logging**, ahead of real-battery bench testing:
+  `fuel_gauge_init()` now logs all 7 readable MAX17048 registers once at
+  startup (`version`/`hibrt`/`config`/`valert`/`vreset`/`chip_id`/`status`),
+  and the per-TX-cycle line adds `version`/`status` alongside the existing
+  voltage/SoC/rate/VBUS fields. `version` is logged because it's the
+  register Adafruit's own MAX1704x libraries use as their sole "battery
+  attached" sentinel (`0xFFFF` = no response) — logging it lets bench
+  testing check whether that pattern ever appears on this board's
+  always-on-rail wiring. `status` is genuinely dynamic (alert flags set
+  autonomously by the chip); the other four are pure config registers
+  never written by this driver, so they're logged once, not per cycle.
+  New `reg_read8()` helper and `fuel_gauge_read_diag()` API.
 
 ## V2.6.5 — roaming-app safety-net widened to 5 min; t_attempt_start_us torn-read fix; three int64→32-bit demotions
 

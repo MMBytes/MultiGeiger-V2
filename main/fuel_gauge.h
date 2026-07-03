@@ -87,3 +87,16 @@ bool fuel_gauge_present(void);
  *  @return ESP_OK on success, ESP_FAIL if not present/initialised.
  */
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr);
+
+/** @brief Read raw VERSION/STATUS registers for diagnostic logging.
+ *  Pointers may be NULL to skip that field.
+ *  @param version Chip/firmware version register (0x08), raw 16-bit value.
+ *                  This is the register Adafruit's own MAX1704x libraries
+ *                  use as their sole "battery attached" sentinel (0xFFFF =
+ *                  no response) — see `project_fuel_gauge_max17048_design.md`
+ *                  memory for why that check doesn't transfer to this board.
+ *  @param status  Alert-flags register (0x1A): bit0 RI (reset indicator),
+ *                  bit1 VH, bit2 VL, bit3 VR, bit4 HD, bit5 SC.
+ *  @return ESP_OK on success, ESP_FAIL if not present/initialised.
+ */
+esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status);

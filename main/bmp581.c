@@ -6,6 +6,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "bmp581";
 
@@ -58,17 +59,6 @@ static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 static uint8_t                 s_addr  = 0;     // actual address we bound to (0x46 or 0x47)
 
-// --- Low-level I2C helpers ---------------------------------------------------
-
-static esp_err_t write_reg(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
-}
-
-static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t n) {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, 100);
-}
-
 // --- Init --------------------------------------------------------------------
 
 esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
@@ -88,12 +78,7 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = addr,
-        .scl_speed_hz    = 100000,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+    esp_err_t err = i2c_add_device(bus, addr, 100000, &s_dev);
     if (err != ESP_OK) return err;
 
     // Verify chip ID. 0x50 = BMP581 (what we want). 0x51 = BMP585 (a different
@@ -101,43 +86,38 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
     // similar enough that we'd probably "work" but accuracy specs differ).
     // Reject anything else.
     uint8_t chip_id = 0;
-    err = read_regs(REG_CHIP_ID, &chip_id, 1);
+    err = i2c_dev_read_regs(s_dev, REG_CHIP_ID, &chip_id, 1);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "BMP581 chip-ID read failed at 0x%02X: %s",
                  addr, esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
     if (chip_id == CHIP_ID_BMP585) {
         ESP_LOGW(TAG, "Found BMP585 (chip ID 0x51) at 0x%02X — wrong part, "
                  "expected BMP581 (0x50). Ignoring.", addr);
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return ESP_ERR_NOT_FOUND;
     }
     if (chip_id != CHIP_ID_BMP581) {
         ESP_LOGW(TAG, "BMP581 chip-ID mismatch at 0x%02X: got 0x%02X (want 0x%02X)",
                  addr, chip_id, CHIP_ID_BMP581);
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return ESP_ERR_NOT_FOUND;
     }
 
     // Verify NVM is ready and error-free (datasheet §4.3.9 post-power-up
     // checklist). status_nvm_rdy lives at bit 1, status_nvm_err at bit 2.
     uint8_t status = 0;
-    err = read_regs(REG_STATUS, &status, 1);
+    err = i2c_dev_read_regs(s_dev, REG_STATUS, &status, 1);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "BMP581 STATUS read failed: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
     if (!(status & 0x02) || (status & 0x04)) {
         ESP_LOGW(TAG, "BMP581 NVM not ready or error: STATUS=0x%02X", status);
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return ESP_FAIL;
     }
 
@@ -145,7 +125,7 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
     // Not strictly required but means a future bmp581-internal reset detection
     // would actually see the bit.
     uint8_t int_status = 0;
-    (void)read_regs(REG_INT_STATUS, &int_status, 1);
+    (void)i2c_dev_read_regs(s_dev, REG_INT_STATUS, &int_status, 1);
 
     // Apply the operating profile. OSR_CONFIG must be written in STANDBY mode
     // or the write is silently lost (datasheet §4.3.8). Reset state IS
@@ -153,11 +133,10 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
     // to STANDBY too. DSP_CONFIG and DSP_IIR are left at their reset values
     // (0x03 and 0x00 respectively) which already give us P+T compensation
     // and BYPASS — no writes needed.
-    err = write_reg(REG_OSR_CONFIG, OSR_CONFIG_VAL);
+    err = i2c_dev_write_reg(s_dev, REG_OSR_CONFIG, OSR_CONFIG_VAL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BMP581 OSR_CONFIG write failed: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
 
@@ -198,7 +177,7 @@ esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
 
     // Trigger a single forced-mode conversion. Datasheet §4.3.7: from STANDBY
     // a write of pwr_mode=0b10 starts the first measurement immediately.
-    esp_err_t err = write_reg(REG_ODR_CONFIG, ODR_CONFIG_FORCED);
+    esp_err_t err = i2c_dev_write_reg(s_dev, REG_ODR_CONFIG, ODR_CONFIG_FORCED);
     if (err != ESP_OK) return err;
 
     // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(12)) at the default
@@ -213,7 +192,7 @@ esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
     //   d[0] = T_XLSB, d[1] = T_LSB, d[2] = T_MSB
     //   d[3] = P_XLSB, d[4] = P_LSB, d[5] = P_MSB
     uint8_t d[6];
-    err = read_regs(REG_TEMP_DATA_XLSB, d, sizeof(d));
+    err = i2c_dev_read_regs(s_dev, REG_TEMP_DATA_XLSB, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     // Temperature: signed 24-bit, °C = raw / 2^16 (datasheet §4.5).

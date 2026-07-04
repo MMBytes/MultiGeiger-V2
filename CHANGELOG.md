@@ -57,6 +57,26 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   autonomously by the chip); the other four are pure config registers
   never written by this driver, so they're logged once, not per cycle.
   New `reg_read8()` helper and `fuel_gauge_read_diag()` API.
+- **I²C driver consolidation (no functional change).** A code-simplifier
+  survey of `main/` found the same low-level I²C boilerplate copy-pasted
+  across every register-based driver. Two rounds of cleanup, both
+  verified with a clean build across all 5 board targets and no change
+  to wire behavior (byte order, timeouts, log messages, error codes):
+  - `i2c_bus.h` gains shared `static inline` per-device helpers
+    (`i2c_dev_write_reg`, `i2c_dev_read_regs`, `i2c_dev_read_u16_be`/`_le`,
+    `i2c_dev_write_u16_le`, `i2c_add_device`, `i2c_probe_and_add`,
+    `i2c_dev_teardown`). `bmp581.c`, `bmp390.c`, `bme280.c`, `bme688.c`,
+    `veml7700.c`, and `fuel_gauge.c` now use these instead of each
+    hand-rolling its own `write_reg`/`read_regs`/16-bit-read wrapper and
+    probe→add_device→teardown-on-failure ceremony; `sht45.c` and
+    `sps30.c` adopt the add/teardown helpers for their command-based
+    protocol. This is the same class of bug the fuel-gauge's BE/LE
+    byte-order mixup (above) came from — centralizing it makes that
+    mistake harder to reintroduce.
+  - New `sensirion_crc.h` centralizes the Sensirion CRC-8 (poly 0x31,
+    init 0xFF) that `sps30.c`, `sht45.c`, and `dnms.c` each reimplemented
+    independently (`sps30.c` even had a comment noting the duplication).
+    All three now call the shared `sensirion_crc8()`.
 
 ## V2.6.5 — roaming-app safety-net widened to 5 min; t_attempt_start_us torn-read fix; three int64→32-bit demotions
 

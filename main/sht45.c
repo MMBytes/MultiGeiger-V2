@@ -5,6 +5,8 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
+#include "sensirion_crc.h"
 
 static const char *TAG = "sht45";
 
@@ -23,16 +25,6 @@ static const char *TAG = "sht45";
 static i2c_master_dev_handle_t s_dev  = NULL;
 static bool                    s_ready = false;
 static uint32_t                s_last_heat_ms = 0;
-
-// CRC-8: polynomial 0x31, init 0xFF (Sensirion standard).
-static bool crc_ok(uint8_t a, uint8_t b, uint8_t crc) {
-    uint8_t v = 0xFF;
-    v ^= a;
-    for (int i = 0; i < 8; i++) v = (v & 0x80) ? (v << 1) ^ 0x31 : v << 1;
-    v ^= b;
-    for (int i = 0; i < 8; i++) v = (v & 0x80) ? (v << 1) ^ 0x31 : v << 1;
-    return v == crc;
-}
 
 static esp_err_t send_cmd(uint8_t cmd) {
     return i2c_master_transmit(s_dev, &cmd, 1, 50);
@@ -55,7 +47,7 @@ static esp_err_t sht45_read_serial(uint32_t *serial) {
     uint8_t buf[6];
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
     if (err != ESP_OK) return err;
-    if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
+    if (sensirion_crc8(&buf[0], 2) != buf[2] || sensirion_crc8(&buf[3], 2) != buf[5]) {
         return ESP_FAIL;
     }
     *serial = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
@@ -102,7 +94,7 @@ static esp_err_t try_init_pass(uint32_t reset_wait_ms, const char *label) {
         return err;
     }
 
-    if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
+    if (sensirion_crc8(&buf[0], 2) != buf[2] || sensirion_crc8(&buf[3], 2) != buf[5]) {
         ESP_LOGW(TAG, "[%s] CRC mismatch — bytes=%02x %02x %02x %02x %02x %02x",
                  label, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
         return ESP_FAIL;
@@ -132,12 +124,7 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
     }
     ESP_LOGI(TAG, "SHT45 ACK'd at 0x%02X — verifying with measurement read", SHT45_ADDR);
 
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = SHT45_ADDR,
-        .scl_speed_hz    = 100000,
-    };
-    err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+    err = i2c_add_device(bus, SHT45_ADDR, 100000, &s_dev);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "i2c_master_bus_add_device: %s", esp_err_to_name(err));
         return err;
@@ -166,8 +153,7 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "SHT45 probe read failed — both attempts unsuccessful "
                  "(last error: %s). Removing device handle.", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return ESP_FAIL;
     }
 
@@ -225,7 +211,7 @@ esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
         return err;
     }
 
-    if (!crc_ok(buf[0], buf[1], buf[2]) || !crc_ok(buf[3], buf[4], buf[5])) {
+    if (sensirion_crc8(&buf[0], 2) != buf[2] || sensirion_crc8(&buf[3], 2) != buf[5]) {
         ESP_LOGW(TAG, "SHT45 CRC mismatch");
         return ESP_FAIL;
     }

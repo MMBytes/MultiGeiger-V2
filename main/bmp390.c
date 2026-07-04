@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "bmp390";
 
@@ -43,22 +44,11 @@ static double par_T1, par_T2, par_T3;
 static double par_P1, par_P2, par_P3, par_P4;
 static double par_P5, par_P6, par_P7, par_P8, par_P9, par_P10, par_P11;
 
-// --- Low-level I2C helpers ---------------------------------------------------
-
-static esp_err_t write_reg(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
-}
-
-static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t n) {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, 100);
-}
-
 // --- Calibration -------------------------------------------------------------
 
 static esp_err_t load_calibration(void) {
     uint8_t d[21];
-    esp_err_t err = read_regs(REG_CALIB, d, sizeof(d));
+    esp_err_t err = i2c_dev_read_regs(s_dev, REG_CALIB, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     // NVM values, little-endian. Types per datasheet table 10.
@@ -116,36 +106,29 @@ esp_err_t bmp390_init(i2c_master_bus_handle_t bus) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = BMP390_ADDR,
-        .scl_speed_hz    = 100000,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+    esp_err_t err = i2c_add_device(bus, BMP390_ADDR, 100000, &s_dev);
     if (err != ESP_OK) return err;
 
     uint8_t chip_id = 0;
-    err = read_regs(REG_CHIP_ID, &chip_id, 1);
+    err = i2c_dev_read_regs(s_dev, REG_CHIP_ID, &chip_id, 1);
     if (err != ESP_OK || chip_id != CHIP_ID_BMP390) {
         ESP_LOGW(TAG, "BMP390 chip ID mismatch: got 0x%02X (want 0x%02X)",
                  chip_id, CHIP_ID_BMP390);
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return ESP_ERR_NOT_FOUND;
     }
 
     err = load_calibration();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BMP390 calibration read failed: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
 
     // Configure oversampling and IIR filter. OSR and CONFIG are written once;
     // PWR_CTRL is written per-measurement to trigger forced-mode conversions.
-    if ((err = write_reg(REG_OSR,    OSR_VAL))    != ESP_OK) return err;
-    if ((err = write_reg(REG_CONFIG, CONFIG_VAL)) != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_OSR,    OSR_VAL))    != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CONFIG, CONFIG_VAL)) != ESP_OK) return err;
 
     s_ready = true;
 
@@ -212,7 +195,7 @@ esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
     if (!s_ready) return ESP_FAIL;
 
     // Trigger a single forced-mode conversion.
-    esp_err_t err = write_reg(REG_PWR_CTRL, PWR_CTRL_FORCED);
+    esp_err_t err = i2c_dev_write_reg(s_dev, REG_PWR_CTRL, PWR_CTRL_FORCED);
     if (err != ESP_OK) return err;
 
     // P x32 + T x1 worst-case measurement time per datasheet (234 + p*392 +
@@ -221,7 +204,7 @@ esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
 
     // 6 bytes: press[0..2] (xlsb, lsb, msb), temp[3..5] (xlsb, lsb, msb).
     uint8_t d[6];
-    err = read_regs(REG_DATA_0, d, sizeof(d));
+    err = i2c_dev_read_regs(s_dev, REG_DATA_0, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     int32_t adc_P = (int32_t)(d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16));

@@ -7,6 +7,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "veml7700";
 
@@ -53,48 +54,26 @@ static inline uint16_t build_config(uint8_t gain, uint8_t it) {
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 
-// VEML7700 wire format: register pointer byte, then 2 data bytes LE.
-static esp_err_t reg_write16(uint8_t reg, uint16_t val) {
-    uint8_t buf[3] = { reg, (uint8_t)(val & 0xFF), (uint8_t)(val >> 8) };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
-}
-
-static esp_err_t reg_read16(uint8_t reg, uint16_t *out) {
-    uint8_t in[2];
-    esp_err_t err = i2c_master_transmit_receive(s_dev, &reg, 1, in, sizeof(in), 100);
-    if (err != ESP_OK) return err;
-    *out = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
-    return ESP_OK;
-}
-
 esp_err_t veml7700_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
     if (!bus) return ESP_ERR_INVALID_ARG;
 
-    if (i2c_master_probe(bus, VEML7700_ADDR, 50) != ESP_OK) {
+    // VEML7700 supports up to 400 kHz I²C.
+    esp_err_t err = i2c_probe_and_add(bus, VEML7700_ADDR, 400000, 50, &s_dev);
+    if (err == ESP_ERR_NOT_FOUND) {
         ESP_LOGW(TAG, "VEML7700 not found at 0x%02X", VEML7700_ADDR);
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = VEML7700_ADDR,
-        .scl_speed_hz    = 400000,    // VEML7700 supports up to 400 kHz I²C
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
-    if (err != ESP_OK) {
+        return err;
+    } else if (err != ESP_OK) {
         ESP_LOGW(TAG, "i2c_master_bus_add_device: %s", esp_err_to_name(err));
-        s_dev = NULL;
         return err;
     }
 
     // 1. Wake from shutdown by writing 0x0000 first (per Adafruit lib pattern).
     //    Datasheet says tWAKE = 2.5 ms — wait conservatively.
-    err = reg_write16(REG_ALS_CONFIG, 0x0000);
+    err = i2c_dev_write_u16_le(s_dev, REG_ALS_CONFIG, 0x0000);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wake-write: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
     // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(5)) at 100 Hz tick
@@ -103,11 +82,10 @@ esp_err_t veml7700_init(i2c_master_bus_handle_t bus) {
     esp_rom_delay_us(5000);
 
     // 2. Apply our default operating mode (gain + IT).
-    err = reg_write16(REG_ALS_CONFIG, build_config(DEFAULT_GAIN, DEFAULT_IT));
+    err = i2c_dev_write_u16_le(s_dev, REG_ALS_CONFIG, build_config(DEFAULT_GAIN, DEFAULT_IT));
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "config-write: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
 
@@ -130,12 +108,12 @@ esp_err_t veml7700_read(uint16_t *raw_als, uint16_t *raw_white, float *lux) {
     if (!s_ready) return ESP_FAIL;
 
     uint16_t als_count = 0;
-    esp_err_t err = reg_read16(REG_ALS_DATA, &als_count);
+    esp_err_t err = i2c_dev_read_u16_le(s_dev, REG_ALS_DATA, &als_count);
     if (err != ESP_OK) return err;
 
     uint16_t white_count = 0;
     if (raw_white || true) {
-        err = reg_read16(REG_WHITE_DATA, &white_count);
+        err = i2c_dev_read_u16_le(s_dev, REG_WHITE_DATA, &white_count);
         if (err != ESP_OK) return err;
     }
 

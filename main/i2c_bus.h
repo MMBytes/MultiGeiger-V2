@@ -33,7 +33,10 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include "driver/i2c_master.h"
+#include "esp_err.h"
 
 /** @brief V2.5.19: select the primary-bus pin route BEFORE the first
  *  i2c_bus_get_primary() call. On a board with HAL_HAS_I2C_PINOUT_SWITCH==1
@@ -94,3 +97,94 @@ void i2c_bus_secondary_keep_alive(void);
  *  secondary bus).
  */
 void i2c_bus_finalize(void);
+
+// --- Per-device helpers -------------------------------------------------
+//
+// Every driver in main/ was independently reimplementing the same handful
+// of register-protocol primitives (write_reg/read_regs, 16-bit LE/BE reads)
+// and the same probe→add_device→teardown-on-failure ceremony. Centralised
+// here (V2.6.7) so the wire-level details — byte order, 100 ms transaction
+// timeout, the exact i2c_device_config_t shape — are written once. A prior
+// byte-order mix-up between VEML7700 (LE) and MAX17048 (BE) is the kind of
+// bug this consolidation is meant to make harder to reintroduce.
+//
+// These are `static inline` so each translation unit gets its own copy with
+// no ODR concerns — same pattern as the rest of this project's shared
+// headers (e.g. util.h).
+
+/** @brief Write one 8-bit register: [reg, val]. 100 ms transaction timeout. */
+static inline esp_err_t i2c_dev_write_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val) {
+    uint8_t buf[2] = { reg, val };
+    return i2c_master_transmit(dev, buf, sizeof(buf), 100);
+}
+
+/** @brief Read n bytes starting at an 8-bit register address (write-then-read,
+ *  single transaction). 100 ms transaction timeout. */
+static inline esp_err_t i2c_dev_read_regs(i2c_master_dev_handle_t dev, uint8_t reg,
+                                            uint8_t *buf, size_t n) {
+    return i2c_master_transmit_receive(dev, &reg, 1, buf, n, 100);
+}
+
+/** @brief Read a 16-bit register that is big-endian on the wire (MSB first —
+ *  e.g. MAX17048). 100 ms transaction timeout. */
+static inline esp_err_t i2c_dev_read_u16_be(i2c_master_dev_handle_t dev, uint8_t reg, uint16_t *out) {
+    uint8_t in[2];
+    esp_err_t err = i2c_master_transmit_receive(dev, &reg, 1, in, sizeof(in), 100);
+    if (err != ESP_OK) return err;
+    *out = ((uint16_t)in[0] << 8) | (uint16_t)in[1];
+    return ESP_OK;
+}
+
+/** @brief Read a 16-bit register that is little-endian on the wire (LSB first
+ *  — e.g. VEML7700). 100 ms transaction timeout. */
+static inline esp_err_t i2c_dev_read_u16_le(i2c_master_dev_handle_t dev, uint8_t reg, uint16_t *out) {
+    uint8_t in[2];
+    esp_err_t err = i2c_master_transmit_receive(dev, &reg, 1, in, sizeof(in), 100);
+    if (err != ESP_OK) return err;
+    *out = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
+    return ESP_OK;
+}
+
+/** @brief Write a 16-bit register that is little-endian on the wire: [reg,
+ *  val_lo, val_hi] — e.g. VEML7700. 100 ms transaction timeout. */
+static inline esp_err_t i2c_dev_write_u16_le(i2c_master_dev_handle_t dev, uint8_t reg, uint16_t val) {
+    uint8_t buf[3] = { reg, (uint8_t)(val & 0xFF), (uint8_t)(val >> 8) };
+    return i2c_master_transmit(dev, buf, sizeof(buf), 100);
+}
+
+/** @brief Bind a device handle at a known-present address: fixed 7-bit
+ *  addressing, the given SCL speed, no other options. Covers every driver's
+ *  i2c_device_config_t — they only ever varied address and speed. */
+static inline esp_err_t i2c_add_device(i2c_master_bus_handle_t bus, uint8_t addr,
+                                         uint32_t scl_speed_hz,
+                                         i2c_master_dev_handle_t *dev) {
+    i2c_device_config_t devcfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = addr,
+        .scl_speed_hz    = scl_speed_hz,
+    };
+    return i2c_master_bus_add_device(bus, &devcfg, dev);
+}
+
+/** @brief Probe an address, then bind a device to it if something ACKed.
+ *  Returns ESP_ERR_NOT_FOUND if the probe times out (nothing at that
+ *  address), or the underlying esp_err_t from i2c_add_device() on a bind
+ *  failure. For the common single-candidate-address init path; drivers that
+ *  probe multiple candidate addresses (e.g. BMP581's 0x46/0x47) still call
+ *  i2c_master_probe()/i2c_add_device() directly to avoid double-probing the
+ *  address they settle on. */
+static inline esp_err_t i2c_probe_and_add(i2c_master_bus_handle_t bus, uint8_t addr,
+                                            uint32_t scl_speed_hz, int probe_timeout_ms,
+                                            i2c_master_dev_handle_t *dev) {
+    if (i2c_master_probe(bus, addr, probe_timeout_ms) != ESP_OK) return ESP_ERR_NOT_FOUND;
+    return i2c_add_device(bus, addr, scl_speed_hz, dev);
+}
+
+/** @brief Remove a device handle and null it out — the standard driver
+ *  init-failure cleanup. Safe to call with *dev already NULL (no-op). */
+static inline void i2c_dev_teardown(i2c_master_dev_handle_t *dev) {
+    if (dev && *dev) {
+        i2c_master_bus_rm_device(*dev);
+        *dev = NULL;
+    }
+}

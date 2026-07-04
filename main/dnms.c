@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sensirion_crc.h"
 
 static const char *TAG = "dnms";
 
@@ -36,20 +37,6 @@ static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 static char                    s_version[VERSION_LEN_CHARS + 1] = {0};
 
-// CRC-8: polynomial 0x31, init 0xFF, no reflection, no XOR-out — Sensirion
-// standard, identical to SHT45 / SPS30. Computed per 16-bit word with the
-// high byte fed first, then the low byte.
-static uint8_t crc8(const uint8_t *p, size_t n) {
-    uint8_t c = 0xFF;
-    for (size_t i = 0; i < n; i++) {
-        c ^= p[i];
-        for (int b = 0; b < 8; b++) {
-            c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x31) : (uint8_t)(c << 1);
-        }
-    }
-    return c;
-}
-
 // Write a 2-byte command with no parameters.
 static esp_err_t send_cmd(uint16_t cmd) {
     uint8_t buf[2] = { (uint8_t)(cmd >> 8), (uint8_t)(cmd & 0xFF) };
@@ -68,7 +55,7 @@ static esp_err_t strip_crc(const uint8_t *wire, size_t wire_len, uint8_t *data_o
     if (wire_len % 3 != 0) return ESP_ERR_INVALID_SIZE;
     size_t out_idx = 0;
     for (size_t i = 0; i < wire_len; i += 3) {
-        if (crc8(&wire[i], 2) != wire[i + 2]) {
+        if (sensirion_crc8(&wire[i], 2) != wire[i + 2]) {
             ESP_LOGW(TAG, "DNMS CRC fail at wire offset %u", (unsigned)i);
             return ESP_FAIL;
         }

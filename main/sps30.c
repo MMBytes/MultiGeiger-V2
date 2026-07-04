@@ -7,6 +7,8 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
+#include "sensirion_crc.h"
 
 static const char *TAG = "sps30";
 
@@ -35,20 +37,6 @@ static const char *TAG = "sps30";
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 
-// CRC-8: polynomial 0x31, init 0xFF, no reflection, no XOR-out (Sensirion
-// standard — same as SHT45 / BMP390). Computed per 16-bit word with the high
-// byte fed first, then the low byte.
-static uint8_t crc8(const uint8_t *p, size_t n) {
-    uint8_t c = 0xFF;
-    for (size_t i = 0; i < n; i++) {
-        c ^= p[i];
-        for (int b = 0; b < 8; b++) {
-            c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x31) : (uint8_t)(c << 1);
-        }
-    }
-    return c;
-}
-
 // Write a 2-byte command with no parameters.
 static esp_err_t send_cmd(uint16_t cmd) {
     uint8_t buf[2] = { (uint8_t)(cmd >> 8), (uint8_t)(cmd & 0xFF) };
@@ -63,7 +51,7 @@ static esp_err_t send_cmd_arg(uint16_t cmd, uint8_t arg_hi, uint8_t arg_lo) {
     buf[1] = (uint8_t)(cmd & 0xFF);
     buf[2] = arg_hi;
     buf[3] = arg_lo;
-    buf[4] = crc8(&buf[2], 2);
+    buf[4] = sensirion_crc8(&buf[2], 2);
     return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
 }
 
@@ -94,7 +82,7 @@ static esp_err_t sps30_read_serial(char *out, size_t outsz) {
 
     size_t out_idx = 0;
     for (size_t i = 0; i < sizeof(buf); i += 3) {
-        if (crc8(&buf[i], 2) != buf[i + 2]) return ESP_FAIL;
+        if (sensirion_crc8(&buf[i], 2) != buf[i + 2]) return ESP_FAIL;
         out[out_idx++] = (char)buf[i];
         out[out_idx++] = (char)buf[i + 1];
     }
@@ -115,12 +103,7 @@ esp_err_t sps30_init(i2c_master_bus_handle_t bus) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    i2c_device_config_t devcfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = SPS30_ADDR,
-        .scl_speed_hz    = SPS30_BUS_HZ,
-    };
-    esp_err_t err = i2c_master_bus_add_device(bus, &devcfg, &s_dev);
+    esp_err_t err = i2c_add_device(bus, SPS30_ADDR, SPS30_BUS_HZ, &s_dev);
     if (err != ESP_OK) return err;
 
     // Soft reset clears any in-progress state from a previous boot. Datasheet
@@ -134,8 +117,7 @@ esp_err_t sps30_init(i2c_master_bus_handle_t bus) {
     err = send_cmd_arg(CMD_START_MEASUREMENT, FLOAT_MODE_HI, FLOAT_MODE_LO);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SPS30 start_measurement: %s", esp_err_to_name(err));
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
+        i2c_dev_teardown(&s_dev);
         return err;
     }
 
@@ -173,7 +155,7 @@ static esp_err_t wait_data_ready(void) {
         esp_rom_delay_us(5000);   // V2.3.31: precise wait — see file header
         uint8_t buf[3];
         if (recv(buf, sizeof(buf)) != ESP_OK) return ESP_FAIL;
-        if (crc8(buf, 2) != buf[2]) return ESP_FAIL;
+        if (sensirion_crc8(buf, 2) != buf[2]) return ESP_FAIL;
         if (buf[1] == 0x01) return ESP_OK;     // low byte = ready flag
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -202,11 +184,11 @@ esp_err_t sps30_read(pm_sample_t *out) {
     float values[10];
     for (int i = 0; i < 10; i++) {
         const uint8_t *p = buf + i * 6;
-        if (crc8(p + 0, 2) != p[2]) {
+        if (sensirion_crc8(p + 0, 2) != p[2]) {
             ESP_LOGW(TAG, "SPS30 CRC fail on word %d", 2 * i);
             return ESP_FAIL;
         }
-        if (crc8(p + 3, 2) != p[5]) {
+        if (sensirion_crc8(p + 3, 2) != p[5]) {
             ESP_LOGW(TAG, "SPS30 CRC fail on word %d", 2 * i + 1);
             return ESP_FAIL;
         }
@@ -245,11 +227,11 @@ esp_err_t sps30_read_device_status(uint32_t *status_out) {
     // 4-byte status word as 2 words × (2 data bytes + 1 CRC) = 6 bytes.
     uint8_t buf[6];
     if (recv(buf, sizeof(buf)) != ESP_OK) return ESP_FAIL;
-    if (crc8(buf + 0, 2) != buf[2]) {
+    if (sensirion_crc8(buf + 0, 2) != buf[2]) {
         ESP_LOGW(TAG, "SPS30 status CRC fail (word 0)");
         return ESP_FAIL;
     }
-    if (crc8(buf + 3, 2) != buf[5]) {
+    if (sensirion_crc8(buf + 3, 2) != buf[5]) {
         ESP_LOGW(TAG, "SPS30 status CRC fail (word 1)");
         return ESP_FAIL;
     }

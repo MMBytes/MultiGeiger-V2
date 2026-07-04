@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "bme688";
 
@@ -78,30 +79,11 @@ static int8_t   par_H3, par_H4, par_H5;
 static uint8_t  par_H6;
 static int8_t   par_H7;
 
-// --- Low-level I2C helpers ---------------------------------------------------
-
-static esp_err_t write_reg(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
-}
-
-static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t n) {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, 100);
-}
-
 // --- Probe / attach ----------------------------------------------------------
 
 static esp_err_t attach_dev(uint8_t addr) {
-    if (s_dev) {
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
-    }
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = addr,
-        .scl_speed_hz    = I2C_FREQ_HZ,
-    };
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
+    i2c_dev_teardown(&s_dev);
+    return i2c_add_device(s_bus, addr, I2C_FREQ_HZ, &s_dev);
 }
 
 // Walk both candidate addresses, attach, and verify chip ID 0x61. The chip-ID
@@ -115,7 +97,7 @@ static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
         esp_err_t err = attach_dev(candidates[i]);
         if (err != ESP_OK) return err;
         uint8_t id = 0;
-        if (read_regs(REG_ID, &id, 1) == ESP_OK && id == CHIP_ID_BME68X) {
+        if (i2c_dev_read_regs(s_dev, REG_ID, &id, 1) == ESP_OK && id == CHIP_ID_BME68X) {
             *found_addr = candidates[i];
             return ESP_OK;
         }
@@ -132,11 +114,11 @@ static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
 // gas channel.
 static esp_err_t read_calibration(void) {
     uint8_t b1[23];
-    esp_err_t err = read_regs(REG_CAL_BLK1, b1, sizeof(b1));
+    esp_err_t err = i2c_dev_read_regs(s_dev, REG_CAL_BLK1, b1, sizeof(b1));
     if (err != ESP_OK) return err;
 
     uint8_t b2[10];   // 0xE1..0xEA — covers H1..H7 plus T1
-    err = read_regs(REG_CAL_BLK2, b2, sizeof(b2));
+    err = i2c_dev_read_regs(s_dev, REG_CAL_BLK2, b2, sizeof(b2));
     if (err != ESP_OK) return err;
 
     // Pressure + temperature coefficients (block 1).
@@ -191,13 +173,13 @@ esp_err_t bme688_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     // Variant byte separates BME680 (0x00) from BME688 (0x01). Logged as info
     // only — we drive both identically since the gas channel is disabled.
     uint8_t variant = 0;
-    (void)read_regs(REG_VARIANT, &variant, 1);
+    (void)i2c_dev_read_regs(s_dev, REG_VARIANT, &variant, 1);
     ESP_LOGI(TAG, "%s found at 0x%02X (chip ID 0x61 verified)",
              variant == 0x01 ? "BME688" : "BME680", addr);
 
     // Soft reset, then settle. Datasheet calls for ~5 ms; 10 ms is generous
     // and matches the BME280 driver's pattern.
-    err = write_reg(REG_RESET, 0xB6);
+    err = i2c_dev_write_reg(s_dev, REG_RESET, 0xB6);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(10));
 
@@ -210,13 +192,13 @@ esp_err_t bme688_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
     // ctrl_hum must be written BEFORE ctrl_meas (datasheet §5.3.4). Gas
     // controls are written first to ensure the heater is off and run_gas=0
     // before any forced-mode conversion can be triggered.
-    if ((err = write_reg(REG_CTRL_GAS_0, CTRL_GAS_0_VAL)) != ESP_OK) return err;
-    if ((err = write_reg(REG_CTRL_GAS_1, CTRL_GAS_1_VAL)) != ESP_OK) return err;
-    if ((err = write_reg(REG_CTRL_HUM,   CTRL_HUM_VAL))   != ESP_OK) return err;
-    if ((err = write_reg(REG_CONFIG,     CONFIG_VAL))     != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CTRL_GAS_0, CTRL_GAS_0_VAL)) != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CTRL_GAS_1, CTRL_GAS_1_VAL)) != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CTRL_HUM,   CTRL_HUM_VAL))   != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CONFIG,     CONFIG_VAL))     != ESP_OK) return err;
 
     // Leave the chip in sleep — bme688_read() flips it to forced mode per call.
-    err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_SLEEP);
+    err = i2c_dev_write_reg(s_dev, REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_SLEEP);
     if (err != ESP_OK) return err;
 
     s_ready = true;
@@ -285,7 +267,7 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
     // Trigger one forced-mode conversion. Writing mode bits to ctrl_meas
     // wakes the chip, runs T/P/H acquisition with the configured oversampling,
     // then returns to sleep automatically.
-    esp_err_t err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_FORCED);
+    esp_err_t err = i2c_dev_write_reg(s_dev, REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_FORCED);
     if (err != ESP_OK) return err;
 
     // T x2 + P x16 + H x1 typical conversion time (datasheet 3.5.2.4):
@@ -295,7 +277,7 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
 
     // Read 8 bytes: pressure(0..2 msb,lsb,xlsb) + temperature(3..5) + humidity(6..7).
     uint8_t d[8];
-    err = read_regs(REG_DATA_PTH, d, sizeof(d));
+    err = i2c_dev_read_regs(s_dev, REG_DATA_PTH, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     // 20-bit P and T (high nibble of xlsb is the lowest 4 bits); 16-bit H.

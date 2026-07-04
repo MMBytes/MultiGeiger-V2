@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 
 static const char *TAG = "bme280";
 
@@ -64,30 +65,11 @@ static uint8_t  dig_H1, dig_H3;
 static int16_t  dig_H2, dig_H4, dig_H5;
 static int8_t   dig_H6;
 
-// --- Low-level I2C helpers ---------------------------------------------------
-
-static esp_err_t write_reg(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = { reg, val };
-    return i2c_master_transmit(s_dev, buf, sizeof(buf), 100);
-}
-
-static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t n) {
-    return i2c_master_transmit_receive(s_dev, &reg, 1, buf, n, 100);
-}
-
 // --- Init --------------------------------------------------------------------
 
 static esp_err_t attach_dev(uint8_t addr) {
-    if (s_dev) {
-        i2c_master_bus_rm_device(s_dev);
-        s_dev = NULL;
-    }
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = addr,
-        .scl_speed_hz    = I2C_FREQ_HZ,
-    };
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_dev);
+    i2c_dev_teardown(&s_dev);
+    return i2c_add_device(s_bus, addr, I2C_FREQ_HZ, &s_dev);
 }
 
 static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
@@ -98,7 +80,7 @@ static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
             esp_err_t err = attach_dev(candidates[i]);
             if (err != ESP_OK) return err;
             uint8_t id = 0;
-            if (read_regs(REG_ID, &id, 1) == ESP_OK && id == CHIP_ID_BME280) {
+            if (i2c_dev_read_regs(s_dev, REG_ID, &id, 1) == ESP_OK && id == CHIP_ID_BME280) {
                 *found_addr = candidates[i];
                 return ESP_OK;
             }
@@ -110,7 +92,7 @@ static esp_err_t probe_and_attach(uint8_t *found_addr, bool skip_addr_77) {
 static esp_err_t read_calibration(void) {
     // T1..T3, P1..P9 live at 0x88..0x9F (24 bytes, little-endian pairs)
     uint8_t tp[24];
-    esp_err_t err = read_regs(REG_CAL_TP, tp, sizeof(tp));
+    esp_err_t err = i2c_dev_read_regs(s_dev, REG_CAL_TP, tp, sizeof(tp));
     if (err != ESP_OK) return err;
 
     dig_T1 = (uint16_t)(tp[0]  | (tp[1]  << 8));
@@ -126,11 +108,11 @@ static esp_err_t read_calibration(void) {
     dig_P8 = (int16_t) (tp[20] | (tp[21] << 8));
     dig_P9 = (int16_t) (tp[22] | (tp[23] << 8));
 
-    err = read_regs(REG_CAL_H1, &dig_H1, 1);
+    err = i2c_dev_read_regs(s_dev, REG_CAL_H1, &dig_H1, 1);
     if (err != ESP_OK) return err;
 
     uint8_t h[7];
-    err = read_regs(REG_CAL_H2, h, sizeof(h));
+    err = i2c_dev_read_regs(s_dev, REG_CAL_H2, h, sizeof(h));
     if (err != ESP_OK) return err;
     dig_H2 = (int16_t)(h[0] | (h[1] << 8));
     dig_H3 = h[2];
@@ -159,12 +141,12 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
 
     // Soft reset, give the chip its 2 ms settling time, then poll the
     // calibration-copying bit until the NVM is ready (datasheet 5.4.1).
-    err = write_reg(REG_RESET, 0xB6);
+    err = i2c_dev_write_reg(s_dev, REG_RESET, 0xB6);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(5));
     for (int i = 0; i < 20; i++) {
         uint8_t status = 0;
-        if (read_regs(REG_STATUS, &status, 1) == ESP_OK && !(status & 0x01)) break;
+        if (i2c_dev_read_regs(s_dev, REG_STATUS, &status, 1) == ESP_OK && !(status & 0x01)) break;
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 
@@ -176,9 +158,9 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
 
     // ctrl_hum must be written BEFORE ctrl_meas (datasheet 5.4.3).
     // Mode bits left at 00 (sleep) here — bme280_read() flips them to forced per call.
-    if ((err = write_reg(REG_CTRL_HUM,  CTRL_HUM_VAL))   != ESP_OK) return err;
-    if ((err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE)) != ESP_OK) return err;
-    if ((err = write_reg(REG_CONFIG,    CONFIG_VAL))     != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CTRL_HUM,  CTRL_HUM_VAL))   != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CTRL_MEAS, CTRL_MEAS_BASE)) != ESP_OK) return err;
+    if ((err = i2c_dev_write_reg(s_dev, REG_CONFIG,    CONFIG_VAL))     != ESP_OK) return err;
 
     s_ready = true;
     ESP_LOGI(TAG, "BME280 ready (osrs T=x2 P=x16 H=x1, filter off, forced mode)");
@@ -242,7 +224,7 @@ esp_err_t bme280_read(float *t_out, float *h_out, float *p_out) {
     // Trigger one forced-mode conversion. Writing the mode bits to ctrl_meas
     // wakes the chip, runs T/P/H acquisition with the configured oversampling,
     // then returns to sleep automatically.
-    esp_err_t err = write_reg(REG_CTRL_MEAS, CTRL_MEAS_BASE | 0x01);
+    esp_err_t err = i2c_dev_write_reg(s_dev, REG_CTRL_MEAS, CTRL_MEAS_BASE | 0x01);
     if (err != ESP_OK) return err;
 
     // T x2 + P x16 + H x1 worst-case measurement time per datasheet 9.1:
@@ -254,7 +236,7 @@ esp_err_t bme280_read(float *t_out, float *h_out, float *p_out) {
     vTaskDelay(pdMS_TO_TICKS(70));
 
     uint8_t d[8];
-    err = read_regs(REG_DATA, d, sizeof(d));
+    err = i2c_dev_read_regs(s_dev, REG_DATA, d, sizeof(d));
     if (err != ESP_OK) return err;
 
     int32_t adc_P = (int32_t)(((uint32_t)d[0] << 12) | ((uint32_t)d[1] << 4) | (d[2] >> 4));

@@ -48,13 +48,33 @@ carried over unchanged from the V3 column).
 | HV_FET_OUTPUT | 33 | HV MOSFET gate |
 | HV_CAP_FULL_INPUT | 2 | ADC1_CH1/TOUCH2 — plain GPIO on base V4, see §5 |
 | GMC_COUNT_INPUT | 3 | Geiger tube pulse |
-| SPEAKER (P) | 26 | Piezo |
-| SDA (env sensor bus) | 47 | J2 pin13 |
-| SCL (env sensor bus) | 48 | J2 pin14 |
+| SPEAKER (P) | 26 | Piezo — J2 pin15, "SPK" |
+| SPEAKER (N) | 5 | Piezo — J3 pin16, "Touch5 – SPK". The matrix marks both GPIO26 and GPIO5 as "SPK" without distinguishing which leg is which; a piezo isn't polarity-sensitive in a way that matters for tone generation, so the P/N assignment here is arbitrary and functionally inconsequential (worst case: a quieter click if reversed). Bench-verify perceived loudness on first flash, same standard as the LED polarity in §4. |
+| SDA (env sensor bus) | 48 | J2 pin14, "SDA" |
+| SCL (env sensor bus) | 47 | J2 pin13, "SCL" |
 | UART TX / RX (console) | 44 / 43 | USB-UART bridge, not native USB |
 | USER_SW | 0 | Boot-strap-shared button, matches every other board's convention |
-| Vext_Ctrl | 36 | Active-LOW enable, per datasheet: "VextCtrl(GPIO36) pin needs to be pulled low" |
 | LED | 35 | Active-HIGH — see §4 |
+
+**Correction (2026-07-06, caught before implementation):** an earlier draft of
+this table had SDA/SCL swapped (GPIO47 as SDA, GPIO48 as SCL) and omitted the
+SPEAKER (N) row entirely. Both are fixed above after re-verifying directly
+against `Multigeiger_V1.9/Pin-Matrix_Heltec_MG_neu-V1.9.pdf`'s "Heltec WiFi
+LoRa 32 V4" column (J2 pin13 = `IO47 – SCL`, J2 pin14 = `IO48 – SDA`, J2
+pin15 = `IO26 – SPK`, J3 pin16 = `IO05 Touch5 – SPK`). §3 already had the
+SDA/SCL assignment correct in its prose — only this table was wrong.
+
+**Vext_Ctrl (GPIO36) is deliberately NOT driven by this port.** Datasheet
+§3.3 "Power Output" documents three output pins: the always-on 3.3V pin,
+5V@USB, and a *switchable* "Ve" pin gated by VextCtrl — Ve is for powering
+external peripherals plugged into the header, separate from the module's
+own always-on 3.3V rail that feeds the OLED and the ESP32-S3 itself. The
+Multigeiger matrix marks the J2 pins carrying Ve (pins 3/4) as unused by
+this mainboard. Unlike Heltec V2 (where Vext gates the shared OLED+sensor
+I²C rail and MUST be driven low for the bus to work at all — see
+`i2c_bus.c`'s existing `HAL_HAS_VEXT_GATE` block), nothing in this board's
+OLED bus or external sensor bus depends on Vext. Leave GPIO36 undriven;
+`HAL_HAS_VEXT_GATE=0`.
 
 OLED (fixed module bus, not on J2/J3 — see §3):
 | Function | GPIO |
@@ -67,6 +87,7 @@ Reserved for future LoRa work (never touched by this port — see §6):
 GPIO 7, 8, 9, 10, 11, 12, 13, 14.
 
 Reserved / never repurpose (out of scope per §9, or module-internal):
+- GPIO36 — Vext_Ctrl, deliberately undriven; see the note above.
 - GPIO19/20 — native USB D-/D+ on the module (JTAG/USB-Serial-JTAG strap
   pair); this board doesn't use native USB (`HAL_HAS_NATIVE_USB=0`) but the
   pins are still module-internal wiring, not free GPIO.
@@ -176,7 +197,7 @@ What this spec *does* do to avoid foreclosing that work:
 #define HAL_HAS_FUEL_GAUGE        0
 #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
 #define HAL_HAS_NATIVE_USB        0   // USB-UART bridge on GPIO43/44
-#define HAL_HAS_VEXT_GATE         1   // GPIO36, active-LOW
+#define HAL_HAS_VEXT_GATE         0   // GPIO36 only gates the external "Ve" header pin, unused on this board — see §2
 #define HAL_HAS_ANTENNA_SWITCH    0
 #define HAL_HAS_I2C_PINOUT_SWITCH 0
 #define HAL_HAS_SPEAKER           1   // GPIO26

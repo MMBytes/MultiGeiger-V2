@@ -15,7 +15,9 @@
 - Do **not** add any LoRaWAN/Meshtastic code, config fields, or a `HAL_HAS_LORA` flag. Per spec §6, this port only documents (in comments) that GPIO 7-14 are reserved for that future work — nothing else changes.
 - Do **not** touch VBAT ADC (GPIO1) or GNSS (GPIO38-42) — both explicitly out of scope per spec §9.
 - Build verification commands use the project's canonical invocation (`& .\_build.cmd <board> 2>&1 | Select-Object -Last 25` from PowerShell) — not raw `idf.py` via the Bash tool's `cmd.exe` bridge, which has a known silent-skip failure mode. After every build, confirm the version string actually landed with `strings build_<board>/geiger_v2.bin | grep -E "V2\.[0-9]+\.[0-9]+" | sort -u` (also PowerShell-invokable via `Select-String` if `strings` isn't on PATH — see Task 3 Step 4 for the exact fallback).
-- Version: current `main/version.h` is `V2.6.6`. Per this project's own convention (every prior new-board addition — e.g. V2.4.25's `seeed_xiao_esp32s3` — got its own version bump + CHANGELOG entry), bump to `V2.6.7` once the board builds cleanly (Task 8), not before.
+- Version: current `main/version.h` is `V2.6.6`. Per this project's own convention (every prior new-board addition — e.g. V2.4.25's `seeed_xiao_esp32s3` — got its own version bump + CHANGELOG entry), bump to `V2.6.7` once the board builds cleanly (Task 6), not before.
+- A fourth bench-verify item (alongside LED polarity, speaker P/N, and PSRAM speed): `PIN_GMC_COUNT_INPUT` reuses GPIO3, an ESP32-S3 JTAG-source boot-strap pin. Unlike `BOARD_FEATHERS3_D`'s reuse of the same pin for `PIN_SPEAKER_P` (safe because the speaker driver stays hi-Z until code drives it post-boot), this pin is an always-connected external input from the tube pulse-conditioning circuit — its level during the ROM bootloader's strap-sampling window is not under firmware control. Flagged in `hal.h`, not resolved by this plan; first-flash bench verification must confirm the board still enumerates over USB-Serial-JTAG.
+- A fifth bench-verify item: the onboard SSD1315's physical panel size (128x64 vs. larger) is unconfirmed — the design spec and pin-matrix source don't state it. This plan assumes the same small single-page 128x64 footprint as Heltec V2's SSD1306 (not FeatherS3-D's 2.42" SSD1309), since Heltec WiFi LoRa 32 modules ship with the same compact onboard OLED across the V2/V3/V4 line. Flagged explicitly in Task 5 rather than left as a silent default.
 
 ## File Structure
 
@@ -23,15 +25,20 @@
 |---|---|
 | `sdkconfig.defaults.heltec_wifi_lora32_v4_r2` | **New.** S3R2-specific overlay: 16 MB flash, 2 MB in-package quad PSRAM, UART console. |
 | `CMakeLists.txt` | Modify. New `elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")` branch + update the 3 board-list mentions (usage comment, cache-string help text, `else()` error message). |
-| `main/hal.h` | Modify. New `#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)` branch (pin map + feature flags) + update the final `#error` message. |
-| `main/i2c_bus.c` | Modify. Widen `s_bus_secondary`'s board guard; add a new branch inside `i2c_bus_get_secondary()` that brings up `I2C_NUM_1` on GPIO17/18 (OLED bus), always-on, no gating GPIO. |
-| `main/i2c_bus.h` | Modify. Add a "Heltec WiFi LoRa 32 V4-R2" paragraph to the per-board doc comment. |
-| `main/display.c` | Modify. Extend `OLED_CHIP_NAME` chain with `"SSD1315"`; update the top-of-file per-board comment; make the `"STEMMA1"`/`"STEMMA2"` log-label strings board-aware (this board has no STEMMA connector). |
-| `.github/workflows/_build-boards.yml` | Modify. Add `heltec_wifi_lora32_v4_r2` to `matrix.board`; extend the `target:` ternary so it maps to `esp32s3` (not the `esp32` default). |
-| `.github/workflows/release.yml` | Modify. Bump `EXPECTED_BOARDS` from `5` to `6`. |
+| `main/hal.h` | Modify. New `#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)` branch (pin map + feature flags, incl. a GPIO3 strap-safety caveat on `PIN_GMC_COUNT_INPUT`); update the final `#error` message and the stale `@file` board-enumeration comment. |
+| `main/i2c_bus.c` | Modify. Widen `s_bus_secondary`'s board guard; add a new branch inside `i2c_bus_get_secondary()` that brings up `I2C_NUM_1` on GPIO17/18 (OLED bus), always-on, no gating GPIO; widen `i2c_bus_finalize()` so it no longer silently no-ops on this board. |
+| `main/i2c_bus.h` | Modify. Add a "Heltec WiFi LoRa 32 V4-R2" paragraph to the `@file` per-board doc comment AND update the separate stale function-level doc comment above `i2c_bus_get_secondary()`. |
+| `main/main.c` | Modify. Guard the `PROBE_ON_BOTH_BUSES` macro's secondary-bus fallback so sensor drivers (env/PM/noise/GNSS/VEML7700) never probe this board's OLED-only secondary bus. |
+| `main/display.c` | Modify. Extend `OLED_CHIP_NAME` chain with `"SSD1315"`; update the top-of-file per-board comment (with an anchor-text fix vs. the file's real current text); make the `"STEMMA1"`/`"STEMMA2"` log-label strings board-aware; give `DISPLAY_MODE_AUTO` an explicit branch for this board instead of relying on the `#else` catch-all; skip the primary-bus probe and the SerLCD-wake delay for this board's always-secondary-only OLED. |
+| `main/display.h` | Modify. Update the stale top-of-file per-board panel/bus doc comment (currently only documents Heltec V2 and FeatherS3-D). |
+| `main/http_server.c` | Modify. Add an `#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)` arm to the OTA-page `UPLOAD_PROMPT_BOARD` chain (mirrors the V2.5.19 XIAO fix — without this, the OTA page shows "(unknown board)"). |
+| `.github/workflows/_build-boards.yml` | Modify. Add `heltec_wifi_lora32_v4_r2` to `matrix.board`; extend the `target:` ternary so it maps to `esp32s3` (not the `esp32` default); fix the stale "5-board list" line-1 comment. |
+| `.github/workflows/release.yml` | Modify. Bump `EXPECTED_BOARDS` from `5` to `6`; fix 4 other stale "5 boards"/"25 artefacts" comment lines. |
+| `docs/manifests/heltec_wifi_lora32_v4_r2.json` | **New.** ESP Web Tools manifest for the 6th board, modeled on the existing 5 manifests. |
+| `docs/index.html` | Modify. Add a 6th `<option>` to the board `<select>` so the web flasher can actually target this board. |
 | `main/version.h` | Modify. `V2.6.6` → `V2.6.7`. |
 | `CHANGELOG.md` | Modify. New `## V2.6.7` entry. |
-| `README.md` | Modify. New board-table row; extend the "Substitute ... for other boards" sentence. |
+| `README.md` | Modify. New board-table row; extend the "Substitute ... for other boards" sentence; fix 2 other stale "five boards" mentions (intro paragraph, release-workflow section). |
 
 No new C source files are needed (unlike, say, adding a whole new sensor driver) — this is a pure HAL/config addition, matching how every previous board was added.
 
@@ -319,6 +326,15 @@ Replace with (inserts a new `#elif` branch before `#else`, and updates the `#err
     // against the V4 datasheet.
     #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
     #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain GPIO on base V4 (see spec §5: no LoRa-PA conflict on this SKU)
+    // IO3 is an ESP32-S3 boot strap (JTAG vs USB-Serial-JTAG select), same
+    // strap BOARD_FEATHERS3_D reuses for PIN_SPEAKER_P below — but that reuse
+    // is safe ONLY because the speaker driver stays hi-Z until code drives it
+    // post-boot. This pin is different: it's an always-connected external
+    // input from the tube pulse-conditioning circuit, whose level during the
+    // ROM bootloader's strap-sampling window is NOT under firmware control.
+    // Not resolvable without hardware in hand — flagged as a first-flash
+    // bench-verify item (see Global Constraints): confirm the board still
+    // enumerates over USB-Serial-JTAG after flashing.
     #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
 
     // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3
@@ -402,9 +418,44 @@ If it fails, read the actual compiler error (don't guess) — most likely cause 
 ```powershell
 Get-Content build_heltec_wifi_lora32_v4_r2\geiger_v2.bin -Raw -Encoding Byte | ForEach-Object { [System.Text.Encoding]::ASCII.GetString($_) } | Select-String -Pattern "V2\.\d+\.\d+" -AllMatches | ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
 ```
-Expected: `V2.6.6` (version not bumped yet — that's Task 8). Confirms the binary was freshly produced, not stale.
+Expected: `V2.6.6` (version not bumped yet — that's Task 6). Confirms the binary was freshly produced, not stale.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Fix the stale `@file` top-of-header board enumeration**
+
+The header's own top-of-file doc comment enumerates `BOARD_*` macros and is already stale (it omits `BOARD_SEEED_XIAO_ESP32S3`, added in a prior board port). Fix it while adding the 6th board rather than perpetuating the drift.
+
+Find:
+```c
+/** @file
+ *  @brief Board-level hardware abstraction — pin map and feature flags.
+ *
+ *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`, or
+ *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO` is defined by the top-level CMakeLists.txt
+ *  based on the `BOARD` variable (default `heltec_v2`). All module .c/.h files
+ *  include this header and reference pins / features by the macros below —
+ *  never by raw GPIO numbers.
+```
+Replace with:
+```c
+/** @file
+ *  @brief Board-level hardware abstraction — pin map and feature flags.
+ *
+ *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`,
+ *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`, or
+ *  `BOARD_HELTEC_WIFI_LORA32_V4_R2` is defined by the top-level
+ *  CMakeLists.txt based on the `BOARD` variable (default `heltec_v2`). All
+ *  module .c/.h files include this header and reference pins / features by
+ *  the macros below — never by raw GPIO numbers.
+```
+
+- [ ] **Step 6: Verify the build still succeeds**
+
+```powershell
+& .\_build.cmd heltec_wifi_lora32_v4_r2 2>&1 | Select-Object -Last 10
+```
+Expected: `Project build complete.` (Doc-comment-only change — this is a regression check, not a new behavior test.)
+
+- [ ] **Step 7: Commit**
 
 ```powershell
 git add main/hal.h
@@ -413,15 +464,16 @@ git commit -m "Add BOARD_HELTEC_WIFI_LORA32_V4_R2 pin map to hal.h"
 
 ---
 
-### Task 4: `main/i2c_bus.c` / `main/i2c_bus.h` — dedicated OLED bus
+### Task 4: `main/i2c_bus.c` / `main/i2c_bus.h` / `main/main.c` — dedicated OLED bus
 
 **Files:**
-- Modify: `main/i2c_bus.c:13-19` (widen the `s_bus_secondary` guard), `main/i2c_bus.c:90-122` (`i2c_bus_get_secondary()` — add a new branch)
-- Modify: `main/i2c_bus.h:11-33` (per-board doc comment — add a paragraph)
+- Modify: `main/i2c_bus.c:13-19` (widen the `s_bus_secondary` guard), `main/i2c_bus.c:90-122` (`i2c_bus_get_secondary()` — add a new branch), `main/i2c_bus.c:128-140` (`i2c_bus_finalize()` — stop silently no-opping on this board)
+- Modify: `main/i2c_bus.h:11-33` (`@file` per-board doc comment — add a paragraph), `main/i2c_bus.h:64-79` (separate function-level doc comment above `i2c_bus_get_secondary()`)
+- Modify: `main/main.c:1006-1016` (`PROBE_ON_BOTH_BUSES` macro — guard the secondary-bus fallback)
 
 **Interfaces:**
 - Consumes: `PIN_OLED_SDA=17`, `PIN_OLED_SCL=18` from Task 3's `hal.h`. Also `BOARD_HELTEC_WIFI_LORA32_V4_R2` for the `#if`/`#elif` guards.
-- Produces: `i2c_bus_get_secondary()` now returns a valid, always-on `i2c_master_bus_handle_t` on `I2C_NUM_1` for this board (previously it unconditionally returned `NULL` for every board except FeatherS3-D). No signature change — `main/display.c` (Task 5) and any future consumer keep calling it exactly as before.
+- Produces: `i2c_bus_get_secondary()` now returns a valid, always-on `i2c_master_bus_handle_t` on `I2C_NUM_1` for this board (previously it unconditionally returned `NULL` for every board except FeatherS3-D). No signature change — `main/display.c` (Task 5) and any future consumer keep calling it exactly as before. `PROBE_ON_BOTH_BUSES` keeps its existing macro signature (`init_fn, present_fn, bus1`) — only its internal expansion changes for this board.
 
 - [ ] **Step 1: Widen the `s_bus_secondary` static's board guard**
 
@@ -545,9 +597,53 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
 }
 ```
 
-Note: `i2c_bus_finalize()` needs no change — its `#if defined(BOARD_FEATHERS3_D)` teardown/LDO-drop logic is FeatherS3-D-specific (nothing to un-gate on this board), and `display.c` already calls `i2c_bus_secondary_keep_alive()` on a successful OLED bind (Task 5), so this board's bus is never a teardown candidate regardless.
+- [ ] **Step 3: Widen `i2c_bus_finalize()` so it doesn't silently no-op on this board**
 
-- [ ] **Step 3: Update the `i2c_bus.h` doc comment**
+`i2c_bus_finalize()`'s entire body is scoped to `#if defined(BOARD_FEATHERS3_D)` with no `#else` — it compiles to an empty function for every other board. That's fine for boards with no secondary bus (nothing to finalize), but on this board `i2c_bus_get_secondary()` always creates a real, always-on handle — if the OLED fails to probe on a given boot, `i2c_bus_secondary_keep_alive()` is never called, and this board's `I2C_NUM_1` handle would be silently leaked with zero log trace. This board's bus is never torn down (it has no gating GPIO to drop), so the fix is a log-only branch — but an explicit one, not a silent no-op.
+
+Find:
+```c
+void i2c_bus_finalize(void) {
+#if defined(BOARD_FEATHERS3_D)
+    if (s_bus_secondary && !s_secondary_kept) {
+        i2c_del_master_bus(s_bus_secondary);
+        s_bus_secondary = NULL;
+        gpio_set_level(GPIO_NUM_39, 0);                // LDO2 off — saves ~5–10 mA quiescent
+        ESP_LOGI(TAG, "secondary bus torn down — no consumer (LDO2 off)");
+    } else if (s_bus_secondary) {
+        ESP_LOGI(TAG, "secondary bus kept alive — at least one consumer is using it");
+    }
+    // s_bus_secondary == NULL && !kept: secondary was never requested, nothing to do.
+#endif
+}
+```
+Replace with:
+```c
+void i2c_bus_finalize(void) {
+#if defined(BOARD_FEATHERS3_D)
+    if (s_bus_secondary && !s_secondary_kept) {
+        i2c_del_master_bus(s_bus_secondary);
+        s_bus_secondary = NULL;
+        gpio_set_level(GPIO_NUM_39, 0);                // LDO2 off — saves ~5–10 mA quiescent
+        ESP_LOGI(TAG, "secondary bus torn down — no consumer (LDO2 off)");
+    } else if (s_bus_secondary) {
+        ESP_LOGI(TAG, "secondary bus kept alive — at least one consumer is using it");
+    }
+    // s_bus_secondary == NULL && !kept: secondary was never requested, nothing to do.
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    // No gating GPIO on this board — the bus is never a teardown candidate,
+    // it's dedicated permanently to the onboard OLED. This branch exists
+    // only so an OLED probe failure leaves a log trace instead of silently
+    // leaking the I2C_NUM_1 handle with zero diagnostic trail.
+    if (s_bus_secondary && !s_secondary_kept) {
+        ESP_LOGW(TAG, "OLED bus is up but no consumer claimed it — "
+                      "OLED probe likely failed this boot");
+    }
+#endif
+}
+```
+
+- [ ] **Step 4: Update the `i2c_bus.h` `@file` doc comment**
 
 In `main/i2c_bus.h`, find:
 ```c
@@ -580,37 +676,202 @@ Replace with:
  */
 ```
 
-- [ ] **Step 4: Verify the build still succeeds**
+- [ ] **Step 5: Fix the separate, stale function-level doc comment above `i2c_bus_get_secondary()`**
+
+`i2c_bus.h` has a SECOND, separate doc comment directly above the `i2c_bus_get_secondary()` declaration (distinct from the `@file` block just updated in Step 4) that still says the secondary bus is FeatherS3-D-only and always returns NULL elsewhere.
+
+Find:
+```c
+/** @brief Get the secondary I²C bus handle (FeatherS3-D STEMMA2 only).
+ *
+ *  On FeatherS3-D: lazy init on first call — drives IO39 HIGH (LDO2
+ *  enable), waits 10 ms for the rail to settle, then creates the
+ *  I²C controller on I²C_NUM_1 / IO15 / IO16. Subsequent calls return
+ *  the cached handle.
+ *
+ *  On Heltec / QT Py / any board without a second bus: always returns
+ *  NULL. Callers should treat NULL as "no second bus on this board"
+ *  and skip secondary-bus probing gracefully.
+ *
+ *  Calling this enables LDO2 — adds ~5–10 mA continuous draw (LDO2
+ *  quiescent + onboard NeoPixel idle on FeatherS3-D). If no consumer
+ *  subsequently calls i2c_bus_secondary_keep_alive(), i2c_bus_finalize()
+ *  will tear it back down.
+ */
+i2c_master_bus_handle_t i2c_bus_get_secondary(void);
+```
+Replace with:
+```c
+/** @brief Get the secondary I²C bus handle (FeatherS3-D STEMMA2, or the
+ *  Heltec WiFi LoRa 32 V4-R2's dedicated OLED bus).
+ *
+ *  On FeatherS3-D: lazy init on first call — drives IO39 HIGH (LDO2
+ *  enable), waits 10 ms for the rail to settle, then creates the
+ *  I²C controller on I²C_NUM_1 / IO15 / IO16. Subsequent calls return
+ *  the cached handle.
+ *
+ *  On Heltec WiFi LoRa 32 V4-R2: lazy init on first call — no gating GPIO
+ *  (this board's OLED bus is always powered), creates the I²C controller
+ *  on I²C_NUM_1 / IO17 / IO18. Always non-NULL once created; never torn
+ *  down (see i2c_bus_finalize()'s log-only branch for this board).
+ *
+ *  On Heltec V2 / QT Py / any board without a second bus: always returns
+ *  NULL. Callers should treat NULL as "no second bus on this board"
+ *  and skip secondary-bus probing gracefully.
+ *
+ *  Calling this on FeatherS3-D enables LDO2 — adds ~5–10 mA continuous draw
+ *  (LDO2 quiescent + onboard NeoPixel idle). If no consumer subsequently
+ *  calls i2c_bus_secondary_keep_alive(), i2c_bus_finalize() will tear it
+ *  back down. On Heltec WiFi LoRa 32 V4-R2 there is no LDO to drop — the
+ *  bus stays up regardless.
+ */
+i2c_master_bus_handle_t i2c_bus_get_secondary(void);
+```
+
+- [ ] **Step 6: Guard `main/main.c`'s `PROBE_ON_BOTH_BUSES` macro so sensor drivers never probe the OLED-only bus**
+
+`main.c`'s `PROBE_ON_BOTH_BUSES` macro (used for env/PM/noise sensors, GNSS, and VEML7700) has no per-board guard — it falls back to `i2c_bus_get_secondary()` unconditionally whenever the primary-bus probe fails. On every other board, that's correct (the secondary bus is either NULL or a general-purpose STEMMA2 connector any sensor might occupy). On this board, once Task 4 lands, `i2c_bus_get_secondary()` always returns a valid handle — but it's permanently and exclusively the onboard SSD1315's bus. Every sensor driver would spuriously probe the OLED on every boot.
+
+In `main/main.c`, find:
+```c
+    // V2.3.29: dual-bus device probing.
+    //
+    // i2c_bus.c owns both buses (primary always-on, secondary lazy +
+    // sheddable). For each sensor module we try the primary bus first;
+    // if no device was found, we ask for the secondary bus (which
+    // lazily enables LDO2 on FeatherS3-D, returns NULL on Heltec / QT Py)
+    // and probe again. On a hit, mark the secondary bus as kept-alive
+    // so i2c_bus_finalize() below doesn't tear it down.
+    //
+    // Display does its own dual-bus auto-detect inside display_setup()
+    // (and calls i2c_bus_secondary_keep_alive() itself if it lands on
+    // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
+    // nothing — sensor or display — ended up on STEMMA2.
+    //
+    // V2.5.19: select the primary-bus pin route from config BEFORE the first
+    // i2c_bus_get_primary() below caches the bus. No-op except on QT Py
+    // (HAL_HAS_I2C_PINOUT_SWITCH); reboot-required by construction.
+    i2c_bus_set_primary_pinout(g_cfg.i2c_pinout);
+    i2c_master_bus_handle_t bus1 = i2c_bus_get_primary();
+
+    // V2.6.6: MAX17048 fuel gauge is a fixed onboard part on STEMMA1/
+    // primary — unlike the pluggable env/PM/noise sensors below, it never
+    // needs the secondary-bus fallback probe.
+    fuel_gauge_init(bus1);
+
+    // Helper macro: try a sensor's init on bus 1; if no device bound,
+    // try bus 2; if a device was found there, keep the bus alive.
+    #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
+        do {                                                                \
+            init_fn(bus1);                                                  \
+            if (!present_fn()) {                                            \
+                i2c_master_bus_handle_t _b2 = i2c_bus_get_secondary();      \
+                if (_b2) {                                                  \
+                    init_fn(_b2);                                           \
+                    if (present_fn()) i2c_bus_secondary_keep_alive();       \
+                }                                                           \
+            }                                                               \
+        } while (0)
+```
+Replace with:
+```c
+    // V2.3.29: dual-bus device probing.
+    //
+    // i2c_bus.c owns both buses (primary always-on, secondary lazy +
+    // sheddable). For each sensor module we try the primary bus first;
+    // if no device was found, we ask for the secondary bus (which
+    // lazily enables LDO2 on FeatherS3-D, returns NULL on Heltec / QT Py)
+    // and probe again. On a hit, mark the secondary bus as kept-alive
+    // so i2c_bus_finalize() below doesn't tear it down.
+    //
+    // Display does its own dual-bus auto-detect inside display_setup()
+    // (and calls i2c_bus_secondary_keep_alive() itself if it lands on
+    // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
+    // nothing — sensor or display — ended up on STEMMA2.
+    //
+    // Heltec WiFi LoRa 32 V4-R2 is the one exception: its secondary bus is
+    // permanently and exclusively the onboard OLED, never a general-purpose
+    // STEMMA-style connector — see PROBE_ON_BOTH_BUSES below, which skips
+    // the secondary-bus fallback entirely on this board.
+    //
+    // V2.5.19: select the primary-bus pin route from config BEFORE the first
+    // i2c_bus_get_primary() below caches the bus. No-op except on QT Py
+    // (HAL_HAS_I2C_PINOUT_SWITCH); reboot-required by construction.
+    i2c_bus_set_primary_pinout(g_cfg.i2c_pinout);
+    i2c_master_bus_handle_t bus1 = i2c_bus_get_primary();
+
+    // V2.6.6: MAX17048 fuel gauge is a fixed onboard part on STEMMA1/
+    // primary — unlike the pluggable env/PM/noise sensors below, it never
+    // needs the secondary-bus fallback probe.
+    fuel_gauge_init(bus1);
+
+    // Helper macro: try a sensor's init on bus 1; if no device bound,
+    // try bus 2; if a device was found there, keep the bus alive.
+    //
+    // Heltec WiFi LoRa 32 V4-R2: the secondary bus is the onboard OLED,
+    // never a pluggable sensor connector, so the fallback probe is
+    // compiled out entirely for this board — it would otherwise probe the
+    // display's bus on every sensor driver, every boot, for no reason.
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
+        do {                                                                \
+            init_fn(bus1);                                                  \
+        } while (0)
+#else
+    #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
+        do {                                                                \
+            init_fn(bus1);                                                  \
+            if (!present_fn()) {                                            \
+                i2c_master_bus_handle_t _b2 = i2c_bus_get_secondary();      \
+                if (_b2) {                                                  \
+                    init_fn(_b2);                                           \
+                    if (present_fn()) i2c_bus_secondary_keep_alive();       \
+                }                                                           \
+            }                                                               \
+        } while (0)
+#endif
+```
+
+- [ ] **Step 7: Verify the build still succeeds**
 
 ```powershell
 & .\_build.cmd heltec_wifi_lora32_v4_r2 2>&1 | Select-Object -Last 25
 ```
 Expected: `Project build complete.` (This is a regression check — no functional test is possible without hardware. The i2c_bus.c change is inert until Task 5's `display.c` actually calls `i2c_bus_get_secondary()` and finds a display.)
 
-- [ ] **Step 5: Structural check — confirm the new branch compiled in, not silently skipped**
+- [ ] **Step 8: Structural check — confirm the new branch compiled in, not silently skipped**
 
 ```powershell
 Select-String -Path "build_heltec_wifi_lora32_v4_r2\CMakeFiles\geiger_v2.elf.dir\i2c_bus.c.obj" -Pattern "onboard OLED" -SimpleMatch -ErrorAction SilentlyContinue
 ```
-This is a weak check (object files aren't reliably greppable text); the authoritative check is Step 4's successful `Project build complete.` combined with re-reading the diff in Step 2. Skip this step if the object-file grep finds nothing — that's expected (compiled/optimized object files don't usually retain source comments as literal text); do not treat a miss here as a build failure.
+This is a weak check (object files aren't reliably greppable text); the authoritative check is Step 7's successful `Project build complete.` combined with re-reading the diffs in Steps 2, 3, and 6. Skip this step if the object-file grep finds nothing — that's expected (compiled/optimized object files don't usually retain source comments as literal text); do not treat a miss here as a build failure.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 9: Regression-check that other boards' sensor probing is unaffected**
 
 ```powershell
-git add main/i2c_bus.c main/i2c_bus.h
+& .\_build.cmd feathers3_d 2>&1 | Select-Object -Last 10
+```
+Expected: `Project build complete.` (Confirms the `#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)` guard around `PROBE_ON_BOTH_BUSES` didn't disturb FeatherS3-D's `#else` branch, which is textually adjacent and must keep its full dual-bus fallback behavior.)
+
+- [ ] **Step 10: Commit**
+
+```powershell
+git add main/i2c_bus.c main/i2c_bus.h main/main.c
 git commit -m "Add dedicated always-on OLED bus for Heltec WiFi LoRa 32 V4-R2"
 ```
 
 ---
 
-### Task 5: `main/display.c` — OLED chip name + board-aware bus labels
+### Task 5: `main/display.c` / `main/display.h` / `main/http_server.c` — OLED support, panel heuristic, and board-name consistency
 
 **Files:**
-- Modify: `main/display.c:1-19` (top-of-file per-board comment), `main/display.c:70-74` (`OLED_CHIP_NAME` chain), `main/display.c:503,528,532,559` (bus-label strings)
+- Modify: `main/display.c:1-19` (top-of-file per-board comment), `main/display.c:70-74` (`OLED_CHIP_NAME` chain), `main/display.c:497-536` (probe order — skip the primary-bus probe and SerLCD-wake delay for this board), `main/display.c:580-592` (`DISPLAY_MODE_AUTO` heuristic — explicit branch), `main/display.c` bus-label strings (inside `display_setup()`)
+- Modify: `main/display.h:3-30` (top-of-file per-board panel/bus doc comment)
+- Modify: `main/http_server.c:2158-2173` (`UPLOAD_PROMPT_BOARD` OTA-page board-name chain)
 
 **Interfaces:**
 - Consumes: `BOARD_HELTEC_WIFI_LORA32_V4_R2`, and (indirectly, via `i2c_bus_get_secondary()`) Task 4's new bus branch.
-- Produces: nothing new consumed elsewhere — this task only changes boot-log/status-log text accuracy. No behavioral change to the probe cascade itself (it already works correctly for this board once Task 4 lands: primary bus has no display, so it falls through to secondary, which always has the SSD1315).
+- Produces: nothing new consumed elsewhere — this task changes boot-log/status-log text accuracy, the boot-time probe order for this board, the multipage-vs-single-page display decision, and the OTA page's board-name label. Behavioral change to the probe cascade for THIS BOARD ONLY: it now tries the secondary (OLED) bus first and skips the SerLCD-wake delay, instead of always probing the primary bus first and unconditionally sleeping 500 ms before it can ever reach the always-present onboard OLED.
 
 - [ ] **Step 1: Update the top-of-file per-board comment**
 
@@ -625,7 +886,7 @@ Find:
 //   Heltec V2 / Heltec V2 4MB : onboard SSD1306 on the shared env_sensor bus
 //                               (SDA=GPIO4, SCL=GPIO15, RST=GPIO16).
 //   FeatherS3-D               : external SSD1309 breakout (Core Electronics
-//                               CE09964) on STEMMA1 or STEMMA2 (SDA=IO16, SCL=IO15),
+//                               CE09964) on STEMMA2 (SDA=IO16, SCL=IO15),
 //                               powered from LDO2 — see bring_up_stemma2_bus.
 //
 // Layout: boot splash, then either the radiation-focused running screen
@@ -647,17 +908,17 @@ Replace with:
 //   Heltec V2 / Heltec V2 4MB : onboard SSD1306 on the shared env_sensor bus
 //                               (SDA=GPIO4, SCL=GPIO15, RST=GPIO16).
 //   FeatherS3-D               : external SSD1309 breakout (Core Electronics
-//                               CE09964) on STEMMA1 or STEMMA2 (SDA=IO16, SCL=IO15),
+//                               CE09964) on STEMMA2 (SDA=IO16, SCL=IO15),
 //                               powered from LDO2 — see bring_up_stemma2_bus.
 //   Heltec WiFi LoRa 32 V4-R2 : onboard SSD1315 on a bus dedicated
 //                               permanently to the display (SDA=GPIO17,
 //                               SCL=GPIO18, RST=GPIO21) — module-internal,
 //                               not shared with the env-sensor bus at all
 //                               (unlike every board above). Always present
-//                               (on-module, not a plug-in breakout), so it's
-//                               reached via the same primary→secondary
-//                               probe fallback but always resolves on the
-//                               secondary bus.
+//                               (on-module, not a plug-in breakout) — this
+//                               board probes the secondary bus FIRST (see
+//                               Step 6 below), since the primary bus can
+//                               never have a display on it.
 //
 // Layout: boot splash, then either the radiation-focused running screen
 // (time + nSv/h on top, big CPM in the middle, status line at the bottom)
@@ -740,27 +1001,366 @@ Replace with:
     ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
 ```
 
-- [ ] **Step 4: Verify the build succeeds**
+- [ ] **Step 4: Skip the primary-bus probe and SerLCD-wake delay for this board**
+
+`display_setup()` always probes the primary bus first (correct for every other board — it's the cheapest way to find a display if one happens to be there). On this board, no display can EVER be on the primary/env-sensor bus — the OLED is wired exclusively to the secondary bus. Probing primary first wastes a full probe-timeout, and then the code unconditionally sleeps 500 ms (meant only to wake an occasionally-present SerLCD's bootloader) before it can even reach the always-present onboard OLED. Fix: for this board only, skip straight to the secondary bus and skip the SerLCD delay (it's an OLED, never a SerLCD).
+
+Find (this is the state of the function after Steps 1-3 above have been applied):
+```c
+    // V2.3.29: auto-detect display across BOTH I²C buses. Probe primary
+    // first since LDO2 is off until the secondary call enables it — lets
+    // the dual-bus probe terminate quickly + cheaply if the display lives
+    // on bus 1. The SerLCD ATmega bootloader's ~500 ms wait only fires
+    // before the SECONDARY probe (bus 1 has been powered since boot, by
+    // display_setup time the SerLCD has had hundreds of ms to wake).
+    //
+    // Boards without a secondary bus (Heltec, QT Py): i2c_bus_get_secondary()
+    // returns NULL and the bus-2 branch is silently skipped.
+
+    i2c_master_bus_handle_t bus = i2c_bus_get_primary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no primary I²C bus — display disabled");
+        return false;
+    }
+
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    const char *bus_label = "env-sensor-bus";
+#else
+    const char *bus_label = "STEMMA1";
+#endif
+
+    // --- Try primary bus -----------------------------------------------
+    if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
+        ESP_LOGI(TAG, "display backend: SerLCD at 0x72 on %s (show=%d brightness=%d%%)",
+                 bus_label, show_display, brightness_pct);
+        goto task_spawn;
+    }
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
+    }
+
+    // --- Fall through to secondary bus ---------------------------------
+    bus = i2c_bus_get_secondary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no display on %s, no secondary bus on this board — "
+                      "display disabled", bus_label);
+        return false;
+    }
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    bus_label = "onboard-OLED-bus";
+#else
+    bus_label = "STEMMA2";
+#endif
+
+    // SerLCD ATmega bootloader needs ~500 ms after LDO2 enable. (Bus 1
+    // probes above didn't need this — bus 1 has been powered since boot.)
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
+        i2c_bus_secondary_keep_alive();
+        ESP_LOGI(TAG, "display backend: SerLCD at 0x72 on %s (show=%d brightness=%d%%)",
+                 bus_label, show_display, brightness_pct);
+        goto task_spawn;
+    }
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            i2c_bus_secondary_keep_alive();
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
+    }
+
+    ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
+    return false;
+```
+Replace with:
+```c
+    // V2.3.29: auto-detect display across BOTH I²C buses. Probe primary
+    // first since LDO2 is off until the secondary call enables it — lets
+    // the dual-bus probe terminate quickly + cheaply if the display lives
+    // on bus 1. The SerLCD ATmega bootloader's ~500 ms wait only fires
+    // before the SECONDARY probe (bus 1 has been powered since boot, by
+    // display_setup time the SerLCD has had hundreds of ms to wake).
+    //
+    // Boards without a secondary bus (Heltec, QT Py): i2c_bus_get_secondary()
+    // returns NULL and the bus-2 branch is silently skipped.
+    //
+    // Heltec WiFi LoRa 32 V4-R2 is the one exception to "probe primary
+    // first": its OLED lives EXCLUSIVELY on the secondary bus — the
+    // primary/env-sensor bus never has a display on it — so probing
+    // primary first would pay a guaranteed probe-timeout plus the SerLCD
+    // 500 ms wake delay on every single boot for no possible benefit. This
+    // board skips straight to the secondary bus and skips the SerLCD
+    // delay too (it's an OLED, never a SerLCD).
+
+    i2c_master_bus_handle_t bus;
+    const char *bus_label;
+
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    bus = i2c_bus_get_secondary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no secondary I²C bus — display disabled");
+        return false;
+    }
+    bus_label = "onboard-OLED-bus";
+#else
+    bus = i2c_bus_get_primary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no primary I²C bus — display disabled");
+        return false;
+    }
+    bus_label = "STEMMA1";
+
+    // --- Try primary bus -----------------------------------------------
+    if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
+        ESP_LOGI(TAG, "display backend: SerLCD at 0x72 on %s (show=%d brightness=%d%%)",
+                 bus_label, show_display, brightness_pct);
+        goto task_spawn;
+    }
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
+    }
+
+    // --- Fall through to secondary bus ---------------------------------
+    bus = i2c_bus_get_secondary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no display on %s, no secondary bus on this board — "
+                      "display disabled", bus_label);
+        return false;
+    }
+    bus_label = "STEMMA2";
+
+    // SerLCD ATmega bootloader needs ~500 ms after LDO2 enable. (Bus 1
+    // probes above didn't need this — bus 1 has been powered since boot.)
+    vTaskDelay(pdMS_TO_TICKS(500));
+#endif
+
+    if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
+        i2c_bus_secondary_keep_alive();
+        ESP_LOGI(TAG, "display backend: SerLCD at 0x72 on %s (show=%d brightness=%d%%)",
+                 bus_label, show_display, brightness_pct);
+        goto task_spawn;
+    }
+    {
+        uint8_t oled_addr = 0;
+        if (try_oled_on_bus(bus, &oled_addr)) {
+            apply_oled_init_sequence();
+            s_show    = show_display;
+            s_backend = BACKEND_OLED;
+            display_set_contrast(brightness_pct);
+            i2c_bus_secondary_keep_alive();
+            ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
+                     OLED_CHIP_NAME, oled_addr, bus_label,
+                     show_display, brightness_pct);
+            goto task_spawn;
+        }
+    }
+
+    ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
+    return false;
+```
+
+- [ ] **Step 5: Give `DISPLAY_MODE_AUTO` an explicit branch for this board's panel size**
+
+The multipage-vs-single-page heuristic only special-cases `BOARD_FEATHERS3_D`; every other board — including this new one — silently gets `resolved_multipage=false` by falling into the `#else`, with no per-board statement of *why* that's the right answer. Make the decision explicit rather than implicit-by-elimination.
+
+Find:
+```c
+task_spawn:;
+    // V2.4.9: finalise AUTO mode now that the panel has been detected.
+    // The rule is panel-based:
+    //   - SerLCD backend       → rotation (typical 20x4 char display has
+    //                            room for the multi-page content)
+    //   - Big OLED (SSD1309)   → rotation (per-board compile-time hint
+    //                            — BOARD_FEATHERS3_D ships with a 2.42"
+    //                            SSD1309 from Core Electronics)
+    //   - Small OLED (SSD1306) → radiation (Heltec onboard 0.96" or
+    //                            Adafruit 326 plugged into STEMMA QT)
+    //
+    // Caveat: SSD1306 and SSD1309 are register-compatible (we drive both
+    // with the same init sequence) and there's no reliable chip-ID
+    // register that differs. So the OLED size discrimination uses the
+    // compile-time per-board hint. The edge case — Adafruit 326 (small)
+    // plugged into a FeatherS3-D's STEMMA1 in place of the SSD1309 —
+    // would auto-pick rotation incorrectly; the user can override via
+    // display_mode = RADIATION in /config.
+    if (mode == DISPLAY_MODE_AUTO) {
+        bool resolved_multipage;
+        if (s_backend == BACKEND_SERLCD) {
+            resolved_multipage = true;
+        } else {
+#if defined(BOARD_FEATHERS3_D)
+            resolved_multipage = true;   // SSD1309 2.42" — big enough for rotation
+#else
+            resolved_multipage = false;  // SSD1306 0.96" — radiation single page
+#endif
+        }
+        s_is_multipage = resolved_multipage;
+    }
+```
+Replace with:
+```c
+task_spawn:;
+    // V2.4.9: finalise AUTO mode now that the panel has been detected.
+    // The rule is panel-based:
+    //   - SerLCD backend       → rotation (typical 20x4 char display has
+    //                            room for the multi-page content)
+    //   - Big OLED (SSD1309)   → rotation (per-board compile-time hint
+    //                            — BOARD_FEATHERS3_D ships with a 2.42"
+    //                            SSD1309 from Core Electronics)
+    //   - Small OLED (SSD1306 / SSD1315) → radiation (Heltec onboard
+    //                            0.96", Adafruit 326 plugged into STEMMA
+    //                            QT, or Heltec WiFi LoRa 32 V4-R2's onboard
+    //                            SSD1315 — assumed same compact 0.96"
+    //                            footprint Heltec ships across its
+    //                            V2/V3/V4 module line; NOT bench-verified
+    //                            for this exact SKU, see Global Constraints)
+    //
+    // Caveat: SSD1306, SSD1309, and SSD1315 are register-compatible (we
+    // drive all three with the same init sequence) and there's no reliable
+    // chip-ID register that differs. So the OLED size discrimination uses
+    // the compile-time per-board hint. The edge case — Adafruit 326 (small)
+    // plugged into a FeatherS3-D's STEMMA1 in place of the SSD1309 —
+    // would auto-pick rotation incorrectly; the user can override via
+    // display_mode = RADIATION in /config.
+    if (mode == DISPLAY_MODE_AUTO) {
+        bool resolved_multipage;
+        if (s_backend == BACKEND_SERLCD) {
+            resolved_multipage = true;
+        } else {
+#if defined(BOARD_FEATHERS3_D)
+            resolved_multipage = true;   // SSD1309 2.42" — big enough for rotation
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+            resolved_multipage = false;  // SSD1315 0.96" (assumed) — radiation single page
+#else
+            resolved_multipage = false;  // SSD1306 0.96" — radiation single page
+#endif
+        }
+        s_is_multipage = resolved_multipage;
+    }
+```
+
+- [ ] **Step 6: Update `main/display.h`'s stale per-board doc comment**
+
+`display.h`'s top-of-file comment enumerates panels/buses for only Heltec V2 and FeatherS3-D — this file is separate from `display.c` and wasn't touched by Steps 1-5 above.
+
+Find:
+```c
+/** @file
+ *  @brief OLED display driver — SSD1306 / SSD1309 128x64 over I2C.
+ *
+ *  Per-board panel + bus:
+ *    Heltec V2 (+ 4MB clone) : onboard SSD1306 on the env_sensor I2C bus
+ *                              (SDA=GPIO4, SCL=GPIO15, dedicated reset=GPIO16).
+ *    FeatherS3-D             : external SSD1309 breakout on STEMMA2
+ *                              (SDA=IO16, SCL=IO15), powered from LDO2;
+ *                              4-pin module — no reset line, chip POR only.
+ *
+ *  SSD1306 and SSD1309 are register-compatible — the same init sequence and
+ *  command set drive both. Boot log distinguishes them via OLED_CHIP_NAME
+ *  in display.c (per-board #define) so a glance at /log shows which silicon
+ *  is fitted without needing to know the board variant.
+```
+Replace with:
+```c
+/** @file
+ *  @brief OLED display driver — SSD1306 / SSD1309 / SSD1315 128x64 over I2C.
+ *
+ *  Per-board panel + bus:
+ *    Heltec V2 (+ 4MB clone)   : onboard SSD1306 on the env_sensor I2C bus
+ *                                (SDA=GPIO4, SCL=GPIO15, dedicated reset=GPIO16).
+ *    FeatherS3-D               : external SSD1309 breakout on STEMMA2
+ *                                (SDA=IO16, SCL=IO15), powered from LDO2;
+ *                                4-pin module — no reset line, chip POR only.
+ *    Heltec WiFi LoRa 32 V4-R2 : onboard SSD1315 on a bus dedicated
+ *                                permanently to the display (SDA=GPIO17,
+ *                                SCL=GPIO18, RST=GPIO21) — module-internal,
+ *                                not the env-sensor bus. See i2c_bus.h for
+ *                                why this board needs two I²C controllers.
+ *
+ *  SSD1306, SSD1309, and SSD1315 are register-compatible — the same init
+ *  sequence and command set drive all three. Boot log distinguishes them
+ *  via OLED_CHIP_NAME in display.c (per-board #define) so a glance at /log
+ *  shows which silicon is fitted without needing to know the board variant.
+```
+
+- [ ] **Step 7: Add the OTA-page board-name arm in `main/http_server.c`**
+
+The OTA update page's `UPLOAD_PROMPT_BOARD` chain has an arm for every existing board — without one for this board, it falls through to `#else` and shows "(unknown board)", exactly reproducing the V2.5.19 XIAO regression documented in this file's own comment.
+
+Find:
+```c
+#elif BOARD_SEEED_XIAO_ESP32S3
+    // V2.5.19: the XIAO target shipped in V2.4.25 but was never given a label
+    // branch here, so it fell through to "(unknown board)" on the OTA page —
+    // which, by elimination, was the only way to identify a XIAO build.
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
+#else
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
+#endif
+```
+Replace with:
+```c
+#elif BOARD_SEEED_XIAO_ESP32S3
+    // V2.5.19: the XIAO target shipped in V2.4.25 but was never given a label
+    // branch here, so it fell through to "(unknown board)" on the OTA page —
+    // which, by elimination, was the only way to identify a XIAO build.
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
+#elif BOARD_HELTEC_WIFI_LORA32_V4_R2
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi LoRa 32 V4 (R2)</b>"
+#else
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
+#endif
+```
+
+- [ ] **Step 8: Verify the build succeeds**
 
 ```powershell
 & .\_build.cmd heltec_wifi_lora32_v4_r2 2>&1 | Select-Object -Last 25
 ```
 Expected: `Project build complete.` This is the last source-code task — the firmware now builds cleanly for `heltec_wifi_lora32_v4_r2` with all HAL/display/I²C wiring in place.
 
-- [ ] **Step 5: Regression-check the other five boards still build**
+- [ ] **Step 9: Regression-check the other five boards still build**
 
 The `#if`/`#elif` chains touched in Tasks 3-5 are additive (new branches only), but verify no existing board's branch was accidentally altered:
 ```powershell
 & .\_build.cmd heltec_v2 2>&1 | Select-Object -Last 10
 & .\_build.cmd feathers3_d 2>&1 | Select-Object -Last 10
 ```
-Expected: both end with `Project build complete.` (Running all 5 pre-existing boards is thorough but slow; these two cover both chip targets — `esp32` and `esp32s3` — and are the two boards whose `hal.h`/`i2c_bus.c`/`display.c` branches sit textually adjacent to the new one, so they're the most likely to show an accidental edit.)
+Expected: both end with `Project build complete.` (Running all 5 pre-existing boards is thorough but slow; these two cover both chip targets — `esp32` and `esp32s3` — and are the two boards whose `hal.h`/`i2c_bus.c`/`display.c`/`http_server.c` branches sit textually adjacent to the new one, so they're the most likely to show an accidental edit.)
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```powershell
-git add main/display.c
-git commit -m "Add SSD1315 support and board-aware bus labels for Heltec WiFi LoRa 32 V4-R2"
+git add main/display.c main/display.h main/http_server.c
+git commit -m "Add SSD1315 support, board-aware bus labels, and OTA board name for Heltec WiFi LoRa 32 V4-R2"
 ```
 
 ---
@@ -858,15 +1458,17 @@ git commit -m "Bump to V2.6.7 — Heltec WiFi LoRa 32 V4 (R2) board support"
 
 ---
 
-### Task 7: CI workflow — board matrix + release artefact count
+### Task 7: CI workflow, web flasher manifest — board matrix, stale board-count comments, and install page
 
 **Files:**
-- Modify: `.github/workflows/_build-boards.yml:52-57` (matrix), `.github/workflows/_build-boards.yml:83-85` (target ternary)
-- Modify: `.github/workflows/release.yml:107-114` (`EXPECTED_BOARDS`)
+- Modify: `.github/workflows/_build-boards.yml:1-5` (header comment), `:52-57` (matrix), `:83-85` (target ternary)
+- Modify: `.github/workflows/release.yml:1-2` (header comment), `:42-44` (changelog-check comment), `:107-114` (`EXPECTED_BOARDS` + artefact-count comment), `:180-181` (Pages-publish comment)
+- Create: `docs/manifests/heltec_wifi_lora32_v4_r2.json`
+- Modify: `docs/index.html` (board `<select>`)
 
 **Interfaces:**
-- Consumes: nothing (CI-only config, not exercised locally).
-- Produces: the 6-board CI matrix that both `build.yml` and `release.yml` call into via `_build-boards.yml`'s `workflow_call`.
+- Consumes: nothing (CI-only config + static web assets, not exercised locally).
+- Produces: the 6-board CI matrix that both `build.yml` and `release.yml` call into via `_build-boards.yml`'s `workflow_call`; the 6th `<option>`/manifest pair the ESP Web Tools flasher at `docs/index.html` needs to offer this board.
 
 - [ ] **Step 1: Add the board to the matrix**
 
@@ -892,7 +1494,28 @@ Replace with:
           - heltec_wifi_lora32_v4_r2
 ```
 
-- [ ] **Step 2: Extend the `target:` ternary**
+- [ ] **Step 2: Fix the stale "5-board list" header comment in `_build-boards.yml`**
+
+This file's own top-of-file comment calls itself "the SINGLE source of the 5-board list" — the kind of claim that becomes actively misleading the moment Step 1 above lands.
+
+Find:
+```yaml
+# Reusable board-build matrix — the SINGLE source of the 5-board list, called
+# by build.yml (release:false → CI build) and release.yml (release:true → build
+# + merge-bin + version==tag check + staged artefacts). Adding/removing a board
+# now means editing the matrix HERE only (plus EXPECTED_BOARDS in release.yml's
+# count check, which is deliberately kept as an independent guard).
+```
+Replace with:
+```yaml
+# Reusable board-build matrix — the SINGLE source of the board list, called
+# by build.yml (release:false → CI build) and release.yml (release:true → build
+# + merge-bin + version==tag check + staged artefacts). Adding/removing a board
+# now means editing the matrix HERE only (plus EXPECTED_BOARDS in release.yml's
+# count check, which is deliberately kept as an independent guard).
+```
+
+- [ ] **Step 3: Extend the `target:` ternary**
 
 Find:
 ```yaml
@@ -908,9 +1531,69 @@ Replace with:
           target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'heltec_wifi_lora32_v4_r2') && 'esp32s3' || 'esp32' }}
 ```
 
-- [ ] **Step 3: Bump `EXPECTED_BOARDS` in `release.yml`**
+- [ ] **Step 4: Fix the three stale board-count comments in `release.yml`**
 
-In `.github/workflows/release.yml`, find:
+`release.yml` states "5 boards" / "25 artefacts" in three separate comments that don't get touched by the `EXPECTED_BOARDS` bump in Step 6 below — each needs its own fix or the file will contradict its own guard.
+
+Find:
+```yaml
+# Release workflow — fire on tag push, build all 5 boards, create the GitHub
+# Release with all 25 artefacts attached, and publish the web flasher to Pages.
+```
+Replace with:
+```yaml
+# Release workflow — fire on tag push, build all 6 boards, create the GitHub
+# Release with all 30 artefacts attached, and publish the web flasher to Pages.
+```
+
+Find:
+```yaml
+  # V2.5.31: fail FAST if CHANGELOG.md has no section for this tag. Pre-V2.5.31
+  # this only surfaced as a warning in the release job AFTER all 5 boards built
+  # (minutes), shipping a placeholder release body (bit us on V2.4.2/.3). This
+  # cheap check mirrors the heading match the extract step uses below.
+```
+Replace with:
+```yaml
+  # V2.5.31: fail FAST if CHANGELOG.md has no section for this tag. Pre-V2.5.31
+  # this only surfaced as a warning in the release job AFTER all boards built
+  # (minutes), shipping a placeholder release body (bit us on V2.4.2/.3). This
+  # cheap check mirrors the heading match the extract step uses below.
+```
+
+Find:
+```yaml
+          # KEEP IN SYNC with the matrix in _build-boards.yml. Each board
+          # contributes exactly 5 .bin files: geiger_v2, _merged, bootloader,
+          # partition-table, ota_data_initial. Independent guard on the count.
+```
+Replace with:
+```yaml
+          # KEEP IN SYNC with the matrix in _build-boards.yml. Each board
+          # contributes exactly 5 .bin files: geiger_v2, _merged, bootloader,
+          # partition-table, ota_data_initial. Independent guard on the count.
+          # (The per-board count of 5 is unrelated to and does not need to
+          # change with the number of boards — see EXPECTED_BOARDS below.)
+```
+
+- [ ] **Step 5: Fix the stale Pages-publish comment in `release.yml`**
+
+Find:
+```yaml
+  # Publish the browser "web flasher" (docs/) + the 5 merged firmware images to
+  # GitHub Pages, so https://<owner>.github.io/<repo>/ always serves an install
+  # page wired to THIS release's binaries.
+```
+Replace with:
+```yaml
+  # Publish the browser "web flasher" (docs/) + the 6 merged firmware images to
+  # GitHub Pages, so https://<owner>.github.io/<repo>/ always serves an install
+  # page wired to THIS release's binaries.
+```
+
+- [ ] **Step 6: Bump `EXPECTED_BOARDS` in `release.yml`**
+
+Find:
 ```bash
           EXPECTED_BOARDS=5
 ```
@@ -919,34 +1602,88 @@ Replace with:
           EXPECTED_BOARDS=6
 ```
 
-- [ ] **Step 4: Verify via grep (no local CI execution possible)**
+- [ ] **Step 7: Create the web flasher manifest for this board**
+
+The ESP Web Tools install page at `docs/index.html` picks a board by loading a per-board manifest JSON — every existing board has one under `docs/manifests/`; this board needs one too or it can never appear as a flashable option.
+
+Create `docs/manifests/heltec_wifi_lora32_v4_r2.json`:
+```json
+{
+  "name": "MultiGeiger V2 — Heltec WiFi LoRa 32 V4 (R2)",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_heltec_wifi_lora32_v4_r2.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
+```
+(Modeled directly on `docs/manifests/seeed_xiao_esp32s3.json`, the other ESP32-S3 board's manifest — same `chipFamily`, same single-part layout, filename following the `geiger_v2_merged_<board>.bin` convention the release workflow produces.)
+
+- [ ] **Step 8: Add the board to `docs/index.html`'s dropdown**
+
+Find:
+```html
+          <option value="manifests/seeed_xiao_esp32s3.json">Seeed XIAO ESP32-S3</option>
+        </select>
+```
+Replace with:
+```html
+          <option value="manifests/seeed_xiao_esp32s3.json">Seeed XIAO ESP32-S3</option>
+          <option value="manifests/heltec_wifi_lora32_v4_r2.json">Heltec WiFi LoRa 32 V4 (R2)</option>
+        </select>
+```
+
+- [ ] **Step 9: Verify via grep (no local CI execution possible)**
 
 ```powershell
 Select-String -Path ".github\workflows\_build-boards.yml" -Pattern "heltec_wifi_lora32_v4_r2"
 Select-String -Path ".github\workflows\release.yml" -Pattern "EXPECTED_BOARDS=6"
+Select-String -Path "docs\index.html" -Pattern "heltec_wifi_lora32_v4_r2"
+Test-Path "docs\manifests\heltec_wifi_lora32_v4_r2.json"
 ```
-Expected: both commands return a match. This is a structural check only — the actual CI matrix and artefact-count guard are exercised for real on the next push / tag, not in this session.
+Expected: all four checks return a match / `True`. This is a structural check only — the actual CI matrix, artefact-count guard, and web flasher page are exercised for real on the next push / tag / Pages deploy, not in this session.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 10: Commit**
 
 ```powershell
-git add .github/workflows/_build-boards.yml .github/workflows/release.yml
-git commit -m "CI: add heltec_wifi_lora32_v4_r2 to the build matrix (6th board)"
+git add .github/workflows/_build-boards.yml .github/workflows/release.yml docs/manifests/heltec_wifi_lora32_v4_r2.json docs/index.html
+git commit -m "CI + web flasher: add heltec_wifi_lora32_v4_r2 as the 6th board"
 ```
 
 ---
 
-### Task 8: `README.md` — board table + build-command reference
+### Task 8: `README.md` — board count, board table, and build-command reference
 
 **Files:**
+- Modify: `README.md:3` (intro paragraph board count)
 - Modify: `README.md:28-38` (board table + `SDKCONFIG_DEFAULTS` sentence)
 - Modify: `README.md:200` (`idf.py` "Substitute ... for other boards" sentence)
+- Modify: `README.md:206` (release workflow "five boards" sentence)
 
 **Interfaces:**
 - Consumes: nothing.
 - Produces: nothing consumed by code — documentation only.
 
-- [ ] **Step 1: Update the board table header and add a row**
+- [ ] **Step 1: Fix the stale board count in the intro paragraph**
+
+Find:
+```markdown
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **five** ESP32 / ESP32-S3 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
+```
+Replace with:
+```markdown
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **six** ESP32 / ESP32-S3 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
+```
+
+- [ ] **Step 2: Update the board table header and add a row**
 
 Find:
 ```markdown
@@ -978,7 +1715,7 @@ Replace with:
 Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
 ```
 
-- [ ] **Step 2: Update the "Substitute ... for other boards" sentence**
+- [ ] **Step 3: Update the "Substitute ... for other boards" sentence**
 
 Find:
 ```markdown
@@ -989,14 +1726,26 @@ Replace with:
 Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, or `heltec_wifi_lora32_v4_r2` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
 ```
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 4: Fix the stale "five boards" mention in the release-workflow section**
+
+Find:
+```markdown
+`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all five boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
+```
+Replace with:
+```markdown
+`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all six boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
+```
+
+- [ ] **Step 5: Verify**
 
 ```powershell
 Select-String -Path "README.md" -Pattern "heltec_wifi_lora32_v4_r2"
+Select-String -Path "README.md" -Pattern "\*\*six\*\*|six boards"
 ```
-Expected: 3 matches (table row, board-count-context sentence is prose so won't match the literal string — just the table row + the substitute-boards sentence + any other literal mentions added above).
+Expected: first command returns 3 matches (table row + substitute-boards sentence + any other literal mentions added above); second returns 2 matches (intro paragraph + release-workflow sentence).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```powershell
 git add README.md

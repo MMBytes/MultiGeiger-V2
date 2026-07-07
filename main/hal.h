@@ -35,8 +35,10 @@
  *                            at I²C 0x36 on the primary bus (FeatherS3-D's
  *                            STEMMA1/IO8-9); fuel_gauge.c is active and
  *                            /status + MQTT + HA discovery gain battery
- *                            rows once a battery is auto-detected. 0
- *                            elsewhere stubs the driver out entirely.
+ *                            rows once the user ticks the /config "Battery
+ *                            attached" checkbox (no auto-detect — see
+ *                            fuel_gauge.h for why). 0 elsewhere stubs the
+ *                            driver out entirely.
  *    HAL_LOG_RING_BYTES      applog ring size — varies by available memory
  *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
  *                            small (6 KB) on internal-DRAM-only boards, larger

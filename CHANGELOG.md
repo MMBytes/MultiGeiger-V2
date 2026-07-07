@@ -56,8 +56,8 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   use as their sole "battery attached" sentinel (`0xFFFF` = no response,
   which doesn't transfer to this board's always-on-rail wiring — see
   `fuel_gauge.h`); the rest are pure config registers this driver never
-  writes, so logging them once at boot is enough. New `reg_read8()`
-  helper and `fuel_gauge_read_diag()` API.
+  writes, so logging them once at boot is enough. New `fuel_gauge_read_diag()`
+  API for the two registers (`version`/`status`) worth reading again later.
 - **Real-battery bench validation** (2026-07-07, FeatherS3-D with a
   genuine LiPo, after fixing a reversed-polarity JST-PH connector):
   confirmed both power states read correctly — charging: 3.956-3.960V /

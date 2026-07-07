@@ -164,9 +164,10 @@ static const ha_entity_t ENTITIES[] = {
 
     // --- Battery (MAX17048 fuel gauge, FeatherS3-D only) -------------------
     // V2.6.6: first entities in this table to use HA's standard "battery"
-    // and "voltage" device classes. Presence auto-detected — see
-    // fuel_gauge.h — so these are simply absent (not "unavailable") on
-    // every other board.
+    // and "voltage" device classes. Gated on the user-confirmed /config
+    // "Battery attached" checkbox (see fuel_gauge.h) — so these are simply
+    // absent (not "unavailable") on every other board, and absent on
+    // FeatherS3-D too until the checkbox is ticked.
     { "batt_v",    "battery_voltage", "Battery voltage",      "voltage", "V",   "measurement", NULL,                 NULL, fuel_gauge_present_, NULL },
     { "batt_soc",  "battery",         "Battery",               "battery", "%",   "measurement", NULL,                 NULL, fuel_gauge_present_, NULL },
     { "batt_rate", "battery_rate",    "Battery charge rate",   NULL,      "%/h", "measurement", "mdi:battery-clock",  NULL, fuel_gauge_present_, NULL },

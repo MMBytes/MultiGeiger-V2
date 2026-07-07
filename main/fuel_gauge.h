@@ -56,8 +56,12 @@
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus);
 
 /** @brief True if VBUS (USB 5V) is present, per the dedicated digital
- *  detect pin. Always true while running on USB power; reads false only
- *  when running purely off battery with USB unplugged. Always false on
+ *  detect pin. True while running on USB power, false when running purely
+ *  off battery with USB unplugged — but only once fuel_gauge_init() has
+ *  succeeded; if the MAX17048 never ACK'd at init, this returns false
+ *  unconditionally regardless of actual VBUS state (the GPIO read is gated
+ *  on the same "ready" flag as the I2C-backed functions, since the pin is
+ *  only configured inside a successful fuel_gauge_init()). Always false on
  *  boards without HAL_HAS_FUEL_GAUGE.
  */
 bool fuel_gauge_vbus_present(void);

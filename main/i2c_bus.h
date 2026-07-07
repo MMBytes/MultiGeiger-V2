@@ -103,10 +103,12 @@ void i2c_bus_finalize(void);
 // Every driver in main/ was independently reimplementing the same handful
 // of register-protocol primitives (write_reg/read_regs, 16-bit LE/BE reads)
 // and the same probe→add_device→teardown-on-failure ceremony. Centralised
-// here (V2.6.7) so the wire-level details — byte order, 100 ms transaction
-// timeout, the exact i2c_device_config_t shape — are written once. A prior
-// byte-order mix-up between VEML7700 (LE) and MAX17048 (BE) is the kind of
-// bug this consolidation is meant to make harder to reintroduce.
+// here (V2.6.6) so the wire-level details — byte order, 100 ms transaction
+// timeout, the exact i2c_device_config_t shape — are written once, since
+// VEML7700 (LE) and MAX17048 (BE) sit right next to each other in this
+// codebase and getting byte order backwards silently scales every reading
+// by a factor of 256 — exactly the kind of bug this consolidation is meant
+// to make harder to introduce in the first place.
 //
 // These are `static inline` so each translation unit gets its own copy with
 // no ODR concerns — same pattern as the rest of this project's shared

@@ -27,8 +27,8 @@ static const char *TAG = "fuel_gauge";
 #define REG_STATUS      0x1A   // R/W: 8-bit alert flags (RI/VH/VL/VR/HD/SC)
 
 static i2c_master_dev_handle_t s_dev            = NULL;
-static bool                    s_ready          = false;
-static bool                    s_user_present   = false;   // mirrors cfg->batt_present
+static volatile bool           s_ready          = false;  // written by init task, read by TX/HTTP/MQTT tasks
+static volatile bool           s_user_present   = false;  // mirrors cfg->batt_present; written by init+HTTP tasks
 
 // MAX17048 registers are BIG-endian (MSB first) — the opposite byte order
 // from VEML7700's little-endian registers (see veml7700.c). Get this
@@ -143,15 +143,23 @@ esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) 
 esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status) {
     if (!s_ready) return ESP_FAIL;
 
+    // Same all-or-nothing contract as fuel_gauge_read(): buffer into locals
+    // first, write outputs only once every requested read has succeeded.
+    uint16_t v = 0;
+    uint8_t  s = 0;
+
     if (version) {
-        esp_err_t err = i2c_dev_read_u16_be(s_dev, REG_VERSION, version);
+        esp_err_t err = i2c_dev_read_u16_be(s_dev, REG_VERSION, &v);
         if (err != ESP_OK) return err;
     }
 
     if (status) {
-        esp_err_t err = i2c_dev_read_regs(s_dev, REG_STATUS, status, 1);
+        esp_err_t err = i2c_dev_read_regs(s_dev, REG_STATUS, &s, 1);
         if (err != ESP_OK) return err;
     }
+
+    if (version) *version = v;
+    if (status)  *status  = s;
 
     return ESP_OK;
 }

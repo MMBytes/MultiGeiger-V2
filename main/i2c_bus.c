@@ -11,9 +11,9 @@
 static const char *TAG = "i2c_bus";
 
 static i2c_master_bus_handle_t s_bus_primary    = NULL;
-#if defined(BOARD_FEATHERS3_D)
-// Only the FeatherS3-D ever brings the second STEMMA QT bus online; on the
-// other boards the declaration would trip -Wunused-variable. Keep the
+#if defined(BOARD_FEATHERS3_D) || defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+// Only boards with a real second I²C controller ever bring this online; on
+// the other boards the declaration would trip -Wunused-variable. Keep the
 // declaration scoped to the boards that actually read/write it.
 static i2c_master_bus_handle_t s_bus_secondary  = NULL;
 #endif
@@ -116,6 +116,30 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
     }
     ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=16 SCL=15) — LDO2 enabled");
     return s_bus_secondary;
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    if (s_bus_secondary) return s_bus_secondary;
+
+    // No gating GPIO on this board — the OLED's bus (PIN_OLED_SDA/SCL) is a
+    // fixed module-internal bus, always powered from the module's own
+    // always-on 3.3V rail (NOT the switchable Vext/"Ve" pin — see hal.h's
+    // HAL_HAS_VEXT_GATE comment). Bring the controller up directly.
+    i2c_master_bus_config_t cfg = {
+        .i2c_port             = I2C_NUM_1,
+        .sda_io_num           = PIN_OLED_SDA,
+        .scl_io_num           = PIN_OLED_SCL,
+        .clk_source           = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt    = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t err = i2c_new_master_bus(&cfg, &s_bus_secondary);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OLED bus init failed: %s", esp_err_to_name(err));
+        s_bus_secondary = NULL;
+        return NULL;
+    }
+    ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=%d SCL=%d) — onboard OLED, always-on",
+             PIN_OLED_SDA, PIN_OLED_SCL);
+    return s_bus_secondary;
 #else
     return NULL;   // Heltec / QT Py: no second bus on this board
 #endif
@@ -136,5 +160,14 @@ void i2c_bus_finalize(void) {
         ESP_LOGI(TAG, "secondary bus kept alive — at least one consumer is using it");
     }
     // s_bus_secondary == NULL && !kept: secondary was never requested, nothing to do.
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    // No gating GPIO on this board — the bus is never a teardown candidate,
+    // it's dedicated permanently to the onboard OLED. This branch exists
+    // only so an OLED probe failure leaves a log trace instead of silently
+    // leaking the I2C_NUM_1 handle with zero diagnostic trail.
+    if (s_bus_secondary && !s_secondary_kept) {
+        ESP_LOGW(TAG, "OLED bus is up but no consumer claimed it — "
+                      "OLED probe likely failed this boot");
+    }
 #endif
 }

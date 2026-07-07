@@ -27,9 +27,19 @@
  *    QT Py ESP32-PICO: primary bus on STEMMA QT (IO22 SDA / IO19 SCL).
  *      Secondary bus: not available.
  *
+ *    Heltec WiFi LoRa 32 V4-R2: primary bus on the external env-sensor
+ *      header (IO48 SDA / IO47 SCL). Secondary bus on the module's fixed
+ *      internal OLED bus (IO17 SDA / IO18 SCL) — always-on (no gating
+ *      GPIO, unlike FeatherS3-D's LDO2-gated STEMMA2), created eagerly on
+ *      first call and never torn down. Unlike every other board's
+ *      secondary bus, this one can only ever host the onboard OLED — it
+ *      isn't wired to anything else, so there's no "no consumer, shed it"
+ *      case to handle.
+ *
  *  Lazy + sheddable secondary lets the multi-page display task and any
  *  future STEMMA2-attached sensor opt into bus 2 without forcing it
- *  always-on for deployments that only use STEMMA1.
+ *  always-on for deployments that only use STEMMA1. (Heltec V4-R2 is the
+ *  exception — see above.)
  */
 
 #include <stdbool.h>
@@ -61,21 +71,28 @@ void i2c_bus_set_primary_pinout(bool use_pinout);
  */
 i2c_master_bus_handle_t i2c_bus_get_primary(void);
 
-/** @brief Get the secondary I²C bus handle (FeatherS3-D STEMMA2 only).
+/** @brief Get the secondary I²C bus handle (FeatherS3-D STEMMA2, or the
+ *  Heltec WiFi LoRa 32 V4-R2's dedicated OLED bus).
  *
  *  On FeatherS3-D: lazy init on first call — drives IO39 HIGH (LDO2
  *  enable), waits 10 ms for the rail to settle, then creates the
  *  I²C controller on I²C_NUM_1 / IO15 / IO16. Subsequent calls return
  *  the cached handle.
  *
- *  On Heltec / QT Py / any board without a second bus: always returns
+ *  On Heltec WiFi LoRa 32 V4-R2: lazy init on first call — no gating GPIO
+ *  (this board's OLED bus is always powered), creates the I²C controller
+ *  on I²C_NUM_1 / IO17 / IO18. Always non-NULL once created; never torn
+ *  down (see i2c_bus_finalize()'s log-only branch for this board).
+ *
+ *  On Heltec V2 / QT Py / any board without a second bus: always returns
  *  NULL. Callers should treat NULL as "no second bus on this board"
  *  and skip secondary-bus probing gracefully.
  *
- *  Calling this enables LDO2 — adds ~5–10 mA continuous draw (LDO2
- *  quiescent + onboard NeoPixel idle on FeatherS3-D). If no consumer
- *  subsequently calls i2c_bus_secondary_keep_alive(), i2c_bus_finalize()
- *  will tear it back down.
+ *  Calling this on FeatherS3-D enables LDO2 — adds ~5–10 mA continuous draw
+ *  (LDO2 quiescent + onboard NeoPixel idle). If no consumer subsequently
+ *  calls i2c_bus_secondary_keep_alive(), i2c_bus_finalize() will tear it
+ *  back down. On Heltec WiFi LoRa 32 V4-R2 there is no LDO to drop — the
+ *  bus stays up regardless.
  */
 i2c_master_bus_handle_t i2c_bus_get_secondary(void);
 

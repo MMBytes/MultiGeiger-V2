@@ -990,6 +990,11 @@ void app_main(void) {
     // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
     // nothing — sensor or display — ended up on STEMMA2.
     //
+    // Heltec WiFi LoRa 32 V4-R2 is the one exception: its secondary bus is
+    // permanently and exclusively the onboard OLED, never a general-purpose
+    // STEMMA-style connector — see PROBE_ON_BOTH_BUSES below, which skips
+    // the secondary-bus fallback entirely on this board.
+    //
     // V2.5.19: select the primary-bus pin route from config BEFORE the first
     // i2c_bus_get_primary() below caches the bus. No-op except on QT Py
     // (HAL_HAS_I2C_PINOUT_SWITCH); reboot-required by construction.
@@ -1007,6 +1012,17 @@ void app_main(void) {
 
     // Helper macro: try a sensor's init on bus 1; if no device bound,
     // try bus 2; if a device was found there, keep the bus alive.
+    //
+    // Heltec WiFi LoRa 32 V4-R2: the secondary bus is the onboard OLED,
+    // never a pluggable sensor connector, so the fallback probe is
+    // compiled out entirely for this board — it would otherwise probe the
+    // display's bus on every sensor driver, every boot, for no reason.
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
+        do {                                                                \
+            init_fn(bus1);                                                  \
+        } while (0)
+#else
     #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
         do {                                                                \
             init_fn(bus1);                                                  \
@@ -1018,6 +1034,7 @@ void app_main(void) {
                 }                                                           \
             }                                                               \
         } while (0)
+#endif
 
     PROBE_ON_BOTH_BUSES(env_sensor_init,   env_sensor_present,   bus1);
     PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);

@@ -3,11 +3,12 @@
 /** @file
  *  @brief Board-level hardware abstraction — pin map and feature flags.
  *
- *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`, or
- *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO` is defined by the top-level CMakeLists.txt
- *  based on the `BOARD` variable (default `heltec_v2`). All module .c/.h files
- *  include this header and reference pins / features by the macros below —
- *  never by raw GPIO numbers.
+ *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`,
+ *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`, or
+ *  `BOARD_HELTEC_WIFI_LORA32_V4_R2` is defined by the top-level
+ *  CMakeLists.txt based on the `BOARD` variable (default `heltec_v2`). All
+ *  module .c/.h files include this header and reference pins / features by
+ *  the macros below — never by raw GPIO numbers.
  *
  *  Adding a new board: pick a `BOARD_*` macro name, add a branch below that
  *  sets the same `PIN_*` and `HAL_HAS_*` symbols, and extend the CMake board
@@ -421,6 +422,124 @@
     //              post-boot but UART0 console is disabled in our sdkconfig
     //              in favour of USB-Serial-JTAG, so they're free)
 
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+
+    // Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2 chip, 2 MB
+    // in-package quad PSRAM). NOT the V4-R8 variant (ESP32-S3R8, 8 MB octal
+    // PSRAM, different GPIOs for Vext/VGNSS/LED/PA_CTX) — confirmed via
+    // heltec.org's own datasheet and the HelTecAutomation/Heltec_ESP32
+    // Arduino library, which defines WIFI_LORA_32_V4 and WIFI_LORA_32_V4_R8
+    // as distinct targets. "_r2" in the board name permanently disambiguates
+    // from a possible future R8 port.
+    //
+    // Third-party PCB, not our own design: a separate team populated the
+    // standard Multigeiger V2 mainboard
+    // (Multigeiger_V1.9/Hardware/Eagle/projects/Multigeiger_V2/) with this
+    // Heltec module instead of the Heltec V2. Pin map sourced from
+    // Multigeiger_V1.9/Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf, cross-validated
+    // pin-for-pin against Heltec's V4 datasheet §2.2.1/2.2.2/2.2.3 — zero
+    // contradictions. Full rationale (incl. the Vext/GPIO2/GPIO46
+    // non-conflict analysis and the future-LoRaWAN pin reservations) in
+    // docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md.
+    #define BOARD_NAME              "heltec_wifi_lora32_v4_r2"
+    #define HAL_HAS_OLED              1   // SSD1315 on a dedicated I2C_NUM_1 bus (GPIO17/18) — see PIN_OLED_SDA/SCL below
+    #define HAL_HAS_ALS               0   // No onboard ambient-light sensor
+    #define HAL_HAS_FUEL_GAUGE        0   // No onboard fuel gauge
+    #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
+    #define HAL_HAS_NATIVE_USB        0   // Console via USB-UART bridge on GPIO43/44 (TX/RX), not native USB
+    // GPIO36 (Vext_Ctrl) only gates the external "Ve" header pin (peripheral
+    // power, 500 mA max, per the datasheet's §3.3 "Power Output") — it does
+    // NOT power the OLED or either I²C bus on this board, unlike Heltec V2
+    // (where Vext gates the shared OLED+sensor rail and MUST be driven for
+    // the bus to work — see i2c_bus.c's HAL_HAS_VEXT_GATE block). Deliberately
+    // left undriven here. See spec §2.
+    #define HAL_HAS_VEXT_GATE         0
+    #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only (no u.FL / no RF switch)
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed route per bus
+    #define HAL_HAS_SPEAKER           1   // Piezo, GPIO26 (P) / GPIO5 (N)
+    #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
+
+    // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
+    // (closest analog: 2 MB in-package PSRAM, not FeatherS3-D's 8 MB external).
+    #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
+
+    // Geiger / HV / speaker pins — from the Multigeiger mainboard's J2/J3
+    // wiring intent (Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf), cross-validated
+    // against the V4 datasheet.
+    #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
+    #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain GPIO on base V4 (see spec §5: no LoRa-PA conflict on this SKU)
+    // IO3 is an ESP32-S3 boot strap (JTAG vs USB-Serial-JTAG select), same
+    // strap BOARD_FEATHERS3_D reuses for PIN_SPEAKER_P below — but that reuse
+    // is safe ONLY because the speaker driver stays hi-Z until code drives it
+    // post-boot. This pin is different: it's an always-connected external
+    // input from the tube pulse-conditioning circuit, whose level during the
+    // ROM bootloader's strap-sampling window is NOT under firmware control.
+    // Not resolvable without hardware in hand — flagged as a first-flash
+    // bench-verify item (see Global Constraints): confirm the board still
+    // enumerates over USB-Serial-JTAG after flashing.
+    #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
+
+    // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3
+    // pin16) as "SPK" without distinguishing P/N — a piezo isn't polarity
+    // sensitive in a way that matters for tone generation, so this
+    // assignment is arbitrary (bench-verify perceived loudness on first
+    // flash; worst case if reversed is a quieter click, not broken audio).
+    #define PIN_SPEAKER_P           26   // J2 pin15
+    #define PIN_SPEAKER_N            5   // J3 pin16 ("Touch5 – SPK")
+
+    // Onboard LED. GPIO35, ACTIVE-HIGH — confirmed via the independent
+    // DN9KGB/rMesh project's hal_HELTEC_WiFi_LoRa_32_V4.c (whose other pin
+    // values match this exact base-V4 pinout): LOW at boot = off, HIGH =
+    // on. Not Heltec's own datasheet text, so bench-verify polarity on
+    // first flash (same standard applied to the XIAO ESP32-S3's LED).
+    // HAL_LED_ACTIVE_LOW omitted (led.c defaults to active-high) — but
+    // led.c's own driver compiles OUT on this board anyway
+    // (HAL_HAS_SPEAKER=1), so speaker.c owns PIN_LED_BUILTIN instead; its
+    // hardcoded gpio_set_level(PIN_LED_BUILTIN, 1)==on already assumes
+    // active-high and needs no changes here.
+    #define PIN_LED_BUILTIN         35   // J2 pin10
+
+    // I2C bus (env sensor — the bus every sensor driver targets by default).
+    // From the Multigeiger mainboard's J2 pins 13/14, NOT the OLED's bus
+    // (see PIN_OLED_SDA/SCL below and spec §3 for why this board needs two
+    // separate I²C controllers).
+    #define PIN_I2C_SDA             48   // J2 pin14
+    #define PIN_I2C_SCL             47   // J2 pin13
+
+    // OLED bus — fixed module-internal bus, NOT on the J2/J3 header at all.
+    // Dedicated permanently to the onboard SSD1315; i2c_bus.c brings this up
+    // as I2C_NUM_1 directly (no probe/fallback — this board always has the
+    // OLED, unlike FeatherS3-D's optional STEMMA2 plug-in). See spec §3.
+    #define PIN_OLED_SDA            17
+    #define PIN_OLED_SCL            18
+    #define PIN_OLED_RESET          21   // J2 pin16
+
+    // RESERVED for future LoRaWAN/Meshtastic work (hardware-reservation
+    // only per spec §6 — no radio driver, no HAL_HAS_LORA flag, nothing
+    // here should need to change when that spec is eventually written):
+    //   GPIO 8/9/10/11/12/13/14 — SX1262 LoRa radio's dedicated internal SPI
+    //     bus (NSS/SCK/MOSI/MISO/DIO1/RST/BUSY). Confirmed via the datasheet
+    //     ("LoRa and Flash have each utilized a separate SPI interface") and
+    //     never appears in the J2/J3 header tables — nothing else could
+    //     claim these pins anyway.
+    //   GPIO 7 — VFEM_Control (LoRa front-end enable per the datasheet's own
+    //     J3 pin table, J3 pin18). Left undriven — not assigned to any
+    //     Multigeiger function.
+    //
+    // RESERVED / never repurpose (out of scope or module-internal — see
+    // spec §2 and §9):
+    //   GPIO36        Vext_Ctrl — deliberately undriven, see HAL_HAS_VEXT_GATE above
+    //   GPIO19/20     native USB D-/D+ (module-internal strap pair; this
+    //                 board doesn't use native USB but the pins are still
+    //                 module wiring, not free GPIO)
+    //   GPIO1         VBAT_Read — out of scope (no battery ADC support)
+    //   GPIO38-42     GNSS connector (RST/PPS/Wakeup/TX/RX) — out of scope
+    //   GPIO45/46     "DIP0/DIP1" in the Multigeiger matrix — DIP-switch
+    //                 inputs unused by V2 firmware on every board
+    //   GPIO6         "DIP3" in the Multigeiger matrix — same as above
+
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 via CMake."
 #endif

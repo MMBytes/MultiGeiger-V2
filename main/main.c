@@ -1000,6 +1000,10 @@ void app_main(void) {
     // primary — unlike the pluggable env/PM/noise sensors below, it never
     // needs the secondary-bus fallback probe.
     fuel_gauge_init(bus1);
+    // V2.6.6: seed the user-confirmed battery-presence flag from config —
+    // see fuel_gauge.h for why this can't be auto-detected via VCELL.
+    // Live-reapplied on every /config Save in http_server.c::config_post.
+    fuel_gauge_set_user_present(g_cfg.batt_present);
 
     // Helper macro: try a sensor's init on bus 1; if no device bound,
     // try bus 2; if a device was found there, keep the bus alive.

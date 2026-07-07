@@ -227,6 +227,23 @@ X_U32 (display_mode,           "disp_mode",   0,        0,       2)
 
 X_BOOL(i2c_pinout,             "i2c_pinout",  false)
 
+// --- Battery presence (V2.6.6, FeatherS3-D only) -----------------------------
+//
+// false (default) = no LiPo attached; true = a real battery is plugged into
+// the onboard MAX17048 fuel gauge. User-set, not auto-detected: the chip's
+// CELL pin floats to a plausible ~4.2-4.4V whenever USB is present even with
+// no battery attached (the board's charger IC regulating unloaded), so a
+// VCELL-threshold heuristic can't tell "USB + real battery" from "USB, no
+// battery" apart — see fuel_gauge.h for the full explanation. This flag is
+// the honest fix: it directly gates fuel_gauge_present(), which in turn
+// controls whether /status, MQTT rich-state, and HA discovery show battery
+// data at all. Only consumed where HAL_HAS_FUEL_GAUGE==1; forced false on
+// every other board by the POST handler, so the stored value is inert
+// elsewhere. Live-apply, no reboot needed — fuel_gauge_set_user_present()
+// runs on every /config Save.
+
+X_BOOL(batt_present,           "batt_present", false)
+
 // --- MQTT broker client (V2.4.2 Phase 1) ------------------------------------
 //
 // Generic MQTT 3.1.1 publish-only client. State is published as a single JSON

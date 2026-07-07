@@ -9,54 +9,61 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log
+## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log, config checkbox
 
 - New `fuel_gauge.c`/`.h` driver for the onboard MAX17048 (I²C 0x36,
   FeatherS3-D's STEMMA1/primary bus only — every other board compiles a
-  zero-cost stub).
-- Battery presence is auto-detected from VCELL (present > 2000 mV,
-  absent < 1500 mV, hysteresis in between) — no config toggle, no NVS
-  key. The chip lives on the always-on 3.3V rail so it ACKs on I²C
-  regardless of battery state; the threshold distinguishes a real cell
-  from the ~0V no-battery reading with wide margin on both sides.
-- `/status` gains a Battery block (voltage / charge % / rate) when a
-  battery is present.
-- MQTT rich-state JSON gains `batt_v` / `batt_soc` / `batt_rate`,
-  published only when a battery is attached.
-- Three new Home Assistant discovery entities: Battery voltage (V,
-  device_class `voltage`), Battery (%, device_class `battery`), Battery
-  charge rate (%/h) — the first entities in this codebase to use HA's
-  `battery`/`voltage` device classes.
-- One `ESP_LOGI` line per TX cycle reporting voltage/SoC/rate whenever a
-  battery is attached (standing requirement, independent of presence-
-  detection cost — every other board and a no-battery FeatherS3-D pay
-  nothing extra).
-- **Post-ship bench correction**: real hardware testing on two FeatherS3-D
-  units (USB-powered, no LiPo attached) found VCELL sitting at 4.2–4.4V
-  instead of the assumed ~0V — the onboard LiPo charger IC's output
-  floats up near its own ~4.2V regulation setpoint when unloaded, which
-  is indistinguishable from a real near-full battery by voltage alone.
-  `fuel_gauge_present()`'s threshold is therefore unreliable whenever
-  VBUS is present (the common case) and is left as-is for now — `/status`,
-  MQTT, and HA discovery still gate on it. The per-TX-cycle log line is
-  changed to be honest about this: it now gates on a new
-  `fuel_gauge_ready()` (chip present at init, not a VCELL guess) instead
-  of `fuel_gauge_present()`, is relabelled from `"battery"` to `"Power
-  supply/Battery"`, and reports VBUS state (new `fuel_gauge_vbus_present()`,
-  digital read on new `PIN_VBUS_DETECT`/GPIO34) alongside the reading so
-  the ambiguity is visible rather than silently resolved.
-- **Diagnostic register logging**, ahead of real-battery bench testing:
-  `fuel_gauge_init()` now logs all 7 readable MAX17048 registers once at
-  startup (`version`/`hibrt`/`config`/`valert`/`vreset`/`chip_id`/`status`),
-  and the per-TX-cycle line adds `version`/`status` alongside the existing
-  voltage/SoC/rate/VBUS fields. `version` is logged because it's the
-  register Adafruit's own MAX1704x libraries use as their sole "battery
-  attached" sentinel (`0xFFFF` = no response) — logging it lets bench
-  testing check whether that pattern ever appears on this board's
-  always-on-rail wiring. `status` is genuinely dynamic (alert flags set
-  autonomously by the chip); the other four are pure config registers
-  never written by this driver, so they're logged once, not per cycle.
-  New `reg_read8()` helper and `fuel_gauge_read_diag()` API.
+  zero-cost stub). Registers used: `VCELL` (voltage), `SOC` (state of
+  charge), `CRATE` (signed charge rate, +charging/-discharging). No init
+  writes needed — the chip lives on the always-on 3.3V rail, independent
+  of the battery, and free-runs once powered.
+- **Battery presence is a `/config` checkbox (`batt_present`), not an
+  auto-detected guess.** The original design tried auto-detecting via a
+  VCELL threshold, but bench testing (first with USB power and no LiPo,
+  later confirmed with a real LiPo on 2026-07-07 — see below) found this
+  fundamentally unworkable: the onboard LiPo charger IC's unloaded output
+  floats to ~4.2-4.4V whenever USB is present, regardless of whether a
+  battery is attached, and no charger-status pin reaches a GPIO on this
+  board — so no voltage-only or digital signal can disambiguate "USB +
+  real battery" from "USB, no battery." The new "Battery attached
+  (MAX17048 fuel gauge)" checkbox is the honest fix: it's greyed out on
+  boards without `HAL_HAS_FUEL_GAUGE` (same convention as the
+  external-antenna and I²C pin-out switches) and directly gates
+  `fuel_gauge_present()`, which in turn controls every surface below.
+  Live-apply — `fuel_gauge_set_user_present()` runs once at boot from the
+  saved config and again on every `/config` Save, so ticking/unticking
+  takes effect immediately, no reboot needed.
+- `/status` gains a Battery block (voltage / charge % / rate), MQTT
+  rich-state JSON gains `batt_v` / `batt_soc` / `batt_rate`, and three new
+  Home Assistant discovery entities appear (Battery voltage — V,
+  device_class `voltage`; Battery — %, device_class `battery`; Battery
+  charge rate — %/h, the first entities in this codebase to use HA's
+  `battery`/`voltage` device classes) — all three gated on
+  `fuel_gauge_present()`, i.e. only shown once the checkbox is ticked.
+- One `ESP_LOGI` line per TX cycle, also gated on `fuel_gauge_present()`,
+  reports `"Battery: <V> <SoC%> <rate%/hr> (VBUS present|absent,
+  version=.. status=..)"`. VBUS state comes from a dedicated digital
+  detect pin (`PIN_VBUS_DETECT`/GPIO34, `fuel_gauge_vbus_present()`) and
+  gives context for the reading (charging vs. running off battery);
+  `version`/`status` are raw MAX17048 diagnostic registers, logged
+  alongside voltage/SoC/rate for field debugging. A node with the
+  checkbox left unticked logs nothing here, rather than presenting a
+  charger-IC float as if it were a real reading.
+- **Diagnostic register logging**: `fuel_gauge_init()` logs all 7
+  readable MAX17048 registers once at startup
+  (`version`/`hibrt`/`config`/`valert`/`vreset`/`chip_id`/`status`) —
+  `version` because it's the register Adafruit's own MAX1704x libraries
+  use as their sole "battery attached" sentinel (`0xFFFF` = no response,
+  which doesn't transfer to this board's always-on-rail wiring — see
+  `fuel_gauge.h`); the rest are pure config registers this driver never
+  writes, so logging them once at boot is enough. New `reg_read8()`
+  helper and `fuel_gauge_read_diag()` API.
+- **Real-battery bench validation** (2026-07-07, FeatherS3-D with a
+  genuine LiPo, after fixing a reversed-polarity JST-PH connector):
+  confirmed both power states read correctly — charging: 3.956-3.960V /
+  67-67.4% / +4.6-7.7%/hr, VBUS present; battery-only: 3.924V / 67.6% /
+  +2.3%/hr, VBUS absent — validating the checkbox-gated design above
+  against a real cell in both states.
 - **I²C driver consolidation (no functional change).** A code-simplifier
   survey of `main/` found the same low-level I²C boilerplate copy-pasted
   across every register-based driver. Two rounds of cleanup, both
@@ -70,9 +77,9 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     hand-rolling its own `write_reg`/`read_regs`/16-bit-read wrapper and
     probe→add_device→teardown-on-failure ceremony; `sht45.c` and
     `sps30.c` adopt the add/teardown helpers for their command-based
-    protocol. This is the same class of bug the fuel-gauge's BE/LE
-    byte-order mixup (above) came from — centralizing it makes that
-    mistake harder to reintroduce.
+    protocol. This is the same class of bug the fuel-gauge's original
+    VCELL byte-order handling needed to get right — centralizing it makes
+    that mistake harder to reintroduce.
   - New `sensirion_crc.h` centralizes the Sensirion CRC-8 (poly 0x31,
     init 0xFF) that `sps30.c`, `sht45.c`, and `dnms.c` each reimplemented
     independently (`sps30.c` even had a comment noting the duplication).

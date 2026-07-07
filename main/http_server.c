@@ -706,10 +706,11 @@ static void format_als(char *out, size_t sz) {
 }
 
 // --- Battery (MAX17048 fuel gauge, FeatherS3-D only) -----------------------
-// V2.6.6: presence is auto-detected (VCELL threshold with hysteresis — see
-// fuel_gauge.h) so this block is simply absent on every other board and on
-// a FeatherS3-D with no LiPo attached. Read happens on every /status
-// request, same cost class as the ambient-light block above it.
+// V2.6.6: presence is the user-set `batt_present` config bool (see
+// fuel_gauge.h for why VCELL alone can't auto-detect this), so this block
+// is simply absent on every other board and on a FeatherS3-D where the user
+// hasn't ticked "Battery attached". Read happens on every /status request,
+// same cost class as the ambient-light block above it.
 static void format_battery(char *out, size_t sz) {
     if (!fuel_gauge_present()) { out[0] = 0; return; }
 
@@ -1457,6 +1458,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
         "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
         "<span class=\"r\">*</span>%s</label></div>"
+        // V2.6.6: battery-attached toggle. Board-gated like the antenna switch
+        // and i2c_pinout above (greyed + force-off on boards without
+        // HAL_HAS_FUEL_GAUGE). 3 %s slots: disabled-attr, checked-attr,
+        // trailing note. No asterisk — live-apply, no reboot needed.
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"batt_present\" "
+        "id=\"batt_present\" %s %s> Battery attached (MAX17048 fuel gauge) "
+        "&mdash; shows battery voltage/charge/rate on this page, MQTT, and HA "
+        "Discovery. Can't be auto-detected: USB power alone makes the chip read "
+        "a plausible battery-shaped voltage even with none attached.%s</label></div>"
         // V2.5.30: heap-guard floor moved here to the BOTTOM of the Hardware
         // section (was in "Other"). No asterisk — read live each TX cycle by
         // tx_heap_guard() (V2.5.18), so it applies on plain Save (no reboot).
@@ -1727,6 +1737,15 @@ static esp_err_t config_get(httpd_req_t *req) {
         "",                                          // never checked on this board
         " <small>(not available on this board)</small>",
 #endif
+#if HAL_HAS_FUEL_GAUGE
+        "",                                          // not disabled on this board
+        s_cfg->batt_present ? "checked" : "",        // current state
+        "",                                          // no trailing note
+#else
+        "disabled",                                  // greyed out
+        "",                                          // never checked on this board
+        " <small>(not available on this board)</small>",
+#endif
         (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
         (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
         (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
@@ -1957,6 +1976,12 @@ static esp_err_t config_post(httpd_req_t *req) {
     cfg_next.i2c_pinout = false;
 #endif
 
+    // V2.6.6: same defence-in-depth for the battery-attached checkbox —
+    // force-disable on boards without the MAX17048 (UI already greys it).
+#if !HAL_HAS_FUEL_GAUGE
+    cfg_next.batt_present = false;
+#endif
+
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
     // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the
     // previously saved value rather than clobbering it to false — that way
@@ -1999,6 +2024,11 @@ static esp_err_t config_post(httpd_req_t *req) {
     // No-op if the panel is dark (show_display=false) or if the value didn't
     // change. ~1 ms (OLED) or ~10 ms (SerLCD) of I²C traffic.
     display_set_contrast(s_cfg->oled_brightness_pct);
+
+    // V2.6.6: live-apply the "Battery attached" checkbox — no reboot needed,
+    // it's a plain flag read by fuel_gauge_present() on every /status load
+    // and TX cycle. No-op on boards without HAL_HAS_FUEL_GAUGE.
+    fuel_gauge_set_user_present(s_cfg->batt_present);
 
     // V2.5.3: live-apply MQTT discovery for upload-target enable changes. The
     // TX path picks up g_cfg next cycle, but MQTT's cached enable flags + the

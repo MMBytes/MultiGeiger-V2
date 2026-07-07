@@ -536,10 +536,11 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"lux\":%.1f", lux);
     }
 
-    // Battery (MAX17048, FeatherS3-D only). Auto-detected — see
-    // fuel_gauge.h for the presence-threshold rationale. Absent entirely
-    // from the JSON (not zeros) when no battery is attached, so HA shows
-    // "unavailable" rather than a misleading 0V/0%.
+    // Battery (MAX17048, FeatherS3-D only). Presence is the user-set
+    // `batt_present` config bool — see fuel_gauge.h for why this can't be
+    // auto-detected. Absent entirely from the JSON (not zeros) when the
+    // checkbox is unticked, so HA shows "unavailable" rather than a
+    // misleading 0V/0%.
     if (fuel_gauge_present()) {
         float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
         if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {

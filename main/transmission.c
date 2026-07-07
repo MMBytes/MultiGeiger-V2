@@ -1420,25 +1420,21 @@ static void tx_run(const tx_context_t *c) {
                  (unsigned long)slog_tx, (unsigned long)slog_drops);
     }
 
-    // V2.6.6: standing requirement — log power-supply status every
-    // TX cycle on boards with the MAX17048. Gated on fuel_gauge_ready()
-    // (chip present at init) rather than fuel_gauge_present() (VCELL
-    // threshold): bench testing found the threshold false-positives
-    // whenever USB power is present with no LiPo attached — the onboard
-    // charger IC's unloaded output floats near ~4.2V, indistinguishable
-    // from a real battery by voltage alone (see fuel_gauge.h). Labelled
-    // "Power supply/Battery" rather than "battery" for the same reason —
-    // this is a raw VCELL/SoC/rate reading, not a verified battery report.
-    // VBUS status alongside it gives the context needed to interpret it:
-    // VBUS present + no separate battery config = expect charger float,
-    // not a real reading.
-    if (fuel_gauge_ready()) {
+    // V2.6.6: log battery status every TX cycle, FeatherS3-D only, gated on
+    // fuel_gauge_present() — chip detected AND the user has ticked the
+    // "Battery attached" checkbox. A USB-only node with no LiPo and the
+    // checkbox left unticked stays silent here instead of logging a
+    // charger-IC float (~4.2V) as if it were a real reading (see
+    // fuel_gauge.h for why VCELL alone can't tell those apart). VBUS status
+    // alongside it gives context for the confirmed reading (e.g. charging
+    // vs. running off battery).
+    if (fuel_gauge_present()) {
         float batt_v = 0.0f, batt_soc = 0.0f, batt_rate = 0.0f;
         if (fuel_gauge_read(&batt_v, &batt_soc, &batt_rate) == ESP_OK) {
             uint16_t version = 0xFFFF;
             uint8_t  status  = 0xFF;
             fuel_gauge_read_diag(&version, &status);
-            ESP_LOGI(TAG, "Power supply/Battery: %.3fV %.1f%% %+.2f%%/hr (VBUS %s, version=0x%04X status=0x%02X)",
+            ESP_LOGI(TAG, "Battery: %.3fV %.1f%% %+.2f%%/hr (VBUS %s, version=0x%04X status=0x%02X)",
                      (double)batt_v, (double)batt_soc, (double)batt_rate,
                      fuel_gauge_vbus_present() ? "present" : "absent",
                      version, status);

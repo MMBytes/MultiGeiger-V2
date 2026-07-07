@@ -26,16 +26,9 @@ static const char *TAG = "fuel_gauge";
 #define REG_CHIPID      0x19   // RO: 8-bit chip ID
 #define REG_STATUS      0x1A   // R/W: 8-bit alert flags (RI/VH/VL/VR/HD/SC)
 
-// Presence hysteresis (mV). See fuel_gauge.h file header for the full
-// derivation — this dead zone sits between the empirical ~0V no-battery
-// reading and the ~2.4V floor a real cell can reach before its protection
-// IC disconnects it.
-#define BATT_PRESENT_MV  2000
-#define BATT_ABSENT_MV   1500
-
-static i2c_master_dev_handle_t s_dev          = NULL;
-static bool                    s_ready        = false;
-static bool                    s_batt_present = false;
+static i2c_master_dev_handle_t s_dev            = NULL;
+static bool                    s_ready          = false;
+static bool                    s_user_present   = false;   // mirrors cfg->batt_present
 
 // MAX17048 registers are BIG-endian (MSB first) — the opposite byte order
 // from VEML7700's little-endian registers (see veml7700.c). Get this
@@ -96,30 +89,17 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     return ESP_OK;
 }
 
-bool fuel_gauge_ready(void) {
-    return s_ready;
-}
-
 bool fuel_gauge_vbus_present(void) {
     if (!s_ready) return false;
     return gpio_get_level(PIN_VBUS_DETECT) != 0;
 }
 
 bool fuel_gauge_present(void) {
-    if (!s_ready) return false;
+    return s_ready && s_user_present;
+}
 
-    uint16_t raw = 0;
-    if (i2c_dev_read_u16_be(s_dev, REG_VCELL, &raw) != ESP_OK) return false;
-
-    // raw * 78.125 uV/LSB, converted to mV. Widened to uint64_t for the
-    // multiply — raw (up to 65535) * 78125 overflows uint32_t.
-    uint32_t mv = (uint32_t)(((uint64_t)raw * 78125u) / 1000000u);
-
-    if (mv > BATT_PRESENT_MV)     s_batt_present = true;
-    else if (mv < BATT_ABSENT_MV) s_batt_present = false;
-    // else: inside the hysteresis band — hold the previous state.
-
-    return s_batt_present;
+void fuel_gauge_set_user_present(bool present) {
+    s_user_present = present;
 }
 
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
@@ -179,9 +159,9 @@ esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status) {
 #else   // HAL_HAS_FUEL_GAUGE == 0 → no-op stubs
 
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) { (void)bus; return ESP_OK; }
-bool      fuel_gauge_ready(void)                       { return false; }
 bool      fuel_gauge_vbus_present(void)                { return false; }
 bool      fuel_gauge_present(void)                     { return false; }
+void      fuel_gauge_set_user_present(bool present)    { (void)present; }
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
     (void)volts; (void)soc_pct; (void)rate_pct_per_hr;
     return ESP_FAIL;

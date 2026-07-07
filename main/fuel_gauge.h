@@ -11,25 +11,25 @@
  *  free-runs on I²C regardless of whether a LiPo is attached — no init
  *  register writes needed.
  *
- *  V2.6.6 CORRECTION: fuel_gauge_present()'s VCELL threshold (present >
- *  2000 mV) was designed around an assumed ~0V no-battery reading
+ *  V2.6.6 CORRECTION: fuel_gauge_present()'s original VCELL threshold
+ *  (present > 2000 mV) was designed around an assumed ~0V no-battery reading
  *  (CHANGELOG V2.4.28). Real bench testing (2026-07-03, two FeatherS3-D
  *  units, confirmed no LiPo attached) showed VCELL sitting at 4.2-4.4V
  *  instead — the onboard LiPo charger IC's output floats up near its
  *  ~4.2V regulation setpoint when USB power is present and unloaded
  *  (no battery to servo against). That's indistinguishable from a real
- *  battery by voltage alone, so fuel_gauge_present() is UNRELIABLE
- *  whenever VBUS is present (the common case — most nodes are USB-powered
- *  with no LiPo). It's kept for now (still gates /status, mqtt.c,
- *  mqtt_discovery.c) but should not be trusted as ground truth; see
- *  `project_fuel_gauge_max17048_design.md` memory for the full trail.
+ *  battery by voltage alone whenever VBUS is present (the common case —
+ *  most nodes are USB-powered with no LiPo), so no voltage-only heuristic
+ *  can be made reliable.
  *
- *  fuel_gauge_ready() is the honest signal for "does this board have the
- *  physical chip" (I2C ACK'd, driver initialised) — independent of whether
- *  a real battery is attached. Use this to gate output that should always
- *  show power-supply data on a FeatherS3-D regardless of battery presence
- *  (e.g. the per-TX-cycle log line, which reports raw VCELL/SoC/rate plus
- *  VBUS state rather than claiming to know if a battery is really there).
+ *  V2.6.6 FIX: fuel_gauge_present() is now driven by the `batt_present`
+ *  config bool (set via the /config "Battery attached" checkbox,
+ *  HAL_HAS_FUEL_GAUGE boards only) instead of a VCELL guess. This is a
+ *  deliberate manual override, not a step back from auto-detection — no
+ *  digital "battery attached" signal exists on this board's wiring (no
+ *  charger-IC status pin reaches a GPIO), so a config bool is the only way
+ *  to get a definite answer. See `project_fuel_gauge_max17048_design.md`
+ *  memory for the full trail.
  *
  *  Compiled out on boards without HAL_HAS_FUEL_GAUGE — every bool-returning
  *  function here returns false and every caller already treats that as
@@ -55,14 +55,6 @@
  */
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus);
 
-/** @brief True if the MAX17048 ACK'd at init and is ready to read — i.e.
- *  this board physically has the chip. Does NOT imply a battery is
- *  attached (see file header) — just that VCELL/SoC/CRATE reads are
- *  meaningful register reads rather than a no-op stub. Always false on
- *  boards without HAL_HAS_FUEL_GAUGE.
- */
-bool fuel_gauge_ready(void);
-
 /** @brief True if VBUS (USB 5V) is present, per the dedicated digital
  *  detect pin. Always true while running on USB power; reads false only
  *  when running purely off battery with USB unplugged. Always false on
@@ -70,14 +62,20 @@ bool fuel_gauge_ready(void);
  */
 bool fuel_gauge_vbus_present(void);
 
-/** @brief True if the chip is initialised AND the latest VCELL reading
- *  crossed into the "battery present" side of the hysteresis band (see
- *  file header for the exact thresholds). Reads VCELL once per call —
- *  cheap (~sub-ms at 400 kHz), safe to call every /status load and every
- *  TX cycle. Always false on boards without HAL_HAS_FUEL_GAUGE (no I²C
- *  traffic at all in that case).
+/** @brief True if the chip is ready AND the user has confirmed (via the
+ *  /config "Battery attached" checkbox, `batt_present`) that a real LiPo is
+ *  plugged in. No voltage heuristic — see file header for why VCELL alone
+ *  can't tell this apart from a floating no-battery reading. Always false
+ *  on boards without HAL_HAS_FUEL_GAUGE.
  */
 bool fuel_gauge_present(void);
+
+/** @brief Set the user-confirmed battery-presence flag (mirrors the
+ *  `batt_present` config bool). Call once at boot after fuel_gauge_init(),
+ *  and again on every live /config Save so a checkbox change takes effect
+ *  without a reboot. No-op on boards without HAL_HAS_FUEL_GAUGE.
+ */
+void fuel_gauge_set_user_present(bool present);
 
 /** @brief Read voltage / state-of-charge / charge-rate. Pointers may be
  *  NULL to skip that field.

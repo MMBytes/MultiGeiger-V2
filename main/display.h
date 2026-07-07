@@ -1,19 +1,24 @@
 #pragma once
 
 /** @file
- *  @brief OLED display driver — SSD1306 / SSD1309 128x64 over I2C.
+ *  @brief OLED display driver — SSD1306 / SSD1309 / SSD1315 128x64 over I2C.
  *
  *  Per-board panel + bus:
- *    Heltec V2 (+ 4MB clone) : onboard SSD1306 on the env_sensor I2C bus
- *                              (SDA=GPIO4, SCL=GPIO15, dedicated reset=GPIO16).
- *    FeatherS3-D             : external SSD1309 breakout on STEMMA2
- *                              (SDA=IO16, SCL=IO15), powered from LDO2;
- *                              4-pin module — no reset line, chip POR only.
+ *    Heltec V2 (+ 4MB clone)   : onboard SSD1306 on the env_sensor I2C bus
+ *                                (SDA=GPIO4, SCL=GPIO15, dedicated reset=GPIO16).
+ *    FeatherS3-D               : external SSD1309 breakout on STEMMA2
+ *                                (SDA=IO16, SCL=IO15), powered from LDO2;
+ *                                4-pin module — no reset line, chip POR only.
+ *    Heltec WiFi LoRa 32 V4-R2 : onboard SSD1315 on a bus dedicated
+ *                                permanently to the display (SDA=GPIO17,
+ *                                SCL=GPIO18, RST=GPIO21) — module-internal,
+ *                                not the env-sensor bus. See i2c_bus.h for
+ *                                why this board needs two I²C controllers.
  *
- *  SSD1306 and SSD1309 are register-compatible — the same init sequence and
- *  command set drive both. Boot log distinguishes them via OLED_CHIP_NAME
- *  in display.c (per-board #define) so a glance at /log shows which silicon
- *  is fitted without needing to know the board variant.
+ *  SSD1306, SSD1309, and SSD1315 are register-compatible — the same init
+ *  sequence and command set drive all three. Boot log distinguishes them
+ *  via OLED_CHIP_NAME in display.c (per-board #define) so a glance at /log
+ *  shows which silicon is fitted without needing to know the board variant.
  *
  *  On boards without an OLED (HAL_HAS_OLED == 0) the entire driver
  *  collapses to no-op stubs so callers in main.c don't change shape.

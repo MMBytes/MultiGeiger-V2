@@ -1,14 +1,23 @@
-// OLED display — SSD1306 / SSD1309 128x64 over I2C.
-// Hand-rolled driver (page-addressing mode) — no U8g2 dependency. SSD1306
-// and SSD1309 are register-compatible (init sequence + command set), so one
-// driver handles both. Per-board chip name comes from OLED_CHIP_NAME below
-// for accurate boot-log identification.
+// OLED display — SSD1306 / SSD1309 / SSD1315 128x64 over I2C.
+// Hand-rolled driver (page-addressing mode) — no U8g2 dependency. SSD1306,
+// SSD1309, and SSD1315 are register-compatible (init sequence + command
+// set), so one driver handles all three. Per-board chip name comes from
+// OLED_CHIP_NAME below for accurate boot-log identification.
 //
 //   Heltec V2 / Heltec V2 4MB : onboard SSD1306 on the shared env_sensor bus
 //                               (SDA=GPIO4, SCL=GPIO15, RST=GPIO16).
 //   FeatherS3-D               : external SSD1309 breakout (Core Electronics
 //                               CE09964) on STEMMA2 (SDA=IO16, SCL=IO15),
 //                               powered from LDO2 — see bring_up_stemma2_bus.
+//   Heltec WiFi LoRa 32 V4-R2 : onboard SSD1315 on a bus dedicated
+//                               permanently to the display (SDA=GPIO17,
+//                               SCL=GPIO18, RST=GPIO21) — module-internal,
+//                               not shared with the env-sensor bus at all
+//                               (unlike every board above). Always present
+//                               (on-module, not a plug-in breakout) — this
+//                               board probes the secondary bus FIRST (see
+//                               Step 6 below), since the primary bus can
+//                               never have a display on it.
 //
 // Layout: boot splash, then either the radiation-focused running screen
 // (time + nSv/h on top, big CPM in the middle, status line at the bottom)
@@ -69,6 +78,8 @@ static display_backend_t s_backend = BACKEND_NONE;
 // actually present differs and the log should reflect that.
 #if defined(BOARD_FEATHERS3_D)
     #define OLED_CHIP_NAME  "SSD1309"
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    #define OLED_CHIP_NAME  "SSD1315"
 #else
     #define OLED_CHIP_NAME  "SSD1306"
 #endif
@@ -493,14 +504,32 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     //
     // Boards without a secondary bus (Heltec, QT Py): i2c_bus_get_secondary()
     // returns NULL and the bus-2 branch is silently skipped.
+    //
+    // Heltec WiFi LoRa 32 V4-R2 is the one exception to "probe primary
+    // first": its OLED lives EXCLUSIVELY on the secondary bus — the
+    // primary/env-sensor bus never has a display on it — so probing
+    // primary first would pay a guaranteed probe-timeout plus the SerLCD
+    // 500 ms wake delay on every single boot for no possible benefit. This
+    // board skips straight to the secondary bus and skips the SerLCD
+    // delay too (it's an OLED, never a SerLCD).
 
-    i2c_master_bus_handle_t bus = i2c_bus_get_primary();
+    i2c_master_bus_handle_t bus;
+    const char *bus_label;
+
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    bus = i2c_bus_get_secondary();
+    if (!bus) {
+        ESP_LOGW(TAG, "no secondary I²C bus — display disabled");
+        return false;
+    }
+    bus_label = "onboard-OLED-bus";
+#else
+    bus = i2c_bus_get_primary();
     if (!bus) {
         ESP_LOGW(TAG, "no primary I²C bus — display disabled");
         return false;
     }
-
-    const char *bus_label = "STEMMA1";
+    bus_label = "STEMMA1";
 
     // --- Try primary bus -----------------------------------------------
     if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
@@ -525,8 +554,8 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     // --- Fall through to secondary bus ---------------------------------
     bus = i2c_bus_get_secondary();
     if (!bus) {
-        ESP_LOGW(TAG, "no display on STEMMA1, no secondary bus on this board — "
-                      "display disabled");
+        ESP_LOGW(TAG, "no display on %s, no secondary bus on this board — "
+                      "display disabled", bus_label);
         return false;
     }
     bus_label = "STEMMA2";
@@ -534,6 +563,7 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     // SerLCD ATmega bootloader needs ~500 ms after LDO2 enable. (Bus 1
     // probes above didn't need this — bus 1 has been powered since boot.)
     vTaskDelay(pdMS_TO_TICKS(500));
+#endif
 
     if (try_serlcd_on_bus(bus, show_display, brightness_pct)) {
         i2c_bus_secondary_keep_alive();
@@ -556,7 +586,7 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
         }
     }
 
-    ESP_LOGW(TAG, "no display found on STEMMA1 or STEMMA2 — display disabled");
+    ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
     return false;
 
 task_spawn:;
@@ -567,13 +597,18 @@ task_spawn:;
     //   - Big OLED (SSD1309)   → rotation (per-board compile-time hint
     //                            — BOARD_FEATHERS3_D ships with a 2.42"
     //                            SSD1309 from Core Electronics)
-    //   - Small OLED (SSD1306) → radiation (Heltec onboard 0.96" or
-    //                            Adafruit 326 plugged into STEMMA QT)
+    //   - Small OLED (SSD1306 / SSD1315) → radiation (Heltec onboard
+    //                            0.96", Adafruit 326 plugged into STEMMA
+    //                            QT, or Heltec WiFi LoRa 32 V4-R2's onboard
+    //                            SSD1315 — assumed same compact 0.96"
+    //                            footprint Heltec ships across its
+    //                            V2/V3/V4 module line; NOT bench-verified
+    //                            for this exact SKU, see Global Constraints)
     //
-    // Caveat: SSD1306 and SSD1309 are register-compatible (we drive both
-    // with the same init sequence) and there's no reliable chip-ID
-    // register that differs. So the OLED size discrimination uses the
-    // compile-time per-board hint. The edge case — Adafruit 326 (small)
+    // Caveat: SSD1306, SSD1309, and SSD1315 are register-compatible (we
+    // drive all three with the same init sequence) and there's no reliable
+    // chip-ID register that differs. So the OLED size discrimination uses
+    // the compile-time per-board hint. The edge case — Adafruit 326 (small)
     // plugged into a FeatherS3-D's STEMMA1 in place of the SSD1309 —
     // would auto-pick rotation incorrectly; the user can override via
     // display_mode = RADIATION in /config.
@@ -584,6 +619,8 @@ task_spawn:;
         } else {
 #if defined(BOARD_FEATHERS3_D)
             resolved_multipage = true;   // SSD1309 2.42" — big enough for rotation
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+            resolved_multipage = false;  // SSD1315 0.96" (assumed) — radiation single page
 #else
             resolved_multipage = false;  // SSD1306 0.96" — radiation single page
 #endif

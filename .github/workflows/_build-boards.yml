@@ -1,4 +1,4 @@
-# Reusable board-build matrix — the SINGLE source of the 5-board list, called
+# Reusable board-build matrix — the SINGLE source of the board list, called
 # by build.yml (release:false → CI build) and release.yml (release:true → build
 # + merge-bin + version==tag check + staged artefacts). Adding/removing a board
 # now means editing the matrix HERE only (plus EXPECTED_BOARDS in release.yml's
@@ -55,6 +55,7 @@ jobs:
           - feathers3_d
           - adafruit_qtpy_esp32_pico
           - seeed_xiao_esp32s3
+          - heltec_wifi_lora32_v4_r2
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -81,8 +82,9 @@ jobs:
         with:
           esp_idf_version: v6.0.1
           # Mirrors CMakeLists.txt's IDF_TARGET selection (kept in sync manually):
-          # ESP32-S3 for feathers3_d + seeed_xiao_esp32s3, esp32 for the rest.
-          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3') && 'esp32s3' || 'esp32' }}
+          # ESP32-S3 for feathers3_d + seeed_xiao_esp32s3 + heltec_wifi_lora32_v4_r2,
+          # esp32 for the rest.
+          target: ${{ (matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'heltec_wifi_lora32_v4_r2') && 'esp32s3' || 'esp32' }}
           path: '.'
           # Forward ccache config into the build container. CCACHE_DIR is a path
           # inside the mounted workspace so writes persist to the host for caching.

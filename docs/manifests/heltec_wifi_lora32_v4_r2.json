@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Heltec WiFi LoRa 32 V4 (R2)",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_heltec_wifi_lora32_v4_r2.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

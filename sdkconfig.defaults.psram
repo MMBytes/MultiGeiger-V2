@@ -1,10 +1,11 @@
 # ============================================================================
-# Shared PSRAM-board defaults — consumed by feathers3_d, adafruit_qtpy_esp32_pico
-# and seeed_xiao_esp32s3 via CMakeLists.txt SDKCONFIG_DEFAULTS; NOT by Heltec.
-# Home for config that applies to every PSRAM board but has NO Kconfig dependency
-# on CONFIG_SPIRAM (so it can't live in the shared sdkconfig.defaults, which the
-# non-PSRAM Heltec also reads). ONE source of truth — this block was previously
-# triplicated verbatim across the three board overlays (V2.5.34 review finding).
+# Shared PSRAM-board defaults — consumed by feathers3_d, adafruit_qtpy_esp32_pico,
+# seeed_xiao_esp32s3, and heltec_wifi_lora32_v4_r2 via CMakeLists.txt
+# SDKCONFIG_DEFAULTS. Home for config that applies to every PSRAM board but has
+# NO Kconfig dependency on CONFIG_SPIRAM (so it can't live in the shared
+# sdkconfig.defaults, which the non-PSRAM Heltec boards also read). ONE source
+# of truth — this block was previously triplicated verbatim across the three
+# board overlays (V2.5.34 review finding).
 # ============================================================================
 
 # --- V2.5.34: ESP-IDF Wi-Fi roaming app -------------------------------------

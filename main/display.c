@@ -16,8 +16,9 @@
 //                               (unlike every board above). Always present
 //                               (on-module, not a plug-in breakout) — this
 //                               board probes the secondary bus FIRST (see
-//                               Step 6 below), since the primary bus can
-//                               never have a display on it.
+//                               the BOARD_HELTEC_WIFI_LORA32_V4_R2 branch in
+//                               display_setup() below), since the primary
+//                               bus can never have a display on it.
 //
 // Layout: boot splash, then either the radiation-focused running screen
 // (time + nSv/h on top, big CPM in the middle, status line at the bottom)

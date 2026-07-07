@@ -42,8 +42,12 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 - Design spec:
   `docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md`.
 - **Not bench-verified** — no hardware in hand this session. LED polarity,
-  speaker P/N assignment, and PSRAM speed (80 MHz assumed) are flagged in
-  `hal.h`/the sdkconfig overlay as first-flash verification items.
+  speaker P/N assignment, PSRAM speed (80 MHz assumed), the GPIO3
+  boot-strap pin used for `PIN_GMC_COUNT_INPUT` (a wrong strap value at
+  boot risks the board failing to enumerate over USB-Serial-JTAG at all),
+  and the assumed 128x64/0.96" SSD1315 panel size (`DISPLAY_MODE_AUTO`)
+  are flagged in `hal.h`/`display.c`/the sdkconfig overlay as first-flash
+  verification items.
 
 ## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log, config checkbox
 

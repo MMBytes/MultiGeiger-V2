@@ -1,6 +1,6 @@
 # MultiGeiger V2 (ESP-IDF native)
 
-A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **five** ESP32 / ESP32-S3 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **six** ESP32 / ESP32-S3 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
 
 See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for the latest build and per-release notes.
 
@@ -25,7 +25,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 
 ## Supported hardware
 
-### Boards (five build targets)
+### Boards (six build targets)
 
 | Build target | MCU / module | Flash | Notes |
 |---|---|---|---|
@@ -34,6 +34,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 | `feathers3_d` | Unexpected Maker FeatherS3 with display (ESP32-S3) | 8 MB | Two STEMMA QT connectors (STEMMA1 on IO8/IO9, STEMMA2 LDO-gated on IO15/IO16). External I²C OLED via STEMMA. PSRAM — WiFi/lwIP/mbedTLS offloaded to PSRAM for sustained heap headroom. |
 | `adafruit_qtpy_esp32_pico` | Adafruit QT Py ESP32-PICO | 8 MB | Compact form factor. Optional NeoPixel tick on pulse. PSRAM. |
 | `seeed_xiao_esp32s3` | Seeed Studio XIAO ESP32-S3 | 8 MB | Tiny 21×17.5 mm — shares QT Py form factor + Geiger pin map (A0 / A1 / SCK), so one PCB design works for both. Onboard user LED blinks per pulse. PSRAM. |
+| `heltec_wifi_lora32_v4_r2` | Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2) | 16 MB | Third-party PCB: the standard Multigeiger V2 mainboard populated with this module instead of the Heltec V2. Onboard SSD1315 OLED on a dedicated, always-on I²C bus separate from the env-sensor bus. 2 MB in-package PSRAM. GPIO 7-14 reserved (undriven) for future LoRaWAN/Meshtastic work — not implemented yet. |
 
 Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
 
@@ -197,13 +198,13 @@ idf.py -B build_heltec_v2 -D SDKCONFIG_DEFAULTS=sdkconfig.defaults.heltec_v2 bui
 idf.py -B build_heltec_v2 -p <PORT> flash monitor
 ```
 
-Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, or `seeed_xiao_esp32s3` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
+Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, or `heltec_wifi_lora32_v4_r2` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
 
 The repo includes `_build.cmd <board>`, `_flash.cmd <board>`, `_merge.cmd <board>` helpers that wrap the above.
 
 ### Release workflow
 
-`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all five boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
+`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all six boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
 
 ## Repository layout
 

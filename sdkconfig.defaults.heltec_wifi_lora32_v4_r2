@@ -1,0 +1,39 @@
+# ============================================================================
+# Heltec WiFi LoRa 32 V4 (R2) overlay — ESP32-S3R2, 16 MB flash, 2 MB
+# in-package QSPI PSRAM (quad mode), USB-UART bridge console (no native USB).
+#
+# "R2" in the board name refers to the ESP32-S3R2 chip variant (2 MB
+# in-package PSRAM) — disambiguates from a possible future ESP32-S3R8 "V4-R8"
+# port, which has different GPIOs and 8 MB octal PSRAM. Pin map and feature
+# flags live in main/hal.h under BOARD_HELTEC_WIFI_LORA32_V4_R2. See
+# docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md
+# for the full pin-sourcing rationale.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# In-package PSRAM, 2 MB, quad mode (S3R2 — NOT octal; the R8 variant is
+# octal and would need CONFIG_SPIRAM_MODE_OCT instead, see the FeatherS3-D
+# overlay's comment on that same distinction). 80 MHz is the standard speed
+# for Espressif's in-package R2/R8 PSRAM variants — UNVERIFIED against this
+# specific board's boot log (no hardware in hand this session). If the boot
+# log shows a PSRAM init failure, drop to CONFIG_SPIRAM_SPEED_40M as the
+# first fallback.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Heap-spill policy and the V2.5.33 network/TLS PSRAM-offload knobs are
+# identical across all PSRAM boards and live in the shared sdkconfig.defaults
+# ("PSRAM heap policy" section).
+
+# Console / flashing path: UART0 via the module's USB-UART bridge (this SKU
+# has no native USB peripheral wired out — see hal.h HAL_HAS_NATIVE_USB=0).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

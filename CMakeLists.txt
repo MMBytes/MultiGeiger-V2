@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.16)
 #     idf.py -DBOARD=feathers3_d           build   (UM FeatherS3-D, ESP32-S3 + 8 MB QSPI PSRAM)
 #     idf.py -DBOARD=adafruit_qtpy_esp32_pico  build (ESP32-PICO SiP, 2 MB QSPI PSRAM)
 #     idf.py -DBOARD=seeed_xiao_esp32s3    build   (Seeed XIAO ESP32-S3, 8 MB OPI PSRAM — I²C sensor host)
+#     idf.py -DBOARD=heltec_wifi_lora32_v4_r2  build (Heltec WiFi LoRa 32 V4 base/R2, ESP32-S3R2 + 2 MB PSRAM)
 #
 # Each board pins its own IDF chip target and pulls a board-specific
 # sdkconfig.defaults overlay on top of the shared base.
@@ -16,7 +17,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -52,8 +53,20 @@ elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3")
+elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")
+    # Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2, 2 MB in-package
+    # PSRAM). NOT the V4-R8 variant (ESP32-S3R8, 8 MB PSRAM, different
+    # GPIOs) — "_r2" in the board name permanently disambiguates. Runs on a
+    # third-party PCB: the standard Multigeiger V2 mainboard populated with
+    # this module instead of the Heltec V2. See hal.h under
+    # BOARD_HELTEC_WIFI_LORA32_V4_R2 for the pin map and
+    # docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md
+    # for the full design rationale.
+    set(IDF_TARGET "esp32s3" CACHE STRING "")
+    add_compile_definitions(BOARD_HELTEC_WIFI_LORA32_V4_R2=1 MQTT_RICH_STATE=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.heltec_wifi_lora32_v4_r2")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

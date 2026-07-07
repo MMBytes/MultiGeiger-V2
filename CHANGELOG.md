@@ -9,6 +9,42 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.7 — New `heltec_wifi_lora32_v4_r2` board target (6th build target)
+
+- **New board**: Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2, 2 MB
+  in-package quad PSRAM). Runs on a third-party PCB: the standard Multigeiger
+  V2 mainboard populated with this Heltec module instead of the Heltec V2.
+  NOT the V4-R8 variant (ESP32-S3R8, 8 MB PSRAM, different GPIOs) — the
+  `_r2` suffix permanently disambiguates from a possible future R8 port.
+- Two-I²C-bus architecture: the onboard SSD1315 OLED lives on a
+  module-internal bus (GPIO17 SDA / GPIO18 SCL) completely separate from the
+  external env-sensor bus exposed on the mainboard header (GPIO48 SDA /
+  GPIO47 SCL) — every other supported board shares one bus between the two.
+  Reuses the dual-bus abstraction built for FeatherS3-D's STEMMA1/STEMMA2
+  split (`i2c_bus.c`'s `i2c_bus_get_secondary()`), extended with an
+  always-on (no LDO gating) branch for this board's fixed OLED bus.
+  `display.c` gains `SSD1315` as a third register-compatible OLED chip
+  identity alongside SSD1306/SSD1309.
+- Onboard LED (GPIO35) is active-HIGH per independent third-party firmware
+  cross-reference (Heltec's own Arduino library defines no LED pin for this
+  module at all). Piezo speaker uses GPIO26/GPIO5 — the source pin matrix
+  marks both as "SPK" without distinguishing P/N; assignment is arbitrary
+  and functionally inconsequential for a piezo.
+- Hardware-reservation only for future LoRaWAN/Meshtastic work: GPIO
+  7-14 (the SX1262 radio's dedicated internal SPI bus + front-end enable)
+  are documented as reserved in `hal.h` but not driven by any code — no
+  `HAL_HAS_LORA` flag, no radio driver, no config fields. LoRaWAN is a
+  parallel connectivity mode (own OTAA/ABP join flow, no WiFi/internet
+  dependency), not another TX-dispatch-table target, so it needs its own
+  dedicated design work once scoped.
+- CI matrix (`_build-boards.yml`) and release artefact count
+  (`release.yml`'s `EXPECTED_BOARDS`) updated for the 6th board.
+- Design spec:
+  `docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md`.
+- **Not bench-verified** — no hardware in hand this session. LED polarity,
+  speaker P/N assignment, and PSRAM speed (80 MHz assumed) are flagged in
+  `hal.h`/the sdkconfig overlay as first-flash verification items.
+
 ## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log, config checkbox
 
 - New `fuel_gauge.c`/`.h` driver for the onboard MAX17048 (I²C 0x36,

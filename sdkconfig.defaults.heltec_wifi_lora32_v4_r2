@@ -4,10 +4,9 @@
 #
 # "R2" in the board name refers to the ESP32-S3R2 chip variant (2 MB
 # in-package PSRAM) — disambiguates from a possible future ESP32-S3R8 "V4-R8"
-# port, which has different GPIOs and 8 MB octal PSRAM. Pin map and feature
-# flags live in main/hal.h under BOARD_HELTEC_WIFI_LORA32_V4_R2. See
-# docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md
-# for the full pin-sourcing rationale.
+# port, which has different GPIOs and 8 MB octal PSRAM. Pin map, feature
+# flags, and the full pin-sourcing rationale live in main/hal.h under
+# BOARD_HELTEC_WIFI_LORA32_V4_R2.
 # ============================================================================
 
 CONFIG_IDF_TARGET="esp32s3"

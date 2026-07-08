@@ -19,8 +19,10 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 - Two-I²C-bus architecture: the onboard SSD1315 OLED lives on a
   module-internal bus (GPIO17 SDA / GPIO18 SCL) completely separate from the
   external env-sensor bus exposed on the mainboard header (GPIO48 SDA /
-  GPIO47 SCL) — every other supported board shares one bus between the two.
-  Reuses the dual-bus abstraction built for FeatherS3-D's STEMMA1/STEMMA2
+  GPIO47 SCL) — every other supported board that has a second bus uses it
+  as an opportunistic fallback shared with sensors; here it is dedicated
+  exclusively to the OLED. Reuses the dual-bus abstraction built for
+  FeatherS3-D's STEMMA1/STEMMA2
   split (`i2c_bus.c`'s `i2c_bus_get_secondary()`), extended with an
   always-on (no LDO gating) branch for this board's fixed OLED bus.
   `display.c` gains `SSD1315` as a third register-compatible OLED chip
@@ -39,8 +41,6 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   dedicated design work once scoped.
 - CI matrix (`_build-boards.yml`) and release artefact count
   (`release.yml`'s `EXPECTED_BOARDS`) updated for the 6th board.
-- Design spec:
-  `docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md`.
 - **Not bench-verified** — no hardware in hand this session. LED polarity,
   speaker P/N assignment, PSRAM speed (80 MHz assumed), the GPIO3
   boot-strap pin used for `PIN_GMC_COUNT_INPUT` (a wrong strap value at

@@ -19,7 +19,7 @@ sdkconfig.*.old
 release_staging/
 
 # IDF Component Manager: `dependencies.lock` is IGNORED (V2.5.13) — its `target:`
-# field flips esp32<->esp32s3 per board across our 5-target matrix, churning the
+# field flips esp32<->esp32s3 per board across our 6-target matrix, churning the
 # tree on every build. Reproducibility is preserved by pinning the EXACT esp-mqtt
 # version (`==1.0.0`) in main/idf_component.yml (committed, never churns). The
 # fetched component sources under `managed_components/` are regenerated on every

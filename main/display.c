@@ -381,10 +381,11 @@ static void display_task(void *arg);
 
 // Try the OLED on the given bus. Returns true and binds s_dev on success,
 // writing the actual 7-bit address it bound (0x3C or 0x3D) into *addr_out.
-// The reset-pulse block is compile-gated by PIN_OLED_RST (Heltec only);
-// fires once per call (i.e. once per bus), then the address probe loop
-// runs. On FeatherS3-D / QT Py the reset block compiles out and this is
-// just up to two i2c_master_probe calls.
+// The reset-pulse block is compile-gated by PIN_OLED_RST (defined for
+// boards with an onboard reset line — Heltec V2 and Heltec WiFi LoRa 32
+// V4-R2); fires once per call (i.e. once per bus), then the address probe
+// loop runs. On FeatherS3-D / QT Py the reset block compiles out and this
+// is just up to two i2c_master_probe calls.
 //
 // V2.4.19: probe both 0x3C and 0x3D. Adafruit 326 (and most STEMMA QT
 // OLED breakouts) have a solder jumper to switch addresses; some board
@@ -511,8 +512,9 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     // primary/env-sensor bus never has a display on it — so probing
     // primary first would pay a guaranteed probe-timeout plus the SerLCD
     // 500 ms wake delay on every single boot for no possible benefit. This
-    // board skips straight to the secondary bus and skips the SerLCD
-    // delay too (it's an OLED, never a SerLCD).
+    // board skips straight to the secondary bus and skips the 500 ms
+    // SerLCD wake delay too (try_serlcd_on_bus() still runs on this bus —
+    // it just returns quickly since there's no SerLCD to answer).
 
     i2c_master_bus_handle_t bus;
     const char *bus_label;
@@ -587,7 +589,11 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
         }
     }
 
+#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    ESP_LOGW(TAG, "no display found on %s — display disabled", bus_label);
+#else
     ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
+#endif
     return false;
 
 task_spawn:;
@@ -604,7 +610,7 @@ task_spawn:;
     //                            SSD1315 — assumed same compact 0.96"
     //                            footprint Heltec ships across its
     //                            V2/V3/V4 module line; NOT bench-verified
-    //                            for this exact SKU, see Global Constraints)
+    //                            for this exact SKU)
     //
     // Caveat: SSD1306, SSD1309, and SSD1315 are register-compatible (we
     // drive all three with the same init sequence) and there's no reliable

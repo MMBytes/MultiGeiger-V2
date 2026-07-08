@@ -59,9 +59,8 @@ elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")
     # GPIOs) — "_r2" in the board name permanently disambiguates. Runs on a
     # third-party PCB: the standard Multigeiger V2 mainboard populated with
     # this module instead of the Heltec V2. See hal.h under
-    # BOARD_HELTEC_WIFI_LORA32_V4_R2 for the pin map and
-    # docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md
-    # for the full design rationale.
+    # BOARD_HELTEC_WIFI_LORA32_V4_R2 for the pin map and full design
+    # rationale.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_HELTEC_WIFI_LORA32_V4_R2=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.heltec_wifi_lora32_v4_r2")

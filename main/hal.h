@@ -439,8 +439,8 @@
     // Multigeiger_V1.9/Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf, cross-validated
     // pin-for-pin against Heltec's V4 datasheet §2.2.1/2.2.2/2.2.3 — zero
     // contradictions. Full rationale (incl. the Vext/GPIO2/GPIO46
-    // non-conflict analysis and the future-LoRaWAN pin reservations) in
-    // docs/superpowers/specs/2026-07-06-heltec-wifi-lora32-v4-r2-board-port-design.md.
+    // non-conflict analysis and the future-LoRaWAN pin reservations) is
+    // captured in the per-pin comments throughout this block below.
     #define BOARD_NAME              "heltec_wifi_lora32_v4_r2"
     #define HAL_HAS_OLED              1   // SSD1315 on a dedicated I2C_NUM_1 bus (GPIO17/18) — see PIN_OLED_SDA/SCL below
     #define HAL_HAS_ALS               0   // No onboard ambient-light sensor
@@ -477,8 +477,8 @@
     // input from the tube pulse-conditioning circuit, whose level during the
     // ROM bootloader's strap-sampling window is NOT under firmware control.
     // Not resolvable without hardware in hand — flagged as a first-flash
-    // bench-verify item (see Global Constraints): confirm the board still
-    // enumerates over USB-Serial-JTAG after flashing.
+    // bench-verify item: confirm the board still enumerates over
+    // USB-Serial-JTAG after flashing.
     #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
 
     // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3
@@ -539,6 +539,11 @@
     //   GPIO45/46     "DIP0/DIP1" in the Multigeiger matrix — DIP-switch
     //                 inputs unused by V2 firmware on every board
     //   GPIO6         "DIP3" in the Multigeiger matrix — same as above
+    //   GPIO26-32     internal flash/PSRAM SPI0/1 (never usable, any PSRAM
+    //                 mode) — see PIN_SPEAKER_P above, currently GPIO26
+    //   GPIO43/44     UART0 console (USB-UART bridge, HAL_HAS_NATIVE_USB=0)
+    //                 — not free GPIO
+    //   GPIO0         BOOT strap
 
 #else
     #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 via CMake."

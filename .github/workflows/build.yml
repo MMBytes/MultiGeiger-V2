@@ -1,4 +1,4 @@
-# GitHub Actions: host tests + static analysis + build all 5 board targets on
+# GitHub Actions: host tests + static analysis + build all 6 board targets on
 # every push to main + PR.
 #
 # Catches "broke board X while testing on Y" before a manual flash. The cppcheck
@@ -44,7 +44,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 # V2.5.31: cancel a superseded in-flight run when a newer commit lands on the
-# same branch/PR — no point finishing a 5-board build for code already replaced.
+# same branch/PR — no point finishing a 6-board build for code already replaced.
 # (release.yml deliberately has NO cancel-in-progress: never abort a release.)
 concurrency:
   group: build-${{ github.ref }}

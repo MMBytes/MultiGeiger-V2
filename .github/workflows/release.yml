@@ -5,7 +5,7 @@
 #   git tag V2.4.2 && git push --tags
 #       OR  Actions tab → "release" → "Run workflow" → enter the existing tag
 #
-# Gates run cheapest-first so a bad tag fails in seconds, not after a 5-board
+# Gates run cheapest-first so a bad tag fails in seconds, not after a 6-board
 # build: cppcheck + changelog preflight → build (merge + stage) → release → pages.
 # The cppcheck gate and the board matrix are reusable workflows shared with
 # build.yml (_cppcheck.yml / _build-boards.yml) so the two pipelines can't drift.

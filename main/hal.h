@@ -456,7 +456,20 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed route per bus
-    #define HAL_HAS_SPEAKER           1   // Piezo, GPIO26 (P) / GPIO5 (N)
+    // V2.6.7: disabled. PIN_SPEAKER_P (GPIO26) is the ESP32-S3R2/RH2's
+    // internal PSRAM chip-select (SPICS1) per Espressif's ESP32-S3 datasheet
+    // v2.2 §2.3.5 Table 2-9 (Priority 4, "SPI0/1 interface connected to the
+    // in-package flash and PSRAM") — confirmed hardwired to the piezo via
+    // KiCad/Eagle trace review of the Multigeiger V2 mainboard, and
+    // independently corroborated by Heltec's own pins_arduino.h for V4/V4_R8
+    // (and V3/ESP32-S3FN8, which hits the same restriction for its in-package
+    // flash) never exposing GPIO26-37. Driving it as a PWM tone output risks
+    // bus contention with live SPI0 flash traffic → crash/hang correlated
+    // with speaker use. Not fixable in firmware (the PSRAM chip-select bond
+    // is fixed at chip fabrication); see
+    // docs/superpowers/reviews/2026-07-08-v2.6.7-max-review/ for the full
+    // writeup. Hardware-team decision pending on a GPIO34/37 rework.
+    #define HAL_HAS_SPEAKER           0   // Piezo present but GPIO26 (P) collides with PSRAM SPICS1 — disabled
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
@@ -482,23 +495,21 @@
     #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
 
     // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3
-    // pin16) as "SPK" without distinguishing P/N — a piezo isn't polarity
-    // sensitive in a way that matters for tone generation, so this
-    // assignment is arbitrary (bench-verify perceived loudness on first
-    // flash; worst case if reversed is a quieter click, not broken audio).
-    #define PIN_SPEAKER_P           26   // J2 pin15
-    #define PIN_SPEAKER_N            5   // J3 pin16 ("Touch5 – SPK")
+    // pin16) as "SPK" without distinguishing P/N. PIN_SPEAKER_P/N are
+    // intentionally left undefined — HAL_HAS_SPEAKER=0 above stubs the
+    // entire speaker path, since GPIO26 (J2 pin15) collides with this
+    // chip's internal PSRAM chip-select (see the HAL_HAS_SPEAKER comment).
 
     // Onboard LED. GPIO35, ACTIVE-HIGH — confirmed via the independent
     // DN9KGB/rMesh project's hal_HELTEC_WiFi_LoRa_32_V4.c (whose other pin
     // values match this exact base-V4 pinout): LOW at boot = off, HIGH =
     // on. Not Heltec's own datasheet text, so bench-verify polarity on
     // first flash (same standard applied to the XIAO ESP32-S3's LED).
-    // HAL_LED_ACTIVE_LOW omitted (led.c defaults to active-high) — but
-    // led.c's own driver compiles OUT on this board anyway
-    // (HAL_HAS_SPEAKER=1), so speaker.c owns PIN_LED_BUILTIN instead; its
-    // hardcoded gpio_set_level(PIN_LED_BUILTIN, 1)==on already assumes
-    // active-high and needs no changes here.
+    // HAL_LED_ACTIVE_LOW omitted (led.c defaults to active-high, matching
+    // this pin's confirmed polarity). V2.6.7: HAL_HAS_SPEAKER=0 means
+    // speaker.c no longer owns this pin — led.c's own driver compiles IN
+    // (per led.c's `!HAL_HAS_SPEAKER && !HAL_HAS_NEOPIXEL` gate) and drives
+    // the pulse-tick LED directly.
     #define PIN_LED_BUILTIN         35   // J2 pin10
 
     // I2C bus (env sensor — the bus every sensor driver targets by default).

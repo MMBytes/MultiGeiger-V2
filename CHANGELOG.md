@@ -29,9 +29,31 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   identity alongside SSD1306/SSD1309.
 - Onboard LED (GPIO35) is active-HIGH per independent third-party firmware
   cross-reference (Heltec's own Arduino library defines no LED pin for this
-  module at all). Piezo speaker uses GPIO26/GPIO5 — the source pin matrix
-  marks both as "SPK" without distinguishing P/N; assignment is arbitrary
-  and functionally inconsequential for a piezo.
+  module at all). Since `HAL_HAS_SPEAKER=0` (see below) stubs out
+  speaker.c entirely, `led.c`'s own pulse-tick driver now owns this pin.
+- **Piezo speaker disabled (`HAL_HAS_SPEAKER=0`)**: the pin matrix wires the
+  onboard piezo to GPIO26 (P) / GPIO5 (N), but GPIO26 is this chip's
+  internal PSRAM chip-select (SPICS1) — confirmed against the Espressif
+  ESP32-S3 datasheet v2.2 (§2.3.5 Table 2-9, Priority 4: "SPI0/1 interface
+  connected to the in-package flash and PSRAM"), against Heltec's own
+  `pins_arduino.h` for V3/V4/V4_R8 (all three omit GPIO26-37 entirely,
+  regardless of whether the chip variant has in-package flash or PSRAM),
+  and against a KiCad/Eagle trace review of the Multigeiger V2 mainboard.
+  Driving GPIO26 as a PWM tone output risks bus contention with live SPI0
+  flash traffic, i.e. crashes/hangs correlated with speaker use — this is a
+  chip-hardware conflict, not a firmware bug, and disabling PSRAM in
+  firmware does not fix it (the chip-select bond is fixed at chip
+  fabrication, and the surrounding GPIO27-32 still carry the live flash
+  bus the firmware itself runs from). Also checked and ruled out as a
+  workaround: swapping to the WiFi LoRa 32 V3 module (ESP32-S3FN8) — same
+  restriction applies for the mirror-image reason (in-package flash instead
+  of in-package PSRAM), and V3/V4 share the same module footprint, so the
+  mainboard's hardwired trace lands on the same physical GPIO26 either way.
+  Full writeup with all three source citations:
+  `docs/superpowers/reviews/2026-07-08-v2.6.7-max-review/GPIO26_Befund_Zusammenfassung_DE.txt`
+  (German). Hardware-team decision pending on a GPIO34/GPIO37 rework for a
+  future board revision; this release ships without speaker/tone output on
+  this board.
 - Hardware-reservation only for future LoRaWAN/Meshtastic work: GPIO
   7-14 (the SX1262 radio's dedicated internal SPI bus + front-end enable)
   are documented as reserved in `hal.h` but not driven by any code — no
@@ -42,12 +64,13 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 - CI matrix (`_build-boards.yml`) and release artefact count
   (`release.yml`'s `EXPECTED_BOARDS`) updated for the 6th board.
 - **Not bench-verified** — no hardware in hand this session. LED polarity,
-  speaker P/N assignment, PSRAM speed (80 MHz assumed), the GPIO3
-  boot-strap pin used for `PIN_GMC_COUNT_INPUT` (a wrong strap value at
-  boot risks the board failing to enumerate over USB-Serial-JTAG at all),
-  and the assumed 128x64/0.96" SSD1315 panel size (`DISPLAY_MODE_AUTO`)
-  are flagged in `hal.h`/`display.c`/the sdkconfig overlay as first-flash
-  verification items.
+  PSRAM speed (80 MHz assumed), the GPIO3 boot-strap pin used for
+  `PIN_GMC_COUNT_INPUT` (a wrong strap value at boot risks the board
+  failing to enumerate over USB-Serial-JTAG at all), and the assumed
+  128x64/0.96" SSD1315 panel size (`DISPLAY_MODE_AUTO`) are flagged in
+  `hal.h`/`display.c`/the sdkconfig overlay as first-flash verification
+  items. (Speaker P/N assignment is no longer a verification item — the
+  speaker is disabled, see above.)
 
 ## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log, config checkbox
 

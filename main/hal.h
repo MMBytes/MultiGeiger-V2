@@ -468,7 +468,23 @@
     // with speaker use. Not fixable in firmware (the PSRAM chip-select bond
     // is fixed at chip fabrication); see
     // docs/superpowers/reviews/2026-07-08-v2.6.7-max-review/ for the full
-    // writeup. Hardware-team decision pending on a GPIO34/37 rework.
+    // writeup.
+    //
+    // CORRECTION (post-release): the review's suggested firmware-side
+    // replacement pins, GPIO34 and GPIO37, are themselves NOT free — Heltec's
+    // own official V4 pin-mapping document names GPIO34 = VGNSS_Ctrl and
+    // GPIO37 = ADC_Ctrl (confirmed against the Multigeiger Pin-Matrix too,
+    // which independently corroborates GPIO34=VGNSS_Ctrl — that one was even
+    // in this board's own §1 V4-vs-V4_R8 comparison table in the design spec
+    // the whole time, just never carried into this reserved-pin list, which
+    // is how it slipped past review). Of the whole GPIO33-37 octal-PSRAM
+    // extension range, only GPIO33 has no named Heltec control function
+    // (hence safe to repurpose as PIN_HV_FET_OUTPUT below); 34/36/37 are
+    // Heltec-reserved control lines and 35 is already correctly used for its
+    // own intended purpose (the onboard LED). No verified-free replacement
+    // GPIO is known for the speaker — see
+    // [[project_heltec_wifi_lora32_v4_r2_board_port]] memory for the
+    // hardware-side next step (Pin-Matrix header audit + continuity check).
     #define HAL_HAS_SPEAKER           0   // Piezo present but GPIO26 (P) collides with PSRAM SPICS1 — disabled
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
 
@@ -482,7 +498,24 @@
     // wiring intent (Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf), cross-validated
     // against the V4 datasheet.
     #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
-    #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain GPIO on base V4 (see spec §5: no LoRa-PA conflict on this SKU)
+    #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain
+    // GPIO on base V4 (spec §5 confirmed no conflict with LoRa's FEM_PA on
+    // this SKU — but that check predates a later finding: GPIO2 is ALSO
+    // Heltec's FEM_EN, per Table 2.2.2 row 13, a second/distinct LoRa
+    // front-end-enable signal from GPIO7's VFEM_Control). Same dormant-
+    // conflict shape as GPIO46/DIP1 vs FEM_PA below: harmless today since
+    // nothing drives LoRa (no HAL_HAS_LORA), but this pin is double-booked
+    // and would contend if LoRa work ever starts.
+    //
+    // FUTURE HARDWARE REWORK (not yet built, no PCB revision exists yet):
+    // hardware team has been asked to move this input to GPIO6 (J3 pin17,
+    // currently wired only to the dead "DIP3" switch, see reserved-pin list
+    // below) once that switch is disconnected — GPIO6 has no Heltec-side
+    // claim and, unlike GPIO45, is NOT one of the ESP32-S3's four strapping
+    // pins (GPIO0/3/45/46 only), so it carries no boot-strap risk either.
+    // Same rule as the speaker rework: this is a copper change, existing
+    // boards keep GPIO2 wired as-is, and firmware needs a way to tell old-
+    // wiring boards from new-wiring boards before this #define can change.
     // IO3 is an ESP32-S3 strapping pin, same strap BOARD_FEATHERS3_D reuses
     // for PIN_SPEAKER_P below — but that reuse is safe ONLY because the
     // speaker driver stays hi-Z until code drives it post-boot. This pin is
@@ -510,6 +543,23 @@
     // intentionally left undefined — HAL_HAS_SPEAKER=0 above stubs the
     // entire speaker path, since GPIO26 (J2 pin15) collides with this
     // chip's internal PSRAM chip-select (see the HAL_HAS_SPEAKER comment).
+    //
+    // FUTURE HARDWARE REWORK (not yet built, no PCB revision exists yet):
+    // GPIO4 (J3 pin15) is the first fully-verified-free GPIO found on this
+    // board — no Heltec-named "Connected" function (datasheet Table 2.2.2
+    // row 15 lists only ADC1_CH3/TOUCH4) AND the Multigeiger Pin-Matrix
+    // itself marks this same header pin "RESERVE" (unwired on the
+    // mainboard). Hardware team has been asked to reroute the speaker's P
+    // leg from GPIO26 to GPIO4 on a future PCB revision, keeping the N leg
+    // on GPIO5 (J3 pin16) unchanged — GPIO5 has no conflict and is already
+    // connected. This is a copper change, not a firmware one: existing
+    // fabricated boards still have the P leg hard-traced to GPIO26 and
+    // cannot be fixed by flipping HAL_HAS_SPEAKER. When the reworked PCB
+    // exists, firmware will need a way to distinguish old-wiring boards
+    // from new-wiring boards (new BOARD variant, or a build-time/runtime
+    // hardware-revision flag) before PIN_SPEAKER_P can safely become 4 —
+    // do not just flip HAL_HAS_SPEAKER=1 with GPIO4 for this board target
+    // as it stands, or every board already in the field breaks.
 
     // Onboard LED. GPIO35, ACTIVE-HIGH — confirmed via the independent
     // DN9KGB/rMesh project's hal_HELTEC_WiFi_LoRa_32_V4.c (whose other pin
@@ -541,28 +591,84 @@
     // RESERVED for future LoRaWAN/Meshtastic work (hardware-reservation
     // only per spec §6 — no radio driver, no HAL_HAS_LORA flag, nothing
     // here should need to change when that spec is eventually written):
-    //   GPIO 8/9/10/11/12/13/14 — SX1262 LoRa radio's dedicated internal SPI
-    //     bus (NSS/SCK/MOSI/MISO/DIO1/RST/BUSY). Confirmed via the datasheet
-    //     ("LoRa and Flash have each utilized a separate SPI interface") and
-    //     never appears in the J2/J3 header tables — nothing else could
-    //     claim these pins anyway.
-    //   GPIO 7 — VFEM_Control (LoRa front-end enable per the datasheet's own
-    //     J3 pin table, J3 pin18). Left undriven — not assigned to any
-    //     Multigeiger function.
+    //   GPIO8/9/10/11/12/13/14  SX1262 LoRa radio's dedicated internal SPI
+    //                 bus: GPIO8=LoRa_NSS, GPIO9=LoRa_SCK, GPIO10=LoRa_MOSI,
+    //                 GPIO11=LoRa_MISO, GPIO12=LoRa_RST, GPIO13=LoRa_BUSY,
+    //                 GPIO14=DIO1 (Heltec's own V4 pin-mapping diagram,
+    //                 verified against WiFi_LoRa_32_V4.3.1_Datasheet.pdf).
+    //                 Never appears in the J2/J3 header tables — nothing
+    //                 else could claim these pins anyway.
+    //   GPIO7         VFEM_Control (LoRa front-end enable, J3 pin18 per the
+    //                 datasheet's own Table 2.2.2). Left undriven.
+    //   GPIO2         FEM_EN (LoRa front-end enable, J3 pin13 per Table
+    //                 2.2.2 — a second, distinct front-end control signal
+    //                 from GPIO7/VFEM_Control). Left undriven.
+    //   GPIO46        FEM_PA (LoRa PA control) per Heltec's own pin-mapping
+    //                 diagram — dropped from the datasheet PDF's own summary
+    //                 table (same class of gap as GPIO34/VGNSS_Ctrl below),
+    //                 but confirmed via direct visual cross-check of the
+    //                 diagram against the PDF. Multigeiger's own board also
+    //                 calls this pin "DIP1" (unused input) — no live
+    //                 conflict today since HAL_HAS_LORA isn't implemented,
+    //                 but flag this pin first if/when LoRa work begins.
+    //                 Hardware team has been asked to remove/disconnect the
+    //                 DIP1 switch on the next PCB revision rather than leave
+    //                 this landmine for whoever eventually does LoRa work.
     //
     // RESERVED / never repurpose (out of scope or module-internal — see
-    // spec §2 and §9):
+    // spec §2 and §9, and WiFi_LoRa_32_V4.3.1_Datasheet.pdf Table 2.2.1/2.2.2
+    // for the primary source):
     //   GPIO36        Vext_Ctrl — deliberately undriven, see HAL_HAS_VEXT_GATE above
     //   GPIO19/20     native USB D-/D+ (module-internal strap pair; this
     //                 board doesn't use native USB but the pins are still
     //                 module wiring, not free GPIO)
-    //   GPIO1         VBAT_Read — out of scope (no battery ADC support)
-    //   GPIO38-42     GNSS connector (RST/PPS/Wakeup/TX/RX) — out of scope
-    //   GPIO45/46     "DIP0/DIP1" in the Multigeiger matrix — DIP-switch
-    //                 inputs unused by V2 firmware on every board
-    //   GPIO6         "DIP3" in the Multigeiger matrix — same as above
+    //   GPIO1         VBAT_Read — out of scope (no battery ADC support).
+    //                 Table 2.2.2 footnote: reading it requires ADC_CTRL
+    //                 (GPIO37) pulled high first — see GPIO37 entry below.
+    //   GPIO38-42     GNSS connector — GPIO38=GNSS_RX, GPIO39=GNSS_TX,
+    //                 GPIO40=GNSS_Wakeup, GPIO41=GNSS_PPS, GPIO42=GNSS_RST
+    //                 (Table 2.2.2 rows 7-11) — out of scope
+    //   GPIO45/46     DIP-switch inputs on the Multigeiger mainboard itself
+    //                 (J3 pin6=GPIO45=DIP0, J3 pin5=GPIO46=DIP1), unused by
+    //                 V2 firmware on every board. GPIO46/DIP1 also = FEM_PA,
+    //                 see LoRa block above — two stacked claims, not free.
+    //                 GPIO45/DIP0 has no competing Heltec-side function
+    //                 (Table 2.2.2 row 6) — free of Heltec's reservations,
+    //                 but IS one of the ESP32-S3's four strapping pins
+    //                 (GPIO0/3/45/46): VDD_SPI voltage-select, sampled at
+    //                 reset to choose the flash/PSRAM regulator voltage —
+    //                 and unlike GPIO3's JTAG-source strap, this one is NOT
+    //                 eFuse-gated off by default. The existing DIP0 switch
+    //                 evidently coexists safely with it (board ships and
+    //                 boots today), but do NOT repurpose this pin for a new
+    //                 actively-driven external signal without hardware
+    //                 verifying it against the strap requirement first —
+    //                 left as DIP0/unused, no repurposing planned.
+    //   GPIO6         "DIP3" in the Multigeiger matrix — no Heltec-side
+    //                 claim (Table 2.2.2 row 17: generic ADC1_CH5/TOUCH6
+    //                 only) and NOT a strapping pin (unlike GPIO45 above).
+    //                 FUTURE HARDWARE REWORK: earmarked as the new home for
+    //                 PIN_HV_CAP_FULL_INPUT (currently GPIO2, see that
+    //                 #define's comment) once the hardware team disconnects
+    //                 the DIP3 switch — no known conflicts either way.
+    //   GPIO15/16     XTAL_32K_P / XTAL_32K_N — external 32kHz RTC crystal
+    //                 pins (Table 2.2.3). Not currently used by this board
+    //                 (no crystal populated), but not free GPIO either.
     //   GPIO26-32     internal flash/PSRAM SPI0/1 (never usable, any PSRAM
     //                 mode) — see PIN_SPEAKER_P above, currently GPIO26
+    //   GPIO34        VGNSS_Ctrl — Heltec module-level named control signal
+    //                 (confirmed via Heltec's own V4 pin-mapping diagram AND
+    //                 independently via the Multigeiger Pin-Matrix; was in
+    //                 this board's design spec §1 comparison table but never
+    //                 carried into this list until the post-release GPIO26
+    //                 correction). Curiously absent from the datasheet PDF's
+    //                 own Table 2.2.1 row 11 text despite being on the same
+    //                 PDF's pin-layout diagram — a gap in Heltec's own docs,
+    //                 not evidence it's free. NOT a free/spare GPIO.
+    //   GPIO37        ADC_Ctrl — Heltec module-level named control signal
+    //                 per Table 2.2.2 row 4 (J3 pin4). Function: gates the
+    //                 VBAT_Read (GPIO1) voltage divider — must be pulled
+    //                 high before reading GPIO1's ADC. NOT a free/spare GPIO.
     //   GPIO43/44     UART0 console (USB-UART bridge, HAL_HAS_NATIVE_USB=0)
     //                 — not free GPIO
     //   GPIO0         BOOT strap

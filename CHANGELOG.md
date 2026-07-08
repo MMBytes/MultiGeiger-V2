@@ -64,13 +64,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 - CI matrix (`_build-boards.yml`) and release artefact count
   (`release.yml`'s `EXPECTED_BOARDS`) updated for the 6th board.
 - **Not bench-verified** — no hardware in hand this session. LED polarity,
-  PSRAM speed (80 MHz assumed), the GPIO3 boot-strap pin used for
-  `PIN_GMC_COUNT_INPUT` (a wrong strap value at boot risks the board
-  failing to enumerate over USB-Serial-JTAG at all), and the assumed
-  128x64/0.96" SSD1315 panel size (`DISPLAY_MODE_AUTO`) are flagged in
-  `hal.h`/`display.c`/the sdkconfig overlay as first-flash verification
-  items. (Speaker P/N assignment is no longer a verification item — the
-  speaker is disabled, see above.)
+  PSRAM speed (80 MHz assumed), and the assumed 128x64/0.96" SSD1315 panel
+  size (`DISPLAY_MODE_AUTO`) are flagged in `hal.h`/`display.c`/the
+  sdkconfig overlay as first-flash verification items. (Speaker P/N
+  assignment is no longer a verification item — the speaker is disabled,
+  see above.) The GPIO3 strap used for `PIN_GMC_COUNT_INPUT` was
+  investigated against the Espressif ESP32-S3 datasheet v2.2 ch.3 and
+  downgraded from a verification item: GPIO3 only selects JTAG signal
+  source (not the SPI-boot/download-mode decision, which is GPIO0+GPIO46),
+  this board doesn't use native USB-Serial-JTAG for console/flashing
+  anyway (separate UART bridge on GPIO43/44), and the eFuse bits that would
+  make the chip act on this strap default to not-burnt on stock chips — see
+  `hal.h`'s `PIN_GMC_COUNT_INPUT` comment for the full citation.
 
 ## V2.6.6 — MAX17048 battery fuel gauge (FeatherS3-D): /status, MQTT, HA discovery, per-cycle log, config checkbox
 

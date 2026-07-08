@@ -483,15 +483,26 @@
     // against the V4 datasheet.
     #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
     #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain GPIO on base V4 (see spec §5: no LoRa-PA conflict on this SKU)
-    // IO3 is an ESP32-S3 boot strap (JTAG vs USB-Serial-JTAG select), same
-    // strap BOARD_FEATHERS3_D reuses for PIN_SPEAKER_P below — but that reuse
-    // is safe ONLY because the speaker driver stays hi-Z until code drives it
-    // post-boot. This pin is different: it's an always-connected external
-    // input from the tube pulse-conditioning circuit, whose level during the
-    // ROM bootloader's strap-sampling window is NOT under firmware control.
-    // Not resolvable without hardware in hand — flagged as a first-flash
-    // bench-verify item: confirm the board still enumerates over
-    // USB-Serial-JTAG after flashing.
+    // IO3 is an ESP32-S3 strapping pin, same strap BOARD_FEATHERS3_D reuses
+    // for PIN_SPEAKER_P below — but that reuse is safe ONLY because the
+    // speaker driver stays hi-Z until code drives it post-boot. This pin is
+    // different: it's an always-connected external input from the tube
+    // pulse-conditioning circuit, whose level during the ROM bootloader's
+    // strap-sampling window is NOT under firmware control.
+    //
+    // V2.6.7: narrowed after re-reading the Espressif ESP32-S3 datasheet
+    // v2.2 ch.3 "Boot Configurations" directly. GPIO3 controls ONLY "JTAG
+    // signal source" (which physical path a hardware JTAG debugger would
+    // use) — it has no role in the SPI-boot-vs-download-mode decision
+    // (that's GPIO0 + GPIO46, per Table 3-3) and no effect on this board's
+    // console/flashing path, which runs over a separate USB-UART bridge
+    // chip on GPIO43/44, not native USB-Serial-JTAG (see
+    // HAL_HAS_NATIVE_USB=0 above). The datasheet also states the eFuse bits
+    // that make the chip act on this strap at all (EFUSE_DIS_PAD_JTAG,
+    // EFUSE_DIS_USB_JTAG, EFUSE_STRAP_JTAG_SEL) default to 0/not-burnt on
+    // every stock chip, so in practice GPIO3's boot-time level here is
+    // inert unless someone has deliberately burnt those fuses. Left as a
+    // documented strap (not a real risk) rather than a bench-verify item.
     #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
 
     // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3

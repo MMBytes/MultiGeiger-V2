@@ -514,8 +514,9 @@ static void do_tx_cycle(void) {
     // in the DIAG log line below when the tube is enabled.
     uint32_t diag_raw_edges = 0;
     uint32_t diag_guard_removed = 0;   // V2.5.30: edges dropped by the dead-time guard
+    uint32_t diag_hv_coincident = 0;   // V2.6.9: counted edges landing in the HV-pulse coincidence window
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
-    tube_get_diag(&diag_raw_edges, &diag_guard_removed, diag_hist);
+    tube_get_diag(&diag_raw_edges, &diag_guard_removed, &diag_hv_coincident, diag_hist);
 
     // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read
     // advances each unit's per-cycle delta base, so re-reading would zero the
@@ -617,11 +618,16 @@ static void do_tx_cycle(void) {
         // counts_without_guard = counts + guard_removed). It is a SUBSET of
         // `rejected`, NOT an orthogonal column — do not sum the two. 0 when off.
         // Placed after rejected so the trailing edt_us block stays positionally
-        // last for log parsers.
-        ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu "
+        // last for log parsers. V2.6.9: hv_coincident is placed after
+        // guard_removed, before edt_us, for the same reason — it's a COUNTED
+        // subset (of `counts`, not of raw_edges-counts like the two before
+        // it), tested against hv_pulses/cum on the CYCLE line above: a real
+        // Poisson tube shows this near-zero; HV-pickup shows it tracking
+        // hv_pulses ~1:1 (radiation_overcounting_independent_review.md).
+        ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu hv_coincident=%lu "
                  "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
-                 (unsigned long)diag_guard_removed,
+                 (unsigned long)diag_guard_removed, (unsigned long)diag_hv_coincident,
                  (unsigned long)diag_hist[0], (unsigned long)diag_hist[1],
                  (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],

@@ -26,6 +26,18 @@
 // apart from count-node ringing/noise.
 #define TUBE_DIAG_NBUCKETS 8
 
+// V2.6.9: coincidence window (µs after the START of an HV charge pulse,
+// see tube.c's recharge_tick S_PULSE_H) used to tag a counted edge as
+// HV-correlated rather than a genuine tube pulse. Lower bound clears the
+// ~190µs dead-time gate itself plus the FET's own 1500µs H-phase so a
+// pulse right on the gate edge isn't misattributed; upper bound covers the
+// 2.5ms (1500+1000µs) full charge-pulse period plus margin — the field
+// evidence (radiation_overcounting_independent_review.md) shows spurious
+// counts landing ~2.5-3ms after HV activity starts, matching the firmware's
+// own 2-pulse charge-train spacing.
+#define HV_COINCIDENT_MIN_US 200
+#define HV_COINCIDENT_MAX_US 3000
+
 /** @brief Configure GPIOs, install ISRs, and start the recharge timer.
  *
  *  @param enabled  When false, configures HV_FET as a static LOW output
@@ -90,13 +102,22 @@ void tube_set_guard_us(uint32_t guard_us);
  *                       have cleared the 190µs gate, so it's the guard's true
  *                       marginal effect and a subset of (raw_edges - counts).
  *                       0 when the guard is off.
+ *  @param hv_coincident Out: V2.6.9 — counted edges (i.e. included in `counts`,
+ *                       NOT a subset of raw_edges-counts) whose gap since the
+ *                       START of the most recent HV charge pulse fell inside
+ *                       [HV_COINCIDENT_MIN_US, HV_COINCIDENT_MAX_US]. Tests the
+ *                       HV-recharge-coupling hypothesis in
+ *                       radiation_overcounting_independent_review.md: a real
+ *                       Poisson tube shows this tracking background rate
+ *                       (near-zero at typical HV cadence); electrical pickup
+ *                       from the charge pump shows it tracking hv_pulses 1:1.
  *  @param hist          Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
  *                       (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
  *                       ~1.2 cps pulses land in the top two bins; a fat low-bin
  *                       population is count-node ringing/noise.
  */
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
-                   uint32_t hist[TUBE_DIAG_NBUCKETS]);
+                   uint32_t *hv_coincident, uint32_t hist[TUBE_DIAG_NBUCKETS]);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

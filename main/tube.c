@@ -66,6 +66,20 @@ static volatile bool     isr_gmc_cap_full = false;
 static portMUX_TYPE mux_hv  = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE mux_cap = portMUX_INITIALIZER_UNLOCKED;
 
+// --- V2.6.9: HV-recharge coincidence diagnostic ---
+// isr_last_hv_pulse_us is stamped at the START of every HV charge pulse (the
+// S_PULSE_H edge in recharge_tick below — the gptimer ISR, NOT the GPIO count
+// ISR). gmc_count_isr reads it under mux_hv (its own writer's lock, since a
+// 64-bit value isn't atomic on this 32-bit core and the two ISRs run on
+// independent interrupt sources that can preempt each other) and, for edges
+// it actually counts, checks whether the gap since that stamp falls inside
+// [HV_COINCIDENT_MIN_US, HV_COINCIDENT_MAX_US] (tube.h). isr_hv_coincident
+// tallies the hits; snapshot+reset via tube_get_diag() alongside the other
+// permanent diagnostics. See radiation_overcounting_independent_review.md
+// for the field evidence this is built to test.
+static volatile uint64_t isr_last_hv_pulse_us = 0;
+static volatile uint32_t isr_hv_coincident    = 0;
+
 // Last read timestamp for dt_ms window.
 static int64_t last_read_us = 0;
 
@@ -121,6 +135,13 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
     while (state < S_FULL) {
         if (state == S_PULSE_H) {
             gpio_set_level(PIN_HV_FET_OUTPUT, 1);
+            // V2.6.9: stamp the coincidence-diagnostic clock at the START of
+            // the pulse (not S_FULL/S_CHECK) — that's the earliest moment any
+            // electrical coupling into the count node could occur, so it's
+            // the correct zero-point for HV_COINCIDENT_MIN/MAX_US in tube.h.
+            portENTER_CRITICAL_ISR(&mux_hv);
+            isr_last_hv_pulse_us = (uint64_t)esp_timer_get_time();
+            portEXIT_CRITICAL_ISR(&mux_hv);
             state = S_PULSE_L;
             next_state = PERIODS(1500);
             return false;
@@ -167,6 +188,16 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
 static void IRAM_ATTR gmc_count_isr(void *arg) {
     uint64_t now = (uint64_t)esp_timer_get_time();
     bool counted = false;
+
+    // V2.6.9: snapshot the last HV-pulse stamp under its OWN lock, before
+    // taking mux_gmc below — the two critical sections are sequential, not
+    // nested, so this never risks a lock-order deadlock against recharge_tick
+    // (which only ever takes mux_hv/mux_cap, never mux_gmc).
+    uint64_t hv_last;
+    portENTER_CRITICAL_ISR(&mux_hv);
+    hv_last = isr_last_hv_pulse_us;
+    portEXIT_CRITICAL_ISR(&mux_hv);
+
     portENTER_CRITICAL_ISR(&mux_gmc);
 
     // V2.5.12: profile every raw edge BEFORE the dead-time gate below.
@@ -231,6 +262,16 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
             }
             isr_last_pulse_us = now;
             counted = true;
+            // V2.6.9: coincidence check — see tube.h HV_COINCIDENT_MIN/MAX_US
+            // and the block comment above isr_last_hv_pulse_us. hv_last==0
+            // means no HV pulse has fired yet since boot (tube disabled node
+            // never reaches here at all, since the ISR isn't installed).
+            if (hv_last != 0) {
+                uint32_t hv_gap = clamp_u32(now - hv_last);
+                if (hv_gap >= HV_COINCIDENT_MIN_US && hv_gap <= HV_COINCIDENT_MAX_US) {
+                    isr_hv_coincident++;
+                }
+            }
             break;
         case GMC_REJECT:
             break;
@@ -380,18 +421,22 @@ void tube_set_guard_us(uint32_t guard_us) {
 }
 
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
-                   uint32_t hist[TUBE_DIAG_NBUCKETS]) {
+                   uint32_t *hv_coincident, uint32_t hist[TUBE_DIAG_NBUCKETS]) {
     // V2.5.12: snapshot + reset under the same lock as the ISR writer,
     // mirroring tube_read()'s window-reset discipline so the diag window tiles
     // cleanly cycle-to-cycle. V2.5.30: guard_removed rides the same snapshot.
+    // V2.6.9: hv_coincident too — it's written under mux_gmc (see gmc_count_isr),
+    // not mux_hv, so it belongs in this critical section, not a separate one.
     portENTER_CRITICAL(&mux_gmc);
     *raw_edges     = isr_raw_edges;
     *guard_removed = isr_guard_removed;
+    *hv_coincident = isr_hv_coincident;
     for (int i = 0; i < TUBE_DIAG_NBUCKETS; i++) {
         hist[i] = isr_dt_hist[i];
         isr_dt_hist[i] = 0;
     }
     isr_raw_edges     = 0;
     isr_guard_removed = 0;
+    isr_hv_coincident  = 0;
     portEXIT_CRITICAL(&mux_gmc);
 }

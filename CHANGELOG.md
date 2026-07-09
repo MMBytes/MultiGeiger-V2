@@ -9,6 +9,39 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.9 — `hv_coincident` diagnostic: test HV-recharge coupling as a spurious-count source
+
+- New permanent diagnostic on the DIAG log line: `hv_coincident` counts, per
+  cycle, how many of the pulses actually COUNTED (i.e. a subset of `counts`,
+  not of `raw_edges - counts` like `rejected`/`guard_removed`) land within
+  [200µs, 3000µs] of the START of the most recent HV charge pulse
+  (`HV_COINCIDENT_MIN_US`/`MAX_US`, `tube.h`).
+- Built to test the leading hypothesis from an independent field-data review
+  (`docs/radiation_overcounting_independent_review.md`, 2026-07-09) that the
+  new small-form-factor PCB (both the FeatherS3-D and XIAO ESP32-S3 carriers)
+  shows spurious counts electrically correlated with its own HV recharge
+  activity (r=0.98-0.99 vs. the original Heltec board's r=-0.02), confirmed
+  independently by a tube-disconnected bench test (12 phantom counts per
+  cycle, exactly matching `hv_pulses`, spaced with clockwork ~10.0025s
+  regularity — inconsistent with genuine Poisson background radiation).
+- Implementation: `tube.c`'s `recharge_tick` (the 100µs HV charge-pump
+  gptimer ISR) stamps `isr_last_hv_pulse_us` at every `S_PULSE_H` FET-on
+  edge; `gmc_count_isr` (the GPIO count ISR) reads that stamp under its own
+  lock (`mux_hv` — a 64-bit value isn't atomic on this core, and the two
+  ISRs run on independent interrupt sources that can preempt each other) and,
+  for each edge it counts, checks whether the gap since that stamp falls in
+  the coincidence window. `tube_get_diag()` gained a fourth out-param
+  (`hv_coincident`) alongside the existing `raw_edges`/`guard_removed`,
+  snapshotting and resetting under the same `mux_gmc` critical section.
+- A real tube should show this near-zero (background rate is far too low to
+  land inside a ~2.8ms window by chance most cycles); HV-pickup should show
+  it tracking `hv_pulses` roughly 1:1, mirroring the tube-disconnected bench
+  result above. Intended for an overnight capture on the XIAO (and ideally
+  the Heltec as a zero-control) to get definitive per-edge attribution before
+  deciding on a permanent fix.
+
+---
+
 ## V2.6.8 — New `sparkfun_thing_plus_esp32s3` board target (7th build target)
 
 - **New board**: SparkFun Thing Plus ESP32-S3 (WRL-24408), ESP32-S3-MINI-1

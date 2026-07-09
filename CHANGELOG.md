@@ -52,6 +52,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   `HAL_HAS_SPEAKER` is set. Verified no regression by rebuilding
   `adafruit_qtpy_esp32_pico` (NeoPixel-only path) and `feathers3_d`
   (`PIN_LED_BUILTIN` path) alongside this board.
+- Post-port MAX review (9 passes) fixed three further issues: `neopixel_notify_pulse()`
+  now carries its own `IRAM_ATTR` (previously only its callee did, despite the
+  header doc promising ISR-safety); the `/config` page's `led_tick` checkbox
+  label — hardcoded "LED flash on each GM pulse" — is genericized since it now
+  also drives a NeoPixel on this board; and a structural CI gap where
+  `_cppcheck.yml` hardcoded one board's feature-flag macros, so cppcheck had
+  never statically analyzed the real `neopixel.c`/`fuel_gauge.c` driver
+  implementations (only their stub branches) on *any* board — fixed by
+  matrixing cppcheck across all 7 build targets, one leg per board with the
+  same defines `CMakeLists.txt` uses.
 - 4 MB flash reuses `partitions_4mb.csv` (dual OTA, no factory partition,
   1.875 MB per slot) — same file already serving `heltec_v2_4mb`. Headroom
   checked against the other four PSRAM/S3 boards' measured binary sizes

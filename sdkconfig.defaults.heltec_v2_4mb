@@ -20,8 +20,8 @@ CONFIG_XTAL_FREQ_AUTO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
-# Override the shared partitions.csv with the 4 MB layout (factory + 1 OTA,
-# 1.875 MB each). Defined in partitions_4mb.csv at repo root.
+# Override the shared partitions.csv with the 4 MB layout (dual OTA, no
+# factory, 1.875 MB each). Defined in partitions_4mb.csv at repo root.
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
 
 # V2.4.5 enabled CONFIG_MBEDTLS_DYNAMIC_BUFFER=y. V2.4.7 REVERTED it

@@ -9,6 +9,60 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.8 — New `sparkfun_thing_plus_esp32s3` board target (7th build target)
+
+- **New board**: SparkFun Thing Plus ESP32-S3 (WRL-24408), ESP32-S3-MINI-1
+  SiP with 2 MB in-package quad PSRAM and 4 MB flash. Second-source MCU for
+  the existing FeatherS3-D-format carrier PCB (`project_feathers3d_new_pcb`,
+  in fab since 2026-05-14) — same physical Feather footprint and wiring,
+  drop-in alternative to `feathers3_d` on the same board with a different
+  GPIO-to-header-position mapping.
+- Reuses the FeatherS3-D peripheral set unmodified: external I²C OLED via
+  Qwiic (probe-detected), onboard MAX17048 fuel gauge at 0x36, native
+  USB-Serial-JTAG console. No ALS (the shared carrier PCB carries none) and
+  no VBUS-detect GPIO (this board's MCP73831 STAT pin drives an onboard LED
+  only, no MCU-visible signal).
+- Onboard WS2812 NeoPixel (GPIO46 DIN) enabled via `HAL_HAS_NEOPIXEL=1`.
+  Its VDD ties to the board's general peripheral rail ("3.3V_P", shared with
+  the Qwiic connector and microSD), which defaults to always-on via the
+  onboard RT9080 LDO's resistor-biased EN pin — unlike the QT Py's switched
+  NeoPixel rail, this board has no dedicated power-gate GPIO. `neopixel.c`'s
+  power-gate step is now conditional on `PIN_NEOPIXEL_POWER` being defined
+  (same "intentionally undefined optional pin" idiom already used for
+  `PIN_OLED_RESET`) so the shared driver works on both rail topologies
+  without a board-specific branch.
+- `fuel_gauge.c`'s VBUS-present check is now conditional on `PIN_VBUS_DETECT`
+  being defined (same idiom as the NeoPixel power-gate above) — this board's
+  MCP73831 STAT-only wiring left it undefined, and the driver previously
+  assumed every `HAL_HAS_FUEL_GAUGE` board had a dedicated sense GPIO.
+  `fuel_gauge_vbus_present()` returns `false` (unknown) where the pin doesn't
+  exist.
+- Found and fixed a latent single-callback collision: `speaker.c` and
+  `neopixel.c` both call `tube_set_pulse_callback()` to claim the one tube
+  ISR pulse-callback slot, and no existing board had both `HAL_HAS_SPEAKER`
+  and `HAL_HAS_NEOPIXEL` set at once, so the collision was never exercised.
+  On this board the NeoPixel's registration (run after the speaker's, per
+  `main.c`'s boot order) would have silently stolen the slot back whenever
+  `led_tick` was enabled, breaking the speaker's audio tick for as long as
+  it stayed enabled. Fixed by having `speaker.c` keep sole ownership of the
+  callback on such boards and drive the NeoPixel directly through a new
+  `neopixel_notify_pulse()` entry point instead of `PIN_LED_BUILTIN` (also
+  now conditional, same idiom); `neopixel_register_pulse_tick()` still
+  creates its worker task but skips re-registering the callback whenever
+  `HAL_HAS_SPEAKER` is set. Verified no regression by rebuilding
+  `adafruit_qtpy_esp32_pico` (NeoPixel-only path) and `feathers3_d`
+  (`PIN_LED_BUILTIN` path) alongside this board.
+- 4 MB flash reuses `partitions_4mb.csv` (dual OTA, no factory partition,
+  1.875 MB per slot) — same file already serving `heltec_v2_4mb`. Headroom
+  checked against the other four PSRAM/S3 boards' measured binary sizes
+  (largest is ~1.36 MB, ~72% of the slot); no partition-table change needed
+  for this port.
+- Full pin-sourcing rationale, schematic verification (WS2812 power rail,
+  strapping-pin review, GPIO26-37 in-package-PSRAM exclusion), and the
+  binary-size headroom analysis are preserved in the design spec at
+  `docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32s3-board-port-design.md`
+  (local working notes, not tracked in git).
+
 ## V2.6.7 — New `heltec_wifi_lora32_v4_r2` board target (6th build target)
 
 - **New board**: Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2, 2 MB

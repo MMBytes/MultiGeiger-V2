@@ -1,6 +1,6 @@
 #include "speaker.h"
 
-#include "hal.h"   // PIN_SPEAKER_P, PIN_SPEAKER_N, PIN_PIN_LED_BUILTIN, HAL_HAS_SPEAKER
+#include "hal.h"   // PIN_SPEAKER_P, PIN_SPEAKER_N, PIN_LED_BUILTIN, HAL_HAS_SPEAKER
 
 // Boards without a piezo (HAL_HAS_SPEAKER == 0, e.g. small QT Py form factor
 // where pin budget can't accommodate it) get no-op stubs for the public API.
@@ -19,12 +19,18 @@
 #include "freertos/task.h"
 
 #include "tube.h"
+#if !defined(PIN_LED_BUILTIN) && HAL_HAS_NEOPIXEL
+#include "neopixel.h"   // neopixel_notify_pulse — visual tick on boards with no onboard LED
+#endif
 
 static const char *TAG = "speaker";
 
 // PIN_SPEAKER_P is driven by LEDC (tone generator).
 // PIN_SPEAKER_N is held HIGH during a tick for push-pull drive against PIN_SPEAKER_P.
-// PIN_PIN_LED_BUILTIN is the onboard LED, lit during a tick if led_tick is enabled.
+// PIN_LED_BUILTIN is the onboard LED, lit during a tick if led_tick is enabled — on
+// boards that don't wire one (e.g. sparkfun_thing_plus_esp32s3), led_tick instead
+// flashes the onboard NeoPixel via neopixel_notify_pulse(), if HAL_HAS_NEOPIXEL.
+// Same "intentionally undefined optional pin" idiom used for PIN_OLED_RESET.
 
 #define LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_NUM  LEDC_TIMER_0
@@ -69,7 +75,11 @@ static void tick_start(void) {
         gpio_set_level(PIN_SPEAKER_N, 1);
     }
     if (s_led_tick) {
+#ifdef PIN_LED_BUILTIN
         gpio_set_level(PIN_LED_BUILTIN, 1);
+#elif HAL_HAS_NEOPIXEL
+        neopixel_notify_pulse();   // no onboard LED — flash the NeoPixel instead
+#endif
     }
 }
 
@@ -77,7 +87,9 @@ static void tick_end(void) {
     ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
     gpio_set_level(PIN_SPEAKER_N, 0);
+#ifdef PIN_LED_BUILTIN
     gpio_set_level(PIN_LED_BUILTIN,   0);
+#endif
 }
 
 // Apply one step of a melody sequence — drives LEDC freq + duty + the N-pin
@@ -187,16 +199,22 @@ void speaker_set_modes(bool led_tick, bool speaker_tick) {
 }
 
 void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
-    // LED + speaker N pin as GPIO outputs.
+    // LED (if this board has one) + speaker N pin as GPIO outputs.
     gpio_config_t out_cfg = {
+#ifdef PIN_LED_BUILTIN
         .pin_bit_mask = (1ULL << PIN_LED_BUILTIN) | (1ULL << PIN_SPEAKER_N),
+#else
+        .pin_bit_mask = (1ULL << PIN_SPEAKER_N),
+#endif
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&out_cfg));
+#ifdef PIN_LED_BUILTIN
     gpio_set_level(PIN_LED_BUILTIN,   0);
+#endif
     gpio_set_level(PIN_SPEAKER_N, 0);
 
     // LEDC timer — 10-bit resolution, base frequency just a seed (set_freq
@@ -230,6 +248,13 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_audio_timer, AUDIO_TICK_US));
 
     speaker_set_modes(led_tick, speaker_tick);
+    // Claims the single tube-pulse callback slot for this board. On boards
+    // that also have HAL_HAS_NEOPIXEL (no PIN_LED_BUILTIN), this handler is
+    // the ONLY one registered — it drives the NeoPixel directly via
+    // neopixel_notify_pulse() in tick_start() rather than letting
+    // neopixel_register_pulse_tick() re-register its own callback and
+    // silently steal the slot back (which would break this speaker's audio
+    // tick). See neopixel_register_pulse_tick()'s doc comment.
     tube_set_pulse_callback(on_gm_pulse);
 
     // V2.3.21: full V1 boot melody when play_sound is enabled (~3.5 s).
@@ -240,9 +265,15 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
         speaker_play_melody(s_v1_boot_melody);
     }
 
+#ifdef PIN_LED_BUILTIN
     ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
              PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
+#else
+    ESP_LOGI(TAG, "speaker setup: P=%d N=%d, led_tick drives NeoPixel (led_tick=%d speaker_tick=%d play=%d)",
+             PIN_SPEAKER_P, PIN_SPEAKER_N,
+             led_tick, speaker_tick, play_sound);
+#endif
 }
 
 #else   // HAL_HAS_SPEAKER == 0 → no-op stubs for boards without a piezo.

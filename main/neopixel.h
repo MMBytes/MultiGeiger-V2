@@ -40,7 +40,24 @@ void neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b);
 /** @brief Register the tube-pulse ISR hook so each Geiger pulse triggers a
  *         brief red flash on the pixel.
  *
- *  Calls tube_set_pulse_callback() internally with an IRAM-safe handler.
- *  No-op on boards without HAL_HAS_NEOPIXEL.
+ *  Calls tube_set_pulse_callback() internally with an IRAM-safe handler —
+ *  EXCEPT on boards that also have HAL_HAS_SPEAKER, where speaker.c already
+ *  owns the single tube-pulse callback slot (for its own audio tick) and
+ *  drives this pixel directly via neopixel_notify_pulse() instead. On such
+ *  boards this call still creates the pulse-flash worker task (needed for
+ *  that direct-drive path) but does not touch the callback registration.
+ *  No-op entirely on boards without HAL_HAS_NEOPIXEL.
  */
 void neopixel_register_pulse_tick(void);
+
+/** @brief Directly trigger one pulse-flash, bypassing the tube-pulse
+ *         callback registration.
+ *
+ *  For boards with both HAL_HAS_SPEAKER and HAL_HAS_NEOPIXEL (e.g.
+ *  sparkfun_thing_plus_esp32s3, which has no separate PIN_LED_BUILTIN):
+ *  speaker.c owns the tube callback slot and calls this from its own
+ *  IRAM-resident handler when led_tick is enabled. IRAM-safe, ISR-callable.
+ *  No-op on boards without HAL_HAS_NEOPIXEL, or before
+ *  neopixel_register_pulse_tick() has created the worker task.
+ */
+void neopixel_notify_pulse(void);

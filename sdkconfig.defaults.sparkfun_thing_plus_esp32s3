@@ -1,0 +1,42 @@
+# ============================================================================
+# SparkFun Thing Plus ESP32-S3 (WRL-24408) overlay — ESP32-S3-MINI-1 SiP,
+# 4 MB flash, 2 MB in-package QSPI PSRAM (quad mode), native USB-C.
+#
+# Second-source MCU for the shared FeatherS3-D-format carrier PCB
+# (project_feathers3d_new_pcb.md). Pin map, feature flags, and the full
+# pin-sourcing rationale live in main/hal.h under
+# BOARD_SPARKFUN_THING_PLUS_ESP32S3.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 4 MB flash (WRL-24408's ESP32-S3-MINI-1 SiP ships with 4 MB in-package
+# flash — smaller than FeatherS3-D/heltec_wifi_lora32_v4_r2's 16 MB).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Override the shared partitions.csv with the 4 MB layout (dual OTA, no
+# factory partition, 1.875 MB each — see partitions_4mb.csv's header
+# comment for why factory+ota_0 was dropped). Same file already used by
+# heltec_v2_4mb. Headroom checked against measured binary sizes of the
+# other four PSRAM/S3 boards — see the design spec §3 footnote.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# In-package PSRAM, 2 MB, quad mode — same SiP class as
+# heltec_wifi_lora32_v4_r2 (ESP32-S3R2). 80 MHz is the standard speed for
+# Espressif's in-package R2 PSRAM variants. If the boot log shows a PSRAM
+# init failure, drop to CONFIG_SPIRAM_SPEED_40M as the first fallback.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Heap-spill policy and the V2.5.33 network/TLS PSRAM-offload knobs are
+# identical across all PSRAM boards and live in the shared sdkconfig.defaults
+# ("PSRAM heap policy" section).
+
+# Console / flashing path: USB-Serial-JTAG (S3 built-in, no TinyUSB needed).
+# `printf` and `ESP_LOGx` go to USB-C; `idf.py flash` uses the same port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

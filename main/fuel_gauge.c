@@ -78,9 +78,15 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
                   "valert=0x%04X vreset=0x%02X chip_id=0x%02X status=0x%02X)",
              MAX17048_ADDR, version, hibrt, config, valert, vreset, chipid, status);
 
+#ifdef PIN_VBUS_DETECT
     // VBUS-present detect — plain digital input, driven by dedicated board
-    // circuitry (not a strap, no pull needed).
+    // circuitry (not a strap, no pull needed). Only some boards wire a
+    // dedicated VBUS-sense GPIO (e.g. FeatherS3-D); others have no such pin
+    // (e.g. the WRL-24408's MCP73831 STAT output drives only an onboard LED,
+    // not a GPIO) — same "intentionally undefined optional pin" idiom used
+    // for PIN_OLED_RESET and PIN_NEOPIXEL_POWER.
     gpio_set_direction(PIN_VBUS_DETECT, GPIO_MODE_INPUT);
+#endif
 
     // Set only after the GPIO is actually configured, so no reader can ever
     // observe s_ready==true with PIN_VBUS_DETECT still in its power-on state.
@@ -90,8 +96,12 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
 }
 
 bool fuel_gauge_vbus_present(void) {
+#ifdef PIN_VBUS_DETECT
     if (!s_ready) return false;
     return gpio_get_level(PIN_VBUS_DETECT) != 0;
+#else
+    return false;   // No VBUS-sense GPIO on this board — always unknown/false.
+#endif
 }
 
 bool fuel_gauge_present(void) {

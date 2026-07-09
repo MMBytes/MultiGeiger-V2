@@ -91,7 +91,13 @@ static void IRAM_ATTR on_tube_pulse(void) {
 // Init: power gate HIGH, RMT TX channel, bytes encoder, worker task.
 // ---------------------------------------------------------------------------
 esp_err_t neopixel_init(void) {
-    // Power gate — drive HIGH to enable the NeoPixel's 3V3 rail.
+    esp_err_t err;
+
+#ifdef PIN_NEOPIXEL_POWER
+    // Power gate — drive HIGH to enable the NeoPixel's 3V3 rail. Only some
+    // boards need this (e.g. QT Py's switched rail); others power the LED
+    // from an always-on rail with no dedicated gate GPIO — same "intentionally
+    // undefined" idiom used for PIN_OLED_RESET.
     gpio_config_t pwr_cfg = {
         .pin_bit_mask = 1ULL << PIN_NEOPIXEL_POWER,
         .mode = GPIO_MODE_OUTPUT,
@@ -99,12 +105,13 @@ esp_err_t neopixel_init(void) {
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t err = gpio_config(&pwr_cfg);
+    err = gpio_config(&pwr_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "power-gate gpio_config: %s", esp_err_to_name(err));
         return err;
     }
     gpio_set_level(PIN_NEOPIXEL_POWER, 1);
+#endif
 
     // RMT TX channel on the data pin.
     rmt_tx_channel_config_t chan_cfg = {
@@ -144,8 +151,13 @@ esp_err_t neopixel_init(void) {
     // from any previous firmware run.
     neopixel_set_rgb(0, 0, 0);
 
+#ifdef PIN_NEOPIXEL_POWER
     ESP_LOGI(TAG, "NeoPixel ready: data=GPIO%d power=GPIO%d (1 px)",
              PIN_NEOPIXEL_DATA, PIN_NEOPIXEL_POWER);
+#else
+    ESP_LOGI(TAG, "NeoPixel ready: data=GPIO%d, no power gate (always-on rail) (1 px)",
+             PIN_NEOPIXEL_DATA);
+#endif
     return ESP_OK;
 }
 
@@ -157,8 +169,23 @@ void neopixel_register_pulse_tick(void) {
         ESP_LOGE(TAG, "pulse worker task creation failed");
         return;
     }
+#if HAL_HAS_SPEAKER
+    // speaker.c already owns the single tube-pulse callback slot on boards
+    // with both a piezo and a NeoPixel (it needs the callback for its own
+    // audio tick) — it calls neopixel_notify_pulse() directly instead of
+    // this module re-registering (which would silently steal the slot back
+    // and break the speaker's audio tick, per the design-spec gap found
+    // while porting sparkfun_thing_plus_esp32s3). Just the worker task above
+    // is needed here; the callback itself stays with speaker.c.
+    ESP_LOGI(TAG, "pulse worker ready (red flash, %d ms) — driven via speaker.c", PULSE_VISIBLE_MS);
+#else
     tube_set_pulse_callback(on_tube_pulse);
     ESP_LOGI(TAG, "tube-pulse hook registered (red flash, %d ms)", PULSE_VISIBLE_MS);
+#endif
+}
+
+void neopixel_notify_pulse(void) {
+    on_tube_pulse();
 }
 
 #else   // HAL_HAS_NEOPIXEL == 0 → no-op stubs
@@ -168,5 +195,6 @@ void      neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b) {
     (void)r; (void)g; (void)b;
 }
 void      neopixel_register_pulse_tick(void)   { /* no-op */ }
+void      neopixel_notify_pulse(void)          { /* no-op */ }
 
 #endif  // HAL_HAS_NEOPIXEL

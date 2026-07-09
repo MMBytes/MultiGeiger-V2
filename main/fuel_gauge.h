@@ -62,7 +62,9 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus);
  *  unconditionally regardless of actual VBUS state (the GPIO read is gated
  *  on the same "ready" flag as the I2C-backed functions, since the pin is
  *  only configured inside a successful fuel_gauge_init()). Always false on
- *  boards without HAL_HAS_FUEL_GAUGE.
+ *  boards without HAL_HAS_FUEL_GAUGE, and also always false (unknown) on
+ *  fuel-gauge boards that don't wire a PIN_VBUS_DETECT (e.g. WRL-24408,
+ *  whose charger-IC status output drives only an onboard LED, not a GPIO).
  */
 bool fuel_gauge_vbus_present(void);
 

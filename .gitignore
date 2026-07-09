@@ -13,6 +13,7 @@ sdkconfig.adafruit_qtpy_esp32_pico
 # follow the same defaults-regenerate pattern.
 sdkconfig.seeed_xiao_esp32s3
 sdkconfig.heltec_wifi_lora32_v4_r2
+sdkconfig.sparkfun_thing_plus_esp32s3
 sdkconfig.*.old
 
 # Per-release staging dir for `gh release upload` (board-suffixed binaries).

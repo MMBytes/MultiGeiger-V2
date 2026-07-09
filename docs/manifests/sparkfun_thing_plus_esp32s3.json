@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — SparkFun Thing Plus ESP32-S3",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_sparkfun_thing_plus_esp32s3.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

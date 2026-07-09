@@ -184,7 +184,7 @@ void neopixel_register_pulse_tick(void) {
 #endif
 }
 
-void neopixel_notify_pulse(void) {
+void IRAM_ATTR neopixel_notify_pulse(void) {
     on_tube_pulse();
 }
 

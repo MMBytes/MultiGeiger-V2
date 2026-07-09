@@ -13,8 +13,8 @@
     over Web Serial — no esptool, no Python, no CLI.
 
     Multi-board note: ESP Web Tools auto-selects a build by *chip family*
-    (ESP32 / ESP32-S3), but three of our boards are all plain "ESP32" and two
-    are both "ESP32-S3", so chip-family auto-detection cannot tell them apart.
+    (ESP32 / ESP32-S3), but three of our boards are all plain "ESP32" and four
+    are all "ESP32-S3", so chip-family auto-detection cannot tell them apart.
     The board <select> below resolves that by pointing the install button at a
     per-board manifest (docs/manifests/<board>.json), each carrying exactly one
     build. The user picks their board; we hand ESP Web Tools an unambiguous

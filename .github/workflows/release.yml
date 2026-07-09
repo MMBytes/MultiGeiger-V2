@@ -1,11 +1,11 @@
-# Release workflow — fire on tag push, build all 6 boards, create the GitHub
-# Release with all 30 artefacts attached, and publish the web flasher to Pages.
+# Release workflow — fire on tag push, build all 7 boards, create the GitHub
+# Release with all 35 artefacts attached, and publish the web flasher to Pages.
 #
 # Trigger:
 #   git tag V2.4.2 && git push --tags
 #       OR  Actions tab → "release" → "Run workflow" → enter the existing tag
 #
-# Gates run cheapest-first so a bad tag fails in seconds, not after a 6-board
+# Gates run cheapest-first so a bad tag fails in seconds, not after a 7-board
 # build: cppcheck + changelog preflight → build (merge + stage) → release → pages.
 # The cppcheck gate and the board matrix are reusable workflows shared with
 # build.yml (_cppcheck.yml / _build-boards.yml) so the two pipelines can't drift.

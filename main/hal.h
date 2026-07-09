@@ -745,7 +745,9 @@
     #define PIN_SPEAKER_N            4   // R8
 
     // No "user" LED separate from the NeoPixel. PIN_LED_BUILTIN intentionally
-    // undefined; the led_tick config flag has no effect on this board.
+    // undefined; the led_tick config flag instead flashes the onboard NeoPixel
+    // (speaker.c drives it directly via neopixel_notify_pulse() — see that
+    // file and neopixel_register_pulse_tick()'s doc comment for why).
 
     // Onboard NeoPixel — single WS2812, data-only (see HAL_HAS_NEOPIXEL note
     // above for why there's no PIN_NEOPIXEL_POWER on this board).
@@ -753,7 +755,7 @@
 
     // I2C bus = Qwiic connector (env sensor breakout plugs in directly; no
     // I2C wiring lands on the shared carrier PCB beyond the header pass-
-    // through — same L11/L12... no, R11/R12 positions as FeatherS3-D).
+    // through — same R11/R12 positions as FeatherS3-D).
     #define PIN_I2C_SDA              8   // R12 — exact GPIO match with FeatherS3-D
     #define PIN_I2C_SCL              9   // R11 — exact GPIO match with FeatherS3-D
 

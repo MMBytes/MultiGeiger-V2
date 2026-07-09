@@ -1657,7 +1657,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
         "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"led_tick\" %s> "
-        "LED flash on each GM pulse <span class=\"r\">*</span></label></div><br>"
+        "Indicator flash on each GM pulse (LED or NeoPixel, board-dependent) <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
         "Play boot chirp <span class=\"r\">*</span></label></div><br>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "

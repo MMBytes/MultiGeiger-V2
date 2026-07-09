@@ -61,6 +61,7 @@ idf_component_register(
         esp_partition
         spi_flash
         espcoredump            # V2.4.18: panic dump to flash, read via /coredump.elf
+        esp_psram              # V2.6.10: applog.c boot-time PSRAM mode/speed log line
         # NOTE: `mqtt` is NOT listed here — V2.4.2's MQTT client
         # (`mqtt_client.h` in main/mqtt.c) ships via the IDF Component
         # Manager as `espressif/mqtt`, declared in main/idf_component.yml.

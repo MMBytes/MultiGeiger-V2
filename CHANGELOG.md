@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.10 — PSRAM mode/speed now visible in `/log`; fix SparkFun OTA page board label
+
+- ESP-IDF's own "found N MB PSRAM, speed X, mode Y" line prints during
+  `esp_psram_init()`, which runs before `app_main()` — before `applog`'s
+  vprintf hook exists — so it never reached `/log` or syslog on any PSRAM
+  board. Confirming PSRAM config after a first boot required a serial
+  capture. `applog_init()` now logs `psram: NNNN KB total, mode=X speed=YMHz`
+  right after the existing ring-placement line, reconstructed from the
+  sdkconfig baked into the binary (mode/speed are build-time choices, not
+  runtime-queryable) plus the live total size from `esp_psram_get_size()`.
+  Applies to all 5 PSRAM boards (`feathers3_d`, `adafruit_qtpy_esp32_pico`,
+  `heltec_wifi_lora32_v4_r2`, `seeed_xiao_esp32s3`,
+  `sparkfun_thing_plus_esp32s3`); the two non-PSRAM Heltec V2 targets skip it.
+  Bench-verified on the SparkFun Thing Plus ESP32-S3: `2048 KB total,
+  mode=quad speed=80MHz`, matching that board's port design spec with no
+  fallback needed.
+- Fixed the `/update` OTA page reporting `sparkfun_thing_plus_esp32s3` as
+  "(unknown board)" — it shipped in V2.6.8 without a label branch in
+  `http_server.c`'s board-name `#if`/`#elif` chain, the same miss the
+  V2.5.19 XIAO fix already documented in a comment one branch up.
+
+---
+
 ## V2.6.9 — `hv_coincident` diagnostic: test HV-recharge coupling as a spurious-count source
 
 - New permanent diagnostic on the DIAG log line: `hv_coincident` counts, per

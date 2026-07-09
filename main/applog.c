@@ -13,6 +13,9 @@
 #include "freertos/task.h"   // V2.5.29: xTaskGetCurrentTaskHandle (line-owner)
 #include "esp_log.h"
 #include "esp_heap_caps.h"   // V2.3.15: also used for boot-time ring-region log
+#if HAL_HAS_PSRAM
+#include "esp_psram.h"       // V2.6.9: PSRAM mode/speed line — see applog_init()
+#endif
 
 static const char *TAG = "applog";
 
@@ -287,6 +290,32 @@ void applog_init(void) {
     ESP_LOGI(TAG, "ring %u B in PSRAM (free SPIRAM after alloc: %u B)",
              (unsigned)LOG_RING_SIZE,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+    // V2.6.10: ESP-IDF itself prints a "found N MB PSRAM, speed X, mode Y"
+    // line during esp_psram_init(), which runs before app_main() — before
+    // this vprintf hook exists — so it never reaches /log or syslog.
+    // Reconstruct the same information from the sdkconfig baked into THIS
+    // binary (mode/speed are build-time choices, not runtime-queryable)
+    // plus the live total size, so a first-boot /log check can confirm
+    // PSRAM config without a serial capture.
+    ESP_LOGI(TAG, "psram: %u KB total, mode=%s speed=%s",
+             (unsigned)(esp_psram_get_size() / 1024),
+#if CONFIG_SPIRAM_MODE_OCT
+             "octal",
+#elif CONFIG_SPIRAM_MODE_QUAD
+             "quad",
+#else
+             "unknown",
+#endif
+#if CONFIG_SPIRAM_SPEED_120M
+             "120MHz");
+#elif CONFIG_SPIRAM_SPEED_80M
+             "80MHz");
+#elif CONFIG_SPIRAM_SPEED_40M
+             "40MHz");
+#else
+             "unknown");
+#endif
 #else
     ESP_LOGI(TAG, "ring %u B in internal DRAM (free heap after alloc: %u B)",
              (unsigned)LOG_RING_SIZE,

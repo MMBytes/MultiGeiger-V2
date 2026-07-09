@@ -2200,6 +2200,10 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
 #elif BOARD_HELTEC_WIFI_LORA32_V4_R2
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi LoRa 32 V4 (R2)</b>"
+#elif BOARD_SPARKFUN_THING_PLUS_ESP32S3
+    // V2.6.10: same miss as the XIAO note above — shipped in V2.6.8 without
+    // a label branch here, so it fell through to "(unknown board)" too.
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">SparkFun Thing Plus ESP32-S3</b>"
 #else
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
 #endif

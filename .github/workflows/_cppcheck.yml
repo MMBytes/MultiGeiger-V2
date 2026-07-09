@@ -7,6 +7,15 @@
 # the tag-push run for the SAME commit evaluated slightly different baselines,
 # the exact failure the old "keep in sync" comments warned against. Tune flags
 # or suppressions HERE, once.
+#
+# V2.6.8 MAX review: this job used to hardcode -DBOARD_HELTEC_V2=1 only, which
+# has HAL_HAS_NEOPIXEL=0 and HAL_HAS_FUEL_GAUGE=0 — so cppcheck had NEVER
+# analyzed the real neopixel.c (WS2812/RMT) or fuel_gauge.c (MAX17048) driver
+# code on ANY board, only their HAL_HAS_*==0 stub branches, since every board
+# with those flags set to 1 postdates the single-macro design. Matrixed across
+# one leg per real build target (mirrors _build-boards.yml's board list and
+# CMakeLists.txt's exact per-board add_compile_definitions) so every hal.h
+# branch and every HAL_HAS_*-gated file actually gets checked somewhere.
 name: cppcheck (reusable)
 
 on:
@@ -25,8 +34,32 @@ env:
 
 jobs:
   cppcheck:
-    name: cppcheck
+    name: cppcheck / ${{ matrix.board }}
     runs-on: ubuntu-latest
+    strategy:
+      # Keep checking every board even if one already has findings, so a
+      # single run shows the full breakage matrix (mirrors _build-boards.yml).
+      fail-fast: false
+      matrix:
+        # One leg per real build target — same list and same per-board
+        # defines as CMakeLists.txt's add_compile_definitions() calls, so a
+        # define added there without a matching leg here silently goes
+        # unanalyzed again (see the V2.6.8 note above).
+        include:
+          - board: heltec_v2
+            defines: -DBOARD_HELTEC_V2=1
+          - board: heltec_v2_4mb
+            defines: -DBOARD_HELTEC_V2=1 -DBOARD_HELTEC_V2_4MB=1
+          - board: feathers3_d
+            defines: -DBOARD_FEATHERS3_D=1 -DMQTT_RICH_STATE=1
+          - board: adafruit_qtpy_esp32_pico
+            defines: -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 -DMQTT_RICH_STATE=1
+          - board: seeed_xiao_esp32s3
+            defines: -DBOARD_SEEED_XIAO_ESP32S3=1 -DMQTT_RICH_STATE=1
+          - board: heltec_wifi_lora32_v4_r2
+            defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1
+          - board: sparkfun_thing_plus_esp32s3
+            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -49,8 +82,10 @@ jobs:
           #   internalAstError      — known cppcheck issue with some macros
           #   unknownMacro          — IDF-defined macros (MACSTR, IP2STR, ...)
           #                            that cppcheck has no header for
-          # -DESP_PLATFORM=1 + -DBOARD_HELTEC_V2=1 mirror the real build so
-          # hal.h enters a real branch instead of the fallback #error.
+          # -DESP_PLATFORM=1 + this leg's board defines mirror the real build
+          # so hal.h enters the same branch this board actually compiles,
+          # instead of the fallback #error (or, pre-V2.6.8, always the same
+          # one board's branch regardless of what changed).
           cppcheck \
             --enable=warning,style,performance,portability \
             --inline-suppr \
@@ -63,12 +98,12 @@ jobs:
             --quiet \
             --std=c11 \
             -DESP_PLATFORM=1 \
-            -DBOARD_HELTEC_V2=1 \
+            ${{ matrix.defines }} \
             -I main \
             main/ 2>&1 | tee cppcheck.out
           RC=${PIPESTATUS[0]}
           {
-            echo "## cppcheck findings"
+            echo "## cppcheck findings — ${{ matrix.board }}"
             if [ -s cppcheck.out ]; then
               echo '```'
               cat cppcheck.out
@@ -87,7 +122,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: cppcheck-${{ github.sha }}
+          name: cppcheck-${{ matrix.board }}-${{ github.sha }}
           path: cppcheck.out
           if-no-files-found: ignore
           retention-days: 14

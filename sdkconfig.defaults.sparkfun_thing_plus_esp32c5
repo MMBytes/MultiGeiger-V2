@@ -1,0 +1,38 @@
+# ============================================================================
+# SparkFun Thing Plus ESP32-C5 (WRL-30678) overlay — ESP32-C5-WROOM-1 SiP,
+# 8 MB flash, 8 MB in-package PSRAM (quad mode — the C5's Kconfig.spiram
+# offers no Octal choice at all), native USB-C console.
+#
+# First single-core RISC-V build target in this codebase — see
+# main/transmission.c's board-conditional task-creation branch and
+# main/hal.h under BOARD_SPARKFUN_THING_PLUS_ESP32C5 for the pin map and
+# full design rationale. Full sourcing writeup in
+# docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32c5"
+
+# 8 MB flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# In-package PSRAM, 8 MB, quad mode (this chip's Kconfig.spiram has no Octal
+# option at all, unlike the ESP32-S3 boards — no mode ambiguity to resolve).
+# 80 MHz is the WROOM-1 module's own datasheet-rated max PSRAM clock
+# (Table 6-11: "Maximum clock frequency: 80 MHz") — NOT yet bench-verified
+# against real silicon (this is the codebase's first-ever ESP32-C5 PSRAM
+# target). If the boot log shows a PSRAM init failure, drop to
+# CONFIG_SPIRAM_SPEED_40M as the first fallback.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Heap-spill policy and the V2.5.33 network/TLS PSRAM-offload knobs are
+# identical across all PSRAM boards and live in the shared sdkconfig.defaults
+# ("PSRAM heap policy" section).
+
+# Console / flashing path: native USB-C (IO13/IO14 wired to USB_D-/D+).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

@@ -236,10 +236,23 @@ static void tx_task(void *arg) {
 void tx_setup(void) {
     s_tx_queue = xQueueCreate(TX_QUEUE_DEPTH, sizeof(tx_context_t));
     configASSERT(s_tx_queue);
+    // BOARD_SPARKFUN_THING_PLUS_ESP32C5 is this codebase's first single-core
+    // target — xTaskCreatePinnedToCore(..., 1) is meaningless (and a build
+    // error: IDF's FreeRTOS port asserts the core ID is < configNUM_CORES)
+    // on a chip with only core 0. The FTPS-on-main/HTTPS-on-worker
+    // core-isolation design this pinning exists for has no bearing on a
+    // single-core chip, so this board just gets a plain, unpinned task.
+#if defined(BOARD_SPARKFUN_THING_PLUS_ESP32C5)
+    BaseType_t ok = xTaskCreate(
+        tx_task, "tx", TX_TASK_STACK_BYTES, NULL, TX_TASK_PRIO, NULL);
+    configASSERT(ok == pdPASS);
+    ESP_LOGI(TAG, "transmission ready (cert bundle = esp_crt_bundle_attach, single-core worker)");
+#else
     BaseType_t ok = xTaskCreatePinnedToCore(
         tx_task, "tx", TX_TASK_STACK_BYTES, NULL, TX_TASK_PRIO, NULL, 1);
     configASSERT(ok == pdPASS);
     ESP_LOGI(TAG, "transmission ready (cert bundle = esp_crt_bundle_attach, worker on CPU1)");
+#endif
 }
 
 // --- Keep-alive push helpers (shared by Madavi + sensor.community) ----------

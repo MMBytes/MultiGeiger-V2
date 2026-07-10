@@ -4,8 +4,9 @@
  *  @brief Board-level hardware abstraction — pin map and feature flags.
  *
  *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`,
- *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`, or
- *  `BOARD_HELTEC_WIFI_LORA32_V4_R2` is defined by the top-level
+ *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`,
+ *  `BOARD_HELTEC_WIFI_LORA32_V4_R2`, `BOARD_SPARKFUN_THING_PLUS_ESP32S3`, or
+ *  `BOARD_SPARKFUN_THING_PLUS_ESP32C5` is defined by the top-level
  *  CMakeLists.txt based on the `BOARD` variable (default `heltec_v2`). All
  *  module .c/.h files include this header and reference pins / features by
  *  the macros below — never by raw GPIO numbers.
@@ -793,6 +794,114 @@
     //   GPIO19/20     native USB D-/D+ (module-internal)
     //   GPIO43/44     UART0 — not used (native USB-Serial-JTAG console)
 
+#elif defined(BOARD_SPARKFUN_THING_PLUS_ESP32C5)
+
+    // SparkFun Thing Plus ESP32-C5 (WRL-30678). ESP32-C5-WROOM-1 SiP — flash
+    // + PSRAM integrated in the module package, but single-core RISC-V (up
+    // to 240 MHz) — the first non-Xtensa, first single-core target this
+    // codebase has ever built for. 2.4/5 GHz WiFi, BLE 5, Zigbee, Thread in
+    // silicon, but this firmware only ever configures 2.4 GHz WiFi station
+    // mode (never calls esp_wifi_set_band_mode()) — see design spec §8.
+    //
+    // Own standalone Thing Plus carrier PCB — NOT a drop-in for the
+    // FeatherS3-D-format carrier shared by BOARD_FEATHERS3_D /
+    // BOARD_SPARKFUN_THING_PLUS_ESP32S3. Pin map derived from SparkFun's
+    // KiCad-exported schematic (SparkFun_Thing_Plus_ESP32_C5.kicad_sch, Rev
+    // v10, 2026-01-22), cross-validated against 7 already-known-good S3
+    // GPIO values via the shared ThingPlus footprint-pin-number scheme, then
+    // confirmed by the user against the physical board in hand. Full
+    // rationale (incl. the R7/GPIO26 speaker-position conflict resolution
+    // and the strapping-pin review) in
+    // docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md §2.
+    #define BOARD_NAME              "sparkfun_thing_plus_esp32c5"
+    #define HAL_HAS_OLED              1   // External SSD1306/SSD1309 on Qwiic, probe-detected — same as S3/FeatherS3-D
+    #define HAL_HAS_ALS               0   // No onboard ALS on this board
+    #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36 — schematic-confirmed, same chip/address/driver as S3
+    #define HAL_HAS_PSRAM             1   // 8 MB in-package, quad (this chip's Kconfig.spiram has no Octal option at all)
+    #define HAL_HAS_NATIVE_USB        1   // USB-C, IO13/IO14 wired to USB_D-/D+
+    // Regulator U4 (produces the "3.3V_P" peripheral rail feeding Qwiic,
+    // microSD, and the NeoPixel) has its EN pin tied to the IO26/LP net
+    // through a 100k pull-up (R6) to 3.3V. Since GPIO26 is left undriven by
+    // firmware (see HAL_HAS_SPEAKER below), that pull-up holds EN high by
+    // default — the peripheral rail is simply always on, without firmware
+    // ever touching this pin. Same "no gating needed" outcome as the S3
+    // board's GPIO45/Q_EN pull-up pattern, via a single resistor instead of
+    // a divider. Bench-confirm at first boot — design spec §9 item 3.
+    #define HAL_HAS_VEXT_GATE         0
+    #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    // R7/GPIO26 and R8/GPIO27 are the only two candidate speaker-position
+    // header pads on this board, and both are hard-committed to
+    // board-specific functions: R7/GPIO26 is the peripheral-rail enable
+    // above (no disconnect jumper exists for that net), and R8/GPIO27 is
+    // the onboard NeoPixel's DIN (its "Open RGB" jumper would free the pad
+    // but at the cost of losing the onboard LED, and wouldn't resolve the
+    // R7 conflict anyway). User decision: disable the speaker on this
+    // board rather than rework hardware — see design spec §2.1.
+    #define HAL_HAS_SPEAKER           0
+    // Onboard WS2812, DIN=GPIO27 — reuses neopixel.c unchanged. GPIO27 is
+    // one of this chip's five strapping pins (pull-up=1, boot-mode +
+    // UART0 ROM-print-control select) — same argument as the S3's GPIO46
+    // and FeatherS3-D's GPIO3: it only matters during the boot-mode
+    // sampling window, and neopixel.c doesn't drive DIN until well after
+    // app startup, so enabling it here is safe.
+    #define HAL_HAS_NEOPIXEL          1
+
+    // Ring/scratch/form-buffer sizes: 8 MB PSRAM (double the 4 MB budget
+    // used by 2 MB-PSRAM boards' analog) — follows the feathers3_d /
+    // seeed_xiao_esp32s3 precedent for 8 MB-PSRAM boards, not the 1 MB
+    // figure used by 2 MB-PSRAM boards (sparkfun_thing_plus_esp32s3,
+    // adafruit_qtpy_esp32_pico, heltec_wifi_lora32_v4_r2).
+    #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
+
+    // Geiger / HV pins — ThingPlus header positions L5/L6/L10 (silkscreen
+    // A0/A1/A5). None of these three GPIOs are strapping pins on this chip.
+    #define PIN_HV_CAP_FULL_INPUT    1   // L5 (silkscreen A0) — comparator interrupt (digital)
+    #define PIN_GMC_COUNT_INPUT      2   // L6 (silkscreen A1) — Geiger pulse interrupt
+    #define PIN_HV_FET_OUTPUT        6   // L10 (silkscreen A5) — HV MOSFET gate (LEDC PWM via gptimer). Also carries an optional, default-open "battery/USB power-source status" jumper tap — harmless unless someone later solders that jumper.
+
+    // No "user" LED separate from the NeoPixel — no PIN_LED_BUILTIN.
+    // led_tick flashes the NeoPixel via neopixel_notify_pulse(), same as
+    // the S3 board.
+
+    // Onboard NeoPixel — single WS2812, data-only (see HAL_HAS_NEOPIXEL
+    // note above for the strap-pin safety argument).
+    #define PIN_NEOPIXEL_DATA       27   // R8 (silkscreen D9/DIN) — WS2812 DIN
+
+    // I2C bus = Qwiic connector (external env sensor breakout plugs in
+    // directly; also the onboard MAX17048's bus). Matches the board's own
+    // Qwiic + MAX17048 wiring.
+    #define PIN_I2C_SDA             23   // R12 (silkscreen SDA)
+    #define PIN_I2C_SCL             24   // R11 (silkscreen SCL)
+
+    // PIN_OLED_RESET intentionally undefined — the external Qwiic OLED has
+    // no reset line, same as FeatherS3-D/S3 Thing Plus; display.c skips the
+    // reset pulse when PIN_OLED_RESET is not defined.
+
+    // No PIN_VBUS_DETECT — this board's MCP73831 STAT pin drives only the
+    // onboard CHG status LED, no GPIO net (same charger IC, same finding,
+    // as the S3 board).
+
+    // RESERVED pins on this board — never repurpose:
+    //   GPIO26        R7 — peripheral-rail ("3.3V_P") enable, pulled high by
+    //                 R6 (100k to 3.3V); deliberately left undriven (see
+    //                 HAL_HAS_VEXT_GATE above). Also a strapping pin
+    //                 (floating, boot mode) — another reason to leave it
+    //                 undriven.
+    //   GPIO15        In-package PSRAM SPICS1 (WROOM-1 datasheet: "used as
+    //                 SPICS1 for SPI PSRAM and cannot be used for other
+    //                 functions") — not exposed on the ThingPlus header at
+    //                 all, no collision with any signal above.
+    //   GPIO25        Strapping pin (floating, clock-edge select) — not
+    //                 assigned to any Multigeiger function on this board.
+    //   GPIO28        Strapping pin (pull-up=1, boot mode) — not assigned.
+    //   GPIO7         Strapping pin (floating, JTAG signal source) — not
+    //                 assigned.
+    //   microSD (J4)  GPIO7/8/9/10/25 — slot present, not wired up, no
+    //                 driver, no pin claim (out of scope — design spec §8).
+
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 via CMake."
 #endif

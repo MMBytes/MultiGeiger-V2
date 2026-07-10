@@ -60,6 +60,8 @@ jobs:
             defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1
           - board: sparkfun_thing_plus_esp32s3
             defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1
+          - board: sparkfun_thing_plus_esp32c5
+            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 -DMQTT_RICH_STATE=1
     steps:
       - name: Checkout
         uses: actions/checkout@v5

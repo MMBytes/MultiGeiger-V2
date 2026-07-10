@@ -11,6 +11,7 @@ cmake_minimum_required(VERSION 3.16)
 #     idf.py -DBOARD=seeed_xiao_esp32s3    build   (Seeed XIAO ESP32-S3, 8 MB OPI PSRAM — I²C sensor host)
 #     idf.py -DBOARD=heltec_wifi_lora32_v4_r2  build (Heltec WiFi LoRa 32 V4 base/R2, ESP32-S3R2 + 2 MB PSRAM)
 #     idf.py -DBOARD=sparkfun_thing_plus_esp32s3  build (SparkFun Thing Plus ESP32-S3, ESP32-S3-MINI-1 + 2 MB PSRAM)
+#     idf.py -DBOARD=sparkfun_thing_plus_esp32c5  build (SparkFun Thing Plus ESP32-C5, ESP32-C5-WROOM-1 + 8 MB PSRAM, first RISC-V target)
 #
 # Each board pins its own IDF chip target and pulls a board-specific
 # sdkconfig.defaults overlay on top of the shared base.
@@ -18,7 +19,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -74,8 +75,22 @@ elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32s3")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32S3=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.sparkfun_thing_plus_esp32s3")
+elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32c5")
+    # SparkFun Thing Plus ESP32-C5 (WRL-30678). ESP32-C5-WROOM-1 SiP — single-
+    # core RISC-V, up to 240 MHz, 8 MB in-package flash + 8 MB in-package quad
+    # PSRAM. First non-Xtensa, first single-core build target in this
+    # codebase — see main/transmission.c's board-conditional task-creation
+    # branch. Its own standalone Thing Plus carrier PCB, NOT a drop-in for
+    # the FeatherS3-D-format carrier the other Thing Plus/FeatherS3-D boards
+    # share. See hal.h under BOARD_SPARKFUN_THING_PLUS_ESP32C5 for the pin
+    # map and
+    # docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md
+    # for the full design rationale.
+    set(IDF_TARGET "esp32c5" CACHE STRING "")
+    add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32C5=1 MQTT_RICH_STATE=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.sparkfun_thing_plus_esp32c5")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

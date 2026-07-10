@@ -9,8 +9,22 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.10 — PSRAM mode/speed now visible in `/log`; fix SparkFun OTA page board label
+## V2.6.10 — SparkFun Thing Plus ESP32-C5 board port; PSRAM mode/speed now visible in `/log`; fix SparkFun OTA page board label
 
+- New board: `sparkfun_thing_plus_esp32c5` (SparkFun WRL-30678,
+  ESP32-C5-WROOM-1, 8 MB in-package flash + 8 MB in-package quad PSRAM).
+  The 8th build target, and the codebase's first single-core, first
+  RISC-V target — every other board is dual-core Xtensa. `tx_setup()` in
+  `main/transmission.c` now branches on `BOARD_SPARKFUN_THING_PLUS_ESP32C5`
+  to create the upload worker with plain `xTaskCreate()` instead of
+  `xTaskCreatePinnedToCore(..., 1)`, since pinning to a second core is
+  meaningless on single-core silicon. Own standalone Thing Plus carrier PCB
+  (not a drop-in for the FeatherS3-D-format carrier the other Thing
+  Plus/FeatherS3-D boards share): external I2C OLED via Qwiic, onboard
+  MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail via
+  pull-up, no power-gate GPIO). Full pin map and design rationale in
+  `main/hal.h` under `BOARD_SPARKFUN_THING_PLUS_ESP32C5` and in
+  `docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md`.
 - ESP-IDF's own "found N MB PSRAM, speed X, mode Y" line prints during
   `esp_psram_init()`, which runs before `app_main()` — before `applog`'s
   vprintf hook exists — so it never reached `/log` or syslog on any PSRAM

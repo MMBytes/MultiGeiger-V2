@@ -3,9 +3,12 @@
 /** @file
  *  @brief Upload pipeline for Madavi, sensor.community, and Radmon.
  *
- *  tx_transmit() enqueues a snapshot onto a CPU1-pinned worker task so
- *  mbedTLS handshakes don't starve the CPU0 idle task (which feeds the
- *  task watchdog). Each target is POST (or GET for Radmon) with retry,
+ *  tx_transmit() enqueues a snapshot onto a worker task — CPU1-pinned on
+ *  every dual-core board so mbedTLS handshakes don't starve the CPU0 idle
+ *  task (which feeds the task watchdog); unpinned on the single-core
+ *  BOARD_SPARKFUN_THING_PLUS_ESP32C5, where there is no second core to pin
+ *  to (see tx_setup() in transmission.c). Each target is POST (or GET for
+ *  Radmon) with retry,
  *  response-body checks for Radmon, and a circuit breaker that backs off
  *  when Radmon fails repeatedly — repeated failed TLS handshakes fragment
  *  the heap and eventually stall the whole pipeline.

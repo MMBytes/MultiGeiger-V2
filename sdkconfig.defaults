@@ -95,6 +95,13 @@ CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 # handshakes — neither ESP32 nor ESP32-S3 has dedicated ECC hardware) runs
 # 10–20 % faster. The FeatherS3-D's larger I-cache amortises the bigger
 # code more cleanly than the Heltec's smaller cache.
+# V2.6.10: the ESP32-C5 (esp32c5/register/soc/ecc_mult_reg.h) DOES have a
+# hardware ECC peripheral, and mbedTLS's MBEDTLS_HARDWARE_ECC defaults to y
+# whenever SOC_ECC_SUPPORTED is set — so on that board mbedTLS uses hardware
+# ECC point multiplication by default and this flag's "dominant cost"
+# rationale doesn't apply the same way. Left enabled anyway (harmless, and
+# still helps the non-ECC parts of the handshake), but don't assume this
+# comment's justification is uniform across all 8 boards.
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE is not set
 
@@ -163,11 +170,13 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
 
 # --- PSRAM heap policy (V2.5.33) — applies to PSRAM boards only --------------
 # These four knobs are byte-identical across every PSRAM board (FeatherS3-D,
-# XIAO S3, QT Py PICO), so they live here once instead of being copy-pasted into
-# each per-board overlay (drift risk). All four are kconfig-gated on CONFIG_SPIRAM
-# (set per-board), so on the Heltec boards (no PSRAM) they are invisible and
-# simply ignored — only the SPIRAM mode/type/speed lines, which genuinely differ
-# per board, stay in the overlays.
+# XIAO S3, QT Py PICO, heltec_wifi_lora32_v4_r2, sparkfun_thing_plus_esp32s3,
+# sparkfun_thing_plus_esp32c5), so they live here once instead of being
+# copy-pasted into each per-board overlay (drift risk). All four are
+# kconfig-gated on CONFIG_SPIRAM (set per-board), so on the Heltec V2 boards
+# (no PSRAM) they are invisible and simply ignored — only the SPIRAM
+# mode/type/speed lines, which genuinely differ per board, stay in the
+# overlays.
 #
 # Root-cause fix for the INTERNAL-DRAM fragmentation that armed the heap-guard
 # auto-reboot (esp32-5965048: INTERNAL largest-free 68K->39K when an inbound

@@ -847,11 +847,12 @@
     // app startup, so enabling it here is safe.
     #define HAL_HAS_NEOPIXEL          1
 
-    // Ring/scratch/form-buffer sizes: 8 MB PSRAM (double the 4 MB budget
-    // used by 2 MB-PSRAM boards' analog) — follows the feathers3_d /
-    // seeed_xiao_esp32s3 precedent for 8 MB-PSRAM boards, not the 1 MB
-    // figure used by 2 MB-PSRAM boards (sparkfun_thing_plus_esp32s3,
-    // adafruit_qtpy_esp32_pico, heltec_wifi_lora32_v4_r2).
+    // Ring/scratch/form-buffer sizes: this board's 8 MB in-package PSRAM
+    // gets the 4 MB ring budget (50% headroom), following the feathers3_d /
+    // seeed_xiao_esp32s3 precedent for 8 MB-PSRAM boards — not the 1 MB
+    // ring (also 50% headroom) used by the 2 MB-PSRAM boards
+    // (sparkfun_thing_plus_esp32s3, adafruit_qtpy_esp32_pico,
+    // heltec_wifi_lora32_v4_r2).
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM
     #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)

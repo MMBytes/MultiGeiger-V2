@@ -25,6 +25,12 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   pull-up, no power-gate GPIO). Full pin map and design rationale in
   `main/hal.h` under `BOARD_SPARKFUN_THING_PLUS_ESP32C5` and in
   `docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md`.
+- `http_server.c`'s OTA cross-family chip guard had no `CHIP_ESP32C5` case,
+  so an upload to this board silently skipped the upfront chip-mismatch
+  rejection every other board gets and fell through to the bootloader-only
+  safety net. Added the case (`ESP_CHIP_ID_ESP32C5` / `CHIP_ESP32C5`, both
+  present in this IDF version's headers) alongside the existing per-board
+  cases.
 - ESP-IDF's own "found N MB PSRAM, speed X, mode Y" line prints during
   `esp_psram_init()`, which runs before `app_main()` — before `applog`'s
   vprintf hook exists — so it never reached `/log` or syslog on any PSRAM

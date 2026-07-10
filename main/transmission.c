@@ -123,8 +123,10 @@ static void record_outcome(tx_target_id_t id, int rc, bool ok) {
     portEXIT_CRITICAL(&s_stats_mux);
 }
 
-// TX runs on its own CPU1-pinned task so mbedTLS handshakes don't starve
-// the CPU0 idle task (which feeds the task watchdog).
+// TX runs on its own task, CPU1-pinned on every dual-core board so mbedTLS
+// handshakes don't starve the CPU0 idle task (which feeds the task
+// watchdog); unpinned on the single-core BOARD_SPARKFUN_THING_PLUS_ESP32C5,
+// which has no second core to pin to — see tx_setup() below.
 #define TX_TASK_STACK_BYTES  16384   // V2.3.22: bumped from 10240. Safety margin for TLS 1.3 handshake stack usage (mbedTLS 4.x cert parsing + key derivation are deeper than 1.2 was).
 #define TX_TASK_PRIO         (tskIDLE_PRIORITY + 1)
 #define TX_QUEUE_DEPTH       1

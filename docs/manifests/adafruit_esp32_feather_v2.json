@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Adafruit ESP32 Feather V2",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_adafruit_esp32_feather_v2.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

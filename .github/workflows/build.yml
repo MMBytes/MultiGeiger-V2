@@ -1,4 +1,4 @@
-# GitHub Actions: host tests + static analysis + build all 9 board targets on
+# GitHub Actions: host tests + static analysis + build all 10 board targets on
 # every push to main + PR.
 #
 # Catches "broke board X while testing on Y" before a manual flash. The cppcheck

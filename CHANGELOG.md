@@ -9,6 +9,44 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.12 — Adafruit ESP32 Feather V2 board port (2nd-source classic-ESP32 MCU for the shared Feather carrier)
+
+- New board: `adafruit_esp32_feather_v2` (Adafruit #5400/#5900 — identical,
+  #5900 just ships with headers pre-soldered — ESP32-PICO-MINI-02 SiP, 8 MB
+  flash + 2 MB in-package PSRAM). The 10th build target, and a second-source
+  MCU for the `Feathers3d_new_pcb` shared carrier alongside `feathers3_d` /
+  `sparkfun_thing_plus_esp32s3` / `adafruit_esp32s3_tft_feather` — same
+  physical Feather-format header positions, but this is the original ESP32
+  LX6 dual-core (not S3), same module *class* as `adafruit_qtpy_esp32_pico`'s
+  ESP32-PICO-V3-02. Full pin map and rationale in `main/hal.h` under
+  `BOARD_ADAFRUIT_ESP32_FEATHER_V2` and in
+  `docs/superpowers/specs/2026-07-10-adafruit-esp32-feather-v2-board-port-design.md`.
+- First board on this shared carrier with no I²C fuel-gauge IC — only a raw
+  ADC `BAT_VOLT_PIN`/GPIO35 battery-voltage divider. An ADC-based battery
+  driver is out of scope for this port (design spec §8) and is not
+  implemented; `HAL_HAS_FUEL_GAUGE=0` on this board.
+- `NEOPIXEL_I2C_POWER` (GPIO2) gate scope confirmed directly against
+  Adafruit's own Learn guide: it switches only the STEMMA QT connector's own
+  3.3V regulator, not the header SDA/SCL pins (which ride the board's main,
+  always-on 3.3V rail). Matches `sparkfun_thing_plus_esp32s3`'s
+  gate-is-irrelevant-to-sensors precedent, not
+  `adafruit_esp32s3_tft_feather`'s only-I2C-bus-is-gated precedent — no
+  `i2c_bus.c` pre-gate needed, `HAL_HAS_VEXT_GATE=0`.
+- New `sdkconfig.defaults.adafruit_esp32_feather_v2` overlay (8 MB flash,
+  in-package PSRAM at 40 MHz, UART0 console via the CH9102F/CP2102N USB
+  bridge). `CONFIG_ESP32_REV_MIN_3` deliberately left unset pending a
+  first-boot log check — Espressif's PCN20220901 hints the module shares
+  QT Py Pico's rev-3 die, but this module's own datasheet doesn't state the
+  ECO revision directly.
+- Drive-by fix: `main/http_server.c`'s `/update` page board-label chain
+  (`UPLOAD_PROMPT_BOARD`) was missing a branch for `adafruit_esp32s3_tft_feather`
+  (shipped in V2.6.11) in addition to the new board here — both fell
+  through to "(unknown board)", the same recurring miss as XIAO (V2.5.19)
+  and SparkFun Thing Plus ESP32-S3 (V2.6.10). Both boards now get a proper
+  label.
+
+---
+
 ## V2.6.11 — Adafruit ESP32-S3 TFT Feather board port (onboard color ST7789 TFT)
 
 - New board: `adafruit_esp32s3_tft_feather` (Adafruit #5483, ESP32-S3, 4 MB

@@ -1,6 +1,6 @@
 # MultiGeiger V2 (ESP-IDF native)
 
-A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **nine** ESP32 / ESP32-S3 / ESP32-C5 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **ten** ESP32 / ESP32-S3 / ESP32-C5 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
 
 See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for the latest build and per-release notes.
 
@@ -25,7 +25,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 
 ## Supported hardware
 
-### Boards (nine build targets)
+### Boards (ten build targets)
 
 | Build target | MCU / module | Flash | Notes |
 |---|---|---|---|
@@ -38,6 +38,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 | `sparkfun_thing_plus_esp32s3` | SparkFun Thing Plus ESP32-S3, WRL-24408 (ESP32-S3-MINI-1) | 4 MB | Second-source MCU for the FeatherS3-D-format carrier PCB — same Feather footprint, drop-in alternative to `feathers3_d` on the same board. External I²C OLED via Qwiic, onboard MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail, no power-gate GPIO). 2 MB in-package PSRAM. |
 | `sparkfun_thing_plus_esp32c5` | SparkFun Thing Plus ESP32-C5, WRL-30678 (ESP32-C5-WROOM-1) | 8 MB | First single-core/RISC-V target. Its own Thing Plus carrier (not a drop-in for the FeatherS3-D board). External I2C OLED via Qwiic, onboard MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail via pull-up, no power-gate GPIO). 8 MB in-package PSRAM. |
 | `adafruit_esp32s3_tft_feather` | Adafruit ESP32-S3 TFT Feather, #5483 (ESP32-S3) | 4 MB | Shares the FeatherS3-D-format carrier PCB. Onboard 240×135 ST7789 color SPI TFT (esp_lcd, 5-page rotation only — no radiation single-page layout) instead of an external I²C OLED; shared TFT/STEMMA-QT power gate on GPIO21. Onboard WS2812 NeoPixel. 2 MB external QSPI PSRAM (feathers3_d-class, not in-package). |
+| `adafruit_esp32_feather_v2` | Adafruit ESP32 Feather V2, #5400/#5900 (ESP32-PICO-MINI-02) | 8 MB | Second-source MCU (original ESP32 LX6, not S3) for the Feathers3d_new_pcb shared carrier. External I²C OLED wired to the header SDA/SCL pins, NOT the board's onboard STEMMA QT connector — NEOPIXEL_I2C_POWER only gates that connector's own regulator, and it isn't driven until neopixel_init() runs after sensor/display probing, so a display wired to the connector would never be found. Onboard WS2812 NeoPixel. No I²C fuel gauge — raw ADC `BAT_VOLT_PIN`/GPIO35 battery sense only. 2 MB in-package PSRAM. |
 
 Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
 
@@ -201,13 +202,13 @@ idf.py -B build_heltec_v2 -D SDKCONFIG_DEFAULTS=sdkconfig.defaults.heltec_v2 bui
 idf.py -B build_heltec_v2 -p <PORT> flash monitor
 ```
 
-Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, or `adafruit_esp32s3_tft_feather` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
+Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, `adafruit_esp32s3_tft_feather`, or `adafruit_esp32_feather_v2` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
 
 The repo includes `_build.cmd <board>`, `_flash.cmd <board>`, `_merge.cmd <board>` helpers that wrap the above.
 
 ### Release workflow
 
-`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all nine boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
+`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all ten boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
 
 ## Repository layout
 

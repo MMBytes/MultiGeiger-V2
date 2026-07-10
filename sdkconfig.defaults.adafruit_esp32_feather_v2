@@ -1,0 +1,45 @@
+# ============================================================================
+# Adafruit ESP32 Feather V2 (#5400 / #5900) overlay — ESP32-PICO-MINI-02 SiP
+# (original ESP32 LX6 dual-core), in-package 8 MB flash + 2 MB SiP PSRAM,
+# USB-C via CH9102F or CP2102N UART bridge (NOT native USB).
+#
+# This is the original ESP32 chip (not S3) — same build path as Heltec V2 /
+# adafruit_qtpy_esp32_pico, same PSRAM-enabled memory profile. Pin map and
+# feature flags live in main/hal.h under BOARD_ADAFRUIT_ESP32_FEATHER_V2.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32"
+
+# 8 MB SiP flash. Standard partitions.csv (factory + ota_0 + ota_1, 2 MB each)
+# fits trivially — no override needed.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Auto-detect XTAL — PICO modules may report 26 or 40 MHz crystal.
+CONFIG_XTAL_FREQ_AUTO=y
+
+# In-package PSRAM, reached over the module's internal SDIO bus (not
+# external QSPI) — same architecture as adafruit_qtpy_esp32_pico's
+# ESP32-PICO-V3-02. Start at 40 MHz (design spec §3 / §9 item 3); adjust only
+# if the first boot log's measured PSRAM speed disagrees.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_TYPE_ESPPSRAM32=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# NOTE: adafruit_qtpy_esp32_pico's overlay pins CONFIG_ESP32_REV_MIN_3=y
+# because its ESP32-PICO-V3-02 module is confirmed rev-3 (V3) silicon,
+# fixing the original-ESP32 PSRAM cache errata. Espressif's own PCN20220901
+# indicates ESP32-PICO-MINI-02 shares that same V3-class die, but this
+# board's own datasheet doesn't state the ECO revision directly — left
+# UNSET here pending a first-boot log check (design spec §9 item 3). If the
+# boot log confirms rev-3+ silicon, add CONFIG_ESP32_REV_MIN_3=y here to
+# match the QT Py Pico overlay's fail-fast safety net.
+
+# Console / flashing path: UART0 via the CH9102F or CP2102N USB bridge.
+# (Original ESP32 has no built-in USB peripheral — USB-C on this board is
+# the UART bridge's USB.)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

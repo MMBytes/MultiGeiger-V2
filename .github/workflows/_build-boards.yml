@@ -59,6 +59,7 @@ jobs:
           - sparkfun_thing_plus_esp32s3
           - sparkfun_thing_plus_esp32c5
           - adafruit_esp32s3_tft_feather
+          - adafruit_esp32_feather_v2
     steps:
       - name: Checkout
         uses: actions/checkout@v5

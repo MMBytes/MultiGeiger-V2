@@ -9,12 +9,13 @@ sdkconfig.heltec_v2_4mb
 sdkconfig.feathers3_d
 sdkconfig.adafruit_qtpy_esp32_pico
 # V2.5.20: the XIAO cache was accidentally COMMITTED when the board was added
-# (this list wasn't extended). Untracked + ignored now so all eight boards
+# (this list wasn't extended). Untracked + ignored now so all nine boards
 # follow the same defaults-regenerate pattern.
 sdkconfig.seeed_xiao_esp32s3
 sdkconfig.heltec_wifi_lora32_v4_r2
 sdkconfig.sparkfun_thing_plus_esp32s3
 sdkconfig.sparkfun_thing_plus_esp32c5
+sdkconfig.adafruit_esp32s3_tft_feather
 sdkconfig.*.old
 
 # Per-release staging dir for `gh release upload` (board-suffixed binaries).

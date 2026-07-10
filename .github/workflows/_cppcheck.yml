@@ -62,6 +62,8 @@ jobs:
             defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1
           - board: sparkfun_thing_plus_esp32c5
             defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 -DMQTT_RICH_STATE=1
+          - board: adafruit_esp32s3_tft_feather
+            defines: -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 -DMQTT_RICH_STATE=1
     steps:
       - name: Checkout
         uses: actions/checkout@v5

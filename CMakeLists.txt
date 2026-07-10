@@ -12,6 +12,7 @@ cmake_minimum_required(VERSION 3.16)
 #     idf.py -DBOARD=heltec_wifi_lora32_v4_r2  build (Heltec WiFi LoRa 32 V4 base/R2, ESP32-S3R2 + 2 MB PSRAM)
 #     idf.py -DBOARD=sparkfun_thing_plus_esp32s3  build (SparkFun Thing Plus ESP32-S3, ESP32-S3-MINI-1 + 2 MB PSRAM)
 #     idf.py -DBOARD=sparkfun_thing_plus_esp32c5  build (SparkFun Thing Plus ESP32-C5, ESP32-C5-WROOM-1 + 8 MB PSRAM, first RISC-V target)
+#     idf.py -DBOARD=adafruit_esp32s3_tft_feather  build (Adafruit ESP32-S3 TFT Feather #5483, ESP32-S3 + 2 MB PSRAM + onboard 240x135 ST7789 color TFT)
 #
 # Each board pins its own IDF chip target and pulls a board-specific
 # sdkconfig.defaults overlay on top of the shared base.
@@ -19,7 +20,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -89,8 +90,23 @@ elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32c5")
     set(IDF_TARGET "esp32c5" CACHE STRING "")
     add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32C5=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.sparkfun_thing_plus_esp32c5")
+elseif(BOARD STREQUAL "adafruit_esp32s3_tft_feather")
+    # Adafruit ESP32-S3 TFT Feather (product #5483). ESP32-S3 LX7 dual-core,
+    # external QSPI flash + 2 MB QSPI PSRAM (feathers3_d-class, not an
+    # in-package SiP), native USB-C. Onboard 240x135 ST7789 color SPI TFT —
+    # first board in this codebase with a non-OLED display backend, driven
+    # via ESP-IDF's built-in esp_lcd component (see main/display_tft.c and
+    # HAL_HAS_TFT in hal.h). Shares the Feathers3d_new_pcb carrier PCB with
+    # feathers3_d / sparkfun_thing_plus_esp32s3. NOT the "ESP32-S3 Reverse
+    # TFT Feather" (#5691) — a different board. See hal.h under
+    # BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER for the pin map and
+    # docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md
+    # for the full design rationale.
+    set(IDF_TARGET "esp32s3" CACHE STRING "")
+    add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 MQTT_RICH_STATE=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_esp32s3_tft_feather")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

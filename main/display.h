@@ -39,6 +39,14 @@
 #include "pm_sensor.h"      // pm_sample_t
 #include "noise_sensor.h"   // noise_sample_t
 
+/** @brief 8x8 bitmap font, printable ASCII 0x20..0x7E (95 glyphs), row-major
+ *  (each byte one row, bit 7 = leftmost column). Defined once in display.c
+ *  at file scope (public domain, dhepper/font8x8 "basic" subset) so both
+ *  the OLED backend and the ST7789 TFT backend (display_tft.c, V2.6.11)
+ *  draw from the same glyph data — no second font table, no GFX library.
+ */
+extern const uint8_t FONT8[95][8];
+
 // V2.3.29: snapshot pushed from main task → display task on FeatherS3-D
 // every TX cycle. Display task reads at 5 s tick to drive page rotation
 // (Env / PM Mass / PM Number / Uploads / System). Single-writer torn-

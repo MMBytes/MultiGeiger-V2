@@ -58,6 +58,7 @@ jobs:
           - heltec_wifi_lora32_v4_r2
           - sparkfun_thing_plus_esp32s3
           - sparkfun_thing_plus_esp32c5
+          - adafruit_esp32s3_tft_feather
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -85,10 +86,10 @@ jobs:
           esp_idf_version: v6.0.1
           # Mirrors CMakeLists.txt's IDF_TARGET selection (kept in sync manually):
           # ESP32-C5 for sparkfun_thing_plus_esp32c5, ESP32-S3 for feathers3_d +
-          # seeed_xiao_esp32s3 + heltec_wifi_lora32_v4_r2 + sparkfun_thing_plus_esp32s3,
-          # esp32 for the rest.
+          # seeed_xiao_esp32s3 + heltec_wifi_lora32_v4_r2 + sparkfun_thing_plus_esp32s3 +
+          # adafruit_esp32s3_tft_feather, esp32 for the rest.
           target: ${{ matrix.board == 'sparkfun_thing_plus_esp32c5' && 'esp32c5' ||
-            ((matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'heltec_wifi_lora32_v4_r2' || matrix.board == 'sparkfun_thing_plus_esp32s3') && 'esp32s3' || 'esp32') }}
+            ((matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'heltec_wifi_lora32_v4_r2' || matrix.board == 'sparkfun_thing_plus_esp32s3' || matrix.board == 'adafruit_esp32s3_tft_feather') && 'esp32s3' || 'esp32') }}
           path: '.'
           # Forward ccache config into the build container. CCACHE_DIR is a path
           # inside the mounted workspace so writes persist to the host for caching.

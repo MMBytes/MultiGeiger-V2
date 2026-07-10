@@ -32,110 +32,19 @@
 #include "display_serlcd.h"
 #include "hal.h"
 
-#if HAL_HAS_OLED
-
-#include <string.h>
-#include <stdio.h>
 #include <stdint.h>
-
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-#include "esp_err.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "env_sensor.h"     // env_sensor_present() for page-skip logic
-#include "i2c_bus.h"        // V2.3.29: bus lifecycle (replaces in-display bring_up_stemma2_bus)
-#include "version.h"
-
-static const char *TAG = "display";
-
-// V2.3.28: which display backend is active. Decided at boot inside
-// display_setup() by probing each candidate in priority order:
-//   1. SerLCD at 0x72 (mutually exclusive with OLED — SparkFun 20x4)
-//   2. SSD1306/SSD1309 at 0x3C
-// Only one backend is ever active per boot; swapping the panel requires
-// a power-cycle/reboot but no firmware change.
-typedef enum {
-    BACKEND_NONE = 0,
-    BACKEND_OLED,
-    BACKEND_SERLCD,
-} display_backend_t;
-static display_backend_t s_backend = BACKEND_NONE;
-
-// SSD1306 datasheet defines exactly two slave addresses, selected by the
-// SA0 pin (sometimes exposed as a solder jumper). 0x3C is the default on
-// Heltec WiFi Kit 32 V2 onboard, the Core Electronics CE09964 SSD1309
-// breakout, and Adafruit 326 STEMMA QT OLED out-of-the-box. 0x3D is
-// reachable on Adafruit 326 (and most other Adafruit/SparkFun OLEDs) by
-// closing a solder jumper on the back of the breakout — some board
-// revisions ship with that jumper closed. V2.4.19 probes both so a
-// 0x3D-strapped unit doesn't silently look like a missing display.
-#define SSD1306_ADDR        0x3C
-#define SSD1306_ADDR_ALT    0x3D
-// Per-board chip identifier for boot log accuracy. Both controllers respond
-// to the SSD1306 init sequence (register-compatible), but the silicon
-// actually present differs and the log should reflect that.
-#if defined(BOARD_FEATHERS3_D)
-    #define OLED_CHIP_NAME  "SSD1309"
-#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
-    #define OLED_CHIP_NAME  "SSD1315"
-#else
-    #define OLED_CHIP_NAME  "SSD1306"
-#endif
-// External SSD1309 breakouts (e.g. Core Electronics CE09964) are 4-pin I²C
-// only — no dedicated reset line. PIN_OLED_RESET stays undefined on those
-// boards (see hal.h); the reset-pulse block below is then skipped and the
-// panel relies on its internal power-on reset.
-#ifdef PIN_OLED_RESET
-    #define PIN_OLED_RST    PIN_OLED_RESET
-#endif
-#define OLED_WIDTH      128
-#define OLED_HEIGHT     64
-#define OLED_PAGES      8
-
-static i2c_master_dev_handle_t s_dev = NULL;
-static bool s_show    = false;   // set by display_setup()
-static bool s_cleared = true;    // panel is blank (no running screen drawn)
-// V2.3.30: OLED contrast / SerLCD backlight in percent (10..100). Set via
-// display_set_contrast() — called from display_setup() at boot with the
-// configured value, and from http_server.c's /config save handler for live
-// updates. Default 80 matches the V2.3.28..V2.3.29 hardcoded init_cmds[]
-// contrast register 0xCC so users who never touched the dropdown stay at
-// exactly the brightness they already had.
-static uint8_t s_brightness_pct = 80;
-
-// V2.3.29: anti-burn-in by alternating SSD1306/9 invert mode at the start
-// of each new rotation. V2.4.9: declared unconditionally — multipage code
-// is now compiled into all boards (decision is runtime, not compile-time).
-// On non-rotation boots this static stays at its initial value FALSE and
-// the rotation task that reads it is never spawned.
-static bool s_oled_inverted = false;
-
-// V2.4.9: runtime resolved display mode + multipage-active flag, set by
-// display_setup(). Read by display_is_multipage() / display_mode_str()
-// from any task context — written once at boot before any reader can run.
-static display_mode_t s_resolved_mode = DISPLAY_MODE_RADIATION;
-static bool           s_is_multipage  = false;
-
-static int s_status[DSP_STATUS_MAX] = { 0, 0, 0, 0, 0 };
-
-// One string per subsystem, indexed by status value.
-static const char *STATUS_CHARS[DSP_STATUS_MAX] = {
-    ".W0wA",   // WiFi:              off, connected, error, connecting, AP
-    ".s1S?",   // sensor.community:  off, idle, error, sending, init
-    ".m2M?",   // Madavi:            off, idle, error, sending, init
-    ".r3R?",   // Radmon:            off, idle, error, sending, init
-    ".H7",     // HV:                nodisplay, ok, error
-};
 
 // ------------------------------------------------------------------
 // 8x8 bitmap font, printable ASCII 0x20..0x7E (95 glyphs).
 // Row-major: each byte is one row, bit 7 = leftmost column.
 // Public-domain font (dhepper/font8x8 "basic" subset).
+//
+// File scope (not inside #if HAL_HAS_OLED below) and non-static since
+// V2.6.11: the ST7789 TFT backend (display_tft.c, HAL_HAS_TFT boards)
+// draws from this same table via the extern declaration in display.h —
+// one font, two backends, no duplication.
 // ------------------------------------------------------------------
-static const uint8_t FONT8[95][8] = {
+const uint8_t FONT8[95][8] = {
     { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // ' '
     { 0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00 },  // '!'
     { 0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // '"'
@@ -231,6 +140,103 @@ static const uint8_t FONT8[95][8] = {
     { 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00 },  // '|'
     { 0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00 },  // '}'
     { 0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },  // '~'
+};
+
+#if HAL_HAS_OLED
+
+#include <string.h>
+#include <stdio.h>
+
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "env_sensor.h"     // env_sensor_present() for page-skip logic
+#include "i2c_bus.h"        // V2.3.29: bus lifecycle (replaces in-display bring_up_stemma2_bus)
+#include "version.h"
+
+static const char *TAG = "display";
+
+// V2.3.28: which display backend is active. Decided at boot inside
+// display_setup() by probing each candidate in priority order:
+//   1. SerLCD at 0x72 (mutually exclusive with OLED — SparkFun 20x4)
+//   2. SSD1306/SSD1309 at 0x3C
+// Only one backend is ever active per boot; swapping the panel requires
+// a power-cycle/reboot but no firmware change.
+typedef enum {
+    BACKEND_NONE = 0,
+    BACKEND_OLED,
+    BACKEND_SERLCD,
+} display_backend_t;
+static display_backend_t s_backend = BACKEND_NONE;
+
+// SSD1306 datasheet defines exactly two slave addresses, selected by the
+// SA0 pin (sometimes exposed as a solder jumper). 0x3C is the default on
+// Heltec WiFi Kit 32 V2 onboard, the Core Electronics CE09964 SSD1309
+// breakout, and Adafruit 326 STEMMA QT OLED out-of-the-box. 0x3D is
+// reachable on Adafruit 326 (and most other Adafruit/SparkFun OLEDs) by
+// closing a solder jumper on the back of the breakout — some board
+// revisions ship with that jumper closed. V2.4.19 probes both so a
+// 0x3D-strapped unit doesn't silently look like a missing display.
+#define SSD1306_ADDR        0x3C
+#define SSD1306_ADDR_ALT    0x3D
+// Per-board chip identifier for boot log accuracy. Both controllers respond
+// to the SSD1306 init sequence (register-compatible), but the silicon
+// actually present differs and the log should reflect that.
+#if defined(BOARD_FEATHERS3_D)
+    #define OLED_CHIP_NAME  "SSD1309"
+#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    #define OLED_CHIP_NAME  "SSD1315"
+#else
+    #define OLED_CHIP_NAME  "SSD1306"
+#endif
+// External SSD1309 breakouts (e.g. Core Electronics CE09964) are 4-pin I²C
+// only — no dedicated reset line. PIN_OLED_RESET stays undefined on those
+// boards (see hal.h); the reset-pulse block below is then skipped and the
+// panel relies on its internal power-on reset.
+#ifdef PIN_OLED_RESET
+    #define PIN_OLED_RST    PIN_OLED_RESET
+#endif
+#define OLED_WIDTH      128
+#define OLED_HEIGHT     64
+#define OLED_PAGES      8
+
+static i2c_master_dev_handle_t s_dev = NULL;
+static bool s_show    = false;   // set by display_setup()
+static bool s_cleared = true;    // panel is blank (no running screen drawn)
+// V2.3.30: OLED contrast / SerLCD backlight in percent (10..100). Set via
+// display_set_contrast() — called from display_setup() at boot with the
+// configured value, and from http_server.c's /config save handler for live
+// updates. Default 80 matches the V2.3.28..V2.3.29 hardcoded init_cmds[]
+// contrast register 0xCC so users who never touched the dropdown stay at
+// exactly the brightness they already had.
+static uint8_t s_brightness_pct = 80;
+
+// V2.3.29: anti-burn-in by alternating SSD1306/9 invert mode at the start
+// of each new rotation. V2.4.9: declared unconditionally — multipage code
+// is now compiled into all boards (decision is runtime, not compile-time).
+// On non-rotation boots this static stays at its initial value FALSE and
+// the rotation task that reads it is never spawned.
+static bool s_oled_inverted = false;
+
+// V2.4.9: runtime resolved display mode + multipage-active flag, set by
+// display_setup(). Read by display_is_multipage() / display_mode_str()
+// from any task context — written once at boot before any reader can run.
+static display_mode_t s_resolved_mode = DISPLAY_MODE_RADIATION;
+static bool           s_is_multipage  = false;
+
+static int s_status[DSP_STATUS_MAX] = { 0, 0, 0, 0, 0 };
+
+// One string per subsystem, indexed by status value.
+static const char *STATUS_CHARS[DSP_STATUS_MAX] = {
+    ".W0wA",   // WiFi:              off, connected, error, connecting, AP
+    ".s1S?",   // sensor.community:  off, idle, error, sending, init
+    ".m2M?",   // Madavi:            off, idle, error, sending, init
+    ".r3R?",   // Radmon:            off, idle, error, sending, init
+    ".H7",     // HV:                nodisplay, ok, error
 };
 
 // ------------------------------------------------------------------
@@ -1102,11 +1108,188 @@ static void display_task(void *arg) {
     }
 }
 
-#else  // HAL_HAS_OLED
+#elif HAL_HAS_TFT
 
-// No-op stubs for boards without an onboard OLED. Same prototypes as above
-// so callers compile unchanged; display_setup() returning false signals that
-// no panel is fitted.
+// ====================================================================
+// V2.6.11: Adafruit ESP32-S3 TFT Feather onboard ST7789 color TFT.
+// Mutually exclusive with HAL_HAS_OLED (see hal.h) — this board has no
+// I2C OLED/SerLCD path, so there's no probe/fallback chain like the
+// branch above: the panel is always fitted, and display_setup() always
+// resolves to the 5-page rotation (no radiation single-page layout is
+// implemented for this backend — the color landscape panel suits the
+// rotation grid, and every deployment of this board so far pairs it
+// with at least one sensor). Rendering itself lives in display_tft.c;
+// this branch only owns the display_task rotation loop and the public
+// display_*() dispatch, mirroring the structure above.
+// ====================================================================
+
+#include "display_tft.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "env_sensor.h"     // env_sensor_present() for page-skip logic
+#include "pm_sensor.h"      // pm_sensor_present() for page-skip logic
+#include "transmission.h"   // main_target_enabled() gating for PAGE_UPLOADS
+#include "version.h"
+
+// main.c-defined accessor (separate from main_status — controls per-target
+// row visibility on the Uploads page). Same declaration as the HAL_HAS_OLED
+// branch above.
+extern bool main_target_enabled(int target_id);
+
+static const char *TAG = "display";
+static bool s_show = false;
+static display_mode_t s_resolved_mode = DISPLAY_MODE_AUTO;
+static display_snapshot_t s_snap = {0};
+static uint8_t s_brightness_pct = 80;   // V2.6.11 review fix: same
+                                        // stored-regardless-of-show-state
+                                        // pattern as the OLED backend above
+                                        // (display.h's documented contract)
+
+#define PAGE_DWELL_MS 7000
+
+typedef enum {
+    PAGE_ENV = 0,
+    PAGE_PM_MASS,
+    PAGE_PM_NUMBER,
+    PAGE_UPLOADS,
+    PAGE_SYSTEM,
+    PAGE_COUNT,
+} display_page_t;
+
+static void render_page(display_page_t page) {
+    switch (page) {
+        case PAGE_ENV:       display_tft_render_env(&s_snap);       break;
+        case PAGE_PM_MASS:   display_tft_render_pm_mass(&s_snap);   break;
+        case PAGE_PM_NUMBER: display_tft_render_pm_number(&s_snap); break;
+        case PAGE_UPLOADS:   display_tft_render_uploads();          break;
+        case PAGE_SYSTEM:    display_tft_render_system();           break;
+        default: break;
+    }
+}
+
+static void display_task(void *arg) {
+    (void)arg;
+    // Boot splash is drawn once by display_boot_screen() at startup. Let
+    // it remain visible for PAGE_DWELL_MS (7 s) before rotation kicks off —
+    // same dwell used by the HAL_HAS_OLED branch above.
+    vTaskDelay(pdMS_TO_TICKS(PAGE_DWELL_MS));
+
+    int page_idx = 0;
+
+    while (1) {
+        if (!s_show) {
+            vTaskDelay(pdMS_TO_TICKS(PAGE_DWELL_MS));
+            continue;
+        }
+
+        // Build rotation list — env / PM pages gated on sensor presence.
+        // Uploads + System always shown. Identical gating to the OLED
+        // branch's display_task().
+        display_page_t pages[PAGE_COUNT];
+        int n_pages = 0;
+        if (env_sensor_present()) pages[n_pages++] = PAGE_ENV;
+        if (pm_sensor_present()) {
+            pages[n_pages++] = PAGE_PM_MASS;
+            pages[n_pages++] = PAGE_PM_NUMBER;
+        }
+        if (main_target_enabled(TX_TARGET_MADAVI)  ||
+            main_target_enabled(TX_TARGET_SENSORC) ||
+            main_target_enabled(TX_TARGET_OSM)     ||
+            main_target_enabled(TX_TARGET_AQI)) {
+            pages[n_pages++] = PAGE_UPLOADS;
+        }
+        pages[n_pages++] = PAGE_SYSTEM;
+
+        if (page_idx >= n_pages) page_idx = 0;
+
+        render_page(pages[page_idx]);
+        page_idx++;
+
+        vTaskDelay(pdMS_TO_TICKS(PAGE_DWELL_MS));
+    }
+}
+
+bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode) {
+    s_resolved_mode = mode;
+
+    esp_err_t err = display_tft_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "display_tft_init failed: %s — display disabled", esp_err_to_name(err));
+        return false;
+    }
+
+    s_show = show_display;
+    display_set_contrast(brightness_pct);
+
+    xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "display backend: ST7789 TFT (show=%d brightness=%d%%)",
+             show_display, brightness_pct);
+    return true;
+}
+
+bool display_is_multipage(void) {
+    return true;
+}
+
+const char *display_mode_str(void) {
+    switch (s_resolved_mode) {
+        case DISPLAY_MODE_RADIATION: return "radiation (unsupported on TFT, showing rotation)";
+        case DISPLAY_MODE_ROTATION:  return "rotation (forced)";
+        default:                     return "auto (resolved: rotation)";
+    }
+}
+
+void display_boot_screen(void) {
+    // V2.6.11 review fix: match display_set_contrast()'s s_show gating —
+    // skip the splash render/push entirely when the display was configured
+    // off, instead of always spending an SPI DMA transfer for a screen the
+    // backlight will never light.
+    if (!s_show) return;
+    display_tft_boot_screen(VERSION_STR);
+}
+
+// V2.3.30-equivalent live brightness change for this backend: pct=0 turns
+// the backlight off (panel keeps driving pixels — same "sealed-tube
+// deployments are dark anyway" reasoning as the OLED branch's comment
+// above), any pct>0 turns it fully on. No PWM dimming in this first pass
+// (design spec §11, out of scope).
+void display_set_contrast(uint8_t pct) {
+    if (pct > 100) pct = 100;
+    // V2.6.11 review fix: store regardless of show state, matching the
+    // OLED backend and display.h's documented contract ("the new value is
+    // stored for next show=true"), even though no runtime show=false→true
+    // path exists yet (same "currently reboot-required" caveat as OLED).
+    s_brightness_pct = pct;
+
+    if (!s_show) return;
+    display_tft_set_backlight(pct);
+}
+
+void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
+    // No radiation single-page layout on this backend — see the comment
+    // at the top of this HAL_HAS_TFT branch. Safety stub, same pattern as
+    // the SerLCD backend's stub above.
+    (void)time_sec; (void)rad_nsvph; (void)cpm; (void)use_display;
+}
+
+void display_set_status(int index, int value) {
+    // Not implemented for this backend's first pass — the Uploads/System
+    // pages already surface live upload and system state (design spec
+    // §11, out of scope).
+    (void)index; (void)value;
+}
+
+void display_update_snapshot(const display_snapshot_t *snap) {
+    if (snap) s_snap = *snap;
+}
+
+#else  // !HAL_HAS_OLED && !HAL_HAS_TFT
+
+// No-op stubs for boards without any onboard display. Same prototypes as
+// above so callers compile unchanged; display_setup() returning false
+// signals that no panel is fitted.
 bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode) {
     (void)show_display; (void)brightness_pct; (void)mode;
     return false;
@@ -1121,4 +1304,4 @@ void display_update_snapshot(const display_snapshot_t *snap) { (void)snap; }
 bool display_is_multipage(void) { return false; }
 const char *display_mode_str(void) { return "no display"; }
 
-#endif  // HAL_HAS_OLED
+#endif  // HAL_HAS_OLED / HAL_HAS_TFT / no-display

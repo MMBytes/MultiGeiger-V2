@@ -9,6 +9,52 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.11 — Adafruit ESP32-S3 TFT Feather board port (onboard color ST7789 TFT)
+
+- New board: `adafruit_esp32s3_tft_feather` (Adafruit #5483, ESP32-S3, 4 MB
+  flash + 2 MB external QSPI PSRAM, feathers3_d-class, not in-package). The
+  9th build target, and the first board
+  with an onboard color TFT instead of an I²C OLED/SerLCD. Plugs into the
+  same FeatherS3-D-format carrier PCB as `feathers3_d` /
+  `sparkfun_thing_plus_esp32s3`. Full pin map and bring-up parameters in
+  `main/hal.h` under `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER` and in
+  `docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md`.
+- New display backend: `main/display_tft.c` / `.h` drive the onboard
+  240×135 ST7789 SPI panel via ESP-IDF's built-in `esp_lcd` component
+  (`esp_lcd_panel_io_spi` + `esp_lcd_panel_st7789`) — no Component Registry
+  dependency, no GFX/bitmap library. A single PSRAM-resident RGB565
+  framebuffer is drawn with primitives built on the same `FONT8` 8×8 font
+  the OLED backend already uses, then pushed with one
+  `esp_lcd_panel_draw_bitmap()` call per page change.
+- New feature flag `HAL_HAS_TFT`, mutually exclusive with `HAL_HAS_OLED`
+  (this board has no I²C OLED/SerLCD path). `main/display.c` gained a third
+  top-level `#elif HAL_HAS_TFT` branch alongside the existing
+  `HAL_HAS_OLED` / no-display branches, implementing the 5-page rotation
+  (Env / PM Mass / PM Number / Uploads / System) only — the radiation
+  single-page layout (`display_running`) isn't implemented for this
+  backend, since the landscape color panel suits the rotation grid.
+  Explicitly defined as `0` on all 8 other boards per `hal.h`'s
+  every-branch-defines-every-flag convention.
+- Shared TFT/STEMMA-QT power gate on GPIO21 (`TFT_I2C_POWER`): powering the
+  panel also powers the primary I²C rail, unlike the other Feather-format
+  boards' independently-gated STEMMA connectors. Driven from
+  `i2c_bus_get_primary()` (`main/i2c_bus.c`), before any I²C bus creation —
+  fixed post-implementation per a Fable 5 MAX code review, which caught it
+  being driven inside `display_tft_init()` instead, too late in `main.c`'s
+  boot sequence (after the fuel-gauge and every env/PM/noise/GNSS/VEML
+  probe, all of which NACK'd on the still-unpowered bus).
+- Review fixes (Fable 5 MAX): `display_tft_init()` now unwinds cleanly
+  (`spi_bus_free()` / `esp_lcd_panel_io_del()` / `esp_lcd_panel_del()`) on
+  every mid-init failure instead of leaking the SPI bus/panel-IO handle,
+  and checks every `esp_lcd_panel_*` bring-up call instead of ignoring
+  their return values; `fb_push()` now logs `esp_lcd_panel_draw_bitmap()`
+  failures instead of swallowing them; `display_boot_screen()` and
+  `display_set_contrast()` for this backend now match the OLED backend's
+  `s_show`-gating/storage behavior (`display.h`'s documented contract);
+  stale "5 s" dwell comment corrected to match `PAGE_DWELL_MS` (7000 ms).
+
+---
+
 ## V2.6.10 — SparkFun Thing Plus ESP32-C5 board port; PSRAM mode/speed now visible in `/log`; fix SparkFun OTA page board label
 
 - New board: `sparkfun_thing_plus_esp32c5` (SparkFun WRL-30678,

@@ -36,6 +36,7 @@ idf_component_register(
         "speaker.c"
         "display.c"
         "display_serlcd.c"
+        "display_tft.c"
         "neopixel.c"
         "led.c"
     INCLUDE_DIRS "."
@@ -52,6 +53,8 @@ idf_component_register(
         esp_adc
         esp_driver_ledc
         esp_driver_rmt
+        esp_driver_spi         # V2.6.11: onboard ST7789 TFT SPI bus (display_tft.c, adafruit_esp32s3_tft_feather only)
+        esp_lcd                # V2.6.11: built-in ST7789 panel driver (display_tft.c) — no idf_component.yml entry, ships in-tree
         esp_http_client
         esp_http_server
         esp-tls

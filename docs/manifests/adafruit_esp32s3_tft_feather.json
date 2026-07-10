@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Adafruit ESP32-S3 TFT Feather",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_adafruit_esp32s3_tft_feather.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

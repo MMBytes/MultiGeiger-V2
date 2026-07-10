@@ -5,8 +5,9 @@
  *
  *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`,
  *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`,
- *  `BOARD_HELTEC_WIFI_LORA32_V4_R2`, `BOARD_SPARKFUN_THING_PLUS_ESP32S3`, or
- *  `BOARD_SPARKFUN_THING_PLUS_ESP32C5` is defined by the top-level
+ *  `BOARD_HELTEC_WIFI_LORA32_V4_R2`, `BOARD_SPARKFUN_THING_PLUS_ESP32S3`,
+ *  `BOARD_SPARKFUN_THING_PLUS_ESP32C5`, or
+ *  `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER` is defined by the top-level
  *  CMakeLists.txt based on the `BOARD` variable (default `heltec_v2`). All
  *  module .c/.h files include this header and reference pins / features by
  *  the macros below — never by raw GPIO numbers.
@@ -18,6 +19,14 @@
  *  Feature flags every branch must define (no implicit defaults — explicit is
  *  better than surprising):
  *    HAL_HAS_OLED            display.c stubs out when 0
+ *    HAL_HAS_TFT             V2.6.11: 1 = onboard SPI ST7789 color TFT
+ *                            (Adafruit ESP32-S3 TFT Feather #5483, 240x135).
+ *                            Mutually exclusive with HAL_HAS_OLED — display.c
+ *                            gains a third top-level `#elif HAL_HAS_TFT`
+ *                            branch that implements the same display_*()
+ *                            API via display_tft.c, always resolving to
+ *                            multi-page rotation (no I²C probe needed, the
+ *                            panel is always present). 0 elsewhere.
  *    HAL_HAS_PSRAM           applog.c picks PSRAM vs internal DRAM ring
  *    HAL_HAS_NATIVE_USB      console routing in sdkconfig overlay
  *    HAL_HAS_VEXT_GATE       Heltec-style active-LOW power gate
@@ -59,6 +68,7 @@
         #define BOARD_NAME          "heltec_v2"
     #endif
     #define HAL_HAS_OLED            1   // SSD1306 on shared I2C bus
+    #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           0
     #define HAL_HAS_NATIVE_USB      0   // Console via CP2102 UART0
     #define HAL_HAS_VEXT_GATE       1   // GPIO 21 = active-LOW MOSFET on V2+ Heltec carriers
@@ -125,6 +135,7 @@
     // is silent — if no panel present, display.c stays dormant. Driver
     // is register-compatible with SSD1306.
     #define HAL_HAS_OLED            1   // External SSD1309 on STEMMA1 (optional — probe-detected)
+    #define HAL_HAS_TFT             0
     #define HAL_HAS_ALS             1   // V2.3.29: onboard ALS-PT19 ambient-light sensor on PIN_ALS
     #define HAL_HAS_FUEL_GAUGE      1   // V2.6.6: onboard MAX17048 fuel gauge at I2C 0x36
     #define HAL_HAS_PSRAM           1   // 8 MB QSPI PSRAM
@@ -263,6 +274,7 @@
     // sensor (IO22 SDA / IO19 SCL) — no LDO2 / second-bus complexity unlike
     // FeatherS3-D's STEMMA2.
     #define HAL_HAS_OLED            1   // External display via STEMMA QT (optional — probe-detected)
+    #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 2 MB in-package SiP PSRAM
     #define HAL_HAS_NATIVE_USB      0   // USB-C via CH9102F or CP2102N UART bridge (NOT native — original ESP32 has no USB-OTG)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — STEMMA QT bus always powered
@@ -362,6 +374,7 @@
     //   https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
     #define BOARD_NAME              "seeed_xiao_esp32s3"
     #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
+    #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
     #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
@@ -444,6 +457,7 @@
     // captured in the per-pin comments throughout this block below.
     #define BOARD_NAME              "heltec_wifi_lora32_v4_r2"
     #define HAL_HAS_OLED              1   // SSD1315 on a dedicated I2C_NUM_1 bus (GPIO17/18) — see PIN_OLED_SDA/SCL below
+    #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE        0   // No onboard fuel gauge
     #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
@@ -695,6 +709,7 @@
     // docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32s3-board-port-design.md §2.
     #define BOARD_NAME              "sparkfun_thing_plus_esp32s3"
     #define HAL_HAS_OLED              1   // External SSD1309/SSD1306 on Qwiic, probe-detected — same as FeatherS3-D
+    #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // ALS-PT19 is onboard the FeatherS3-D module itself (GPIO4, not header-routed) — the shared carrier PCB carries no ALS, and this board has no onboard equivalent. Confirmed by user (PCB designer).
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36 — same chip/address/driver as FeatherS3-D
     #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
@@ -815,6 +830,7 @@
     // docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md §2.
     #define BOARD_NAME              "sparkfun_thing_plus_esp32c5"
     #define HAL_HAS_OLED              1   // External SSD1306/SSD1309 on Qwiic, probe-detected — same as S3/FeatherS3-D
+    #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // No onboard ALS on this board
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36 — schematic-confirmed, same chip/address/driver as S3
     #define HAL_HAS_PSRAM             1   // 8 MB in-package, quad (this chip's Kconfig.spiram has no Octal option at all)
@@ -903,6 +919,101 @@
     //   microSD (J4)  GPIO7/8/9/10/25 — slot present, not wired up, no
     //                 driver, no pin claim (out of scope — design spec §8).
 
+#elif defined(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER)
+
+    // Adafruit ESP32-S3 TFT Feather (product #5483). ESP32-S3 with external
+    // QSPI flash + PSRAM (feathers3_d-class, NOT an in-package SiP). Onboard
+    // 240x135 ST7789V color SPI TFT — the first board in this codebase with
+    // a non-OLED display backend (see HAL_HAS_TFT above / display_tft.c).
+    // NOT the "ESP32-S3 Reverse TFT Feather" (#5691) — a different, later
+    // board with the opposite screen orientation.
+    //
+    // Shares the Feathers3d_new_pcb carrier PCB with BOARD_FEATHERS3_D /
+    // BOARD_SPARKFUN_THING_PLUS_ESP32S3 (user decision). Pin map derived
+    // from arduino-esp32's official
+    // variants/adafruit_feather_esp32s3_tft/pins_arduino.h and confirmed by
+    // the user against the physical board (2 corrections during that
+    // check: L3=3V3 not AREF, L16=TXD0). Full pin table, ST7789 bring-up
+    // parameter derivation, and the I2C/TFT power-gate rationale in
+    // docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md §2/§4.
+    #define BOARD_NAME              "adafruit_esp32s3_tft_feather"
+    #define HAL_HAS_OLED              0   // No I2C OLED path — the onboard TFT is the display (HAL_HAS_TFT)
+    #define HAL_HAS_TFT               1   // Onboard 240x135 ST7789 SPI color TFT — see display_tft.c
+    #define HAL_HAS_ALS               0   // No onboard ALS on this board
+    #define HAL_HAS_FUEL_GAUGE        1   // Onboard fuel gauge @ 0x36 — MAX17048 assumed, confirm chip at bring-up (design spec §12 item 5)
+    #define HAL_HAS_PSRAM             1   // 2 MB, external QSPI (feathers3_d-class)
+    #define HAL_HAS_NATIVE_USB        1   // USB-C, USB-Serial-JTAG console
+    // No always-on peripheral rail on this board — unlike every other
+    // PSRAM board's VEXT/Q_EN-style pull-up-defaults-on pattern, this
+    // board's ONLY I2C bus (env sensors + fuel gauge) and its TFT are both
+    // dead until PIN_I2C_POWER_GATE (GPIO21, Adafruit's own
+    // "TFT_I2C_POWER" net) is driven high. V2.6.11 review fix: this used
+    // to be driven inside display_tft_init(), which runs too late (after
+    // fuel_gauge_init() and every I2C sensor probe in main.c); it now
+    // lives in i2c_bus_get_primary() (main/i2c_bus.c), the first I2C
+    // consumer main.c calls, guarded by `#if defined(BOARD_ADAFRUIT_...)`
+    // rather than HAL_HAS_VEXT_GATE (that flag's Heltec-style
+    // active-LOW-gate semantics don't fit this board's active-HIGH gate).
+    // See design spec §2.1.
+    #define HAL_HAS_VEXT_GATE         0
+    #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness — pins verified §2
+    #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO34) — reuses neopixel.c unchanged
+
+    // Ring/scratch/form-buffer sizes: 2 MB external-QSPI PSRAM — same size
+    // class as sparkfun_thing_plus_esp32s3 / heltec_wifi_lora32_v4_r2's
+    // shared-PCB variant (both 1 MB of 2 MB PSRAM, 50% headroom), NOT
+    // feathers3_d (that board has 8 MB PSRAM / a 4 MB ring — "external
+    // QSPI" above only means the same PSRAM *class* as feathers3_d, not
+    // the same *size*). Opus 4.8 review fix: prior wording here claimed
+    // "identical PSRAM class/size" as feathers3_d, which would mislead a
+    // future maintainer into 4x-ing this ring into a 2 MB PSRAM pool.
+    #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
+
+    // Geiger / HV pins — header positions L5/L6/L9 (silkscreen A0/A1/A5).
+    #define PIN_HV_CAP_FULL_INPUT    18  // L5 (silkscreen A0)
+    #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
+    #define PIN_HV_FET_OUTPUT         8  // L9 (silkscreen A5)
+
+    #define PIN_LED_BUILTIN          13  // onboard LED
+
+    // Speaker — D9/D10 header pads.
+    #define PIN_SPEAKER_P            10  // D10
+    #define PIN_SPEAKER_N             9  // D9
+
+    // Onboard NeoPixel — WS2812 data + power-gate.
+    #define PIN_NEOPIXEL_DATA        33  // PIN_NEOPIXEL
+    #define PIN_NEOPIXEL_POWER       34  // NEOPIXEL_POWER — driven high by neopixel.c before use
+
+    // I2C bus (STEMMA QT connector; also the onboard fuel-gauge's bus).
+    #define PIN_I2C_SDA              42  // SDA
+    #define PIN_I2C_SCL              41  // SCL
+    // Shared TFT/I2C peripheral-rail power gate — see HAL_HAS_VEXT_GATE
+    // note above and design spec §2.1. Driven from i2c_bus_get_primary()
+    // (main/i2c_bus.c), before any I2C bus creation or probe.
+    #define PIN_I2C_POWER_GATE       21  // TFT_I2C_POWER
+
+    // Onboard TFT — dedicated SPI bus (MOSI/SCK only, no MISO; ST7789 is
+    // write-only in this driver). Not header-routed.
+    #define PIN_TFT_CS                7
+    #define PIN_TFT_DC               39
+    #define PIN_TFT_RST              40
+    #define PIN_TFT_BACKLITE         45  // also a VDD_SPI strapping pin; Adafruit's own reference design drives it post-boot as a backlight enable line — same precedented-repurposing argument as other boards' strap pins
+    #define PIN_TFT_MOSI             35
+    #define PIN_TFT_SCK              36
+
+    // PIN_OLED_RESET intentionally undefined — no OLED on this board.
+
+    // RESERVED pins on this board — never repurpose:
+    //   GPIO0         BOOT strap (chip-standard)
+    //   GPIO19/20     native USB D-/D+ (module-internal)
+    //   GPIO37        TFT MISO (pins_arduino.h `MISO`) — not wired up, the
+    //                 ST7789 panel is write-only in this driver
+    //   GPIO43/44     UART0 — not used (native USB-Serial-JTAG console)
+
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 via CMake."
 #endif

@@ -14,7 +14,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"   // V2.3.15: also used for boot-time ring-region log
 #if HAL_HAS_PSRAM
-#include "esp_psram.h"       // V2.6.9: PSRAM mode/speed line — see applog_init()
+#include "esp_psram.h"       // V2.6.10: PSRAM mode/speed line — see applog_init()
 #endif
 
 static const char *TAG = "applog";

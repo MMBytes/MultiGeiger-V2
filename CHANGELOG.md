@@ -33,9 +33,10 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
   right after the existing ring-placement line, reconstructed from the
   sdkconfig baked into the binary (mode/speed are build-time choices, not
   runtime-queryable) plus the live total size from `esp_psram_get_size()`.
-  Applies to all 5 PSRAM boards (`feathers3_d`, `adafruit_qtpy_esp32_pico`,
+  Applies to all 6 PSRAM boards (`feathers3_d`, `adafruit_qtpy_esp32_pico`,
   `heltec_wifi_lora32_v4_r2`, `seeed_xiao_esp32s3`,
-  `sparkfun_thing_plus_esp32s3`); the two non-PSRAM Heltec V2 targets skip it.
+  `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`); the two
+  non-PSRAM Heltec V2 targets skip it.
   Bench-verified on the SparkFun Thing Plus ESP32-S3: `2048 KB total,
   mode=quad speed=80MHz`, matching that board's port design spec with no
   fallback needed.

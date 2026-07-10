@@ -1,6 +1,7 @@
 # ============================================================================
 # Shared PSRAM-board defaults — consumed by feathers3_d, adafruit_qtpy_esp32_pico,
-# seeed_xiao_esp32s3, and heltec_wifi_lora32_v4_r2 via CMakeLists.txt
+# seeed_xiao_esp32s3, heltec_wifi_lora32_v4_r2, sparkfun_thing_plus_esp32s3,
+# and sparkfun_thing_plus_esp32c5 via CMakeLists.txt
 # SDKCONFIG_DEFAULTS. Home for config that applies to every PSRAM board but has
 # NO Kconfig dependency on CONFIG_SPIRAM (so it can't live in the shared
 # sdkconfig.defaults, which the non-PSRAM Heltec boards also read). ONE source

@@ -2523,6 +2523,10 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             expected_chip_id = ESP_CHIP_ID_ESP32S3;
             expected_board   = BOARD_NAME " (ESP32-S3)";
             break;
+        case CHIP_ESP32C5:
+            expected_chip_id = ESP_CHIP_ID_ESP32C5;
+            expected_board   = BOARD_NAME " (ESP32-C5)";
+            break;
         default:
             // Future-proofing: if someone ports the firmware to ESP32-C3/C6/H2
             // without updating this switch, fall through and trust the

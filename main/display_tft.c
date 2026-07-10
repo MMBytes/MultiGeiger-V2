@@ -267,8 +267,8 @@ void display_tft_render_pm_mass(const display_snapshot_t *snap) {
     if (!s_fb || !snap) return;
     fb_fill(TFT_COLOR_BLACK);
 
-    char line[16];
     if (snap->pm_valid) {
+        char line[16];
         snprintf(line, sizeof(line), "PM1.0%3d", (int)(snap->pm.pm1_0 + 0.5f));
         draw_string_2x(0, 0 * GLYPH_H, line, TFT_COLOR_WHITE);
         snprintf(line, sizeof(line), "PM2.5%3d", (int)(snap->pm.pm2_5 + 0.5f));
@@ -305,9 +305,9 @@ void display_tft_render_pm_number(const display_snapshot_t *snap) {
     if (!s_fb || !snap) return;
     fb_fill(TFT_COLOR_BLACK);
 
-    char line[16];
-    char val[8];
     if (snap->pm_valid) {
+        char line[16];
+        char val[8];
         fmt_n_value(val, sizeof(val), snap->pm.nc0_5);
         snprintf(line, sizeof(line), "n0.5%s", val);
         draw_string_2x(0, 0 * GLYPH_H, line, TFT_COLOR_WHITE);

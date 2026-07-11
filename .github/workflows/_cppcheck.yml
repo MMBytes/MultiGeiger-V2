@@ -51,11 +51,11 @@ jobs:
       # Ubuntu release (2.13.0 on ubuntu-latest as of this writing) and never
       # rolls forward within that release. Build from source instead, pinned
       # to 2.21.0 by commit SHA (mirroring the espressif/esp-idf-ci-action
-      # SHA-pin convention in build.yml) for a reproducible baseline. NOTE:
-      # local pre-build gating in _build.cmd currently points at whatever
-      # cppcheck is installed on the dev machine (2.20.0 as of this writing)
-      # — bump that install too when you want the two back in sync. Cached
-      # by version so only the first run after a version bump pays the
+      # SHA-pin convention in build.yml) for a reproducible baseline. Local
+      # pre-build gating in _build.cmd points at whatever cppcheck is
+      # installed on the dev machine — currently 2.21.0, in sync with this
+      # pin as of 2026-07-11; bump the local install again if this pin moves.
+      # Cached by version so only the first run after a version bump pays the
       # build cost at all.
       # Cache BOTH the binary and its library config files (std.cfg etc,
       # under share/Cppcheck) — cppcheck refuses to run without them

@@ -64,7 +64,7 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     vTaskDelay(pdMS_TO_TICKS(50));                     // rail settle + OLED charge-pump warm-up
 #endif
 
-#if defined(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER)
+#if defined(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER) || defined(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM)
     // V2.6.11 review fix: this board's shared TFT/I2C peripheral rail
     // (Adafruit's own "TFT_I2C_POWER" net, GPIO21) is active-HIGH direct
     // GPIO — opposite polarity from Heltec's active-LOW P-MOSFET Vext gate
@@ -75,6 +75,11 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     // consumer main.c calls, so gating here (mirroring HAL_HAS_VEXT_GATE's
     // pattern) guarantees the rail is up before any probe, including the
     // TFT's own SPI bring-up which runs later via display_setup().
+    //
+    // BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM (#5477) shares this same
+    // active-HIGH gate pattern on its own PIN_I2C_POWER_GATE (GPIO7,
+    // Adafruit's "PIN_I2C_POWER" net) — no TFT on that board, but the same
+    // "gate the only I2C bus before any probe" requirement applies.
     gpio_reset_pin(PIN_I2C_POWER_GATE);
     gpio_set_direction(PIN_I2C_POWER_GATE, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_I2C_POWER_GATE, 1);              // 1 = rail ON

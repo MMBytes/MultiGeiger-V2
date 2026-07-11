@@ -1,0 +1,43 @@
+# ============================================================================
+# Adafruit ESP32-S3 Feather, 4 MB Flash / 2 MB PSRAM, STEMMA QT (#5477)
+# overlay — ESP32-S3 LX7 dual-core, 4 MB external QSPI flash, 2 MB external
+# QSPI PSRAM (feathers3_d-class, NOT an in-package SiP), native USB-C. No
+# onboard display — sensor OLED is external, probe-detected via STEMMA QT
+# (HAL_HAS_OLED=1).
+#
+# Pin map, feature flags, and the full design rationale live in main/hal.h
+# under BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM and in
+# docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 4 MB flash (product page spec).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Override the shared partitions.csv with the 4 MB layout (dual OTA, no
+# factory partition — see partitions_4mb.csv's header comment). Same file
+# already used by heltec_v2_4mb / sparkfun_thing_plus_esp32s3 /
+# adafruit_esp32s3_tft_feather.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# External QSPI PSRAM, 2 MB, quad mode — same class as feathers3_d /
+# adafruit_esp32s3_tft_feather (not an in-package SiP like the R2/MINI-1
+# boards). 80 MHz to start; bench-verify and drop to
+# CONFIG_SPIRAM_SPEED_40M if the boot log shows a PSRAM init failure
+# (design spec §11 item 5).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Heap-spill policy and the V2.5.33 network/TLS PSRAM-offload knobs are
+# identical across all PSRAM boards and live in the shared sdkconfig.defaults
+# ("PSRAM heap policy" section).
+
+# Console / flashing path: USB-Serial-JTAG (S3 built-in, no TinyUSB needed).
+# `printf` and `ESP_LOGx` go to USB-C; `idf.py flash` uses the same port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).

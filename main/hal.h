@@ -7,8 +7,9 @@
  *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`,
  *  `BOARD_HELTEC_WIFI_LORA32_V4_R2`, `BOARD_SPARKFUN_THING_PLUS_ESP32S3`,
  *  `BOARD_SPARKFUN_THING_PLUS_ESP32C5`,
- *  `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER`, or
- *  `BOARD_ADAFRUIT_ESP32_FEATHER_V2` is defined by the top-level
+ *  `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER`,
+ *  `BOARD_ADAFRUIT_ESP32_FEATHER_V2`, or
+ *  `BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM` is defined by the top-level
  *  CMakeLists.txt based on the `BOARD` variable (default `heltec_v2`). All
  *  module .c/.h files include this header and reference pins / features by
  *  the macros below — never by raw GPIO numbers.
@@ -1112,6 +1113,97 @@
     //         battery-voltage sense, not used (HAL_HAS_FUEL_GAUGE=0, no
     //         ADC-battery driver implemented — design spec §8)
 
+#elif defined(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM)
+
+    // Adafruit ESP32-S3 Feather, 4 MB Flash / 2 MB PSRAM, STEMMA QT
+    // (product #5477). ESP32-S3 with external QSPI flash + PSRAM
+    // (feathers3_d-class, NOT an in-package SiP) — same silicon class as
+    // BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER, but no onboard display: the
+    // sensor OLED is external, probe-detected on the STEMMA QT bus
+    // (HAL_HAS_OLED below), same as feathers3_d / sparkfun_thing_plus_esp32s3.
+    //
+    // Shares the Feathers3d_new_pcb carrier PCB with BOARD_FEATHERS3_D /
+    // BOARD_SPARKFUN_THING_PLUS_ESP32S3 / BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER
+    // (user decision, 2026-07-11). Pin map cross-verified against
+    // arduino-esp32's pins_arduino.h, CircuitPython's SKU-specific pins.c,
+    // and the user's own visual read of Adafruit's pin-identical #5323
+    // sibling-SKU picture (#5477 itself has no published picture; #5323
+    // differs only in flash size and lacks PSRAM) — all three sources
+    // agree. Full pin table and design rationale in
+    // docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md §2/§4.
+    #define BOARD_NAME              "adafruit_esp32s3_feather_4mb_2mbpsram"
+    #define HAL_HAS_OLED              1   // External SSD1306/SSD1309 via STEMMA QT, probe-detected
+    #define HAL_HAS_TFT               0   // No onboard display on this variant
+    #define HAL_HAS_ALS               0   // No onboard ALS
+    #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36, user-confirmed 2026-07-11
+    #define HAL_HAS_PSRAM             1   // 2 MB, external QSPI (feathers3_d-class, not in-package SiP)
+    #define HAL_HAS_NATIVE_USB        1   // USB-C, USB-Serial-JTAG console
+    // No always-on I2C bus on this board — same as BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER:
+    // the single STEMMA QT bus (also the onboard fuel gauge's bus) is dead
+    // until PIN_I2C_POWER_GATE (GPIO7, Adafruit's "PIN_I2C_POWER" net) is
+    // driven high. Confirmed required (not just precautionary) by Adafruit's
+    // own product documentation: "There is an I2C power pin that needs to be
+    // pulled high for the STEMMA QT connector ... to work properly." Reuses
+    // the TFT Feather's i2c_bus_get_primary() gate plumbing (main/i2c_bus.c)
+    // with its own GPIO7 guarded by `#if defined(BOARD_ADAFRUIT_...)`. See
+    // design spec §2.1.
+    #define HAL_HAS_VEXT_GATE         0
+    #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness (P=GPIO10, N=GPIO9)
+    #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO21) — reuses neopixel.c unchanged
+
+    // Dual-LED note: this board defines both PIN_LED_BUILTIN and
+    // HAL_HAS_NEOPIXEL. speaker.c's tick_start() prefers PIN_LED_BUILTIN
+    // when both are present, so the onboard red "#13" LED — not the
+    // NeoPixel — flashes on each Geiger pulse, same as
+    // BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER. The NeoPixel is otherwise unused
+    // by firmware logic (available for future status-color use only).
+
+    // Ring/scratch/form-buffer sizes: 2 MB external-QSPI PSRAM — same size
+    // class as BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER (both 1 MB of 2 MB
+    // PSRAM, 50% headroom).
+    #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
+
+    // Geiger / HV pins — header positions L5/L6/L10 (silkscreen A0/A1/A5).
+    #define PIN_HV_CAP_FULL_INPUT    18  // L5 (silkscreen A0)
+    #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
+    #define PIN_HV_FET_OUTPUT         8  // L10 (silkscreen A5)
+
+    #define PIN_LED_BUILTIN          13  // R4 (silkscreen D13) — onboard red "#13" LED
+
+    // Speaker — D9/D10 header pads.
+    #define PIN_SPEAKER_P            10  // R7 (silkscreen D10)
+    #define PIN_SPEAKER_N             9  // R8 (silkscreen D9)
+
+    // Onboard NeoPixel — WS2812 data + power-gate.
+    #define PIN_NEOPIXEL_DATA        33  // PIN_NEOPIXEL
+    #define PIN_NEOPIXEL_POWER       21  // NEOPIXEL_POWER — driven high by neopixel.c before use
+
+    // I2C bus (STEMMA QT connector; also the onboard fuel-gauge's bus).
+    // GPIO3 (SDA) is a JTAG source-select strapping pin — safe post-boot
+    // only, same category as FeatherS3-D's IO3; i2c_bus.c only drives it
+    // after the power gate below, well past boot-strap sampling.
+    #define PIN_I2C_SDA               3  // R12 (silkscreen SDA) — strapping pin, safe post-boot only
+    #define PIN_I2C_SCL               4  // R11 (silkscreen SCL)
+    // I2C/STEMMA-QT power gate — see HAL_HAS_VEXT_GATE note above and design
+    // spec §2.1. Driven from i2c_bus_get_primary() (main/i2c_bus.c), before
+    // any I2C bus creation or probe.
+    #define PIN_I2C_POWER_GATE        7  // PIN_I2C_POWER
+
+    // PIN_OLED_RESET intentionally undefined — external STEMMA QT OLED has
+    // no reset line, same as feathers3_d / sparkfun_thing_plus_esp32s3.
+
+    // RESERVED pins on this board — never repurpose:
+    //   GPIO0         BOOT strap (chip-standard)
+    //   GPIO19/20     native USB D-/D+ (module-internal)
+    //   GPIO43/44     UART0 / "DB" debug-console pin (hardware UART debug
+    //                 TX, per Adafruit's own docs — NOT where Serial.print()/
+    //                 ESP_LOGx output goes; that's native USB-Serial-JTAG).
+    //                 Not used — console is USB-C (HAL_HAS_NATIVE_USB=1).
+
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
 #endif

@@ -9,6 +9,51 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.14 — Adafruit ESP32-S3 Feather (4MB/2MB PSRAM, STEMMA QT) board port
+
+- New board: `adafruit_esp32s3_feather_4mb_2mbpsram` (Adafruit #5477 —
+  ESP32-S3 LX7 dual-core, 4 MB external QSPI flash + 2 MB external QSPI
+  PSRAM, feathers3_d-class not in-package SiP). The 11th build target, on
+  the shared `Feathers3d_new_pcb` carrier alongside `feathers3_d` /
+  `sparkfun_thing_plus_esp32s3` / `adafruit_esp32s3_tft_feather`. Full pin
+  map and rationale in `main/hal.h` under
+  `BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM` and in
+  `docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md`.
+- No onboard display — unlike the sibling TFT Feather (#5483), this variant
+  has no screen; the sensor OLED is external, probe-detected on the STEMMA
+  QT bus (`HAL_HAS_OLED=1`), same as `feathers3_d` / `sparkfun_thing_plus_esp32s3`.
+- Pin map cross-verified against three independent sources (arduino-esp32's
+  `pins_arduino.h`, CircuitPython's SKU-specific `pins.c`, and the user's
+  own visual read of Adafruit's pin-identical #5323 sibling-SKU picture —
+  #5477 itself has no published picture) — all three agree.
+- No always-on I²C bus, like the TFT Feather: the single STEMMA QT bus
+  (also the onboard MAX17048 fuel gauge's bus) is dead until
+  `PIN_I2C_POWER_GATE` (GPIO7, Adafruit's own `PIN_I2C_POWER` net) is
+  driven high. Confirmed required — not just precautionary — by Adafruit's
+  own product documentation. Reuses the TFT Feather's
+  `i2c_bus_get_primary()` gate plumbing (`main/i2c_bus.c`), widened to
+  cover both boards under one guard.
+- Dual-LED note: this board defines both `PIN_LED_BUILTIN` and
+  `HAL_HAS_NEOPIXEL`. `speaker.c`'s `tick_start()` prefers
+  `PIN_LED_BUILTIN`, so the onboard red "#13" LED — not the NeoPixel —
+  flashes on each Geiger pulse, matching the TFT Feather's behavior.
+- New `sdkconfig.defaults.adafruit_esp32s3_feather_4mb_2mbpsram` overlay
+  (4 MB flash / `partitions_4mb.csv`, 2 MB external QSPI PSRAM at 80 MHz
+  quad mode, USB-Serial-JTAG console) — copied from the TFT Feather's
+  overlay verbatim minus the display-specific commentary.
+- `http_server.c`'s `UPLOAD_PROMPT_BOARD` OTA-page label added at port
+  time (this board has been missed on three prior ports — XIAO in
+  V2.4.25, SparkFun Thing Plus ESP32-S3 in V2.6.8, TFT Feather in
+  V2.6.11 — each shipped without a label and silently fell through to
+  "(unknown board)" on the `/update` page until fixed retroactively).
+- Corrected a stale wiring-reference memory in the process: the D9/D10
+  speaker-pin GPIOs recorded for the #5323 sibling SKU were wrong
+  (previously GPIO6/5); confirmed correct as GPIO9/10 by two independent
+  sources during this port.
+- CI: added to `_build-boards.yml`'s matrix (esp32s3 target) and
+  `_cppcheck.yml`'s per-board leg; `release.yml`'s `EXPECTED_BOARDS`
+  bumped 10 → 11.
+
 ## V2.6.13 — ESP-IDF v6.0.1 → v6.0.2 toolchain upgrade
 
 - Bumped the pinned ESP-IDF version from v6.0.1 to v6.0.2 (local dev

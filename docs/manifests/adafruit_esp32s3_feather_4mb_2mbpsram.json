@@ -1,0 +1,16 @@
+{
+  "name": "MultiGeiger V2 — Adafruit ESP32-S3 Feather (4MB/2MB PSRAM, STEMMA QT)",
+  "version": "latest",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "../firmware/geiger_v2_merged_adafruit_esp32s3_feather_4mb_2mbpsram.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

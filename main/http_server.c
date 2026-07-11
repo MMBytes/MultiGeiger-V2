@@ -2213,6 +2213,10 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 TFT Feather</b>"
 #elif BOARD_ADAFRUIT_ESP32_FEATHER_V2
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32 Feather V2</b>"
+#elif BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM
+    // Added at port time (unlike the 3 boards above) — see the OTA-label
+    // checklist item in the board-port process.
+    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 Feather (4MB/2MB PSRAM)</b>"
 #else
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
 #endif

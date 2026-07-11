@@ -101,7 +101,7 @@ CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 # ECC point multiplication by default and this flag's "dominant cost"
 # rationale doesn't apply the same way. Left enabled anyway (harmless, and
 # still helps the non-ECC parts of the handshake), but don't assume this
-# comment's justification is uniform across all 10 boards.
+# comment's justification is uniform across all 11 boards.
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE is not set
 

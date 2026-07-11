@@ -147,6 +147,8 @@ jobs:
             defines: -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 -DMQTT_RICH_STATE=1
           - board: adafruit_esp32_feather_v2
             defines: -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 -DMQTT_RICH_STATE=1
+          - board: adafruit_esp32s3_feather_4mb_2mbpsram
+            defines: -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 -DMQTT_RICH_STATE=1
     steps:
       - name: Checkout
         uses: actions/checkout@v7

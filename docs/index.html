@@ -13,8 +13,9 @@
     over Web Serial — no esptool, no Python, no CLI.
 
     Multi-board note: ESP Web Tools auto-selects a build by *chip family*
-    (ESP32 / ESP32-S3), but four of our boards are all plain "ESP32" and five
-    are all "ESP32-S3", so chip-family auto-detection cannot tell them apart.
+    (ESP32 / ESP32-S3), but four of our boards are all plain "ESP32" and six
+    are all "ESP32-S3" (plus one ESP32-C5), so chip-family auto-detection
+    cannot tell them apart.
     The board <select> below resolves that by pointing the install button at a
     per-board manifest (docs/manifests/<board>.json), each carrying exactly one
     build. The user picks their board; we hand ESP Web Tools an unambiguous
@@ -100,6 +101,7 @@
       <option value="manifests/sparkfun_thing_plus_esp32c5.json">SparkFun Thing Plus ESP32-C5</option>
       <option value="manifests/adafruit_esp32s3_tft_feather.json">Adafruit ESP32-S3 TFT Feather</option>
       <option value="manifests/adafruit_esp32_feather_v2.json">Adafruit ESP32 Feather V2</option>
+      <option value="manifests/adafruit_esp32s3_feather_4mb_2mbpsram.json">Adafruit ESP32-S3 Feather (4MB/2MB PSRAM)</option>
     </select>
 
     <div class="actions">

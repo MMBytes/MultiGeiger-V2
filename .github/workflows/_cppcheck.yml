@@ -33,8 +33,74 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  # Builds cppcheck 2.21.0 from source ONCE and hands it to every matrix leg
+  # below via artifact, instead of each of the 10 legs building it in
+  # parallel. The first cut of this (single build step inlined into the
+  # matrix job, cached via actions/cache) had all 10 legs race to build AND
+  # save the same cache key simultaneously — cache save failed for the 9
+  # losers ("Unable to reserve cache... another job may be creating this
+  # cache") and, worse, all 10 still paid the full from-source build cost
+  # every run since the cache write hadn't landed yet when they started.
+  # This job runs once; the matrix below downloads its output instead of
+  # rebuilding.
+  build-cppcheck:
+    name: build cppcheck 2.21.0
+    runs-on: ubuntu-latest
+    steps:
+      # Ubuntu's apt package is frozen at whatever shipped with the runner's
+      # Ubuntu release (2.13.0 on ubuntu-latest as of this writing) and never
+      # rolls forward within that release. Build from source instead, pinned
+      # to 2.21.0 by commit SHA (mirroring the espressif/esp-idf-ci-action
+      # SHA-pin convention in build.yml) for a reproducible baseline. NOTE:
+      # local pre-build gating in _build.cmd currently points at whatever
+      # cppcheck is installed on the dev machine (2.20.0 as of this writing)
+      # — bump that install too when you want the two back in sync. Cached
+      # by version so only the first run after a version bump pays the
+      # build cost at all.
+      # Cache BOTH the binary and its library config files (std.cfg etc,
+      # under share/Cppcheck) — cppcheck refuses to run without them
+      # ("Failed to load std.cfg") since it looks them up relative to the
+      # FILESDIR it was compiled with (${CMAKE_INSTALL_PREFIX}/share/Cppcheck),
+      # not next to the binary itself.
+      - name: Cache cppcheck 2.21.0 build
+        id: cppcheck_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/cppcheck
+            /usr/local/share/Cppcheck
+          key: cppcheck-2.21.0-e73bf44-${{ runner.os }}
+
+      - name: Build cppcheck 2.21.0
+        if: steps.cppcheck_cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
+          git clone --depth 1 https://github.com/danmar/cppcheck.git /tmp/cppcheck-src
+          git -C /tmp/cppcheck-src fetch --depth 1 origin e73bf44c3e49686b7495fab352d03a6c6075516b # tag 2.21.0
+          git -C /tmp/cppcheck-src checkout e73bf44c3e49686b7495fab352d03a6c6075516b
+          cmake -S /tmp/cppcheck-src -B /tmp/cppcheck-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/cppcheck-build -j"$(nproc)"
+          sudo cmake --install /tmp/cppcheck-build
+
+      - name: Verify cppcheck version
+        run: cppcheck --version
+
+      - name: Package cppcheck install for matrix jobs
+        run: |
+          mkdir -p cppcheck-dist/bin cppcheck-dist/share
+          cp /usr/local/bin/cppcheck cppcheck-dist/bin/
+          cp -r /usr/local/share/Cppcheck cppcheck-dist/share/
+
+      - name: Upload cppcheck build
+        uses: actions/upload-artifact@v5
+        with:
+          name: cppcheck-2.21.0-build
+          path: cppcheck-dist
+          retention-days: 1
+
   cppcheck:
     name: cppcheck / ${{ matrix.board }}
+    needs: build-cppcheck
     runs-on: ubuntu-latest
     strategy:
       # Keep checking every board even if one already has findings, so a
@@ -72,40 +138,17 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      # Ubuntu's apt package is frozen at whatever shipped with the runner's
-      # Ubuntu release (2.13.0 on ubuntu-latest as of this writing) and never
-      # rolls forward within that release. Build from source instead, pinned
-      # to 2.21.0 by commit SHA (mirroring the espressif/esp-idf-ci-action
-      # SHA-pin convention in build.yml) for a reproducible baseline. NOTE:
-      # local pre-build gating in _build.cmd currently points at whatever
-      # cppcheck is installed on the dev machine (2.20.0 as of this writing)
-      # — bump that install too when you want the two back in sync. Cached
-      # by version so only the first run after a version bump pays the
-      # build cost.
-      # Cache BOTH the binary and its library config files (std.cfg etc,
-      # under share/Cppcheck) — cppcheck refuses to run without them
-      # ("Failed to load std.cfg") since it looks them up relative to the
-      # FILESDIR it was compiled with (${CMAKE_INSTALL_PREFIX}/share/Cppcheck),
-      # not next to the binary itself.
-      - name: Cache cppcheck 2.21.0 build
-        id: cppcheck_cache
-        uses: actions/cache@v4
+      - name: Download cppcheck 2.21.0 build
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            /usr/local/bin/cppcheck
-            /usr/local/share/Cppcheck
-          key: cppcheck-2.21.0-e73bf44-${{ runner.os }}
+          name: cppcheck-2.21.0-build
+          path: /tmp/cppcheck-dist
 
-      - name: Build cppcheck 2.21.0
-        if: steps.cppcheck_cache.outputs.cache-hit != 'true'
+      - name: Install cppcheck from downloaded build
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
-          git clone --depth 1 https://github.com/danmar/cppcheck.git /tmp/cppcheck-src
-          git -C /tmp/cppcheck-src fetch --depth 1 origin e73bf44c3e49686b7495fab352d03a6c6075516b # tag 2.21.0
-          git -C /tmp/cppcheck-src checkout e73bf44c3e49686b7495fab352d03a6c6075516b
-          cmake -S /tmp/cppcheck-src -B /tmp/cppcheck-build -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/cppcheck-build -j"$(nproc)"
-          sudo cmake --install /tmp/cppcheck-build
+          sudo cp /tmp/cppcheck-dist/bin/cppcheck /usr/local/bin/cppcheck
+          sudo chmod +x /usr/local/bin/cppcheck
+          sudo cp -r /tmp/cppcheck-dist/share/Cppcheck /usr/local/share/Cppcheck
 
       - name: Verify cppcheck version
         run: cppcheck --version

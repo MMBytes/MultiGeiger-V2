@@ -57,18 +57,26 @@ jobs:
       # pin as of 2026-07-11; bump the local install again if this pin moves.
       # Cached by version so only the first run after a version bump pays the
       # build cost at all.
-      # Cache BOTH the binary and its library config files (std.cfg etc,
-      # under share/Cppcheck) — cppcheck refuses to run without them
+      # Install to a runner-owned prefix (runner.temp), NOT /usr/local.
+      # First cut installed via `sudo cmake --install` into /usr/local, which
+      # made SAVING the cache work (reading root-owned-but-world-readable
+      # files needs no privilege) but silently broke RESTORING it on every
+      # subsequent run: /usr/local/bin is pre-opened for the runner user on
+      # GitHub-hosted runners, but /usr/local/share is not, so the unprivileged
+      # cache-restore step couldn't `mkdir` a fresh share/Cppcheck on the new
+      # runner VM ("Cannot mkdir: Permission denied") and silently fell back
+      # to a full rebuild every run — cache-hit was reported true but never
+      # actually saved any time. Installing under runner.temp needs no sudo
+      # and is fully runner-owned, so restore always succeeds.
+      # Cache the WHOLE prefix (binary + library config files like std.cfg
+      # under share/Cppcheck) — cppcheck refuses to run without the latter
       # ("Failed to load std.cfg") since it looks them up relative to the
-      # FILESDIR it was compiled with (${CMAKE_INSTALL_PREFIX}/share/Cppcheck),
-      # not next to the binary itself.
+      # FILESDIR it was compiled with, not next to the binary itself.
       - name: Cache cppcheck 2.21.0 build
         id: cppcheck_cache
         uses: actions/cache@v6
         with:
-          path: |
-            /usr/local/bin/cppcheck
-            /usr/local/share/Cppcheck
+          path: ${{ runner.temp }}/cppcheck-install
           key: cppcheck-2.21.0-e73bf44-${{ runner.os }}
 
       - name: Build cppcheck 2.21.0
@@ -78,18 +86,17 @@ jobs:
           git clone --depth 1 https://github.com/danmar/cppcheck.git /tmp/cppcheck-src
           git -C /tmp/cppcheck-src fetch --depth 1 origin e73bf44c3e49686b7495fab352d03a6c6075516b # tag 2.21.0
           git -C /tmp/cppcheck-src checkout e73bf44c3e49686b7495fab352d03a6c6075516b
-          cmake -S /tmp/cppcheck-src -B /tmp/cppcheck-build -DCMAKE_BUILD_TYPE=Release
+          cmake -S /tmp/cppcheck-src -B /tmp/cppcheck-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${{ runner.temp }}/cppcheck-install"
           cmake --build /tmp/cppcheck-build -j"$(nproc)"
-          sudo cmake --install /tmp/cppcheck-build
+          cmake --install /tmp/cppcheck-build
 
       - name: Verify cppcheck version
-        run: cppcheck --version
+        run: "${{ runner.temp }}/cppcheck-install/bin/cppcheck --version"
 
       - name: Package cppcheck install for matrix jobs
         run: |
-          mkdir -p cppcheck-dist/bin cppcheck-dist/share
-          cp /usr/local/bin/cppcheck cppcheck-dist/bin/
-          cp -r /usr/local/share/Cppcheck cppcheck-dist/share/
+          mkdir -p cppcheck-dist
+          cp -r "${{ runner.temp }}/cppcheck-install/." cppcheck-dist/
 
       - name: Upload cppcheck build
         uses: actions/upload-artifact@v7

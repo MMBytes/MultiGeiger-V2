@@ -9,6 +9,28 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.13 — ESP-IDF v6.0.1 → v6.0.2 toolchain upgrade
+
+- Bumped the pinned ESP-IDF version from v6.0.1 to v6.0.2 (local dev
+  toolchain at `C:\esp\v6.0\esp-idf`, `_build-boards.yml`'s
+  `esp_idf_version`, and `main/idf_component.yml`'s `idf: ">=6.0.2"` floor).
+  All in-tree submodules (mbedTLS, esp_wifi/esp_phy/esp_coex libs, BT
+  controller libs, NimBLE, OpenThread) moved to their v6.0.2-pinned commits.
+- Driven by a genuine security fix: ESP-TLS resolved a bug that allowed
+  **CA verification to be bypassed during TLS session resumption** —
+  directly relevant since this firmware does HTTPS/MQTT TLS uploads.
+- mbedTLS itself moved to 4.1.0 (upstream-flagged Breaking Change). All
+  three chip families this project builds for (esp32, esp32s3, esp32c5)
+  compile clean against the new toolchain; FTPS and HTTPS upload paths
+  still need a real-hardware bench re-test given the project's prior
+  history with mbedTLS buffer-handling regressions
+  (`CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` previously caused heap corruption in
+  `log_ftp.c`) before this is considered fully verified.
+- Also picks up (not independently verified, assessed low-risk):
+  `esp_http_client_connect()` now actually reuses connections instead of
+  always reconnecting, and a console REPL busy-loop fix for
+  USB-Serial-JTAG consoles without an attached host.
+
 ## V2.6.12 — Adafruit ESP32 Feather V2 board port (2nd-source classic-ESP32 MCU for the shared Feather carrier)
 
 - New board: `adafruit_esp32_feather_v2` (Adafruit #5400/#5900 — identical,

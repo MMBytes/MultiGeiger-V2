@@ -84,7 +84,7 @@ jobs:
         # supply-chain stability — bump the SHA + comment together on upgrade.
         uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
         with:
-          esp_idf_version: v6.0.1
+          esp_idf_version: v6.0.2
           # Mirrors CMakeLists.txt's IDF_TARGET selection (kept in sync manually):
           # ESP32-C5 for sparkfun_thing_plus_esp32c5, ESP32-S3 for feathers3_d +
           # seeed_xiao_esp32s3 + heltec_wifi_lora32_v4_r2 + sparkfun_thing_plus_esp32s3 +

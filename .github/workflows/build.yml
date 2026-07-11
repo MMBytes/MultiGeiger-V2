@@ -5,8 +5,8 @@
 # gate and the board matrix live in reusable workflows (_cppcheck.yml /
 # _build-boards.yml) shared with release.yml, so the two pipelines can't drift.
 #
-# The IDF version is pinned in _build-boards.yml to v6.0.1 (matches the local
-# dev toolchain). Must be >= idf_component.yml's `idf: ">=6.0.1"` constraint.
+# The IDF version is pinned in _build-boards.yml to v6.0.2 (matches the local
+# dev toolchain). Must be >= idf_component.yml's `idf: ">=6.0.2"` constraint.
 #
 # Added in V2.4.1 (T2); reusable-workflow refactor + concurrency in V2.5.31.
 

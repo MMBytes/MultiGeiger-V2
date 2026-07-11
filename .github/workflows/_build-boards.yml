@@ -62,7 +62,7 @@ jobs:
           - adafruit_esp32_feather_v2
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           # Empty ref → checkout's default (the triggering commit/tag). Release
           # passes the tag so a workflow_dispatch of an older tag builds it.
@@ -72,7 +72,7 @@ jobs:
         # After checkout (which cleans untracked files) so it isn't wiped. Key is
         # per-board + per-commit; restore-keys falls back to the latest prior
         # cache for the same board.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-${{ matrix.board }}-${{ github.sha }}
@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload firmware artefacts (CI build)
         if: ${{ !inputs.release }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: geiger_v2_${{ matrix.board }}_${{ github.sha }}
           path: |
@@ -189,7 +189,7 @@ jobs:
 
       - name: Upload staged artefacts (release)
         if: ${{ inputs.release }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.board }}
           path: stage/*

@@ -64,7 +64,7 @@ jobs:
       # not next to the binary itself.
       - name: Cache cppcheck 2.21.0 build
         id: cppcheck_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             /usr/local/bin/cppcheck
@@ -92,7 +92,7 @@ jobs:
           cp -r /usr/local/share/Cppcheck cppcheck-dist/share/
 
       - name: Upload cppcheck build
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: cppcheck-2.21.0-build
           path: cppcheck-dist
@@ -134,12 +134,12 @@ jobs:
             defines: -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 -DMQTT_RICH_STATE=1
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
 
       - name: Download cppcheck 2.21.0 build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: cppcheck-2.21.0-build
           path: /tmp/cppcheck-dist
@@ -204,7 +204,7 @@ jobs:
 
       - name: Upload cppcheck output as artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: cppcheck-${{ matrix.board }}-${{ github.sha }}
           path: cppcheck.out

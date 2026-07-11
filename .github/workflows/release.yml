@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - name: Verify CHANGELOG.md has a section for the tag
@@ -89,12 +89,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Download all board artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artefacts/
           pattern: release-*
@@ -211,10 +211,10 @@ jobs:
         # Checking out an older inputs.tag would 404 here when dispatching a tag
         # that predates docs/. The published firmware is still version-correct:
         # the bins come from the build job's artefacts of inputs.tag's source.
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Download built artefacts (for the merged bins)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artefacts/
           pattern: release-*
@@ -236,10 +236,10 @@ jobs:
           find _site -maxdepth 2 -type f | sort
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

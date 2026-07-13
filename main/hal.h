@@ -817,8 +817,12 @@
     // + PSRAM integrated in the module package, but single-core RISC-V (up
     // to 240 MHz) — the first non-Xtensa, first single-core target this
     // codebase has ever built for. 2.4/5 GHz WiFi, BLE 5, Zigbee, Thread in
-    // silicon, but this firmware only ever configures 2.4 GHz WiFi station
-    // mode (never calls esp_wifi_set_band_mode()) — see design spec §8.
+    // silicon; this firmware never calls esp_wifi_set_band_mode(), so it
+    // runs on the IDF default of WIFI_BAND_MODE_AUTO (both bands) rather
+    // than being pinned to 2.4 GHz — confirmed live via 5 GHz association
+    // (channel 44). apply_radio_limits_sta() (main.c) branches on
+    // esp_wifi_get_band_mode() to use the plural per-band protocol/
+    // bandwidth APIs this mode requires. See design spec §8.
     //
     // Own standalone Thing Plus carrier PCB — NOT a drop-in for the
     // FeatherS3-D-format carrier shared by BOARD_FEATHERS3_D /

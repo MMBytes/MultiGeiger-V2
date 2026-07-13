@@ -9,6 +9,36 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.17 — Fix ESP32-C5 STA radio-limit APIs under WIFI_BAND_MODE_AUTO
+
+- `apply_radio_limits_sta()` (`main.c`) previously always called the
+  single-band `esp_wifi_set_protocol()`/`esp_wifi_set_bandwidth()`. On the
+  ESP32-C5 (this fleet's only dual-band chip) the firmware never calls
+  `esp_wifi_set_band_mode()`, so it runs on the IDF default of
+  `WIFI_BAND_MODE_AUTO` — and both single-band calls are documented to
+  return `ESP_ERR_NOT_SUPPORTED` in that mode, confirmed live in the
+  V2.6.16 verification boot log (both calls failed with warnings, silently
+  leaving the `wifi_11bg_only`/`wifi_ht20_only` config flags un-applied on
+  that board — harmless today only because both flags default off).
+  - Fix: branch at runtime on `esp_wifi_get_band_mode()`. Under
+    `WIFI_BAND_MODE_AUTO`, use the plural per-band
+    `esp_wifi_set_protocols()`/`esp_wifi_set_bandwidths()` (separate
+    `ghz_2g`/`ghz_5g` fields) instead; single-band boards keep the original
+    calls unchanged. Runtime check rather than a board `#ifdef`, so any
+    future dual-band port gets this automatically.
+  - `wifi_11bg_only`/`wifi_ht20_only` are 2.4 GHz-only concepts (5 GHz has
+    no 11b/g), so `ghz_5g` protocol is always the fullest set
+    (11A/11N/11AC/11AX) regardless of `wifi_11bg_only`, and `ghz_5g`
+    bandwidth is always forced to `WIFI_BW20` regardless of `wifi_ht20_only`
+    — the IDF only permits `WIFI_BW20` on a band with 11AC/11AX enabled,
+    which also matches the BW20 link actually observed on air against a
+    160MHz-capable AP.
+  - Corrected an adjacent stale comment in `hal.h`'s C5 board section that
+    claimed the firmware "only ever configures 2.4 GHz WiFi station mode
+    (never calls esp_wifi_set_band_mode())" — the second half is true, but
+    the conclusion was wrong: not calling it means the chip runs its
+    dual-band `AUTO` default, not a 2.4 GHz-only mode.
+
 ## V2.6.16 — Log wifi_ap_record_t link details (RSSI/channel/security/phy) to syslog
 
 - New `ESP_LOGI` line ("wifi link: ...") in `main.c`, fired once right after

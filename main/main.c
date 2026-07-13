@@ -281,7 +281,50 @@ static void mark_attempt(void) {
 // Called right before esp_wifi_start() when the AP→STA switch happens;
 // the APIs take effect on the next association, so ordering matters.
 // 11b/g-only disables 802.11n; HT20-only caps channel bandwidth at 20 MHz.
+//
+// V2.6.17: dual-band chips (ESP32-C5) default to WIFI_BAND_MODE_AUTO, under
+// which the single-band esp_wifi_set_protocol()/set_bandwidth() calls below
+// are documented to return ESP_ERR_NOT_SUPPORTED — confirmed live on a C5
+// board (both calls failed, silently leaving the flags un-applied). The
+// plural per-band esp_wifi_set_protocols()/set_bandwidths() are required
+// instead in that mode. 11bg_only/ht20_only are 2.4 GHz-only concepts (5 GHz
+// has no 11b/g), so the 5 GHz side is always given the fullest protocol set;
+// its bandwidth is forced to WIFI_BW20 regardless of ht20_only because the
+// IDF only allows WIFI_BW20 on a band with 11AC/11AX enabled — matching the
+// BW20 link actually observed on air.
 static void apply_radio_limits_sta(void) {
+    wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
+    esp_wifi_get_band_mode(&band_mode);
+
+    if (band_mode == WIFI_BAND_MODE_AUTO) {
+        wifi_protocols_t proto = { 0 };
+        proto.ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
+        if (!g_cfg.wifi_11bg_only) proto.ghz_2g |= WIFI_PROTOCOL_11N;
+        proto.ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N |
+                        WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX;
+        esp_err_t r = esp_wifi_set_protocols(WIFI_IF_STA, &proto);
+        if (r != ESP_OK) {
+            ESP_LOGW(TAG, "set_protocols(2g=0x%02x, 5g=0x%02x) failed: %s",
+                     proto.ghz_2g, proto.ghz_5g, esp_err_to_name(r));
+        } else {
+            ESP_LOGI(TAG, "STA protocols = 2g:0x%02x 5g:0x%02x (11bg_only=%d)",
+                     proto.ghz_2g, proto.ghz_5g, g_cfg.wifi_11bg_only);
+        }
+
+        wifi_bandwidths_t bw = { 0 };
+        bw.ghz_2g = g_cfg.wifi_ht20_only ? WIFI_BW20 : WIFI_BW40;
+        bw.ghz_5g = WIFI_BW20;
+        r = esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
+        if (r != ESP_OK) {
+            ESP_LOGW(TAG, "set_bandwidths(2g=%d, 5g=%d) failed: %s",
+                     bw.ghz_2g, bw.ghz_5g, esp_err_to_name(r));
+        } else {
+            ESP_LOGI(TAG, "STA bandwidths = 2g:%s 5g:20MHz (ht20_only=%d)",
+                     (bw.ghz_2g == WIFI_BW20) ? "20MHz" : "40MHz", g_cfg.wifi_ht20_only);
+        }
+        return;
+    }
+
     uint8_t proto = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
     if (!g_cfg.wifi_11bg_only) proto |= WIFI_PROTOCOL_11N;
     esp_err_t r = esp_wifi_set_protocol(WIFI_IF_STA, proto);

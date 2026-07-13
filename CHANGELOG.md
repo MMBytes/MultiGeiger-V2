@@ -52,6 +52,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     `CONFIG_SOC_WIFI_HE_SUPPORT` — capability-gated rather than hardcoded to
     the C5, so any future HE-capable board port inherits the same default
     without code changes.
+  - Second follow-up (same version, also from the Fable MAX review): the
+    `/config` page's "Limit to 802.11b/g" checkbox label implies a
+    device-wide restriction, but on dual-band boards it only ever restricts
+    `ghz_2g` — `apply_radio_limits_sta()` always leaves `ghz_5g` at its
+    fullest protocol set, since 802.11b/g doesn't exist on 5GHz to begin
+    with. A C5 near a same-SSID dual-band AP can still associate via
+    5GHz/11ac/11ax with the box ticked. No functional change (that would
+    mean pinning `WIFI_BAND_MODE_2G_ONLY`, which can only be set *after*
+    `esp_wifi_start()` — a larger, separately-scoped change to the STA
+    bring-up sequence) — just disclosed in the UI: the checkbox now shows
+    "(2.4GHz only — this board's 5GHz radio stays unrestricted)" on any
+    `CONFIG_SOC_WIFI_SUPPORT_5G` board (`http_server.c`).
 
 ## V2.6.16 — Log wifi_ap_record_t link details (RSSI/channel/security/phy) to syslog
 

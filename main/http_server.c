@@ -1413,7 +1413,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<label>Web admin and access point password"
         "<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
-        "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span></label></div>"
+        "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
+        "%s</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
         "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span></label></div>"
         "<script>function syncHt20(){"
@@ -1735,6 +1736,18 @@ static esp_err_t config_get(httpd_req_t *req) {
         "</body></html>",
         e_ssid, e_pw, e_host, e_apn, e_ap,   // V2.5.30: e_ap (ap_pw) moved to Network
         s_cfg->wifi_11bg_only   ? "checked" : "",
+        // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
+        // restricts the 2.4GHz protocol set — 5GHz has no 802.11b/g to limit
+        // it to, so apply_radio_limits_sta() (main.c) always leaves 5GHz at
+        // its fullest protocol set. Disclose that scoping here rather than
+        // implying (as the label alone would) that the whole device is
+        // capped to legacy rates on every band.
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+        " <small>(2.4GHz only &mdash; this board's 5GHz radio stays "
+        "unrestricted)</small>",
+#else
+        "",
+#endif
         s_cfg->wifi_ht20_only   ? "checked" : "",
         s_cfg->wifi_ps_disabled ? "checked" : "",
 #if HAL_HAS_ANTENNA_SWITCH

@@ -1,6 +1,7 @@
 #include "sgp41.h"
 
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -24,12 +25,23 @@ static const char *TAG = "sgp41";
 #define DEFAULT_RH_TICKS            0x8000
 #define DEFAULT_T_TICKS             0x6666
 
-#define CONDITIONING_DELAY_MS       50    // datasheet: wait after cmd before read
-#define MEASUREMENT_DELAY_MS        50
-#define SERIAL_READ_DELAY_MS         1
+// V2.6.15: bumped 50 -> 70 ms, same rationale as bme280.c's 55->70 bump.
+// At CONFIG_FREERTOS_HZ=100 (10 ms tick), pdMS_TO_TICKS(50) = 5 ticks, but
+// vTaskDelay's worst case is (N-1) full tick periods -> as little as ~40 ms
+// actual sleep, below the datasheet's 50 ms max conversion time.
+// pdMS_TO_TICKS(70) = 7 ticks -> 60..70 ms actual, a guaranteed >=60 ms floor.
+#define CONDITIONING_DELAY_MS       70    // datasheet: wait after cmd before read
+#define MEASUREMENT_DELAY_MS        70
 
 #define CONDITIONING_SECONDS        10    // 10 x 1 Hz per Sensirion reference example
 #define SAMPLE_PERIOD_MS           1000
+
+// ~15 consecutive failed 1 Hz measurements (roughly 15 s) before the cached
+// NOx index is considered stale and withheld from callers.
+#define MAX_CONSECUTIVE_FAILURES    15
+// Log every 30th consecutive failure after the first, instead of every one
+// -- avoids ~1 log line/s of WARN spam if the sensor drops off the bus.
+#define FAILURE_LOG_INTERVAL        30
 
 static i2c_master_dev_handle_t s_dev  = NULL;
 static bool                    s_ready = false;
@@ -86,7 +98,10 @@ static esp_err_t read_words(uint16_t *out, size_t n_words) {
 static esp_err_t sgp41_get_serial(uint16_t serial[3]) {
     esp_err_t err = write_cmd(CMD_GET_SERIAL_NUMBER, NULL, 0);
     if (err != ESP_OK) return err;
-    vTaskDelay(pdMS_TO_TICKS(SERIAL_READ_DELAY_MS));
+    // V2.6.15: precise busy-wait, same fix as sht45.c's sht45_read_serial().
+    // pdMS_TO_TICKS(1) truncates to 0 ticks at CONFIG_FREERTOS_HZ=100 (10 ms
+    // tick), making vTaskDelay(0) a no-op yield instead of a real delay.
+    esp_rom_delay_us(2000);
     return read_words(serial, 3);
 }
 
@@ -136,6 +151,7 @@ static void sgp41_task(void *arg) {
     ESP_LOGI(TAG, "SGP41 conditioning complete (%d s) — switching to measurement",
              CONDITIONING_SECONDS);
 
+    uint32_t consec_fail = 0;
     for (;;) {
         uint16_t rh_ticks = DEFAULT_RH_TICKS;
         uint16_t t_ticks  = DEFAULT_T_TICKS;
@@ -148,6 +164,7 @@ static void sgp41_task(void *arg) {
         uint16_t sraw_voc, sraw_nox;
         esp_err_t err = sgp41_measure_raw_signals(rh_ticks, t_ticks, &sraw_voc, &sraw_nox);
         if (err == ESP_OK) {
+            consec_fail = 0;
             int32_t nox_index = 0;
             GasIndexAlgorithm_process(&s_nox_params, (int32_t)sraw_nox, &nox_index);
             // 0 = still in the algorithm's 45 s initial-blackout period — not
@@ -159,7 +176,23 @@ static void sgp41_task(void *arg) {
                 xSemaphoreGive(s_cache_mux);
             }
         } else {
-            ESP_LOGW(TAG, "measure_raw_signals failed: %s", esp_err_to_name(err));
+            consec_fail++;
+            // V2.6.15: throttle to the first failure, then every Nth, instead
+            // of one WARN per second for as long as the sensor stays wedged.
+            if (consec_fail == 1 || consec_fail % FAILURE_LOG_INTERVAL == 0) {
+                ESP_LOGW(TAG, "measure_raw_signals failed (%u consecutive): %s",
+                         (unsigned)consec_fail, esp_err_to_name(err));
+            }
+            // V2.6.15: withhold the cached NOx index once it's old enough
+            // that a caller (MQTT/status page) publishing it would be
+            // reporting a stale reading as if it were current.
+            if (consec_fail == MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGW(TAG, "SGP41 unresponsive for %d consecutive samples — "
+                         "marking cached NOx index stale", MAX_CONSECUTIVE_FAILURES);
+                xSemaphoreTake(s_cache_mux, portMAX_DELAY);
+                s_last_nox_valid = false;
+                xSemaphoreGive(s_cache_mux);
+            }
         }
 
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(SAMPLE_PERIOD_MS));

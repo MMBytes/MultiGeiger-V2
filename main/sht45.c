@@ -5,6 +5,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "i2c_bus.h"
 #include "sensirion_crc.h"
 
@@ -25,6 +26,17 @@ static const char *TAG = "sht45";
 static i2c_master_dev_handle_t s_dev  = NULL;
 static bool                    s_ready = false;
 static uint32_t                s_last_heat_ms = 0;
+
+// V2.6.15: sgp41.c's background task now calls sht45_read() once per second
+// for RH/T compensation, alongside the main task's own periodic sht45_read()
+// during the TX cycle. sht45_read()'s multi-step protocol (write cmd -> wait
+// for conversion -> read result) is not atomic against a second task doing
+// the same thing on the same device — an interleaved read can land mid-
+// conversion of the OTHER task's command, silently returning a CRC-valid but
+// wrong reading (see the V2.3.31 comment on sht45_read() for the exact
+// H=0x0000 corruption mode this originally documented for a single-task
+// caller). This mutex serializes all I2C access through the driver.
+static SemaphoreHandle_t s_mutex = NULL;
 
 static esp_err_t send_cmd(uint8_t cmd) {
     return i2c_master_transmit(s_dev, &cmd, 1, 50);
@@ -157,6 +169,7 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
         return ESP_FAIL;
     }
 
+    if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
     s_ready = true;
 
     // V2.3.30: log the factory serial — diagnostic aid for tracking which
@@ -177,7 +190,7 @@ bool sht45_present(void) {
     return s_ready;
 }
 
-esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
+static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) {
     if (!s_dev) return ESP_FAIL;
 
     // V2.3.26: log the two silent error paths. Previously sht45_read() returned
@@ -230,6 +243,13 @@ esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
     return ESP_OK;
 }
 
+esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    esp_err_t err = sht45_read_unlocked(temperature_c, humidity_pct);
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return err;
+}
+
 void sht45_heat_periodic(uint32_t now_ms, float humidity_pct) {
     if (!s_ready) return;
     if (humidity_pct < HEATER_HUMIDITY_THR) return;
@@ -240,9 +260,11 @@ void sht45_heat_periodic(uint32_t now_ms, float humidity_pct) {
     // a measurement. The result is discarded — we just want the heat effect.
     // The next normal sht45_read() call will get fresh post-heat readings.
     ESP_LOGI(TAG, "SHT45 heater activated (RH=%.1f%%)", humidity_pct);
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     send_cmd(CMD_HEATER_200MW);
     vTaskDelay(pdMS_TO_TICKS(120));   // 100 ms pulse + 20 ms settle
     uint8_t discard[6];
     i2c_master_receive(s_dev, discard, sizeof(discard), 50);
+    if (s_mutex) xSemaphoreGive(s_mutex);
     s_last_heat_ms = now_ms;
 }

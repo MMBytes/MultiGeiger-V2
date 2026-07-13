@@ -837,8 +837,8 @@ static void do_tx_cycle(void) {
         if (nox_valid) {
             ESP_LOGI(TAG, "SGP41: NOx index=%ld", (long)nox_index);
         } else if (sgp41_had_valid_reading()) {
-            // V2.6.15: was working, cache has since gone stale (sensor
-            // unresponsive for MAX_CONSECUTIVE_FAILURES) — not a boot state.
+            // V2.6.15: was working, cache has since aged out (no fresh
+            // sample within NOX_STALE_US) — not a boot state.
             ESP_LOGI(TAG, "SGP41: NOx index unavailable (sensor unresponsive)");
         } else {
             ESP_LOGI(TAG, "SGP41: NOx index not yet available (conditioning/warming up)");

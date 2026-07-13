@@ -810,9 +810,9 @@ static void format_sgp41(char *out, size_t sz) {
     int32_t nox_index;
     if (sgp41_get_nox_index(&nox_index) != ESP_OK) {
         // V2.6.15: distinguish first-boot warmup from a sensor that was
-        // working and has since gone unresponsive (stale-cache invalidation
-        // after MAX_CONSECUTIVE_FAILURES) — the old fixed wording misled at
-        // hours/days of uptime.
+        // working and has since gone unresponsive (age-based cache
+        // staleness in sgp41_get_nox_index()) — a fixed wording would
+        // mislead hours/days into uptime.
         snprintf(out, sz,
             "<div class=\"info\"><h3>Gas (SGP41)</h3>%s"
             "</div>",

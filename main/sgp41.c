@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -36,12 +37,18 @@ static const char *TAG = "sgp41";
 #define CONDITIONING_SECONDS        10    // 10 x 1 Hz per Sensirion reference example
 #define SAMPLE_PERIOD_MS           1000
 
-// ~15 consecutive failed 1 Hz measurements (roughly 15 s) before the cached
-// NOx index is considered stale and withheld from callers.
-#define MAX_CONSECUTIVE_FAILURES    15
-// Log every 30th consecutive failure after the first, instead of every one
-// -- avoids ~1 log line/s of WARN spam if the sensor drops off the bus.
+// V2.6.15: log every 30th consecutive measurement failure after the first,
+// instead of every one -- avoids ~1 log line/s of WARN spam if the sensor
+// drops off the bus. Pure log throttle, unrelated to cache staleness below.
 #define FAILURE_LOG_INTERVAL        30
+// One-shot informational log when a failure streak crosses this length
+// (roughly matches NOX_STALE_US below at the 1 Hz sample rate).
+#define FAILURE_STREAK_NOTE         15
+
+// No fresh, publishable NOx index for this long -> treat the cache as
+// stale and withhold it from callers, rather than serving an arbitrarily
+// old reading as if it were current.
+#define NOX_STALE_US                (15LL * 1000 * 1000)
 
 static i2c_master_dev_handle_t s_dev  = NULL;
 static bool                    s_ready = false;
@@ -50,12 +57,13 @@ static GasIndexAlgorithmParams s_nox_params;
 
 static SemaphoreHandle_t s_cache_mux = NULL;
 static int32_t           s_last_nox_index = 0;
-static bool               s_last_nox_valid = false;
-// V2.6.15: one-way latch, set the first time a valid index is ever produced
-// and never cleared — lets callers tell "still in first-boot warmup" (never
-// latched) apart from "was working, now stale/wedged" (latched, but
-// s_last_nox_valid has since gone false) for accurate status-page wording.
-static bool               s_ever_valid = false;
+// V2.6.15: timestamp of the last cache write (esp_timer_get_time(), us
+// since boot), -1 = never valid. Replaces separate "valid" and "ever
+// valid" booleans: staleness is fundamentally a data-age question, so the
+// getters compute it directly from age instead of the writer proactively
+// flipping a flag on a failure-count threshold. See sgp41_get_nox_index()
+// and sgp41_had_valid_reading().
+static int64_t            s_last_good_us = -1;
 
 static uint16_t humidity_to_ticks(float rh_pct) {
     if (rh_pct < 0.0f)   rh_pct = 0.0f;
@@ -177,27 +185,23 @@ static void sgp41_task(void *arg) {
             if (nox_index > 0) {
                 xSemaphoreTake(s_cache_mux, portMAX_DELAY);
                 s_last_nox_index = nox_index;
-                s_last_nox_valid = true;
-                s_ever_valid = true;
+                s_last_good_us   = esp_timer_get_time();
                 xSemaphoreGive(s_cache_mux);
             }
         } else {
             consec_fail++;
-            // V2.6.15: throttle to the first failure, then every Nth, instead
-            // of one WARN per second for as long as the sensor stays wedged.
+            // Throttle to the first failure, then every Nth, instead of one
+            // WARN per second for as long as the sensor stays wedged.
             if (consec_fail == 1 || consec_fail % FAILURE_LOG_INTERVAL == 0) {
                 ESP_LOGW(TAG, "measure_raw_signals failed (%u consecutive): %s",
                          (unsigned)consec_fail, esp_err_to_name(err));
             }
-            // V2.6.15: withhold the cached NOx index once it's old enough
-            // that a caller (MQTT/status page) publishing it would be
-            // reporting a stale reading as if it were current.
-            if (consec_fail == MAX_CONSECUTIVE_FAILURES) {
-                ESP_LOGW(TAG, "SGP41 unresponsive for %d consecutive samples — "
-                         "marking cached NOx index stale", MAX_CONSECUTIVE_FAILURES);
-                xSemaphoreTake(s_cache_mux, portMAX_DELAY);
-                s_last_nox_valid = false;
-                xSemaphoreGive(s_cache_mux);
+            // Informational only -- sgp41_get_nox_index() independently
+            // withholds the cache once it's older than NOX_STALE_US, no
+            // cache write needed here.
+            if (consec_fail == FAILURE_STREAK_NOTE) {
+                ESP_LOGW(TAG, "SGP41 unresponsive for %d consecutive samples",
+                         FAILURE_STREAK_NOTE);
             }
         }
 
@@ -273,16 +277,18 @@ esp_err_t sgp41_get_nox_index(int32_t *out) {
     if (!out) return ESP_ERR_INVALID_ARG;
     if (!s_ready || !s_cache_mux) return ESP_FAIL;
     xSemaphoreTake(s_cache_mux, portMAX_DELAY);
-    bool valid = s_last_nox_valid;
-    if (valid) *out = s_last_nox_index;
+    int64_t good_us = s_last_good_us;
+    int32_t index    = s_last_nox_index;
     xSemaphoreGive(s_cache_mux);
-    return valid ? ESP_OK : ESP_FAIL;
+    if (good_us < 0 || (esp_timer_get_time() - good_us) > NOX_STALE_US) return ESP_FAIL;
+    *out = index;
+    return ESP_OK;
 }
 
 bool sgp41_had_valid_reading(void) {
     if (!s_ready || !s_cache_mux) return false;
     xSemaphoreTake(s_cache_mux, portMAX_DELAY);
-    bool ever = s_ever_valid;
+    bool ever = (s_last_good_us >= 0);
     xSemaphoreGive(s_cache_mux);
     return ever;
 }

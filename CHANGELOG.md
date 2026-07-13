@@ -43,6 +43,23 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     as the rest of the WiFi/lwIP buffers, so the extra depth doesn't cost
     internal RAM here the way it would on Heltec.
 
+- Fix ESP32-C5 STA bandwidth still failing under `WIFI_BAND_MODE_AUTO`
+  after V2.6.17 (`set_bandwidths(...) failed: ESP_ERR_INVALID_ARG` with
+  `2g:0x47` — 11B/11G/11N/11AX — still logged live on a C5 node).
+  - Root cause: V2.6.17 added the `max_legal_bw()` helper in
+    `main/main.c` specifically to keep the requested bandwidth legal for
+    whatever protocol mask was just set (`WIFI_BW40` is rejected outright
+    when `WIFI_PROTOCOL_11AX`/`11AC` is in the mask), and its doc comment
+    claimed both bands "now go through the same helper instead of a
+    hardcoded `WIFI_BW20`" — but `apply_radio_limits_sta()` itself was
+    never actually changed to call it: `bw.ghz_2g`/`bw.ghz_5g` were still
+    assigned `WIFI_BW40`/`WIFI_BW20` directly, so an HE-capable 2.4 GHz
+    mask kept requesting the illegal 40 MHz width every boot.
+  - Fix: wire `bw.ghz_2g`/`bw.ghz_5g` through `max_legal_bw(proto.ghz_2g)`/
+    `max_legal_bw(proto.ghz_5g)` as the comment already described, only
+    short-circuiting to `WIFI_BW20` when the user's `ht20_only` checkbox
+    is set.
+
 ---
 
 ## V2.6.17 — Fix ESP32-C5 STA radio-limit APIs under WIFI_BAND_MODE_AUTO

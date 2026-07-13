@@ -352,8 +352,8 @@ static void apply_radio_limits_sta(void) {
         }
 
         wifi_bandwidths_t bw = { 0 };
-        bw.ghz_2g = g_cfg.wifi_ht20_only ? WIFI_BW20 : WIFI_BW40;
-        bw.ghz_5g = WIFI_BW20;
+        bw.ghz_2g = g_cfg.wifi_ht20_only ? WIFI_BW20 : max_legal_bw(proto.ghz_2g);
+        bw.ghz_5g = max_legal_bw(proto.ghz_5g);
         r = esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
         if (r != ESP_OK) {
             ESP_LOGW(TAG, "set_bandwidths(2g=%d, 5g=%d) failed: %s",

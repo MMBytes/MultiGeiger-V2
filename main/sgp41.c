@@ -196,9 +196,9 @@ static void sgp41_task(void *arg) {
                 ESP_LOGW(TAG, "measure_raw_signals failed (%u consecutive): %s",
                          (unsigned)consec_fail, esp_err_to_name(err));
             }
-            // Informational only -- sgp41_get_nox_index() independently
-            // withholds the cache once it's older than NOX_STALE_US, no
-            // cache write needed here.
+            // Log-only -- sgp41_get_nox_index() independently withholds the
+            // cache once it's older than NOX_STALE_US, no cache write needed
+            // here. WARN is deliberate: 15 s unresponsive is worth flagging.
             if (consec_fail == FAILURE_STREAK_NOTE) {
                 ESP_LOGW(TAG, "SGP41 unresponsive for %d consecutive samples",
                          FAILURE_STREAK_NOTE);
@@ -278,10 +278,10 @@ esp_err_t sgp41_get_nox_index(int32_t *out) {
     if (!s_ready || !s_cache_mux) return ESP_FAIL;
     xSemaphoreTake(s_cache_mux, portMAX_DELAY);
     int64_t good_us = s_last_good_us;
-    int32_t index    = s_last_nox_index;
+    int32_t idx      = s_last_nox_index;
     xSemaphoreGive(s_cache_mux);
     if (good_us < 0 || (esp_timer_get_time() - good_us) > NOX_STALE_US) return ESP_FAIL;
-    *out = index;
+    *out = idx;
     return ESP_OK;
 }
 

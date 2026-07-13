@@ -9,6 +9,42 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.18 — Fix OTA upload stall on heavy-TX-target PSRAM nodes (recv-mailbox ceiling)
+
+- Repeated `/update` OTA failures on esp32-5965048 (feathers3_d): the 1.3+ MB
+  upload stalled at an exact TCP-MSS-multiple byte offset (`8640` = 6×1440,
+  or `11520` = 8×1440), then sat with zero received bytes through all
+  5 × 30s `httpd_req_recv()` retries before aborting — reproduced both after
+  multi-day uptime and immediately after a fresh reboot (~48 min uptime),
+  ruling out the older long-uptime heap-fragmentation theory as sufficient
+  on its own.
+  - Root cause: `CONFIG_LWIP_TCP_RECVMBOX_SIZE` was never set by this
+    project and defaulted to IDF's stock value of 6 — the depth of the
+    queue lwIP uses to hand received TCP segments to the app before
+    `recv()` drains them, decoupled from the byte-level
+    `CONFIG_LWIP_TCP_WND_DEFAULT` (16384). `update_post_inner()`'s recv
+    loop (`main/http_server.c`) calls `esp_ota_write()` — synchronous flash
+    erase/write — between `httpd_req_recv()` calls; on a node whose
+    per-cycle TX load is heavy enough (this fleet's most TX targets: Madavi,
+    sensor.community, ThingSpeak PM, aqi.eco, openSenseMap ×2, MQTT — 7
+    sequential TLS sessions every ~3 minutes churning internal RAM harder
+    per wall-clock minute than lighter nodes), the mailbox fills before the
+    byte window does, lwIP stops accepting further segments, and the
+    resulting stall can outlast the retry budget. The RECVMBOX ceiling
+    itself is universal to every PSRAM board — only this node's heavier
+    per-cycle churn has pushed it far enough to actually trip it.
+  - Fix: `CONFIG_LWIP_TCP_RECVMBOX_SIZE=24` added to
+    `sdkconfig.defaults.psram` (all 8 PSRAM boards), not the feathers3_d
+    overlay alone — the mechanism isn't board-specific, and every PSRAM
+    board shares the same OTA code path and the same stock default. Scoped
+    to PSRAM boards (not the shared base `sdkconfig.defaults`, which the
+    non-PSRAM Heltec boards also read) because the mailbox entries ride the
+    same `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` net-stack-to-PSRAM offload
+    as the rest of the WiFi/lwIP buffers, so the extra depth doesn't cost
+    internal RAM here the way it would on Heltec.
+
+---
+
 ## V2.6.17 — Fix ESP32-C5 STA radio-limit APIs under WIFI_BAND_MODE_AUTO
 
 - `apply_radio_limits_sta()` (`main.c`) previously always called the

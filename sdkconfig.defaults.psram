@@ -24,3 +24,22 @@ CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_ROAMING=y
 CONFIG_ESP_WIFI_ROAMING_LOW_RSSI_THRESHOLD=-72
 CONFIG_ESP_WIFI_ROAMING_PERIODIC_SCAN_MONITOR=n
 CONFIG_ESP_WIFI_ROAMING_LEGACY_ROAMING=y
+
+# --- V2.6.18: lwIP TCP receive-mailbox depth --------------------------------
+# Stock IDF default (6) queues at most 6 unread TCP segments (6*1440B MSS =
+# 8640B) between the lwIP recv callback and the app's recv() call. A large
+# single-connection bulk receive (OTA `/update` upload) can outrun that depth
+# when the httpd task's own recv() loop is momentarily slow to drain it
+# (esp_ota_write's synchronous flash-erase cycles between reads) — observed
+# as a hard stall at an exact MSS-multiple byte offset (8640/11520) that
+# survives all 5 x 30s retries. Reproduced repeatedly on esp32-5965048
+# (feathers3_d, the fleet's heaviest node: 7 sequential TLS uploads/cycle —
+# Madavi/sensor.community/ThingSpeak PM/aqi.eco/openSenseMap x2/MQTT — churns
+# internal RAM harder per wall-clock minute than lighter nodes, so it hits
+# the same universal RECVMBOX ceiling that other PSRAM boards haven't been
+# pushed hard enough to trip yet). Scoped to PSRAM boards only: the mailbox
+# entries ride the same WiFi/lwIP-to-PSRAM offload as the rest of the net
+# stack (CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP in sdkconfig.defaults), so the
+# extra depth doesn't cost internal RAM here the way it would on the
+# non-PSRAM Heltec boards.
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=24

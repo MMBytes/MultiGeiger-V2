@@ -9,6 +9,87 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.15 — Adafruit SGP41 gas sensor (NOx), fix ESP32-C5 "Chip: ?" display, quiet misleading WiFi retry-connect log, fix silent NTP fallback
+
+- New sensor: Adafruit SGP41 (SKU 6455) VOC/NOx gas sensor, I²C address
+  `0x59`, board-agnostic auto-detect (`sgp41_init`/`sgp41_present`,
+  `PROBE_ON_BOTH_BUSES` in `main.c`) — no HAL gating, works on any board with
+  a free STEMMA QT/I²C bus. Only the NOx index is surfaced; the VOC index is
+  intentionally not exposed (out of scope for this integration).
+  - Unlike every other sensor in this codebase, the SGP41 needs a dedicated
+    background FreeRTOS task (`sgp41.c`) sampling at a steady ~1 Hz via
+    `vTaskDelayUntil`, rather than a per-TX-cycle read: the sensor's raw NOx
+    signal only becomes a meaningful index when fed continuously through
+    Sensirion's Gas Index Algorithm, which requires a consistent sampling
+    cadence and has a ~45 s initial "blackout" plus multi-hour maturation
+    (mean-estimator ~4.75 h, variance ~5.7 h) before its output stabilises.
+    Boot sequence: `executeConditioning()` once/second for 10 s (VOC-only,
+    NOx unused), then `measureRawSignals()` at 1 Hz indefinitely. Reads live
+    RH/T from the SHT45 (if present) each tick for compensation, falling
+    back to the sensor's disable-compensation defaults (50% RH / 25°C)
+    otherwise. Latest index cached behind a mutex-guarded getter
+    (`sgp41_get_nox_index()`), matching the existing `noise_sensor.c`
+    last-known-good pattern.
+  - Vendored `sensirion_gas_index_algorithm.{c,h}` verbatim (float variant —
+    ESP32 has HW FPU, so `_fixpoint` wasn't needed) from
+    `github.com/Sensirion/gas-index-algorithm`, BSD-3-Clause, with a
+    provenance header citing source/subdir/branch/fetch-date and a
+    do-not-hand-edit note — the first vendored-third-party-code convention
+    in this repo, since CI's cppcheck gate scans the entire flat `main/`
+    directory with no exclusion mechanism.
+  - Deliberately does NOT implement the sensor's documented soft-reset
+    command: it's an I²C *general call* (broadcast address `0x00`), not
+    device-specific, so issuing it would also reset every other sensor
+    sharing the bus (SHT45, BMP581, fuel gauge).
+  - Wired into all four existing per-sensor surfaces: per-cycle log line in
+    `main.c`, `/status` page block (`format_sgp41()` in `http_server.c`),
+    MQTT state JSON (`nox_index` field, suppressed while unavailable so HA
+    shows "unavailable" rather than a misleading `0`), and MQTT HA Discovery
+    (`mqtt_discovery.c`, `device_class=NULL` — Sensirion's 1..500 scale has
+    no HA-standard class, same convention as the existing PM4/NC entities).
+- `chip_model_str()` in `main/sysinfo.h` — the shared model-string lookup
+  used by the boot `chip:` log line, the `/status` device block, and the
+  syslog boot banner — never had a case for `CHIP_ESP32C5` (added to
+  `esp_chip_info.h` for the board port in V2.6.10), so it fell through to
+  `default: return "?"`. Purely cosmetic: WiFi, telemetry, and OTA were
+  unaffected — the C5 board correctly identified itself as
+  `sparkfun_thing_plus_esp32c5` via `BOARD`/hal.h the whole time, only the
+  silicon-model string was wrong. Found on first real bench deployment of
+  the C5 (V2.6.14) via its live `/status` page.
+- Added `case CHIP_ESP32C5: return "ESP32-C5";`.
+- `main.c`'s `EV_DISCONNECTED` retry path logged `"retry connect (attempt
+  #N)"` even when `esp_wifi_connect()` was rejected with
+  `ESP_ERR_WIFI_CONN` — meaning the driver's own internal auth/SAE retry
+  from the previous cycle was still in flight and our call did nothing.
+  Observed on the same C5 bench unit: 5 consecutive WPA3-SAE `AUTH_FAIL`
+  (reason=202) rounds against its 5GHz AP, each internal SAE round taking
+  several seconds, with every one of our 500ms-later retry calls bounced —
+  the log implied 5 fresh attempts when only the driver's own retries were
+  actually happening. Harmless (the driver keeps retrying regardless,
+  connection still recovers on its own), purely a misleading log. Now
+  checks the return value and logs `"...driver already reconnecting,
+  skipped"` instead when this happens.
+- `CONFIG_LWIP_SNTP_MAX_SERVERS` was left at ESP-IDF's stock default of `1`
+  on every board in the fleet (never overridden anywhere in this repo).
+  `ntp.c`'s `ntp_setup()` registers up to 3 configured NTP servers via
+  `esp_sntp_setservername(0..2, ...)`, but lwIP bounds-checks that index
+  against `SNTP_MAX_SERVERS` and silently drops any call with `idx >= 1` —
+  so server 2 and 3 were configured in name only and never actually used.
+  With `SNTP_MAX_SERVERS == 1`, lwIP also compiles its multi-server
+  failover function (`sntp_try_next_server()`) as a `#define` alias for
+  `sntp_retry()` — the whole round-robin-on-failure state machine doesn't
+  exist in the binary, so a dead/unreachable server 1 is retried forever
+  (exponential backoff, capped ~1h) instead of ever falling through to
+  servers 2/3. Root-caused on a C5 bench unit: `10.11.12.150`'s
+  `chrony.service` stopped, and the device never fell back to its two
+  configured public NTP servers despite them being reachable the whole
+  time — the boot log's `"SNTP started (3 server(s): ...)"` line was
+  itself misleading, since it only counts our configured strings, not how
+  many the underlying client actually accepted. Bumped to `3` in
+  `sdkconfig.defaults` (shared, applies fleet-wide) and directly in all 11
+  committed per-board `sdkconfig.<board>` caches, since `sdkconfig.defaults`
+  only fills keys missing from an existing cache.
+
 ## V2.6.14 — Adafruit ESP32-S3 Feather (4MB/2MB PSRAM, STEMMA QT) board port
 
 - New board: `adafruit_esp32s3_feather_4mb_2mbpsram` (Adafruit #5477 —

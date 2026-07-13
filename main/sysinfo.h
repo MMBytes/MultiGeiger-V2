@@ -38,6 +38,7 @@ static inline const char *chip_model_str(esp_chip_model_t m) {
         case CHIP_ESP32S2: return "ESP32-S2";
         case CHIP_ESP32S3: return "ESP32-S3";
         case CHIP_ESP32C3: return "ESP32-C3";
+        case CHIP_ESP32C5: return "ESP32-C5";
         default:           return "?";
     }
 }

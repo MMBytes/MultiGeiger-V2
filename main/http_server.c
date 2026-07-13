@@ -33,6 +33,7 @@
 #include "pm_sensor.h"
 #include "env_sensor.h"
 #include "noise_sensor.h"
+#include "sgp41.h"             // V2.6.15: SGP41 VOC+NOx sensor (NOx index only)
 #include "display.h"           // V2.3.30: live-apply OLED brightness via display_set_contrast
 #include "als.h"               // V2.3.29: ambient light sensor (FeatherS3-D)
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
@@ -803,6 +804,24 @@ static void format_noise(char *out, size_t sz) {
         n.laeq, n.la_min, n.la_max);
 }
 
+// --- SGP41 gas (NOx) block -----------------------------------------------
+static void format_sgp41(char *out, size_t sz) {
+    if (!sgp41_present()) { out[0] = 0; return; }
+    int32_t nox_index;
+    if (sgp41_get_nox_index(&nox_index) != ESP_OK) {
+        snprintf(out, sz,
+            "<div class=\"info\"><h3>Gas (SGP41)</h3>"
+            "conditioning / warming up..."
+            "</div>");
+        return;
+    }
+    snprintf(out, sz,
+        "<div class=\"info\"><h3>Gas (SGP41)</h3>"
+        "<b>NOx index:</b> %ld"
+        "</div>",
+        (long)nox_index);
+}
+
 // --- MQTT block --------------------------------------------------------------
 //
 // V2.4.4 (Phase 3): /status row for the MQTT client added in V2.4.2. Skipped
@@ -1185,6 +1204,7 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_battery    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_gnss       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+    format_sgp41      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_mqtt       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;

@@ -28,6 +28,7 @@
 #include "i2c_bus.h"            // V2.3.29: bus lifecycle (replaces env_sensor_get_i2c_bus)
 #include "pm_sensor.h"
 #include "noise_sensor.h"
+#include "sgp41.h"
 #include "config.h"
 #include "diag.h"               // V2.4.28: I²C sensor-read-error counter
 #include "display.h"
@@ -825,6 +826,21 @@ static void do_tx_cycle(void) {
         }
     }
 
+    // V2.6.15: SGP41 NOx index — unlike noise/PM above, this is a
+    // continuously-updated background value (see sgp41.h), not something
+    // triggered per TX cycle. We just sample whatever the background task
+    // has most recently cached. Not yet valid for the first ~10 s
+    // (conditioning) plus ~45 s (algorithm's initial blackout) after boot.
+    int32_t nox_index = 0;
+    bool    nox_valid = (sgp41_get_nox_index(&nox_index) == ESP_OK);
+    if (sgp41_present()) {
+        if (nox_valid) {
+            ESP_LOGI(TAG, "SGP41: NOx index=%ld", (long)nox_index);
+        } else {
+            ESP_LOGI(TAG, "SGP41: NOx index not yet available (conditioning/warming up)");
+        }
+    }
+
     // V2.3.29 / V2.4.9: feed the multi-page display task with this
     // cycle's sensor readings IF rotation is active. The task wakes
     // every 5 s, rotates through Env / PM Mass / PM Number / Uploads /
@@ -882,7 +898,8 @@ static void do_tx_cycle(void) {
     {
         main_status_t snap;
         main_status_snapshot(&snap);
-        mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise);
+        mqtt_publish_state(&snap, pm_valid, &pm, noise_valid, &noise,
+                           nox_valid, nox_index);
     }
 
     // V2.4.27: hv_pulses_delta (not cumulative) — see comment in do_tx_cycle
@@ -1045,6 +1062,10 @@ void app_main(void) {
     PROBE_ON_BOTH_BUSES(env_sensor_init,   env_sensor_present,   bus1);
     PROBE_ON_BOTH_BUSES(pm_sensor_init,    pm_sensor_present,    bus1);
     PROBE_ON_BOTH_BUSES(noise_sensor_init, noise_sensor_present, bus1);
+    // V2.6.15: SGP41 VOC+NOx sensor — probed after env_sensor_init so its
+    // background sampling task (started inside sgp41_init on a hit) can
+    // find SHT45 already bound for RH/T compensation reads.
+    PROBE_ON_BOTH_BUSES(sgp41_init,        sgp41_present,        bus1);
 
     // V2.5.10: GNSS vs ambient-light auto-detect (no config toggle). The
     // PA1010D GNSS breakout sits at I²C 0x10 — the SAME address as the
@@ -1301,8 +1322,21 @@ void app_main(void) {
 #endif
             vTaskDelay(pdMS_TO_TICKS(500));
             mark_attempt();
-            ESP_LOGI(TAG, "retry connect (attempt #%" PRIu32 ")", n_attempts);
-            esp_wifi_connect();
+            // V2.6.15: esp_wifi_connect() can be rejected with ESP_ERR_WIFI_CONN
+            // when the driver's own internal auth/SAE retry from the previous
+            // cycle is still in flight — observed repeatedly during a WPA3-SAE
+            // retry storm on the C5's 5GHz link, where each internal SAE round
+            // took several seconds and every 500ms-later retry call here was
+            // bounced. Harmless (the driver keeps retrying on its own schedule
+            // regardless), but logging it as a fresh "retry connect" attempt was
+            // misleading. Log what actually happened instead.
+            esp_err_t connect_err = esp_wifi_connect();
+            if (connect_err == ESP_ERR_WIFI_CONN) {
+                ESP_LOGI(TAG, "retry connect (attempt #%" PRIu32 "): driver already reconnecting, skipped",
+                         n_attempts);
+            } else {
+                ESP_LOGI(TAG, "retry connect (attempt #%" PRIu32 ")", n_attempts);
+            }
             continue;
         }
 

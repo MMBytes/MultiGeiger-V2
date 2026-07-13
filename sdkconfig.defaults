@@ -18,6 +18,23 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # Keep CONFIG_LWIP_DHCP_RESTORE_LAST_IP default (y) — REBOOTING fast path on 2nd+ boot.
 
+# V2.6.15: lwIP SNTP client stock default is 1 server slot, silently capping
+# every board (confirmed =1 on sparkfun_thing_plus_esp32c5, feathers3_d,
+# heltec_v2 — never overridden anywhere in this repo). ntp.c's ntp_setup()
+# calls esp_sntp_setservername(0..2, ...) to register all 3 configured NTP
+# servers, but lwIP bounds-checks that index against SNTP_MAX_SERVERS and
+# silently drops any call with idx >= it — so servers #2/#3 were configured
+# in name only and never actually reachable. Worse, with MAX_SERVERS==1,
+# lwIP's sntp.c compiles sntp_try_next_server() as a #define alias for
+# sntp_retry() (components/lwip/lwip/src/apps/sntp/sntp.c) — the entire
+# multi-server failover state machine doesn't exist in the binary, so a dead
+# server 1 is retried forever (exponential backoff, capped ~1h) instead of
+# ever falling through to servers 2/3. Root-caused when 10.11.12.150's
+# chrony.service died and a C5 bench unit never fell back to its two public
+# NTP servers despite them being configured and reachable. Bumped to 3 to
+# match the 3 server slots ntp.c actually tries to fill.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
 # DHCP debug off for overnight soak (was filling log at ~10 KB/s). The lwIP
 # master debug switch below being off already forces every lwIP sub-debug
 # (DHCP included) off, so we don't list the children — an explicit child

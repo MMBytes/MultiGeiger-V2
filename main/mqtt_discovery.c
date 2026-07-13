@@ -33,6 +33,7 @@
 #include "hal.h"
 #include "noise_sensor.h"
 #include "pm_sensor.h"
+#include "sgp41.h"
 #include "veml7700.h"
 #include "fuel_gauge.h"   // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "version.h"
@@ -55,6 +56,7 @@ static bool env_h_present_(void)         { return env_h_present(); }
 static bool env_p_present_(void)         { return env_p_present(); }
 static bool pm_present_(void)            { return pm_sensor_present();  }
 static bool noise_present_(void)         { return noise_sensor_present(); }
+static bool sgp41_present_(void)         { return sgp41_present(); }
 static bool any_light_present_(void)     { return veml7700_present() || als_present(); }
 static bool fuel_gauge_present_(void)    { return fuel_gauge_present(); }
 
@@ -158,6 +160,11 @@ static const ha_entity_t ENTITIES[] = {
     { "noise_laeq", "noise_laeq", "Sound LAeq",      "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
     { "noise_min",  "noise_min",  "Sound min",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
     { "noise_max",  "noise_max",  "Sound max",       "sound_pressure", "dB",    "measurement",      NULL, NULL, noise_present_, NULL },
+
+    // --- Gas (SGP41) --------------------------------------------------------
+    // V2.6.15: NOx only (VOC index intentionally not exposed — see sgp41.h).
+    // Sensirion's proprietary 1..500 scale has no HA-standard device_class.
+    { "nox_index",  "nox_index",  "NOx index",       NULL,             NULL,    "measurement",      "mdi:molecule", NULL, sgp41_present_, NULL },
 
     // --- Ambient light (VEML7700 OR ALS-PT19) -----------------------------
     { "lux",        "lux",        "Illuminance",     "illuminance",    "lx",    "measurement",      NULL, NULL, any_light_present_, NULL },

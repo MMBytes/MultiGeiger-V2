@@ -413,7 +413,8 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
 // keepalive budget and WiFi cycle.
 void mqtt_publish_state(const main_status_t *st,
                         bool pm_valid, const pm_sample_t *pm,
-                        bool noise_valid, const noise_sample_t *noise) {
+                        bool noise_valid, const noise_sample_t *noise,
+                        bool nox_valid, int32_t nox_index) {
     // Hold s_state_mux from the s_client check all the way through the
     // esp_mqtt_client_publish call. Keeps mqtt_stop() (called by OTA
     // teardown on the httpd task) from destroying the handle between
@@ -447,6 +448,8 @@ void mqtt_publish_state(const main_status_t *st,
     //     blocks present, uint32-max counters, signed floats at their
     //     widest) totals ~1466 B against this 1792 B buffer — ~326 B
     //     (~18%) slack remains. 1792 B ceiling still unchanged.
+    //   - V2.6.15 added nox_index (~20 B worst case, "int32_t" min value).
+    //     Well within existing slack; 1792 B ceiling still unchanged.
     // Stack-allocated — cycle task has 4 KB+ stack, so 1792 / 768 B both fit.
 #ifdef MQTT_RICH_STATE
     char buf[1792];   // 8 upload targets + heap split + cpm5/15 + all sensors + FTP
@@ -520,6 +523,13 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"noise_laeq\":%.1f", noise->laeq);
         APPEND(",\"noise_min\":%.1f",  noise->la_min);
         APPEND(",\"noise_max\":%.1f",  noise->la_max);
+    }
+
+    // V2.6.15: SGP41 NOx index (1..500). Suppressed while conditioning /
+    // in the Gas Index Algorithm's initial blackout period, same rationale
+    // as the radiation block above — HA should show unavailable, not 0.
+    if (nox_valid) {
+        APPEND(",\"nox_index\":%ld", (long)nox_index);
     }
 
     // Ambient light — read live (cheap: one ADC sample, ~ms). Two

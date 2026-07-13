@@ -24,6 +24,8 @@ idf_component_register(
         "sps30.c"
         "noise_sensor.c"
         "dnms.c"
+        "sgp41.c"
+        "sensirion_gas_index_algorithm.c"
         "applog.c"
         "diag.c"
         "syslog.c"

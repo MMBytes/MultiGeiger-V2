@@ -90,7 +90,8 @@ bool mqtt_is_initialized(void);
  */
 void mqtt_publish_state(const main_status_t *st,
                         bool pm_valid, const pm_sample_t *pm,
-                        bool noise_valid, const noise_sample_t *noise);
+                        bool noise_valid, const noise_sample_t *noise,
+                        bool nox_valid, int32_t nox_index);
 
 /** @brief True if the client is currently connected to the broker.
  *

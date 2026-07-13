@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.16 — Log wifi_ap_record_t link details (RSSI/channel/security/phy) to syslog
+
+- New `ESP_LOGI` line ("wifi link: ...") in `main.c`, fired once right after
+  the syslog UDP client comes up (same one-shot block that already emits
+  the `config:` dump — V2.5.23). Reports BSSID, channel, secondary-channel/
+  bandwidth, RSSI, auth mode, pairwise/group cipher, the AP's 11b/g/n/a/ac/
+  ax/WPS/FTM capability bits, the negotiated PHY mode, and AID — all pulled
+  from `esp_wifi_sta_get_ap_info()` / `esp_wifi_sta_get_negotiated_phymode()`
+  / `esp_wifi_sta_get_aid()`. Fields are logged as their raw enum/bitfield
+  values, not translated to strings.
+  - Motivation: the WiFi driver's own internal `wifi:`-tagged trace lines
+    (association/PHY negotiation detail — SNR, phy type, rate, etc.) print
+    synchronously during `esp_wifi_connect()`, which is structurally before
+    syslog can be up (syslog only starts after `GOT_IP`, which follows
+    association) — so that trace never reaches the rsyslog server. This adds
+    an equivalent (though coarser — see below) summary that we control the
+    timing of, so it lands in both `/log` and syslog.
+  - Deliberately does NOT attempt to reproduce SNR, noise floor, DTIM
+    period, beacon interval, PMF confirmation, TWT state, or AMPDU state:
+    verified against the ESP-IDF v6.0.2 `esp_wifi` headers that none of
+    these are exposed by any public API on this IDF version — they only
+    exist inside the driver's own internal trace output.
+
 ## V2.6.15 — Adafruit SGP41 gas sensor (NOx), fix SHT45 read-concurrency corruption, fix ESP32-C5 "Chip: ?" display, quiet misleading WiFi retry-connect log, fix silent NTP fallback
 
 - New sensor: Adafruit SGP41 (SKU 6455) VOC/NOx gas sensor, I²C address

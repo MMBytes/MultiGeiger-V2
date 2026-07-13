@@ -1414,6 +1414,32 @@ void app_main(void) {
             // re-enter once syslog is up. Syslog-OFF nodes dumped it at boot.
             if (syslog_is_initialized()) {
                 config_log_summary(&g_cfg);
+
+                // V2.6.16: raw wifi_ap_record_t + negotiated phymode dump —
+                // same association info the driver's own "wifi:" trace lines
+                // print (RSSI, channel, security, phy caps), but queried via
+                // the public esp_wifi API so we control the timing and it
+                // reaches syslog. Fields are logged as-is (no enum->string
+                // mapping): authmode/pairwise/group/phymode are the raw
+                // wifi_auth_mode_t / wifi_cipher_type_t / wifi_phy_mode_t
+                // values, b/g/n/lr/a/ac/ax/wps/ftmr/ftmi are the ap_record's
+                // capability bitfields.
+                wifi_ap_record_t ap = { 0 };
+                if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                    wifi_phy_mode_t phymode = 0;
+                    esp_wifi_sta_get_negotiated_phymode(&phymode);
+                    uint16_t aid = 0;
+                    esp_wifi_sta_get_aid(&aid);
+                    ESP_LOGI(TAG, "wifi link: bssid=" MACSTR " ch=%d second=%d bandwidth=%d "
+                                  "rssi=%d authmode=%d pairwise=%d group=%d "
+                                  "b=%d g=%d n=%d lr=%d a=%d ac=%d ax=%d wps=%d ftmr=%d ftmi=%d "
+                                  "phymode=%d aid=%d",
+                             MAC2STR(ap.bssid), ap.primary, ap.second, ap.bandwidth,
+                             ap.rssi, ap.authmode, ap.pairwise_cipher, ap.group_cipher,
+                             ap.phy_11b, ap.phy_11g, ap.phy_11n, ap.phy_lr, ap.phy_11a,
+                             ap.phy_11ac, ap.phy_11ax, ap.wps, ap.ftm_responder,
+                             ap.ftm_initiator, phymode, aid);
+                }
             }
         }
 

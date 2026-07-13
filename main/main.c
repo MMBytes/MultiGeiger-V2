@@ -292,6 +292,17 @@ static void mark_attempt(void) {
 // its bandwidth is forced to WIFI_BW20 regardless of ht20_only because the
 // IDF only allows WIFI_BW20 on a band with 11AC/11AX enabled — matching the
 // BW20 link actually observed on air.
+//
+// On CONFIG_SOC_WIFI_HE_SUPPORT chips (the C5 today), IDF's own unrestricted
+// 2.4 GHz default already includes WIFI_PROTOCOL_11AX (esp_wifi.h's
+// esp_wifi_set_protocol() doc comment). Because the singular call used to
+// fail outright here, that AX-inclusive default was never actually
+// overridden — every C5 has been running on it, unmonitored, since its
+// board port shipped. Gating 11AX on this capability macro (rather than
+// leaving it out, as the pre-existing 2.4GHz-only boards' value does)
+// preserves that already-proven default instead of silently downgrading
+// HE-capable chips to HT (802.11n) the first time this code path actually
+// takes effect.
 static void apply_radio_limits_sta(void) {
     wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
     esp_wifi_get_band_mode(&band_mode);
@@ -299,7 +310,12 @@ static void apply_radio_limits_sta(void) {
     if (band_mode == WIFI_BAND_MODE_AUTO) {
         wifi_protocols_t proto = { 0 };
         proto.ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
-        if (!g_cfg.wifi_11bg_only) proto.ghz_2g |= WIFI_PROTOCOL_11N;
+        if (!g_cfg.wifi_11bg_only) {
+            proto.ghz_2g |= WIFI_PROTOCOL_11N;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+            proto.ghz_2g |= WIFI_PROTOCOL_11AX;
+#endif
+        }
         proto.ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N |
                         WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX;
         esp_err_t r = esp_wifi_set_protocols(WIFI_IF_STA, &proto);

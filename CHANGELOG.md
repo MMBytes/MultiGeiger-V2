@@ -38,6 +38,20 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     (never calls esp_wifi_set_band_mode())" — the second half is true, but
     the conclusion was wrong: not calling it means the chip runs its
     dual-band `AUTO` default, not a 2.4 GHz-only mode.
+  - Follow-up (same version, found in Fable MAX review of this fix): the
+    `ghz_2g` protocol set above was copied from the pre-existing single-band
+    code, which predates any 802.11ax-capable board and so never included
+    `WIFI_PROTOCOL_11AX`. Since the singular API call used to fail outright
+    on the C5, that omission was never actually enforced — the chip has been
+    running on IDF's own unrestricted-2.4GHz default (which *does* include
+    11AX on `CONFIG_SOC_WIFI_HE_SUPPORT` chips, per `esp_wifi_set_protocol()`'s
+    doc comment) the whole time. Fixing the failing call without also adding
+    11AX would have silently downgraded every C5 from HE to HT rates on
+    2.4 GHz the first time this code path actually took effect. Now gated:
+    `proto.ghz_2g` includes `WIFI_PROTOCOL_11AX` when `!wifi_11bg_only` **and**
+    `CONFIG_SOC_WIFI_HE_SUPPORT` — capability-gated rather than hardcoded to
+    the C5, so any future HE-capable board port inherits the same default
+    without code changes.
 
 ## V2.6.16 — Log wifi_ap_record_t link details (RSSI/channel/security/phy) to syslog
 

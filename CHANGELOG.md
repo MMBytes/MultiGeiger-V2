@@ -9,7 +9,7 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.15 — Adafruit SGP41 gas sensor (NOx), fix ESP32-C5 "Chip: ?" display, quiet misleading WiFi retry-connect log, fix silent NTP fallback
+## V2.6.15 — Adafruit SGP41 gas sensor (NOx), fix SHT45 read-concurrency corruption, fix ESP32-C5 "Chip: ?" display, quiet misleading WiFi retry-connect log, fix silent NTP fallback
 
 - New sensor: Adafruit SGP41 (SKU 6455) VOC/NOx gas sensor, I²C address
   `0x59`, board-agnostic auto-detect (`sgp41_init`/`sgp41_present`,
@@ -24,12 +24,21 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     cadence and has a ~45 s initial "blackout" plus multi-hour maturation
     (mean-estimator ~4.75 h, variance ~5.7 h) before its output stabilises.
     Boot sequence: `executeConditioning()` once/second for 10 s (VOC-only,
-    NOx unused), then `measureRawSignals()` at 1 Hz indefinitely. Reads live
-    RH/T from the SHT45 (if present) each tick for compensation, falling
-    back to the sensor's disable-compensation defaults (50% RH / 25°C)
-    otherwise. Latest index cached behind a mutex-guarded getter
-    (`sgp41_get_nox_index()`), matching the existing `noise_sensor.c`
-    last-known-good pattern.
+    NOx unused), then `measureRawSignals()` at 1 Hz indefinitely, each with a
+    70 ms post-command wait (guarantees the datasheet's 50 ms conversion time
+    even at the fleet's worst-case tick-rounding). Reads live RH/T from the
+    SHT45 (if present) each tick for compensation, falling back to the
+    sensor's disable-compensation defaults (50% RH / 25°C) otherwise. Latest
+    index cached behind a mutex-guarded getter (`sgp41_get_nox_index()`);
+    the cache ages out and is withheld (`ESP_FAIL`) after 15 s without a
+    fresh sample rather than serving an arbitrarily old reading, and the
+    `/status` page and per-cycle log line distinguish first-boot warmup from
+    a sensor that later went unresponsive (`sgp41_had_valid_reading()`).
+    Cache-mutex allocation failure during init is treated as sensor-absent
+    rather than risking unserialized access. Measurement failures log a WARN
+    on the first occurrence and every 30th thereafter (instead of one per
+    second for as long as the sensor stays wedged), plus a one-shot note
+    once a failure streak crosses 15 consecutive samples.
   - Vendored `sensirion_gas_index_algorithm.{c,h}` verbatim (float variant —
     ESP32 has HW FPU, so `_fixpoint` wasn't needed) from
     `github.com/Sensirion/gas-index-algorithm`, BSD-3-Clause, with a
@@ -47,6 +56,19 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
     shows "unavailable" rather than a misleading `0`), and MQTT HA Discovery
     (`mqtt_discovery.c`, `device_class=NULL` — Sensirion's 1..500 scale has
     no HA-standard class, same convention as the existing PM4/NC entities).
+  - The serial-number probe (`sgp41_get_serial()`, used once at init) uses a
+    precise 2 ms busy-wait instead of a 1 ms `vTaskDelay`, which rounds down
+    to a no-op at the fleet's 100 Hz tick rate — same fix already in place
+    for `sht45.c`'s own serial-number read.
+- SHT45 driver (`sht45.c`) read/write access is now mutex-serialized. The
+  new SGP41 background task reads live RH/T from the SHT45 once per second
+  for compensation, alongside the main task's own per-TX-cycle
+  `sht45_read()` call; the sensor's multi-step I²C protocol (write command
+  → wait → read result) isn't safe against two tasks interleaving on the
+  same device, and an unlucky interleave could silently return a CRC-valid
+  but wrong reading. All `sht45_read()`/`sht45_heat_periodic()` access now
+  goes through a shared mutex; a failed mutex allocation is treated as
+  sensor-absent rather than falling back to unserialized access.
 - `chip_model_str()` in `main/sysinfo.h` — the shared model-string lookup
   used by the boot `chip:` log line, the `/status` device block, and the
   syslog boot banner — never had a case for `CHIP_ESP32C5` (added to

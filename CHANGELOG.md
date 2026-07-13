@@ -12,58 +12,42 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 ## V2.6.17 — Fix ESP32-C5 STA radio-limit APIs under WIFI_BAND_MODE_AUTO
 
 - `apply_radio_limits_sta()` (`main.c`) previously always called the
-  single-band `esp_wifi_set_protocol()`/`esp_wifi_set_bandwidth()`. On the
-  ESP32-C5 (this fleet's only dual-band chip) the firmware never calls
-  `esp_wifi_set_band_mode()`, so it runs on the IDF default of
-  `WIFI_BAND_MODE_AUTO` — and both single-band calls are documented to
-  return `ESP_ERR_NOT_SUPPORTED` in that mode, confirmed live in the
-  V2.6.16 verification boot log (both calls failed with warnings, silently
-  leaving the `wifi_11bg_only`/`wifi_ht20_only` config flags un-applied on
-  that board — harmless today only because both flags default off).
+  single-band `esp_wifi_set_protocol()`/`esp_wifi_set_bandwidth()`, which
+  IDF returns `ESP_ERR_NOT_SUPPORTED` for under `WIFI_BAND_MODE_AUTO` — the
+  default band mode on the ESP32-C5 (this fleet's only dual-band chip),
+  since the firmware never calls `esp_wifi_set_band_mode()`. Both calls
+  failed silently, leaving the `wifi_11bg_only`/`wifi_ht20_only` config
+  flags un-applied on that board.
   - Fix: branch at runtime on `esp_wifi_get_band_mode()`. Under
     `WIFI_BAND_MODE_AUTO`, use the plural per-band
     `esp_wifi_set_protocols()`/`esp_wifi_set_bandwidths()` (separate
     `ghz_2g`/`ghz_5g` fields) instead; single-band boards keep the original
-    calls unchanged. Runtime check rather than a board `#ifdef`, so any
-    future dual-band port gets this automatically.
+    calls unchanged.
   - `wifi_11bg_only`/`wifi_ht20_only` are 2.4 GHz-only concepts (5 GHz has
-    no 11b/g), so `ghz_5g` protocol is always the fullest set
-    (11A/11N/11AC/11AX) regardless of `wifi_11bg_only`, and `ghz_5g`
-    bandwidth is always forced to `WIFI_BW20` regardless of `wifi_ht20_only`
-    — the IDF only permits `WIFI_BW20` on a band with 11AC/11AX enabled,
-    which also matches the BW20 link actually observed on air against a
-    160MHz-capable AP.
-  - Corrected an adjacent stale comment in `hal.h`'s C5 board section that
-    claimed the firmware "only ever configures 2.4 GHz WiFi station mode
-    (never calls esp_wifi_set_band_mode())" — the second half is true, but
-    the conclusion was wrong: not calling it means the chip runs its
-    dual-band `AUTO` default, not a 2.4 GHz-only mode.
-  - Follow-up (same version, found in Fable MAX review of this fix): the
-    `ghz_2g` protocol set above was copied from the pre-existing single-band
-    code, which predates any 802.11ax-capable board and so never included
-    `WIFI_PROTOCOL_11AX`. Since the singular API call used to fail outright
-    on the C5, that omission was never actually enforced — the chip has been
-    running on IDF's own unrestricted-2.4GHz default (which *does* include
-    11AX on `CONFIG_SOC_WIFI_HE_SUPPORT` chips, per `esp_wifi_set_protocol()`'s
-    doc comment) the whole time. Fixing the failing call without also adding
-    11AX would have silently downgraded every C5 from HE to HT rates on
-    2.4 GHz the first time this code path actually took effect. Now gated:
-    `proto.ghz_2g` includes `WIFI_PROTOCOL_11AX` when `!wifi_11bg_only` **and**
-    `CONFIG_SOC_WIFI_HE_SUPPORT` — capability-gated rather than hardcoded to
-    the C5, so any future HE-capable board port inherits the same default
-    without code changes.
-  - Second follow-up (same version, also from the Fable MAX review): the
-    `/config` page's "Limit to 802.11b/g" checkbox label implies a
-    device-wide restriction, but on dual-band boards it only ever restricts
-    `ghz_2g` — `apply_radio_limits_sta()` always leaves `ghz_5g` at its
-    fullest protocol set, since 802.11b/g doesn't exist on 5GHz to begin
-    with. A C5 near a same-SSID dual-band AP can still associate via
-    5GHz/11ac/11ax with the box ticked. No functional change (that would
-    mean pinning `WIFI_BAND_MODE_2G_ONLY`, which can only be set *after*
-    `esp_wifi_start()` — a larger, separately-scoped change to the STA
-    bring-up sequence) — just disclosed in the UI: the checkbox now shows
-    "(2.4GHz only — this board's 5GHz radio stays unrestricted)" on any
-    `CONFIG_SOC_WIFI_SUPPORT_5G` board (`http_server.c`).
+    no 11b/g), so `ghz_5g`'s protocol set is always the fullest
+    (11A/11N/11AC/11AX) regardless of `wifi_11bg_only`.
+  - `ghz_2g`'s protocol set includes `WIFI_PROTOCOL_11AX` when
+    `!wifi_11bg_only` on `CONFIG_SOC_WIFI_HE_SUPPORT` chips, matching the
+    unrestricted-2.4GHz default IDF already used on the C5 before this fix
+    — so HE-capable boards keep their 802.11ax rate rather than being
+    silently downgraded to HT (802.11n).
+  - Bandwidth on both bands is derived via a `max_legal_bw()` helper rather
+    than a bare `wifi_ht20_only` ternary: IDF only permits `WIFI_BW40` when
+    802.11n is in the protocol mask and neither 11AC nor 11AX is —
+    requesting `WIFI_BW40` against an 11AX-inclusive 2.4GHz mask (or an
+    11bg-only, no-11n mask) is rejected outright and previously left both
+    bands' bandwidth unset. This also fixes the same latent bug on legacy
+    2.4GHz-only boards when `wifi_11bg_only` is checked.
+  - `/config`: the "Limit to 802.11b/g" and "Limit to 20MHz" checkboxes
+    each show a caveat where they don't do what the label implies — the
+    former discloses it only restricts 2.4GHz (5GHz stays unrestricted) on
+    `CONFIG_SOC_WIFI_SUPPORT_5G` boards; the latter discloses it has no
+    effect on `CONFIG_SOC_WIFI_HE_SUPPORT` boards, whose 802.11ax radio is
+    capped at 20MHz regardless.
+  - Corrected a stale comment in `hal.h`'s C5 board section claiming the
+    firmware "only ever configures 2.4 GHz WiFi station mode" — not calling
+    `esp_wifi_set_band_mode()` means the chip runs its dual-band `AUTO`
+    default, not a 2.4GHz-only mode.
 
 ## V2.6.16 — Log wifi_ap_record_t link details (RSSI/channel/security/phy) to syslog
 

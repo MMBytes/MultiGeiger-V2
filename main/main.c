@@ -277,6 +277,18 @@ static void mark_attempt(void) {
     n_attempts++;
 }
 
+// Maximum WIFI_BW* legal for a given protocol bitmap, per esp_wifi.h's
+// esp_wifi_set_bandwidth()/set_bandwidths() @attention 1+2: WIFI_BW40 needs
+// WIFI_PROTOCOL_11N in the mask and neither WIFI_PROTOCOL_11AC nor
+// WIFI_PROTOCOL_11AX — both setters return ESP_ERR_INVALID_ARG otherwise.
+static wifi_bandwidth_t max_legal_bw(uint8_t proto_mask) {
+    if ((proto_mask & WIFI_PROTOCOL_11N) &&
+        !(proto_mask & (WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX))) {
+        return WIFI_BW40;
+    }
+    return WIFI_BW20;
+}
+
 // Apply user-configured radio capability limits to the STA interface.
 // Called right before esp_wifi_start() when the AP→STA switch happens;
 // the APIs take effect on the next association, so ordering matters.
@@ -288,10 +300,7 @@ static void mark_attempt(void) {
 // board (both calls failed, silently leaving the flags un-applied). The
 // plural per-band esp_wifi_set_protocols()/set_bandwidths() are required
 // instead in that mode. 11bg_only/ht20_only are 2.4 GHz-only concepts (5 GHz
-// has no 11b/g), so the 5 GHz side is always given the fullest protocol set;
-// its bandwidth is forced to WIFI_BW20 regardless of ht20_only because the
-// IDF only allows WIFI_BW20 on a band with 11AC/11AX enabled — matching the
-// BW20 link actually observed on air.
+// has no 11b/g), so the 5 GHz side is always given the fullest protocol set.
 //
 // On CONFIG_SOC_WIFI_HE_SUPPORT chips (the C5 today), IDF's own unrestricted
 // 2.4 GHz default already includes WIFI_PROTOCOL_11AX (esp_wifi.h's
@@ -303,6 +312,21 @@ static void mark_attempt(void) {
 // preserves that already-proven default instead of silently downgrading
 // HE-capable chips to HT (802.11n) the first time this code path actually
 // takes effect.
+//
+// bw.ghz_2g is NOT a bare ht20_only ternary: confirmed live on a C5 that
+// requesting WIFI_BW40 against a mask carrying WIFI_PROTOCOL_11AX fails the
+// same way a bg-only (no-11N) mask does — set_bandwidths(2g=WIFI_BW40,
+// 5g=WIFI_BW20) was rejected outright with ESP_ERR_INVALID_ARG, leaving
+// BOTH bands' bandwidth unset. max_legal_bw() derives the ceiling from the
+// same protocol mask just requested above, so it can never ask for a value
+// the driver will refuse for THIS mask, on THIS or any future HE-capable
+// board — ht20_only still narrows further when checked. On an HE chip with
+// it unchecked, 2.4 GHz is capped at 20 MHz anyway (11AX is in the mask),
+// making the checkbox a no-op there; disclosed via a /config caveat
+// (http_server.c) rather than silently promising 40 MHz. 5 GHz's bandwidth
+// now goes through the same helper instead of a hardcoded WIFI_BW20 — it
+// still always resolves to BW20 (its protocol set always carries 11AC/
+// 11AX), but the code now derives that instead of just asserting it.
 static void apply_radio_limits_sta(void) {
     wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
     esp_wifi_get_band_mode(&band_mode);

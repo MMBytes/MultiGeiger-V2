@@ -1416,7 +1416,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
         "%s</label></div>"
         "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
-        "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span></label></div>"
+        "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span>"
+        "%s</label></div>"
         "<script>function syncHt20(){"
         "var bg=document.getElementById('wifi_11bg');"
         "var ht=document.getElementById('wifi_ht20');"
@@ -1749,6 +1750,18 @@ static esp_err_t config_get(httpd_req_t *req) {
         "",
 #endif
         s_cfg->wifi_ht20_only   ? "checked" : "",
+        // V2.6.17: on CONFIG_SOC_WIFI_HE_SUPPORT chips (ESP32-C5 today),
+        // apply_radio_limits_sta() (main.c) caps 2.4GHz at 20MHz regardless
+        // of this checkbox once 802.11ax is in the protocol mask (IDF only
+        // allows WIFI_BW40 without 11AC/11AX in the mask) — confirmed live.
+        // Disclose the no-op rather than implying the checkbox still gates
+        // a real 40MHz mode on these boards.
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+        " <small>(no effect on this board &mdash; its 802.11ax radio runs "
+        "at 20MHz in every mode)</small>",
+#else
+        "",
+#endif
         s_cfg->wifi_ps_disabled ? "checked" : "",
 #if HAL_HAS_ANTENNA_SWITCH
         "",                                                  // not disabled on this board

@@ -51,6 +51,11 @@ static GasIndexAlgorithmParams s_nox_params;
 static SemaphoreHandle_t s_cache_mux = NULL;
 static int32_t           s_last_nox_index = 0;
 static bool               s_last_nox_valid = false;
+// V2.6.15: one-way latch, set the first time a valid index is ever produced
+// and never cleared — lets callers tell "still in first-boot warmup" (never
+// latched) apart from "was working, now stale/wedged" (latched, but
+// s_last_nox_valid has since gone false) for accurate status-page wording.
+static bool               s_ever_valid = false;
 
 static uint16_t humidity_to_ticks(float rh_pct) {
     if (rh_pct < 0.0f)   rh_pct = 0.0f;
@@ -173,6 +178,7 @@ static void sgp41_task(void *arg) {
                 xSemaphoreTake(s_cache_mux, portMAX_DELAY);
                 s_last_nox_index = nox_index;
                 s_last_nox_valid = true;
+                s_ever_valid = true;
                 xSemaphoreGive(s_cache_mux);
             }
         } else {
@@ -237,7 +243,14 @@ esp_err_t sgp41_init(i2c_master_bus_handle_t bus) {
     ESP_LOGI(TAG, "SGP41 ready at 0x%02X, serial=0x%04x%04x%04x",
              SGP41_ADDR, serial[0], serial[1], serial[2]);
 
+    // V2.6.15: a failed mutex allocation must not silently fall back to the
+    // unserialized cache access this mutex exists to prevent.
     if (!s_cache_mux) s_cache_mux = xSemaphoreCreateMutex();
+    if (!s_cache_mux) {
+        ESP_LOGE(TAG, "mutex creation failed — treating SGP41 as absent");
+        i2c_dev_teardown(&s_dev);
+        return ESP_OK;
+    }
     GasIndexAlgorithm_init(&s_nox_params, GasIndexAlgorithm_ALGORITHM_TYPE_NOX);
 
     BaseType_t ok = xTaskCreate(sgp41_task, "sgp41", 4096, NULL,
@@ -264,4 +277,12 @@ esp_err_t sgp41_get_nox_index(int32_t *out) {
     if (valid) *out = s_last_nox_index;
     xSemaphoreGive(s_cache_mux);
     return valid ? ESP_OK : ESP_FAIL;
+}
+
+bool sgp41_had_valid_reading(void) {
+    if (!s_ready || !s_cache_mux) return false;
+    xSemaphoreTake(s_cache_mux, portMAX_DELAY);
+    bool ever = s_ever_valid;
+    xSemaphoreGive(s_cache_mux);
+    return ever;
 }

@@ -53,3 +53,11 @@ bool sgp41_present(void);
  *  valid index produced yet).
  */
 esp_err_t sgp41_get_nox_index(int32_t *out);
+
+/** @brief True if the background task has EVER produced a valid NOx index,
+ *         even if the cache is currently invalid/stale. Distinguishes
+ *         first-boot warmup (never valid yet) from a sensor that was
+ *         working and has since gone unresponsive, for accurate status
+ *         wording — see sgp41_get_nox_index()'s ESP_FAIL case.
+ */
+bool sgp41_had_valid_reading(void);

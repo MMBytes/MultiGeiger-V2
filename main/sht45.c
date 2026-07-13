@@ -169,7 +169,15 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
         return ESP_FAIL;
     }
 
+    // V2.6.15: a failed mutex allocation must not silently fall back to the
+    // unserialized access this mutex exists to prevent (see the s_mutex
+    // comment above) — treat it the same as any other init failure.
     if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) {
+        ESP_LOGE(TAG, "mutex creation failed — treating SHT45 as absent");
+        i2c_dev_teardown(&s_dev);
+        return ESP_FAIL;
+    }
     s_ready = true;
 
     // V2.3.30: log the factory serial — diagnostic aid for tracking which

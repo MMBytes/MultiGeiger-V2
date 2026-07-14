@@ -9,6 +9,18 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.19 — Log STA IP/gateway/netmask/DNS to syslog
+
+- New `ESP_LOGI` line ("wifi ip: ...") in `main.c`, fired right after the
+  "wifi link: ..." line added in V2.6.16 — same one-shot block that already
+  emits the `config:` dump (V2.5.23). Reports the STA's IP address, gateway,
+  network mask, and both DNS servers via `esp_netif_get_ip_info()` /
+  `esp_netif_get_dns_info()`.
+  - Motivation: `on_ip_event()` already logs this at `GOT_IP`, but that fires
+    before `syslog_init()` (syslog only starts once STA has an IP) so it
+    never reaches the rsyslog server — the same gap the V2.6.16 `wifi link:`
+    line closed for RF/association details.
+
 ## V2.6.18 — Fix OTA upload stall on heavy-TX-target PSRAM nodes (recv-mailbox ceiling)
 
 - Repeated `/update` OTA failures on esp32-5965048 (feathers3_d): the 1.3+ MB

@@ -1523,6 +1523,24 @@ void app_main(void) {
                              ap.phy_11ac, ap.phy_11ax, ap.wps, ap.ftm_responder,
                              ap.ftm_initiator, phymode, aid);
                 }
+
+                // V2.6.19: STA IP/gateway/netmask/DNS dump alongside the "wifi
+                // link:" RF details above. Read fresh here (not reused from the
+                // GOT_IP handler's own log line) because that one fires before
+                // syslog_init() and never reaches the server — same reasoning
+                // as the config: dump this block already does.
+                esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                if (sta_netif) {
+                    esp_netif_ip_info_t ip = { 0 };
+                    esp_netif_dns_info_t dns1 = { 0 }, dns2 = { 0 };
+                    esp_netif_get_ip_info(sta_netif, &ip);
+                    esp_netif_get_dns_info(sta_netif, ESP_NETIF_DNS_MAIN,   &dns1);
+                    esp_netif_get_dns_info(sta_netif, ESP_NETIF_DNS_BACKUP, &dns2);
+                    ESP_LOGI(TAG, "wifi ip: IP=" IPSTR " Gateway=" IPSTR
+                                  " Network Mask=" IPSTR " DNS=" IPSTR ", " IPSTR,
+                             IP2STR(&ip.ip), IP2STR(&ip.gw), IP2STR(&ip.netmask),
+                             IP2STR(&dns1.ip.u_addr.ip4), IP2STR(&dns2.ip.u_addr.ip4));
+                }
             }
         }
 

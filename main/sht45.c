@@ -40,8 +40,15 @@ static uint32_t                s_last_heat_ms = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 
 // V2.6.19: last-read cache consumed by the telemetry read callbacks below.
-// Written ONLY by sht45_read() (main-task TX cycle, under the I2C mutex);
-// read ONLY by sd_logger's row build on the same task — no locking needed.
+// Written by sht45_read(), which is called from the main-task TX cycle AND
+// from sgp41.c's background compensation task (see the V2.6.15 note above) —
+// the two writers are serialized against each other by s_mutex, so writes
+// never tear each other. Read by sd_logger's row build on the main task
+// WITHOUT taking the mutex: a read landing mid-update from the other writer
+// task can pair a fresh T with a stale H (or vice versa) — s_tm_valid alone
+// does not guard against that. Accepted as a narrow, low-impact residual
+// race (both values are at most ~1 s apart); revisit with a generation
+// counter if sd_logger ever needs strict same-sample row consistency.
 // Invalidated on read failure so the CSV emits an empty cell, never stale data.
 static bool  s_tm_valid;
 static float s_tm_t_c;

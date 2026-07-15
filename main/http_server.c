@@ -39,6 +39,7 @@
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
+#include "sd_logger.h"         // V2.6.19: standalone-mode CSV logger status (/status card)
 #include "tube.h"
 #include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
 #include "history.h"            // V2.5.6: CPM history for the /status graph
@@ -782,6 +783,51 @@ static void format_gnss(char *out, size_t sz) {
     append_safe(out, sz, n, "</div>");
 }
 
+// --- SD logger block (standalone mode) --------------------------------------
+// V2.6.19: standalone-mode CSV logging status (design spec §7). Board- AND
+// mode-gated: sd_logger_get_status() only ever has real data on
+// HAL_HAS_SD_CARD boards with standalone_sd ticked — everywhere else the
+// fields sit at their zero/empty init forever (sd_logger.h), so showing the
+// card there would just be permanent, misleading clutter. This is the only
+// place a field node without a permanent AP can see logging health without
+// pulling the card; a dedicated OLED page is deliberately deferred (spec §7).
+#if HAL_HAS_SD_CARD
+static void format_sd_logger(char *out, size_t sz) {
+    if (!s_cfg->standalone_sd) { out[0] = 0; return; }
+
+    sd_logger_status_t sd;
+    sd_logger_get_status(&sd);
+
+    int n = append_safe(out, sz, 0,
+        "<div class=\"info\"><h3>SD Logger</h3>"
+        "<b>SD card:</b> %s<br>",
+        sd.mounted ? "mounted" : "NOT MOUNTED");
+
+    if (sd.filename[0]) {
+        // Device-generated (chip-id + UTC timestamp, sd_logger.h) — same
+        // no-escape treatment as the GNSS serial/chip-id strings above,
+        // not user-supplied config text.
+        n = append_safe(out, sz, n, "<b>CSV file:</b> %s<br>", sd.filename);
+    } else if (sd.mounted) {
+        // File creation waits for the first GNSS clock sync (sd_logger.h) —
+        // an empty name while mounted means "no fix yet", not a fault.
+        n = append_safe(out, sz, n,
+            "<b>CSV file:</b> &mdash; (waiting for GPS fix)<br>");
+    }
+
+    n = append_safe(out, sz, n,
+        "<b>Rows written:</b> %lu", (unsigned long)sd.rows_written);
+
+    if (sd.last_err != 0) {
+        n = append_safe(out, sz, n,
+            "<br><b>Last error:</b> %d (streak %lu)",
+            sd.last_err, (unsigned long)sd.fail_streak);
+    }
+
+    append_safe(out, sz, n, "</div>");
+}
+#endif
+
 // --- Noise block -------------------------------------------------------------
 static void format_noise(char *out, size_t sz) {
     if (!noise_sensor_present()) { out[0] = 0; return; }
@@ -1208,6 +1254,9 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_als        (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_battery    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_gnss       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+#if HAL_HAS_SD_CARD
+    format_sd_logger  (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+#endif
     format_noise      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_sgp41      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;

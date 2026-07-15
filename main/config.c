@@ -269,6 +269,12 @@ void config_log_summary(const config_t *cfg) {
              cfg->syslog_enable,
              cfg->syslog_host[0] ? cfg->syslog_host : "<empty>",
              (unsigned long)cfg->syslog_port);
+    // V2.6.19: standalone SD-logging mode. Fields exist on every board (NVS
+    // portability — see config_fields.def), so dumped unconditionally like the
+    // other bool pairs above rather than HAL-gated (contrast i2c_pinout, which
+    // is only meaningful/dumped on the one board with the alternate pinout).
+    LOG_PACED("  standalone:       standalone_sd=%d standalone_ap_on=%d",
+             cfg->standalone_sd, cfg->standalone_ap_on);
     #undef LOG_PACED
     #undef MASK
 }

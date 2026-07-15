@@ -401,3 +401,13 @@ X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 // re-triggers, e.g. the classic-ESP32 QT Py where pcnt_filter is pointless).
 X_BOOL(deadtime_guard,         "dt_guard",    false)
 X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
+
+// --- Standalone SD-logging mode (V2.6.19) ------------------------------------
+//
+// Only meaningful on HAL_HAS_SD_CARD boards (the /config form renders the
+// block conditionally), but the fields exist on every board so NVS blobs
+// stay portable across board variants. standalone_ap_on is ignored by
+// main.c unless standalone_sd is also set (UI additionally grays it out).
+
+X_BOOL(standalone_sd,          "sd_stand",   false)
+X_BOOL(standalone_ap_on,       "sd_ap_on",   false)

@@ -1494,6 +1494,32 @@ static esp_err_t config_get(httpd_req_t *req) {
         "&mdash; shows battery voltage/charge/rate on this page, MQTT, and HA "
         "Discovery. Can't be auto-detected: USB power alone makes the chip read "
         "a plausible battery-shaped voltage even with none attached.%s</label></div>"
+#if HAL_HAS_SD_CARD
+        // V2.6.19: standalone SD-logging block (2026-07-15 design spec §2).
+        // Second checkbox is UI-gated on the first via the inline script
+        // (mirrors the wifi_ht20 dependent-checkbox pattern); server-side,
+        // main.c ignores standalone_ap_on unless standalone_sd is set, so a
+        // stale flag can never keep the radio on in a networked node.
+        "<h3>Standalone mode</h3>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sd_stand\" "
+        "id=\"sd_stand\" onchange=\"syncSdAp()\" %s> Standalone mode (SD logging, "
+        "radio off). After the boot AP window the radio turns off and every TX "
+        "cycle appends one CSV row of all attached sensor readings to the microSD "
+        "card. Requires a FAT32 card and a GPS receiver (clock source &mdash; "
+        "logging starts at first fix). <span class=\"r\">*</span></label></div>"
+        // Indented .cfg wrapper (same as pcnt_filt under tube_en) — USER-APPROVED
+        // mock 2026-07-15: V4/standalone_config_block.html. Untick of standalone
+        // also CLEARS the AP checkbox (not just disables) so no stale hidden
+        // state survives; server-side ignore is the backstop.
+        "<div class=\"cfg\"><div class=\"chk\"><label><input type=\"checkbox\" "
+        "name=\"sd_ap_on\" id=\"sd_ap_on\" %s> Keep WiFi access point on "
+        "permanently (uses more battery) &mdash; /status, /log and /config stay "
+        "reachable in the field. <span class=\"r\">*</span></label></div></div>"
+        "<script>function syncSdAp(){var s=document.getElementById('sd_stand');"
+        "var a=document.getElementById('sd_ap_on');"
+        "if(s.checked){a.disabled=false;}else{a.disabled=true;a.checked=false;}}"
+        "syncSdAp();</script>"
+#endif
         // V2.5.30: heap-guard floor moved here to the BOTTOM of the Hardware
         // section (was in "Other"). No asterisk — read live each TX cycle by
         // tx_heap_guard() (V2.5.18), so it applies on plain Save (no reboot).
@@ -1796,6 +1822,10 @@ static esp_err_t config_get(httpd_req_t *req) {
         "disabled",                                  // greyed out
         "",                                          // never checked on this board
         " <small>(not available on this board)</small>",
+#endif
+#if HAL_HAS_SD_CARD
+        s_cfg->standalone_sd    ? "checked" : "",    // V2.6.19: standalone SD-logging
+        s_cfg->standalone_ap_on ? "checked" : "",    // V2.6.19: keep-AP-on sub-toggle
 #endif
         (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
         (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box

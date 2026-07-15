@@ -40,3 +40,8 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
 # (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).
+
+# V2.6.19 standalone SD logging: FAT32 long filenames (esp32-<chipid>_YYYYMMDD_HHMMSS.csv).
+# CONFIG_FATFS_LFN_HEAP=y is already the IDF 6.0.1 Kconfig default — pinned here as
+# documentation of intent so a future IDF default change can't silently break CSV names.
+CONFIG_FATFS_LFN_HEAP=y

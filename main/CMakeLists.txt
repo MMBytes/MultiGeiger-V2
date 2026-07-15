@@ -27,6 +27,7 @@ idf_component_register(
         "sgp41.c"
         "telemetry.c"
         "sd_card.c"
+        "sd_logger.c"
         "sensirion_gas_index_algorithm.c"
         "applog.c"
         "diag.c"

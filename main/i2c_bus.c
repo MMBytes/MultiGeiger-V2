@@ -141,10 +141,18 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
 #elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
     if (s_bus_secondary) return s_bus_secondary;
 
-    // No gating GPIO on this board — the OLED's bus (PIN_OLED_SDA/SCL) is a
-    // fixed module-internal bus, always powered from the module's own
-    // always-on 3.3V rail (NOT the switchable Vext/"Ve" pin — see hal.h's
-    // HAL_HAS_VEXT_GATE comment). Bring the controller up directly.
+    // V2.6.20 (see hal.h's HAL_HAS_VEXT_GATE comment on this board):
+    // first real hardware showed every transaction on this bus timing
+    // out, the classic signature of an unpowered I2C target — the
+    // datasheet's claim that Vext_Ctrl doesn't gate the OLED was wrong.
+    // Drive Vext_Ctrl LOW here (mirroring Heltec V2's PIN_VEXT pattern in
+    // i2c_bus_get_primary() above) before bringing the controller up;
+    // bench-confirmed to clear the timeouts and light up the OLED.
+    gpio_reset_pin(PIN_VEXT);
+    gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_VEXT, 0);                       // 0 = Vext ON
+    vTaskDelay(pdMS_TO_TICKS(50));                     // rail settle + OLED charge-pump warm-up
+
     i2c_master_bus_config_t cfg = {
         .i2c_port             = I2C_NUM_1,
         .sda_io_num           = PIN_OLED_SDA,
@@ -159,7 +167,7 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
         s_bus_secondary = NULL;
         return NULL;
     }
-    ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=%d SCL=%d) — onboard OLED, always-on",
+    ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=%d SCL=%d) — onboard OLED, Vext-gated",
              PIN_OLED_SDA, PIN_OLED_SCL);
     return s_bus_secondary;
 #else

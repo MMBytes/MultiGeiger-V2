@@ -468,12 +468,25 @@
     #define HAL_HAS_FUEL_GAUGE        0   // No onboard fuel gauge
     #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
     #define HAL_HAS_NATIVE_USB        0   // Console via USB-UART bridge on GPIO43/44 (TX/RX), not native USB
-    // GPIO36 (Vext_Ctrl) only gates the external "Ve" header pin (peripheral
-    // power, 500 mA max, per the datasheet's §3.3 "Power Output") — it does
-    // NOT power the OLED or either I²C bus on this board, unlike Heltec V2
-    // (where Vext gates the shared OLED+sensor rail and MUST be driven for
-    // the bus to work — see i2c_bus.c's HAL_HAS_VEXT_GATE block). Deliberately
-    // left undriven here. See spec §2.
+    // V2.6.20: the datasheet's §3.3 "Power Output" was read at port time
+    // (V2.6.7) as GPIO36 (Vext_Ctrl) only gating the external "Ve" header,
+    // not the OLED — never bench-verified, since no physical unit existed
+    // at port time. First real hardware (2026-07-15) instead showed the
+    // OLED's I²C bus (I2C_NUM_1, GPIO17/18) timing out on every
+    // transaction — the classic unpowered-target signature — and driving
+    // Vext_Ctrl LOW before the OLED bus comes up (see PIN_VEXT below and
+    // i2c_bus_get_secondary()'s BOARD_HELTEC_WIFI_LORA32_V4_R2 branch)
+    // confirmed it: the display now enumerates (SSD1315 @ 0x3C) and shows
+    // correctly. The datasheet reading was wrong; this board's Vext_Ctrl
+    // behaves like Heltec V3's, gating the OLED rail.
+    //
+    // Staying at HAL_HAS_VEXT_GATE=0 rather than folding this into the
+    // flag: that flag's one existing code path lives in
+    // i2c_bus_get_primary() (see i2c_bus.c), which on THIS board is the
+    // external sensor header — a different bus from the OLED's. Making the
+    // flag drive Vext ahead of the wrong bus wouldn't be right either;
+    // the fix belongs where it now lives, scoped to the OLED bus in
+    // i2c_bus_get_secondary(). PIN_VEXT is driven directly there.
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed route per bus
@@ -609,6 +622,11 @@
     #define PIN_OLED_SDA            17
     #define PIN_OLED_SCL            18
     #define PIN_OLED_RESET          21   // J2 pin16
+    // V2.6.20: bench-confirmed active-LOW MOSFET gating the OLED rail (see
+    // HAL_HAS_VEXT_GATE comment above). Driven LOW by
+    // i2c_bus_get_secondary() before the OLED bus init, mirroring Heltec
+    // V2's PIN_VEXT pattern.
+    #define PIN_VEXT                36   // Vext_Ctrl — active-LOW MOSFET, gates OLED rail (bench-confirmed)
 
     // RESERVED for future LoRaWAN/Meshtastic work (hardware-reservation
     // only per spec §6 — no radio driver, no HAL_HAS_LORA flag, nothing
@@ -640,7 +658,9 @@
     // RESERVED / never repurpose (out of scope or module-internal — see
     // spec §2 and §9, and WiFi_LoRa_32_V4.3.1_Datasheet.pdf Table 2.2.1/2.2.2
     // for the primary source):
-    //   GPIO36        Vext_Ctrl — deliberately undriven, see HAL_HAS_VEXT_GATE above
+    //   GPIO36        Vext_Ctrl — see PIN_VEXT / HAL_HAS_VEXT_GATE above
+    //                 (V2.6.20: bench-confirmed to gate the OLED rail, now
+    //                 driven — moved out of this reserved/untouched list)
     //   GPIO19/20     native USB D-/D+ (module-internal strap pair; this
     //                 board doesn't use native USB but the pins are still
     //                 module wiring, not free GPIO)

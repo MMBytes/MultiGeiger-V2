@@ -9,6 +9,28 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.20 — Heltec WiFi LoRa32 V4-R2: fix dead onboard OLED (Vext-gated rail)
+
+- First real V4-R2 unit shipped with the OLED's dedicated I²C bus
+  (I2C_NUM_1, GPIO17/18) timing out on every transaction (not NACKing —
+  timing out), the classic signature of an unpowered I²C target. The
+  V2.6.7 port's `HAL_HAS_VEXT_GATE=0` for this board rested on a single,
+  never-bench-tested datasheet reading that GPIO36 (`Vext_Ctrl`) only
+  gates the external "Ve" header, not the OLED.
+- Root cause confirmed on real hardware: that reading was wrong. This
+  board's Vext_Ctrl gates the OLED rail, matching the well-documented
+  Heltec V3-generation gotcha (same SDA=17/SCL=18/RST=21 OLED pinout this
+  board reuses) where the OLED stays dark until Vext is pulled low.
+- Fix: `i2c_bus_get_secondary()` now drives GPIO36 LOW (new `PIN_VEXT` for
+  this board) before the OLED bus comes up, mirroring the same active-LOW
+  gate pattern already used for Heltec V2's shared OLED+sensor rail.
+  Bench-verified 2026-07-15: I2C timeouts cleared (`i2c_err=0`), OLED
+  enumerates as SSD1315 @ 0x3C and displays correctly.
+- Kept as a bus-local drive in `i2c_bus_get_secondary()` rather than
+  folding into `HAL_HAS_VEXT_GATE` — that flag's one existing code path
+  gates the *primary* bus (`i2c_bus_get_primary()`), which on this board
+  is the unrelated external sensor header, not the OLED.
+
 ## V2.6.19 — Standalone SD-logging mode (offline field logger); log STA IP/gateway/netmask/DNS to syslog
 
 ### Standalone SD-logging mode (offline field logger)

@@ -33,6 +33,16 @@
  *  while churning settimeofday. The parsed UTC is shown on /status as the
  *  receiver's reported time, nothing more.
  *
+ *  V2.6.19: ...with ONE opt-in exception — standalone SD-logging mode
+ *  (no network, so no NTP) arms gnss_set_clock_source(true) and the parser
+ *  then steps the system clock from RMC time: immediately on first valid
+ *  fix, thereafter re-checked hourly and stepped only when |drift| > 10 s.
+ *  The 10 s threshold is deliberate and battle-tested: this 1 Hz
+ *  NMEA-over-I²C path is ~1-2 s laggy/non-monotonic, and the original
+ *  V2.5.8-era GPS-time work showed a tight comparison re-steps the RTC on
+ *  EVERY check because NMEA time always differs by a second or two.
+ *  Networked nodes never arm this — NTP remains their sole time source.
+ *
  *  Draining (`gnss_poll()`) runs on the main service task at ~1 Hz; the
  *  status page reads only the cached snapshot via `gnss_get_fix()`, so the
  *  I²C device is touched from exactly one task.
@@ -93,3 +103,12 @@ uint8_t gnss_i2c_addr(void);
  *  UBX-SEC-UNIQID at init), or "" for the PA1010D (no per-unit serial) or if
  *  the query failed. Never NULL. */
 const char *gnss_serial(void);
+
+/** @brief Arm/disarm GPS-as-clock (standalone SD-logging mode only — see
+ *  file header). Call before the first gnss_poll(). */
+void gnss_set_clock_source(bool enable);
+
+/** @brief True once the system clock has been stepped from a GNSS fix at
+ *  least once (only ever true when clock-source mode is armed). Gates CSV
+ *  file creation in sd_logger. */
+bool gnss_clock_synced(void);

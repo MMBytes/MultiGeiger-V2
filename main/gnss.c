@@ -7,12 +7,16 @@
 // node with no network sends nothing anyway, so GPS-as-time-fallback had no
 // value while causing constant settimeofday churn. Now position/fix/UTC are
 // parsed only to render the /status card.)
+//
+// V2.6.19: ...with ONE opt-in exception — standalone SD-logging mode (no
+// network, so no NTP). See gnss.h header + clock_discipline() below.
 
 #include "gnss.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>           // snprintf (UBX serial → hex string)
+#include <sys/time.h>        // settimeofday (clock-source mode)
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -70,6 +74,51 @@ static char                    s_serial[24] = "";
 // --- Latest fix snapshot (written by poll task, read by HTTP task) ----------
 static portMUX_TYPE s_fix_mux = portMUX_INITIALIZER_UNLOCKED;
 static gnss_fix_t   s_fix     = { 0 };
+
+// --- GPS-as-clock (standalone mode, V2.6.19) --------------------------------
+//
+// See gnss.h header for the rationale behind the wide 10 s threshold (V2.5.8
+// lesson: NMEA time is ~1-2 s off ALWAYS; a tight threshold re-steps the
+// clock on every check).
+#define GNSS_CLOCK_STEP_THRESHOLD_S   10
+#define GNSS_CLOCK_CHECK_INTERVAL_US  (3600LL * 1000LL * 1000LL)   // hourly
+
+static bool    s_clock_source;         // armed via gnss_set_clock_source()
+static bool    s_clock_synced;         // true once the clock has been stepped
+static int64_t s_clock_last_check_us;  // esp_timer_get_time() of last check
+
+void gnss_set_clock_source(bool enable) {
+    s_clock_source = enable;
+}
+
+bool gnss_clock_synced(void) {
+    return s_clock_synced;
+}
+
+// Called from the RMC parse path with each navigation-valid fix time. No-op
+// (bit-for-bit) when clock-source mode is disarmed — networked nodes never
+// set s_clock_source, so this path is dead code for them (DISPLAY-ONLY per
+// the file header stands unchanged).
+static void clock_discipline(time_t fix_utc) {
+    if (!s_clock_source || fix_utc <= 0) return;
+    int64_t now_us = esp_timer_get_time();
+    // After the first sync, only re-examine hourly — the whole point of the
+    // wide cadence+threshold pair is to NOT churn settimeofday (V2.5.8 lesson).
+    if (s_clock_synced &&
+        (now_us - s_clock_last_check_us) < GNSS_CLOCK_CHECK_INTERVAL_US) {
+        return;
+    }
+    s_clock_last_check_us = now_us;
+    int64_t delta = (int64_t)fix_utc - (int64_t)time(NULL);
+    if (!s_clock_synced || delta > GNSS_CLOCK_STEP_THRESHOLD_S ||
+        delta < -GNSS_CLOCK_STEP_THRESHOLD_S) {
+        struct timeval tv = { .tv_sec = fix_utc, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "system clock stepped from GNSS (delta %+lld s)",
+                 (long long)delta);
+        s_clock_synced = true;
+    }
+}
 
 // --- Transport implementations ----------------------------------------------
 
@@ -347,6 +396,13 @@ static void parse_rmc(const char *const fields[], int nf) {
         if (have_utc) s_fix.utc = utc;
     }
     taskEXIT_CRITICAL(&s_fix_mux);
+
+    // Clock-source mode only (standalone SD-logging, no NTP) — see gnss.h
+    // header. clock_discipline() itself may log/settimeofday, so it must run
+    // OUTSIDE the critical section above (no blocking calls under
+    // taskENTER_CRITICAL). No-op when disarmed or when this sentence carried
+    // no navigation-valid UTC.
+    if (valid && have_utc) clock_discipline(utc);
 }
 
 static void parse_gga(const char *const fields[], int nf) {

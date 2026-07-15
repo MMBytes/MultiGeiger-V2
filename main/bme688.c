@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
+#include "telemetry.h"
 
 static const char *TAG = "bme688";
 
@@ -60,6 +61,36 @@ static const char *TAG = "bme688";
 static i2c_master_bus_handle_t  s_bus   = NULL;
 static i2c_master_dev_handle_t  s_dev   = NULL;
 static bool                     s_ready = false;
+
+// V2.6.19: last-read cache consumed by the telemetry read callbacks below.
+// Written ONLY by bme688_read(); read ONLY by sd_logger's row build on the
+// same task — no locking needed. Invalidated on read failure so the CSV
+// emits an empty cell, never stale data.
+static bool  s_tm_valid;
+static float s_tm_t_c;
+static float s_tm_h_pct;
+static float s_tm_p_pa;
+
+static bool tm_read_t(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_t_c);
+    return true;
+}
+
+static bool tm_read_h(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_h_pct);
+    return true;
+}
+
+static bool tm_read_p(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_p_pa / 100.0);
+    return true;
+}
 
 // Calibration coefficients — names match the Bosch BME68x reference driver
 // so the compensation formulas below read like the published source.
@@ -203,6 +234,16 @@ esp_err_t bme688_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
 
     s_ready = true;
     ESP_LOGI(TAG, "BME68x ready (osrs T=x2 P=x16 H=x1, IIR off, gas off, forced mode)");
+
+    // V2.6.19: register our CSV columns once. Guards against a second,
+    // idempotent init call (env_sensor's dual-bus probe) double-registering.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("BME688 Temperature [C]", tm_read_t, NULL);
+        telemetry_register("BME688 Humidity [%]",    tm_read_h, NULL);
+        telemetry_register("BME688 Pressure [hPa]",  tm_read_p, NULL);
+    }
     return ESP_OK;
 }
 
@@ -262,13 +303,19 @@ static float compensate_humidity(uint16_t adc_H, float t_fine) {
 // --- Read --------------------------------------------------------------------
 
 esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
-    if (!s_ready) return ESP_FAIL;
+    if (!s_ready) {
+        s_tm_valid = false;
+        return ESP_FAIL;
+    }
 
     // Trigger one forced-mode conversion. Writing mode bits to ctrl_meas
     // wakes the chip, runs T/P/H acquisition with the configured oversampling,
     // then returns to sleep automatically.
     esp_err_t err = i2c_dev_write_reg(s_dev, REG_CTRL_MEAS, CTRL_MEAS_BASE | MODE_FORCED);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     // T x2 + P x16 + H x1 typical conversion time (datasheet 3.5.2.4):
     //   1.97 + (2+16+1)*1.97 = ~39 ms typ; max ~46 ms. Wait 60 ms for margin.
@@ -278,7 +325,10 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
     // Read 8 bytes: pressure(0..2 msb,lsb,xlsb) + temperature(3..5) + humidity(6..7).
     uint8_t d[8];
     err = i2c_dev_read_regs(s_dev, REG_DATA_PTH, d, sizeof(d));
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     // 20-bit P and T (high nibble of xlsb is the lowest 4 bits); 16-bit H.
     uint32_t adc_P = ((uint32_t)d[0] << 12) | ((uint32_t)d[1] << 4) | ((uint32_t)d[2] >> 4);
@@ -287,7 +337,10 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
 
     // 0x80000 / 0x8000 are the "channel disabled / settling" sentinels — we
     // configured all three so treat them as a transient I/O hiccup.
-    if (adc_T == 0x80000 || adc_P == 0x80000 || adc_H == 0x8000) return ESP_FAIL;
+    if (adc_T == 0x80000 || adc_P == 0x80000 || adc_H == 0x8000) {
+        s_tm_valid = false;
+        return ESP_FAIL;
+    }
 
     float t_fine;
     float T = compensate_temperature(adc_T, &t_fine);
@@ -297,5 +350,12 @@ esp_err_t bme688_read(float *t_out, float *h_out, float *p_out) {
     if (t_out) *t_out = T;
     if (p_out) *p_out = P;
     if (h_out) *h_out = H;
+
+    // V2.6.19: cache from the LOCAL computed values, not the (possibly NULL)
+    // out-pointers — the telemetry callbacks above read this cache.
+    s_tm_t_c   = T;
+    s_tm_h_pct = H;
+    s_tm_p_pa  = P;
+    s_tm_valid = true;
     return ESP_OK;
 }

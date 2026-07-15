@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
+#include "telemetry.h"
 
 static const char *TAG = "bmp581";
 
@@ -58,6 +59,28 @@ static const char *TAG = "bmp581";
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 static uint8_t                 s_addr  = 0;     // actual address we bound to (0x46 or 0x47)
+
+// V2.6.19: last-read cache consumed by the telemetry read callbacks below.
+// Written ONLY by bmp581_read(); read ONLY by sd_logger's row build on the
+// same task — no locking needed. Invalidated on read failure so the CSV
+// emits an empty cell, never stale data.
+static bool  s_tm_valid;
+static float s_tm_t_c;
+static float s_tm_p_pa;
+
+static bool tm_read_t(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_t_c);
+    return true;
+}
+
+static bool tm_read_p(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_p_pa / 100.0);
+    return true;
+}
 
 // --- Init --------------------------------------------------------------------
 
@@ -163,6 +186,15 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
 
     ESP_LOGI(TAG, "BMP581 ready at 0x%02X (P x16, T x1, IIR off, forced mode, "
              "primed 10 samples)", addr);
+
+    // V2.6.19: register our CSV columns once. Guards against a second,
+    // idempotent init call (env_sensor's dual-bus probe) double-registering.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("BMP581 Temperature [C]", tm_read_t, NULL);
+        telemetry_register("BMP581 Pressure [hPa]",  tm_read_p, NULL);
+    }
     return ESP_OK;
 }
 
@@ -173,12 +205,18 @@ bool bmp581_present(void) {
 // --- Read --------------------------------------------------------------------
 
 esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
-    if (!s_ready) return ESP_FAIL;
+    if (!s_ready) {
+        s_tm_valid = false;
+        return ESP_FAIL;
+    }
 
     // Trigger a single forced-mode conversion. Datasheet §4.3.7: from STANDBY
     // a write of pwr_mode=0b10 starts the first measurement immediately.
     esp_err_t err = i2c_dev_write_reg(s_dev, REG_ODR_CONFIG, ODR_CONFIG_FORCED);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     // V2.3.31: precise busy-wait. vTaskDelay(pdMS_TO_TICKS(12)) at the default
     // CONFIG_FREERTOS_HZ=100 (10 ms tick) rounds to 1 tick = 0..10 ms actual,
@@ -193,7 +231,10 @@ esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
     //   d[3] = P_XLSB, d[4] = P_LSB, d[5] = P_MSB
     uint8_t d[6];
     err = i2c_dev_read_regs(s_dev, REG_TEMP_DATA_XLSB, d, sizeof(d));
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     // Temperature: signed 24-bit, °C = raw / 2^16 (datasheet §4.5).
     int32_t t_raw = ((int32_t)d[2] << 16) | ((int32_t)d[1] << 8) | (int32_t)d[0];
@@ -208,5 +249,11 @@ esp_err_t bmp581_read(float *temperature_c, float *pressure_pa) {
 
     if (temperature_c) *temperature_c = T;
     if (pressure_pa)   *pressure_pa   = P;
+
+    // V2.6.19: cache from the LOCAL computed values, not the (possibly NULL)
+    // out-pointers — the telemetry callbacks above read this cache.
+    s_tm_t_c   = T;
+    s_tm_p_pa  = P;
+    s_tm_valid = true;
     return ESP_OK;
 }

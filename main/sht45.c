@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "i2c_bus.h"
 #include "sensirion_crc.h"
+#include "telemetry.h"
 
 static const char *TAG = "sht45";
 
@@ -37,6 +38,28 @@ static uint32_t                s_last_heat_ms = 0;
 // H=0x0000 corruption mode this originally documented for a single-task
 // caller). This mutex serializes all I2C access through the driver.
 static SemaphoreHandle_t s_mutex = NULL;
+
+// V2.6.19: last-read cache consumed by the telemetry read callbacks below.
+// Written ONLY by sht45_read() (main-task TX cycle, under the I2C mutex);
+// read ONLY by sd_logger's row build on the same task — no locking needed.
+// Invalidated on read failure so the CSV emits an empty cell, never stale data.
+static bool  s_tm_valid;
+static float s_tm_t_c;
+static float s_tm_h_pct;
+
+static bool tm_read_t(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_t_c);
+    return true;
+}
+
+static bool tm_read_h(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_h_pct);
+    return true;
+}
 
 static esp_err_t send_cmd(uint8_t cmd) {
     return i2c_master_transmit(s_dev, &cmd, 1, 50);
@@ -191,6 +214,19 @@ esp_err_t sht45_init(i2c_master_bus_handle_t bus) {
     }
 
     ESP_LOGI(TAG, "SHT45 ready at 0x%02X (high-precision mode)", SHT45_ADDR);
+
+    // V2.6.19: register our CSV columns once. env_sensor's dual-bus probe
+    // can call sht45_init() a second time (e.g. after a teardown/retry); the
+    // s_ready guard at function top makes that the common case, but this
+    // second, explicit guard is what actually prevents a double
+    // registration — belt-and-braces against future callers that reach this
+    // success path more than once.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("SHT45 Temperature [C]", tm_read_t, NULL);
+        telemetry_register("SHT45 Humidity [%]",    tm_read_h, NULL);
+    }
     return ESP_OK;
 }
 
@@ -199,7 +235,10 @@ bool sht45_present(void) {
 }
 
 static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) {
-    if (!s_dev) return ESP_FAIL;
+    if (!s_dev) {
+        s_tm_valid = false;
+        return ESP_FAIL;
+    }
 
     // V2.3.26: log the two silent error paths. Previously sht45_read() returned
     // a bare esp_err_t on write/receive failure with no log, so an SHT45 that
@@ -210,6 +249,7 @@ static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) 
     esp_err_t err = send_cmd(CMD_MEASURE_HIGH);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "measure_high write: %s", esp_err_to_name(err));
+        s_tm_valid = false;
         return err;
     }
 
@@ -229,11 +269,13 @@ static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) 
     err = i2c_master_receive(s_dev, buf, sizeof(buf), 50);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "post-measure read: %s", esp_err_to_name(err));
+        s_tm_valid = false;
         return err;
     }
 
     if (sensirion_crc8(&buf[0], 2) != buf[2] || sensirion_crc8(&buf[3], 2) != buf[5]) {
         ESP_LOGW(TAG, "SHT45 CRC mismatch");
+        s_tm_valid = false;
         return ESP_FAIL;
     }
 
@@ -248,6 +290,12 @@ static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) 
 
     if (temperature_c)  *temperature_c  = t;
     if (humidity_pct)   *humidity_pct   = h;
+
+    // V2.6.19: cache from the LOCAL computed values, not the (possibly NULL)
+    // out-pointers — the telemetry callbacks above read this cache.
+    s_tm_t_c   = t;
+    s_tm_h_pct = h;
+    s_tm_valid = true;
     return ESP_OK;
 }
 

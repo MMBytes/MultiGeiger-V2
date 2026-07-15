@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
+#include "telemetry.h"
 
 static const char *TAG = "bmp390";
 
@@ -37,6 +38,28 @@ static const char *TAG = "bmp390";
 
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
+
+// V2.6.19: last-read cache consumed by the telemetry read callbacks below.
+// Written ONLY by bmp390_read(); read ONLY by sd_logger's row build on the
+// same task — no locking needed. Invalidated on read failure so the CSV
+// emits an empty cell, never stale data.
+static bool  s_tm_valid;
+static float s_tm_t_c;
+static float s_tm_p_pa;
+
+static bool tm_read_t(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_t_c);
+    return true;
+}
+
+static bool tm_read_p(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tm_valid) return false;
+    snprintf(cell, cap, "%.2f", (double)s_tm_p_pa / 100.0);
+    return true;
+}
 
 // Floating-point calibration coefficients — derived from NVM once at init.
 // Names follow the Bosch compensation algorithm (datasheet 8.5).
@@ -153,6 +176,15 @@ esp_err_t bmp390_init(i2c_master_bus_handle_t bus) {
 
     ESP_LOGI(TAG, "BMP390 ready at 0x%02X (P x32, T x1, IIR off, forced mode, "
              "primed 10 samples)", BMP390_ADDR);
+
+    // V2.6.19: register our CSV columns once. Guards against a second,
+    // idempotent init call (env_sensor's dual-bus probe) double-registering.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("BMP390 Temperature [C]", tm_read_t, NULL);
+        telemetry_register("BMP390 Pressure [hPa]",  tm_read_p, NULL);
+    }
     return ESP_OK;
 }
 
@@ -192,11 +224,17 @@ static double compensate_pressure(int32_t adc_P, double t_lin) {
 // --- Read --------------------------------------------------------------------
 
 esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
-    if (!s_ready) return ESP_FAIL;
+    if (!s_ready) {
+        s_tm_valid = false;
+        return ESP_FAIL;
+    }
 
     // Trigger a single forced-mode conversion.
     esp_err_t err = i2c_dev_write_reg(s_dev, REG_PWR_CTRL, PWR_CTRL_FORCED);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     // P x32 + T x1 worst-case measurement time per datasheet (234 + p*392 +
     // t*313 µs) is ~13 ms; 30 ms gives comfortable margin.
@@ -205,7 +243,10 @@ esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
     // 6 bytes: press[0..2] (xlsb, lsb, msb), temp[3..5] (xlsb, lsb, msb).
     uint8_t d[6];
     err = i2c_dev_read_regs(s_dev, REG_DATA_0, d, sizeof(d));
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        s_tm_valid = false;
+        return err;
+    }
 
     int32_t adc_P = (int32_t)(d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16));
     int32_t adc_T = (int32_t)(d[3] | ((uint32_t)d[4] << 8) | ((uint32_t)d[5] << 16));
@@ -216,5 +257,11 @@ esp_err_t bmp390_read(float *temperature_c, float *pressure_pa) {
 
     if (temperature_c) *temperature_c = (float)T;
     if (pressure_pa)   *pressure_pa   = (float)P;
+
+    // V2.6.19: cache from the LOCAL computed values, not the (possibly NULL)
+    // out-pointers — the telemetry callbacks above read this cache.
+    s_tm_t_c   = (float)T;
+    s_tm_p_pa  = (float)P;
+    s_tm_valid = true;
     return ESP_OK;
 }

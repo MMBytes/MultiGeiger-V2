@@ -25,6 +25,7 @@ idf_component_register(
         "noise_sensor.c"
         "dnms.c"
         "sgp41.c"
+        "telemetry.c"
         "sensirion_gas_index_algorithm.c"
         "applog.c"
         "diag.c"

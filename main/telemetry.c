@@ -1,4 +1,4 @@
-﻿#include "telemetry.h"
+#include "telemetry.h"
 
 #include "esp_log.h"
 

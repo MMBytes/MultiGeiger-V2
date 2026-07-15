@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 /** @file
  *  @brief V2.6.19: neutral telemetry column registry for the standalone

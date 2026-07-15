@@ -26,6 +26,7 @@ idf_component_register(
         "dnms.c"
         "sgp41.c"
         "telemetry.c"
+        "sd_card.c"
         "sensirion_gas_index_algorithm.c"
         "applog.c"
         "diag.c"
@@ -68,6 +69,10 @@ idf_component_register(
         spi_flash
         espcoredump            # V2.4.18: panic dump to flash, read via /coredump.elf
         esp_psram              # V2.6.10: applog.c boot-time PSRAM mode/speed log line
+        fatfs                  # V2.6.19: standalone SD logging (sd_card.c/sd_logger.c)
+        sdmmc
+        esp_driver_sdmmc
+        esp_driver_sdspi
         # NOTE: `mqtt` is NOT listed here — V2.4.2's MQTT client
         # (`mqtt_client.h` in main/mqtt.c) ships via the IDF Component
         # Manager as `espressif/mqtt`, declared in main/idf_component.yml.

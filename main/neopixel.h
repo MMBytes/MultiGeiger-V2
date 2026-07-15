@@ -34,8 +34,27 @@ esp_err_t neopixel_init(void);
  *
  *  Each component 0..255. Synchronous — returns after the RMT TX completes
  *  (~30 µs for one pixel). Safe from any task context but NOT from ISR.
+ *
+ *  One-shot only: on a board with the pulse-tick worker running
+ *  (neopixel_register_pulse_tick()), the very next tube pulse restores
+ *  whatever colour neopixel_set_alert() last set (black by default) —
+ *  it does NOT preserve a colour set via this call. Use neopixel_set_alert()
+ *  for anything that must survive pulses.
  */
 void neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b);
+
+/** @brief Drive the pixel to a solid colour that SURVIVES the per-pulse
+ *         flash worker — for standing alerts (e.g. sd_logger.c's 3-failure
+ *         SD-error indication), where a Geiger pulse must not wipe it.
+ *
+ *  Sets the "restore to" colour the pulse worker uses after each flash, and
+ *  draws it immediately (so it's visible even if no pulses arrive — e.g.
+ *  tube_enabled=false, or the flash between pulses). Call with (0,0,0) to
+ *  clear the alert; the intended caller for that is the alert owner itself
+ *  on recovery (e.g. sd_logger_cycle() after a successful write), not an
+ *  unrelated module.
+ */
+void neopixel_set_alert(uint8_t r, uint8_t g, uint8_t b);
 
 /** @brief Register the tube-pulse ISR hook so each Geiger pulse triggers a
  *         brief red flash on the pixel.

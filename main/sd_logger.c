@@ -102,7 +102,10 @@ static void fail_cycle(int err) {
         // way to tell a passer-by its whole reason for existing has stopped.
         ESP_LOGE(TAG, "%lu consecutive SD failures (last err %d)",
                  (unsigned long)s_fail_streak, err);
-        neopixel_set_rgb(64, 0, 0);
+        // V2.6.19 (final review A1): neopixel_set_alert(), not
+        // neopixel_set_rgb() — the latter is a one-shot the very next tube
+        // pulse would wipe to black within seconds at background rate.
+        neopixel_set_alert(64, 0, 0);
     }
 }
 
@@ -238,7 +241,7 @@ void sd_logger_cycle(void) {
     }
 
     if (s_fail_streak >= SD_FAIL_STREAK_ALERT) {
-        neopixel_set_rgb(0, 0, 0);   // recovery: clear the red alert
+        neopixel_set_alert(0, 0, 0);   // recovery: clear the sticky red alert
     }
     s_fail_streak = 0;
     s_last_err    = 0;

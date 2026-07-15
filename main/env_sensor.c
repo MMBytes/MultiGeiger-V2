@@ -224,3 +224,21 @@ const char *env_sensor_name(void) {
 void env_sensor_heat_periodic(uint32_t now_ms, float humidity_pct) {
     sht45_heat_periodic(now_ms, humidity_pct);
 }
+
+// V2.6.19 (final review A3): unconditional per-chip refresh for the
+// standalone CSV's telemetry columns — see env_sensor.h doc comment. Every
+// PRESENT chip is read regardless of whether env_sensor_read()'s fused
+// cascade above already skipped it this cycle; each *_read() call is what
+// populates that chip's own s_tm_valid/cached-value pair consumed by its
+// telemetry_register() callbacks. sht45_present()/bmp581_present() are
+// always attempted first (unconditionally) in the fused cascade too, so
+// re-reading them here is a harmless duplicate — kept for symmetry and to
+// avoid tracking per-cycle skip state.
+void env_sensor_refresh_all_for_telemetry(void) {
+    float t, h, p;
+    if (sht45_present())  (void)sht45_read(&t, &h);
+    if (bmp581_present()) (void)bmp581_read(&t, &p);
+    if (bmp390_present()) (void)bmp390_read(&t, &p);
+    if (bme688_present()) (void)bme688_read(&t, &h, &p);
+    if (bme280_present()) (void)bme280_read(&t, &h, &p);
+}

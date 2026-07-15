@@ -150,6 +150,22 @@ static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 // the bottom of the main loop for the consumer and the rationale.
 static bool s_arp_after_reconnect_pending = false;
 
+// V2.6.19 (final review A2): boot-time latch of the two standalone-SD
+// checkboxes. /config's plain "Save" commits g_cfg live (only "Save and
+// restart" reboots), but g_cfg.standalone_sd/standalone_ap_on are BOTH
+// starred reboot-required in the UI — the mode's arming (sd_logger_init(),
+// gnss_set_clock_source(), the boot SD mount) only ever runs once, at boot.
+// Reading g_cfg.standalone_sd live in do_tx_cycle()/the radio-off branch let
+// a plain Save on a running networked node kill the radio (esp_wifi_stop+
+// deinit fires within ~1 s) while the GPS clock source was never armed, so
+// sd_logger_cycle() waits at its clock-sync gate forever: radio dead, zero
+// rows ever logged, until a physical power-cycle. Latching both flags here
+// and using ONLY the latch below (never g_cfg.standalone_sd/standalone_ap_on
+// directly) makes a live Save a pure no-op until reboot, matching the
+// starred-field contract the /config result page already promises.
+static bool s_standalone_sd_latched    = false;
+static bool s_standalone_ap_on_latched = false;
+
 // --- NTP/TX state ---
 static bool     ntp_started = false;
 // V2.4.13: mqtt-init tracking moved into mqtt.c (mqtt_is_initialized()).
@@ -1008,7 +1024,9 @@ static void do_tx_cycle(void) {
     // upload. Skips the WiFi/NTP gates (meaningless offline), MQTT, and
     // tx_transmit entirely. DNMS window re-trigger still happens (below)
     // so noise integration keeps covering full cycles.
-    if (HAL_HAS_SD_CARD && g_cfg.standalone_sd) {
+    // Final review A2: gate on the boot-time LATCH, not the live g_cfg
+    // field — see the latch's declaration comment.
+    if (s_standalone_sd_latched) {
         s_tube_tm = (tube_tm_cache_t){
             .valid     = g_cfg.tube_enabled,
             .cpm       = cpm,
@@ -1017,6 +1035,18 @@ static void do_tx_cycle(void) {
             .hv_pulses = hv_pulses_delta,
             .dt_ms     = dt_ms,
         };
+        // Final review A3: env_sensor_read() above already ran the fused
+        // cascade (priority short-circuit — skips a chip once an earlier
+        // one already satisfied its fields), which is exactly right for the
+        // single fused reading networked firmware publishes. But the CSV
+        // wants every ATTACHED chip's own column (spec §4.1), and a column
+        // whose chip got skipped this cycle never refreshes its own
+        // telemetry cache (populated only inside that chip's own *_read()):
+        // permanently empty, or worse, frozen on a stale value from the one
+        // cycle its higher-priority sibling happened to fail. One extra full
+        // I2C pass, standalone-only, main task, 150 s cadence — acceptable
+        // per spec; the fused path above is untouched.
+        env_sensor_refresh_all_for_telemetry();
         sd_logger_cycle();
         if (noise_sensor_present()) {
             if (noise_sensor_trigger() != ESP_OK) {
@@ -1266,7 +1296,13 @@ void app_main(void) {
         telemetry_register("Tube HV Pulses",     tm_tube_hv,     NULL);
         telemetry_register("Tube Window [ms]",   tm_tube_window, NULL);
     }
-    if (HAL_HAS_SD_CARD && g_cfg.standalone_sd) {
+    // Final review A2: latch here, once, at boot — g_cfg.standalone_sd/
+    // standalone_ap_on themselves must NOT be read again anywhere past this
+    // point (do_tx_cycle and the AP-window-close branch below both use the
+    // latch instead). See the latch's declaration comment for why.
+    s_standalone_sd_latched    = HAL_HAS_SD_CARD && g_cfg.standalone_sd;
+    s_standalone_ap_on_latched = g_cfg.standalone_ap_on;
+    if (s_standalone_sd_latched) {
         sd_logger_init(g_chip_id);
         gnss_set_clock_source(true);   // no NTP offline — GPS is the clock (spec §6)
         if (sd_card_mount() != ESP_OK) {
@@ -1276,6 +1312,13 @@ void app_main(void) {
             ESP_LOGW(TAG, "standalone: no GNSS receiver found — "
                           "no clock source, CSV logging will never start!");
         }
+        // Final review A1: the SD-failure alert (sd_logger.c's fail_cycle(),
+        // via neopixel_set_alert()) needs a live NeoPixel even when led_tick
+        // is off or the tube is disabled (spec §8 test 6's exact env-only
+        // rig) — init it here, unconditionally, so it's never a silent
+        // no-op on a standalone node. Guarded against double-init below
+        // (neopixel_init() is not safe to call twice — see that call site).
+        neopixel_init();
     }
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -1380,7 +1423,15 @@ void app_main(void) {
     // Whichever module(s) don't claim it are stubs for that call.
     led_init();
     if (g_cfg.tube_enabled && g_cfg.led_tick) {
-        neopixel_init();
+        // Final review A1: standalone mode may already have brought the
+        // NeoPixel up above (for the SD alert, independent of led_tick) —
+        // neopixel_init() is not safe to call twice (would re-create the RMT
+        // TX channel on the same already-claimed GPIO), so skip the repeat
+        // init in that case; only the pulse-tick worker/callback still needs
+        // registering here.
+        if (!s_standalone_sd_latched) {
+            neopixel_init();
+        }
         neopixel_register_pulse_tick();
         led_register_pulse_tick();
     }
@@ -1649,9 +1700,13 @@ void app_main(void) {
         //     existing branch below requires g_have_sta_creds — standalone
         //     must NOT: a credential-less standalone node still needs its
         //     radio turned off (the stock behaviour would hold AP forever).
+        // Final review A2: both reads below are the boot-time LATCH, not
+        // live g_cfg — a plain /config Save toggling either checkbox on a
+        // running node must have zero effect until reboot (see the latch's
+        // declaration comment).
         static bool s_radio_off = false;
-        if (g_cfg.standalone_sd && HAL_HAS_SD_CARD) {
-            if (!g_cfg.standalone_ap_on && !s_radio_off &&
+        if (s_standalone_sd_latched) {
+            if (!s_standalone_ap_on_latched && !s_radio_off &&
                 (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
                 ESP_LOGI(TAG, "AP window closed — standalone mode, radio off");
                 ESP_ERROR_CHECK(esp_wifi_stop());

@@ -99,3 +99,25 @@ const char *env_sensor_name(void);
  *         built-in heater (see sht45.h for policy details).
  */
 void env_sensor_heat_periodic(uint32_t now_ms, float humidity_pct);
+
+/** @brief Standalone-SD-logging only: read every PRESENT sub-driver's own
+ *  T/H/P this cycle, bypassing env_sensor_read()'s fused priority
+ *  short-circuit (final review A3).
+ *
+ *  The standalone CSV gives every attached env chip its own column (spec
+ *  §4.1) — but env_sensor_read() skips a chip once an earlier one already
+ *  satisfied its fields (e.g. BME280 skipped once SHT45+BMP581 already cover
+ *  T/H/P), and a chip's telemetry cache is only ever refreshed inside its
+ *  own `*_read()`. Left alone, a skipped chip's CSV column stays empty
+ *  forever, or worse, freezes on a stale reading from the one cycle its
+ *  higher-priority sibling happened to fail. This call reads every present
+ *  chip unconditionally so every registered telemetry column is fresh every
+ *  cycle. Return values are discarded — only the driver-internal cache
+ *  (read by the telemetry callbacks) matters here; the fused values used by
+ *  the networked path come from env_sensor_read() alone, untouched.
+ *
+ *  Intentionally a second full I²C pass, standalone-only, called once per
+ *  TX cycle from the main task (150 s cadence) — acceptable per spec;
+ *  telemetry read callbacks themselves must still never issue fresh I²C.
+ */
+void env_sensor_refresh_all_for_telemetry(void);

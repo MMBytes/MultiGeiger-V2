@@ -46,6 +46,14 @@ static rmt_channel_handle_t s_chan      = NULL;
 static rmt_encoder_handle_t s_encoder   = NULL;
 static TaskHandle_t          s_pulse_task = NULL;
 
+// V2.6.19 (final review A1): sticky "alert base colour" the pulse worker
+// restores to after each flash, instead of hardcoding black. Two independent
+// writers, never concurrently: the main task via neopixel_set_alert() (e.g.
+// sd_logger.c's SD-failure indication), and the pulse worker task reading it
+// after every flash — plain bytes, no lock needed (matches the volatile-flag
+// idiom used for speaker.c's s_led_tick). 0,0,0 = no active alert (default).
+static volatile uint8_t s_alert_r = 0, s_alert_g = 0, s_alert_b = 0;
+
 // ---------------------------------------------------------------------------
 // Synchronous one-pixel write. WS2812 expects byte order GRB (not RGB!).
 // ---------------------------------------------------------------------------
@@ -55,6 +63,21 @@ void neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b) {
     rmt_transmit_config_t cfg = { .loop_count = 0 };
     rmt_transmit(s_chan, s_encoder, grb, sizeof(grb), &cfg);
     rmt_tx_wait_all_done(s_chan, 100);  // ~30 µs in practice; 100 ms is paranoid
+}
+
+// ---------------------------------------------------------------------------
+// V2.6.19 (final review A1): sticky solid-colour alert, immune to the
+// per-pulse worker's flash/clear cycle. Sets the base colour pulse_task
+// restores to (see pulse_task above) AND draws it immediately — a standalone
+// node with the tube disabled (or between pulses) must see the alert right
+// away, not wait for the next tube pulse to trigger a restore. Call with
+// (0,0,0) to clear — the only intended clearer is sd_logger.c on recovery.
+// ---------------------------------------------------------------------------
+void neopixel_set_alert(uint8_t r, uint8_t g, uint8_t b) {
+    s_alert_r = r;
+    s_alert_g = g;
+    s_alert_b = b;
+    neopixel_set_rgb(r, g, b);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +98,12 @@ static void pulse_task(void *arg) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         neopixel_set_rgb(PULSE_RED_BRIGHTNESS, 0, 0);
         vTaskDelay(pdMS_TO_TICKS(PULSE_VISIBLE_MS));
-        neopixel_set_rgb(0, 0, 0);
+        // V2.6.19 (final review A1): restore the sticky alert colour, not a
+        // hardcoded black — otherwise a standalone node's solid-red
+        // SD-failure alert (neopixel_set_alert()) is wiped by the very next
+        // tube pulse, within seconds at background rate. Black when no
+        // alert is active, so networked/no-alert behaviour is unchanged.
+        neopixel_set_rgb(s_alert_r, s_alert_g, s_alert_b);
     }
 }
 
@@ -192,6 +220,9 @@ void IRAM_ATTR neopixel_notify_pulse(void) {
 
 esp_err_t neopixel_init(void)                  { return ESP_OK; }
 void      neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    (void)r; (void)g; (void)b;
+}
+void      neopixel_set_alert(uint8_t r, uint8_t g, uint8_t b) {
     (void)r; (void)g; (void)b;
 }
 void      neopixel_register_pulse_tick(void)   { /* no-op */ }

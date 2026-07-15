@@ -11,6 +11,7 @@
 #include "sensirion_crc.h"
 #include "sensirion_gas_index_algorithm.h"
 #include "sht45.h"
+#include "telemetry.h"
 
 static const char *TAG = "sgp41";
 
@@ -209,6 +210,17 @@ static void sgp41_task(void *arg) {
     }
 }
 
+// V2.6.19: CSV read callback. No new cache needed here — sgp41_get_nox_index()
+// already withholds the value once the background task's cache ages past
+// NOX_STALE_US, so this simply forwards that staleness decision.
+static bool tm_read_nox(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    int32_t nox;
+    if (sgp41_get_nox_index(&nox) != ESP_OK) return false;
+    snprintf(cell, cap, "%ld", (long)nox);
+    return true;
+}
+
 esp_err_t sgp41_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
     if (!bus) return ESP_ERR_INVALID_ARG;
@@ -266,6 +278,15 @@ esp_err_t sgp41_init(i2c_master_bus_handle_t bus) {
     }
 
     s_ready = true;
+
+    // V2.6.19: register our CSV column once. env_sensor's dual-bus probe can
+    // call sgp41_init() a second time; the s_tm_registered guard (mirrors
+    // sht45.c) is what actually prevents a double registration in that case.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("SGP41 NOx Index", tm_read_nox, NULL);
+    }
     return ESP_OK;
 }
 

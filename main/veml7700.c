@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
+#include "telemetry.h"
 
 static const char *TAG = "veml7700";
 
@@ -54,6 +55,21 @@ static inline uint16_t build_config(uint8_t gain, uint8_t it) {
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
 
+// V2.6.19: CSV read callback — deliberate exception to the "cache, don't
+// re-read" pattern used by the other drivers' telemetry columns. Unlike
+// SHT45/SGP41/pm/noise (each has an existing per-cycle caller whose cached
+// result the CSV reuses), nothing calls veml7700_read() once per TX cycle
+// today, so there is no cache to read. A live read here is cheap (two I2C
+// register reads, same main service task, no mutex contention) and avoids
+// inventing a cache with no other consumer.
+static bool tm_read_lux(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    float lux;
+    if (veml7700_read(NULL, NULL, &lux) != ESP_OK) return false;
+    snprintf(cell, cap, "%.1f", (double)lux);
+    return true;
+}
+
 esp_err_t veml7700_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
     if (!bus) return ESP_ERR_INVALID_ARG;
@@ -97,6 +113,15 @@ esp_err_t veml7700_init(i2c_master_bus_handle_t bus) {
     s_ready = true;
     ESP_LOGI(TAG, "VEML7700 ready at 0x%02X (gain=1/8x, IT=%dms, %.4f lux/count)",
              VEML7700_ADDR, DEFAULT_IT_MS, (double)DEFAULT_RESOLUTION);
+
+    // V2.6.19: register our CSV column once. env_sensor's dual-bus probe can
+    // call veml7700_init() a second time; the s_tm_registered guard (mirrors
+    // sht45.c) is what actually prevents a double registration in that case.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("VEML7700 Lux", tm_read_lux, NULL);
+    }
     return ESP_OK;
 }
 

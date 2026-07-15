@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "i2c_bus.h"
+#include "telemetry.h"
 
 static const char *TAG = "fuel_gauge";
 
@@ -34,6 +35,28 @@ static volatile bool           s_user_present   = false;  // mirrors cfg->batt_p
 // from VEML7700's little-endian registers (see veml7700.c). Get this
 // backwards and every reading is off by a factor of 256. i2c_dev_read_u16_be()
 // (i2c_bus.h) makes that byte-order choice explicit at every call site.
+
+// V2.6.19: CSV read callbacks. Live reads (same rationale as
+// fuel_gauge_read()'s existing callers — cheap I2C register reads on the
+// always-on rail, no per-cycle cache exists to reuse). Gated on
+// fuel_gauge_present() so a board with the chip present but the user's
+// batt_present checkbox unset (no LiPo actually wired) emits empty cells
+// instead of a meaningless reading off an unpowered cell.
+static bool tm_read_batt_pct(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    float soc;
+    if (!fuel_gauge_present() || fuel_gauge_read(NULL, &soc, NULL) != ESP_OK) return false;
+    snprintf(cell, cap, "%.1f", (double)soc);
+    return true;
+}
+
+static bool tm_read_batt_v(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    float v;
+    if (!fuel_gauge_present() || fuel_gauge_read(&v, NULL, NULL) != ESP_OK) return false;
+    snprintf(cell, cap, "%.2f", (double)v);
+    return true;
+}
 
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     if (s_ready) return ESP_OK;
@@ -91,6 +114,19 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     // Set only after the GPIO is actually configured, so no reader can ever
     // observe s_ready==true with PIN_VBUS_DETECT still in its power-on state.
     s_ready = true;
+
+    // V2.6.19: register our CSV columns once, in the chip-ACK success path.
+    // env_sensor's dual-bus probe can call fuel_gauge_init() a second time;
+    // the s_tm_registered guard (mirrors sht45.c) is what actually prevents
+    // a double registration in that case. Boards without HAL_HAS_FUEL_GAUGE
+    // compile the stub fuel_gauge_init() below instead, which never reaches
+    // here — no columns registered on those boards.
+    static bool s_tm_registered = false;
+    if (!s_tm_registered) {
+        s_tm_registered = true;
+        telemetry_register("Battery [%]", tm_read_batt_pct, NULL);
+        telemetry_register("Battery [V]", tm_read_batt_v,   NULL);
+    }
 
     return ESP_OK;
 }

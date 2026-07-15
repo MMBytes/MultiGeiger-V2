@@ -78,6 +78,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
@@ -147,6 +148,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (STEMMA1 + STEMMA2 are separate buses, not a pinout toggle)
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (V2.3.18)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — negligible vs the 4 MB
     // PSRAM pool, and 2× the Heltec margin since the PSRAM cost is free.
@@ -284,6 +286,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
     // a QT Py + Adafruit 326 deployment. V2.4.9 removed HAL_MULTIPAGE_ROTATION
     // entirely — page-layout selection is now runtime via `display_mode` in
@@ -384,6 +387,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
@@ -504,6 +508,7 @@
     // hardware-side next step (Pin-Matrix header audit + continuity check).
     #define HAL_HAS_SPEAKER           0   // Piezo present but GPIO26 (P) collides with PSRAM SPICS1 — disabled
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
     // (closest analog: 2 MB in-package PSRAM, not FeatherS3-D's 8 MB external).
@@ -735,6 +740,23 @@
     // idiom used for PIN_OLED_RESET) — not defined here.
     #define HAL_HAS_NEOPIXEL          1
 
+    // V2.6.19: onboard microSD, full 4-bit SDIO wiring (SparkFun schematic
+    // global labels + their SD_SDIO_Benchmark.ino, verified 2026-07-15).
+    // SDMMC host (native SD protocol, per-transfer data CRC) — the S3 SDMMC
+    // host routes through the GPIO matrix, so these non-IOMUX pins are fine.
+    // Slot is powered from the always-on "3.3V_P" rail (RT9080/JP2 — see the
+    // GPIO45/Q_EN note above); no power gating needed. SD_DET (GPIO48) is
+    // deliberately unused: card presence = mount attempt, one code path with
+    // the C5 board (whose SD_DET isn't even connected by default).
+    #define HAL_HAS_SD_CARD           1
+    #define HAL_SD_USE_SDMMC          1
+    #define PIN_SD_CLK               38
+    #define PIN_SD_CMD               34
+    #define PIN_SD_D0                39
+    #define PIN_SD_D1                40
+    #define PIN_SD_D2                47
+    #define PIN_SD_D3                33
+
     // Ring/scratch/form-buffer sizes modeled on BOARD_HELTEC_WIFI_LORA32_V4_R2
     // (identical 2 MB in-package PSRAM budget).
     #define HAL_LOG_RING_BYTES      (1 * 1024 * 1024)   // 1 MB of 2 MB PSRAM (50% headroom)
@@ -806,8 +828,10 @@
     //                 mode in this port). Also one of the ESP32-S3's four
     //                 strapping pins (VDD_SPI voltage-select) — left
     //                 undriven, no repurposing planned.
-    //   GPIO33/34/38/39/40/47/48   microSD SPI bus — slot unused, no driver,
-    //                 no pin claim (design spec §4/§8 decision).
+    //   GPIO33/34/38/39/40/47   microSD SDIO bus — claimed V2.6.19 (PIN_SD_*
+    //                 above, standalone SD-logging design 2026-07-15).
+    //   GPIO48        microSD SD_DET — deliberately unused (mount-probe
+    //                 instead; keeps one code path with the C5 board).
     //   GPIO19/20     native USB D-/D+ (module-internal)
     //   GPIO43/44     UART0 — not used (native USB-Serial-JTAG console)
 
@@ -869,6 +893,21 @@
     // app startup, so enabling it here is safe.
     #define HAL_HAS_NEOPIXEL          1
 
+    // V2.6.19: onboard microSD via SPI (user-supplied SparkFun hardware-
+    // overview pin list, 2026-07-15; the page's "ESP32-C6" mention is
+    // SparkFun's copy-paste typo). The C5 has NO SDMMC host peripheral —
+    // SPI mode is the only option on this chip. GPIO25 (CS) is a strapping
+    // pin (floating, clock-edge select): safe, the SPI master only drives
+    // CS well after the boot-strap sampling window and idles it high.
+    // SD_DET (GPIO7) is not connected by default (solder jumper) — unused.
+    // Slot is powered from the always-on "3.3V_P" rail (U4/R6 pull-up).
+    #define HAL_HAS_SD_CARD           1
+    #define HAL_SD_USE_SDMMC          0
+    #define PIN_SD_CS                25
+    #define PIN_SD_SCK               10
+    #define PIN_SD_PICO               8   // MOSI (controller out)
+    #define PIN_SD_POCI               9   // MISO (controller in)
+
     // Ring/scratch/form-buffer sizes: this board's 8 MB in-package PSRAM
     // gets the 4 MB ring budget (50% headroom), following the feathers3_d /
     // seeed_xiao_esp32s3 precedent for 8 MB-PSRAM boards — not the 1 MB
@@ -917,13 +956,14 @@
     //                 SPICS1 for SPI PSRAM and cannot be used for other
     //                 functions") — not exposed on the ThingPlus header at
     //                 all, no collision with any signal above.
-    //   GPIO25        Strapping pin (floating, clock-edge select) — not
-    //                 assigned to any Multigeiger function on this board.
+    //   GPIO25        Strapping pin (floating, clock-edge select) — SD chip-select
+    //                 (PIN_SD_CS) as of V2.6.19 — driven only post-boot, see microSD note.
     //   GPIO28        Strapping pin (pull-up=1, boot mode) — not assigned.
     //   GPIO7         Strapping pin (floating, JTAG signal source) — not
     //                 assigned.
-    //   microSD (J4)  GPIO7/8/9/10/25 — slot present, not wired up, no
-    //                 driver, no pin claim (out of scope — design spec §8).
+    //   microSD (J4)  GPIO8/9/10/25 claimed V2.6.19 (PIN_SD_* above,
+    //                 standalone SD-logging design 2026-07-15). GPIO7
+    //                 (SD_DET) stays unclaimed — NC by default.
 
 #elif defined(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER)
 
@@ -966,6 +1006,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness — pins verified §2
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO34) — reuses neopixel.c unchanged
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
 
     // Ring/scratch/form-buffer sizes: 2 MB external-QSPI PSRAM — same size
     // class as sparkfun_thing_plus_esp32s3 / heltec_wifi_lora32_v4_r2's
@@ -1068,6 +1109,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route (header SDA/SCL)
     #define HAL_HAS_SPEAKER           1   // Piezo via PCB harness — pin assignment user-confirmed, see block comment above
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812, PIN_NEOPIXEL_POWER=GPIO2 (NEOPIXEL_I2C_POWER) required before use
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
     // (identical 2 MB in-package PSRAM budget).
@@ -1156,6 +1198,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness (P=GPIO10, N=GPIO9)
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO21) — reuses neopixel.c unchanged
+    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
 
     // Dual-LED note: this board defines both PIN_LED_BUILTIN and
     // HAL_HAS_NEOPIXEL. speaker.c's tick_start() prefers PIN_LED_BUILTIN

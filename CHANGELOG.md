@@ -9,7 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.19 — Log STA IP/gateway/netmask/DNS to syslog
+## V2.6.19 — Standalone SD-logging mode (offline field logger); log STA IP/gateway/netmask/DNS to syslog
+
+### Standalone SD-logging mode (offline field logger)
+
+- NEW standalone mode (SparkFun Thing Plus ESP32-S3 / ESP32-C5, the two
+  boards with microSD slots): after the boot AP config window the radio
+  turns fully off and every TX cycle appends one CSV row of all attached
+  sensors' readings to a FAT32 card. Optional "keep AP on permanently"
+  sub-mode for in-field monitoring via /status (uses more battery).
+- GPS becomes the coarse clock in standalone mode (first-fix step, then
+  hourly, 10 s threshold); networked nodes keep NTP-only (V2.5.11 rule).
+- CSV: pinned DateTime/Uptime/GPS columns, then per-sensor columns sorted
+  by name (stable across boots/OTAs — files always merge). Per-sensor
+  readings (no fused values): SHT45/BMP581/BMP390/BME688/BME280, SPS30,
+  DNMS, SGP41 NOx, VEML7700, battery %/V, tube CPM/dose/counts/HV/window.
+- File per boot session: esp32-<chipid>_YYYYMMDD_HHMMSS.csv; creation
+  waits for first GPS fix; fsync per row; card-pull recovery with new
+  file on remount; 3 consecutive failures = red NeoPixel + /log error.
+- S3 mounts via SDMMC 4-bit (native protocol, data CRC); C5 via SPI (no
+  SDMMC peripheral on that chip). exFAT unsupported (IDF hardcodes it
+  off) — cards >32 GB must be reformatted FAT32.
+
+### Log STA IP/gateway/netmask/DNS to syslog
 
 - New `ESP_LOGI` line ("wifi ip: ...") in `main.c`, fired right after the
   "wifi link: ..." line added in V2.6.16 — same one-shot block that already

@@ -43,8 +43,11 @@
 #include "sysinfo.h"   // chip_model_str (shared model-string ladder)
 #include "periodic.h"           // V2.4.19: 24h housekeeping (PSA refresh + safety-net ARP)
 #include "history.h"            // V2.5.6: in-RAM CPM history + rolling averages
+#include "sd_card.h"            // V2.6.19: standalone mode — microSD FAT32 mount
+#include "sd_logger.h"          // V2.6.19: standalone mode — per-cycle CSV logger
 #include "speaker.h"
 #include "syslog.h"
+#include "telemetry.h"          // V2.6.19: standalone mode — neutral column registry
 #include "transmission.h"
 #include "tube.h"
 #include "tube_pcnt.h"   // V2.5.16: optional PCNT pulse-width comb diagnostic
@@ -588,6 +591,52 @@ static void build_tx_context(tx_context_t *ctx,
                 sizeof(ctx->thingspeak_pm_api_key));
 }
 
+// V2.6.19: per-cycle tube snapshot consumed by the telemetry read callbacks
+// (standalone CSV columns). Written once per cycle by do_tx_cycle on the
+// main service task; read by sd_logger_cycle in the SAME call frame — no
+// concurrency. "Tube " header prefix keeps the sorted CSV grouped (spec §5).
+typedef struct {
+    bool     valid;
+    uint32_t cpm;
+    float    usvph;
+    uint32_t counts;
+    uint32_t hv_pulses;
+    uint32_t dt_ms;
+} tube_tm_cache_t;
+
+static tube_tm_cache_t s_tube_tm;
+
+static bool tm_tube_cpm(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tube_tm.valid) return false;
+    snprintf(cell, cap, "%lu", (unsigned long)s_tube_tm.cpm);
+    return true;
+}
+static bool tm_tube_dose(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tube_tm.valid) return false;
+    snprintf(cell, cap, "%.4f", (double)s_tube_tm.usvph);
+    return true;
+}
+static bool tm_tube_counts(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tube_tm.valid) return false;
+    snprintf(cell, cap, "%lu", (unsigned long)s_tube_tm.counts);
+    return true;
+}
+static bool tm_tube_hv(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tube_tm.valid) return false;
+    snprintf(cell, cap, "%lu", (unsigned long)s_tube_tm.hv_pulses);
+    return true;
+}
+static bool tm_tube_window(char *cell, size_t cap, void *arg) {
+    (void)arg;
+    if (!s_tube_tm.valid) return false;
+    snprintf(cell, cap, "%lu", (unsigned long)s_tube_tm.dt_ms);
+    return true;
+}
+
 static void do_tx_cycle(void) {
     uint32_t counts_raw, dt_ms, min_us, max_us, hv_pulses;
     bool hv_error;
@@ -955,6 +1004,28 @@ static void do_tx_cycle(void) {
         display_update_snapshot(&snap);
     }
 
+    // V2.6.19 standalone mode: the cycle's output is a CSV row, not an
+    // upload. Skips the WiFi/NTP gates (meaningless offline), MQTT, and
+    // tx_transmit entirely. DNMS window re-trigger still happens (below)
+    // so noise integration keeps covering full cycles.
+    if (HAL_HAS_SD_CARD && g_cfg.standalone_sd) {
+        s_tube_tm = (tube_tm_cache_t){
+            .valid     = g_cfg.tube_enabled,
+            .cpm       = cpm,
+            .usvph     = usvph,
+            .counts    = counts,
+            .hv_pulses = hv_pulses_delta,
+            .dt_ms     = dt_ms,
+        };
+        sd_logger_cycle();
+        if (noise_sensor_present()) {
+            if (noise_sensor_trigger() != ESP_OK) {
+                ESP_LOGW(TAG, "%s: trigger for next window failed", noise_sensor_name());
+            }
+        }
+        return;
+    }
+
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
         // Still trigger the next DNMS window so we don't lose the cycle's
@@ -1182,6 +1253,30 @@ void app_main(void) {
     // consumer (sensor or display) bound to it, drop LDO2 to save the
     // ~5–10 mA quiescent + NeoPixel idle current.
     i2c_bus_finalize();
+
+    // V2.6.19: standalone SD-logging mode (spec §2). Tube columns register
+    // here (not in a driver — the values are computed per-cycle in
+    // do_tx_cycle), gated on tube_enabled: an env-only standalone logger
+    // gets a CSV with no tube columns at all. Registration itself is
+    // harmless when standalone is off (registry has no consumer then).
+    if (g_cfg.tube_enabled) {
+        telemetry_register("Tube CPM",           tm_tube_cpm,    NULL);
+        telemetry_register("Tube Dose [uSv/h]",  tm_tube_dose,   NULL);
+        telemetry_register("Tube GM Counts",     tm_tube_counts, NULL);
+        telemetry_register("Tube HV Pulses",     tm_tube_hv,     NULL);
+        telemetry_register("Tube Window [ms]",   tm_tube_window, NULL);
+    }
+    if (HAL_HAS_SD_CARD && g_cfg.standalone_sd) {
+        sd_logger_init(g_chip_id);
+        gnss_set_clock_source(true);   // no NTP offline — GPS is the clock (spec §6)
+        if (sd_card_mount() != ESP_OK) {
+            ESP_LOGW(TAG, "standalone: SD mount failed at boot — will retry each cycle");
+        }
+        if (!gnss_present()) {
+            ESP_LOGW(TAG, "standalone: no GNSS receiver found — "
+                          "no clock source, CSV logging will never start!");
+        }
+    }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -1546,8 +1641,25 @@ void app_main(void) {
 
         // End of boot AP window: stop the AP and switch to STA-only.
         // Radio is never shared — AP is fully down before STA starts.
-        if (!g_sta_connect_allowed && g_have_sta_creds &&
-            (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+        //
+        // V2.6.19 standalone (spec §2): never switch to STA. Sub-modes:
+        //   standalone_ap_on=1 → AP + httpd stay up forever (field
+        //     monitoring via /status; costs ~50-80 mA);
+        //   standalone_ap_on=0 → radio fully off at window close. Note the
+        //     existing branch below requires g_have_sta_creds — standalone
+        //     must NOT: a credential-less standalone node still needs its
+        //     radio turned off (the stock behaviour would hold AP forever).
+        static bool s_radio_off = false;
+        if (g_cfg.standalone_sd && HAL_HAS_SD_CARD) {
+            if (!g_cfg.standalone_ap_on && !s_radio_off &&
+                (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+                ESP_LOGI(TAG, "AP window closed — standalone mode, radio off");
+                ESP_ERROR_CHECK(esp_wifi_stop());
+                ESP_ERROR_CHECK(esp_wifi_deinit());
+                s_radio_off = true;
+            }
+        } else if (!g_sta_connect_allowed && g_have_sta_creds &&
+                   (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
             ESP_LOGI(TAG, "AP window closed — stopping AP and switching to STA");
 
             ESP_ERROR_CHECK(esp_wifi_stop());

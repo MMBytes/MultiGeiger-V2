@@ -1,5 +1,7 @@
 #include "telemetry.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 
 static const char *TAG = "telemetry";
@@ -17,6 +19,14 @@ void telemetry_register(const char *header, telemetry_read_fn read, void *arg) {
         // field node at boot. The error lands in /log + serial.
         ESP_LOGE(TAG, "registry full (%d) — dropping column '%s'",
                  TELEMETRY_MAX_COLUMNS, header);
+        return;
+    }
+    if (strlen(header) > TELEMETRY_HEADER_MAX_LEN) {
+        // Same non-fatal contract as the registry-full case above: a dropped
+        // column is loud in /log; the alternative — a silently truncated CSV
+        // header row (see TELEMETRY_HEADER_MAX_LEN in telemetry.h) — is not.
+        ESP_LOGE(TAG, "header '%s' exceeds %d chars — dropping column",
+                 header, TELEMETRY_HEADER_MAX_LEN);
         return;
     }
     s_cols[s_count].header = header;

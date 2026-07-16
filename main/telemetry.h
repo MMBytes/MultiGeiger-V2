@@ -24,6 +24,17 @@
 // with headroom for future sensors. Registry array is 48 * 12 bytes static.
 #define TELEMETRY_MAX_COLUMNS 48
 
+// Hard cap on header string length, excluding the NUL (today's longest,
+// "BME280 Temperature [C]", is 22). sd_logger.c sizes its row buffer
+// assuming every column — header or data cell — fits the same CELL_MAX
+// budget it applies to data cells (23 chars + NUL; a static assert there
+// ties the two constants together). A longer header would let the header
+// row outgrow a buffer every data row still fits, and append_safe would
+// silently clamp it: trailing columns present in each data row but missing
+// from the header — a misaligned CSV with no error anywhere. So
+// telemetry_register() rejects over-long headers loudly instead.
+#define TELEMETRY_HEADER_MAX_LEN 23
+
 /** @brief Fill `cell` (NUL-terminated, plain number, no comma) with the
  *  column's current value. Return false to emit an EMPTY cell instead —
  *  used when this cycle's read failed or the value is stale/invalid. */
@@ -36,8 +47,9 @@ typedef struct {
 } telemetry_desc_t;
 
 /** @brief Register one CSV column. Call from driver init, at detection time.
- *  Logs an error and drops the column if the registry is full (never fails
- *  the caller). `header` must be a string with static storage duration. */
+ *  Logs an error and drops the column if the registry is full or `header`
+ *  exceeds TELEMETRY_HEADER_MAX_LEN chars (never fails the caller).
+ *  `header` must be a string with static storage duration. */
 void telemetry_register(const char *header, telemetry_read_fn read, void *arg);
 
 size_t telemetry_count(void);

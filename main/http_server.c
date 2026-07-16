@@ -819,9 +819,19 @@ static void format_sd_logger(char *out, size_t sz) {
         "<b>Rows written:</b> %lu", (unsigned long)sd.rows_written);
 
     if (sd.last_err != 0) {
-        n = append_safe(out, sz, n,
-            "<br><b>Last error:</b> %d (streak %lu)",
-            sd.last_err, (unsigned long)sd.fail_streak);
+        // V2.6.22 (M2): the two error domains sd_logger mixes into last_err
+        // render differently — one bare %d showed ESP_ERR_TIMEOUT (0x107)
+        // as a baffling "263" that reads like an errno.
+        if (sd.last_err_is_esp) {
+            n = append_safe(out, sz, n,
+                "<br><b>Last error:</b> %s (streak %lu)",
+                esp_err_to_name(sd.last_err), (unsigned long)sd.fail_streak);
+        } else {
+            n = append_safe(out, sz, n,
+                "<br><b>Last error:</b> errno %d (%s) (streak %lu)",
+                sd.last_err, strerror(sd.last_err),
+                (unsigned long)sd.fail_streak);
+        }
     }
 
     append_safe(out, sz, n, "</div>");

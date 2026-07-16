@@ -7,10 +7,12 @@
  *
  *  File lifecycle: creation WAITS for the first GNSS clock sync
  *  (gnss_clock_synced()) so the filename timestamp and every row share one
- *  valid UTC time base — a node with a dead GPS antenna logs nothing, by
- *  design. One file per boot session: esp32-<chipid>_YYYYMMDD_HHMMSS.csv.
+ *  valid GPS-set time base — a node with a dead GPS antenna logs nothing,
+ *  by design. One file per boot session: esp32-<chipid>_YYYYMMDD_HHMMSS.csv
+ *  (V2.6.21: timestamp is local time per cfg tz_posix, applied at boot).
  *
- *  Column order (spec §4/§5): DateTime UTC, Uptime [s], GPS Lat/Lon/Alt/
+ *  Column order (spec §4/§5): DateTime (V2.6.21: local time with numeric
+ *  UTC offset, was hardcoded UTC "Z"), Uptime [s], GPS Lat/Lon/Alt/
  *  Sats/HDOP fixed and pinned first; then every registered telemetry
  *  column sorted by header string — order is a pure function of the
  *  attached sensor set, stable across boots/OTAs, so a node's files always
@@ -33,6 +35,7 @@ typedef struct {
     uint32_t rows_written;
     uint32_t fail_streak;    ///< consecutive failed cycles (mount or write)
     int      last_err;       ///< 0 = OK, else errno/esp_err of last failure
+    bool     last_err_is_esp; ///< V2.6.22: true = last_err is an esp_err_t (mount path), false = errno (stdio path)
 } sd_logger_status_t;
 
 /** @brief One-time init. Stores the chip-id string used in filenames

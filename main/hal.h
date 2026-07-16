@@ -78,7 +78,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
-    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
@@ -148,7 +148,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (STEMMA1 + STEMMA2 are separate buses, not a pinout toggle)
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
-    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (V2.3.18)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — negligible vs the 4 MB
     // PSRAM pool, and 2× the Heltec margin since the PSRAM cost is free.
@@ -286,7 +286,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
-    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
     // a QT Py + Adafruit 326 deployment. V2.4.9 removed HAL_MULTIPAGE_ROTATION
     // entirely — page-layout selection is now runtime via `display_mode` in
@@ -387,7 +387,7 @@
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
-    #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
@@ -976,8 +976,9 @@
     //                 SPICS1 for SPI PSRAM and cannot be used for other
     //                 functions") — not exposed on the ThingPlus header at
     //                 all, no collision with any signal above.
-    //   GPIO25        Strapping pin (floating, clock-edge select) — SD chip-select
-    //                 (PIN_SD_CS) as of V2.6.19 — driven only post-boot, see microSD note.
+    //   GPIO25        Strapping pin (floating, clock-edge select) — SD
+    //                 chip-select (PIN_SD_CS) as of V2.6.19 — driven only
+    //                 post-boot, see microSD note.
     //   GPIO28        Strapping pin (pull-up=1, boot mode) — not assigned.
     //   GPIO7         Strapping pin (floating, JTAG signal source) — not
     //                 assigned.

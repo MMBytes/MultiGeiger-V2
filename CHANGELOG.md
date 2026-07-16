@@ -9,6 +9,78 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.22 — Standalone SD-logging: V2.6.19-review deferred items (diagnostic accuracy + doc rot)
+
+Clears the deferred-item list from the V2.6.19 final review (items 2–7; items
+10/11 re-verified as already matching house style / already in place, no
+change).
+
+### /status "Last error" now names the actual error (M2, item 5)
+
+- `sd_logger.c::fail_cycle()` mixed two error domains into one `int` rendered
+  with a bare `%d`: `sd_card_mount()` failures are `esp_err_t` (so
+  `ESP_ERR_TIMEOUT`/`0x107` displayed as a baffling "263"), while file
+  create/write failures are `errno`. `fail_cycle()` now tags the domain,
+  `sd_logger_status_t` carries `last_err_is_esp`, and /status renders
+  `ESP_ERR_TIMEOUT` vs `errno 5 (I/O error)` accordingly (serial log line
+  likewise).
+- `errno` is now captured BEFORE `close_file_for_remount()` — the cleanup's
+  own `fclose`/unmount could overwrite it, so the number shown on /status
+  could be the cleanup's errno, not the real failure's. Diagnostic accuracy
+  only; retry/alert behaviour unchanged.
+
+### /status SD card cosmetics after card pull (M2, items 7)
+
+- Row count no longer lingers: after a card pull, /status showed the dead
+  file's `rows_written` next to no filename. `close_file_for_remount()` now
+  zeroes the count together with the filename.
+- Torn-filename read closed: the httpd task snapshots the filename while the
+  main service task creates/clears it. Both sides now go through a tiny
+  `portMUX` critical section (`s_status_mux`), and `create_file()` publishes
+  the new name only after the header row is safely fsync'd — /status can
+  never show a half-written name or a name with no live file behind it.
+
+### Header-length contract made explicit (item 4)
+
+- A future sensor registering a CSV column header longer than 23 chars would
+  have silently truncated the CSV header row (data rows still full-width — a
+  misaligned CSV with no error anywhere). New `TELEMETRY_HEADER_MAX_LEN` (23)
+  in `telemetry.h` documents the limit; `telemetry_register()` now rejects
+  over-long headers loudly (same non-fatal drop contract as registry-full);
+  `sd_logger.c` static-asserts the cap against its `CELL_MAX` row budget.
+  Today's longest header is 22 chars — no behaviour change for any current
+  sensor.
+
+### Doc rot + cosmetics (items 2, 3, 6)
+
+- `sd_logger.c`: two stale claims fixed — "status read unconditionally on
+  every board" (the /status card is `HAL_HAS_SD_CARD`-gated since the final
+  review) and "init called unconditionally from main.c" (mode-gated since the
+  A2 boot-latch).
+- `sd_logger.h`: "DateTime UTC" column doc updated for V2.6.21's local-time
+  change (header is now "DateTime", local time with numeric UTC offset;
+  filename stamp likewise local).
+- `fuel_gauge.c`: comment claimed env_sensor's dual-bus probe can call
+  `fuel_gauge_init()` twice — main.c calls it exactly once and the `s_ready`
+  guard would short-circuit a second call anyway; the `s_tm_registered` guard
+  is belt-and-braces, not load-bearing. Justification corrected, guard kept.
+- `hal.h`: `HAL_HAS_SD_CARD` value column was 2 chars right of its neighbours
+  in the four narrow-alignment board sections (heltec_v2, feathers3_d,
+  adafruit_qtpy_esp32_pico, seeed_xiao_esp32s3); the V2.6.19 GPIO25
+  reserved-pin comment rewrapped to house width.
+
+### Verified no-change items (10, 11)
+
+- Trailing `append_safe()` calls without `(void)`: grep confirms zero
+  `(void)append_safe` casts exist anywhere in `main/` — bare trailing calls
+  ARE the house style (http_server.c, transmission.c, mqtt.c, sd_logger.c
+  all agree); cppcheck gate is clean on it. Left as-is.
+- `ESP_ERROR_CHECK` on the standalone radio-off `esp_wifi_stop()`/
+  `esp_wifi_deinit()` pair (main.c): abort re-verified unreachable — the
+  branch only runs after WiFi init succeeded at boot, and both calls can
+  only fail with `ESP_ERR_WIFI_NOT_INIT`. Consistent with the adjacent
+  networked AP-window branch. Left as-is.
+
 ## V2.6.21 — Standalone SD-logging: fix card-pull crash, local-time CSV, unified heap diagnostics
 
 ### Fix SD card-pull crash (LoadProhibited, httpd task)

@@ -116,11 +116,14 @@ esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) {
     s_ready = true;
 
     // V2.6.19: register our CSV columns once, in the chip-ACK success path.
-    // env_sensor's dual-bus probe can call fuel_gauge_init() a second time;
-    // the s_tm_registered guard (mirrors sht45.c) is what actually prevents
-    // a double registration in that case. Boards without HAL_HAS_FUEL_GAUGE
-    // compile the stub fuel_gauge_init() below instead, which never reaches
-    // here — no columns registered on those boards.
+    // main.c calls fuel_gauge_init() exactly once (the MAX17048 is a fixed
+    // onboard part on the primary bus — it never takes the env sensors'
+    // dual-bus fallback probe), and the s_ready guard at the top would
+    // short-circuit any second call before reaching here anyway. The
+    // s_tm_registered guard (mirrors sht45.c) is therefore belt-and-braces
+    // for a future second caller, not load-bearing today. Boards without
+    // HAL_HAS_FUEL_GAUGE compile the stub fuel_gauge_init() below instead,
+    // which never reaches here — no columns registered on those boards.
     static bool s_tm_registered = false;
     if (!s_tm_registered) {
         s_tm_registered = true;

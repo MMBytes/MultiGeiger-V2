@@ -16,6 +16,7 @@
  */
 
 #include <stdbool.h>
+#include "esp_http_server.h"
 #include "config.h"
 
 /** @brief Start the server on port 80.
@@ -26,3 +27,8 @@
  *  derived, owned by main.c, shown on the status and config pages.
  */
 void http_server_start(config_t *cfg, const char *chip_id);
+
+/** @brief Handle from httpd_start(), or NULL before http_server_start()
+ *  runs / if it failed. Lets other modules serialize onto the httpd task
+ *  via httpd_queue_work() — see sd_card.c's mount/unmount for why. */
+httpd_handle_t http_server_get_handle(void);

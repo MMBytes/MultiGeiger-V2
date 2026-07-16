@@ -1035,6 +1035,13 @@ static void do_tx_cycle(void) {
             .hv_pulses = hv_pulses_delta,
             .dt_ms     = dt_ms,
         };
+        // Bypassing tx_run() (transmission.c) below this branch also skips
+        // its per-cycle heap log lines — standalone had zero heap visibility
+        // in /log until this was added, matching what tx_run() logs every
+        // networked TX cycle (as one combined line here). Ring-buffer/serial
+        // only, not the CSV.
+        diag_log_heap_standalone();
+
         // Final review A3: env_sensor_read() above already ran the fused
         // cascade (priority short-circuit — skips a chip once an earlier
         // one already satisfied its fields), which is exactly right for the
@@ -1138,6 +1145,13 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
 
     config_load(&g_cfg);
+
+    // V2.6.21: apply TZ before anything logs or timestamps a file — standalone
+    // boards never reach ntp_setup() (no STA, so no GOT_IP), so without this
+    // they never got past the UTC default despite tz_posix being configured.
+    // Harmless on networked boards too: ntp_setup() re-applies the same value
+    // once GOT_IP fires.
+    ntp_set_timezone(g_cfg.tz_posix);
 
     // Chip ID is always derived from the factory MAC — never user-edited,
     // never stored in NVS. Format: "esp32-<decimal>" where <decimal> is the

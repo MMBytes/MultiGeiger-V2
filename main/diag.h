@@ -48,3 +48,17 @@ uint32_t diag_i2c_errors(void);
  *  over uptime. `where` is a short context label (e.g. "per-cycle", "OTA prep").
  */
 void diag_log_heap(const char *where);
+
+/** @brief Log one combined line: free/min_free/max_alloc PSRAM-dominated
+ *  heap summary + the INTERNAL/DMA capability split (diag_log_heap()'s
+ *  fields), all in a single ESP_LOGI call.
+ *
+ *  V2.6.21 standalone SD-logging: tx_run() (transmission.c) has logged the
+ *  same information as two separate lines once per networked TX cycle since
+ *  V2.3.17/V2.4.32 — standalone mode never reaches tx_run() (do_tx_cycle
+ *  returns via sd_logger_cycle() before ever calling tx_transmit()), so a
+ *  standalone node had zero per-cycle heap visibility in /log until this was
+ *  added to the standalone branch. One line here (not two, unlike tx_run())
+ *  by explicit request.
+ */
+void diag_log_heap_standalone(void);

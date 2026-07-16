@@ -10,6 +10,21 @@
 #include <stdbool.h>
 #include <time.h>
 
+/** @brief Set the process TZ environment variable + tzset(). Independent of
+ *  SNTP/WiFi — safe to call at boot before either is up. @p tz_posix is a
+ *  POSIX TZ string (e.g. "AEST-10AEDT,M10.1.0,M4.1.0/3"); NULL or empty
+ *  leaves TZ unchanged.
+ *
+ *  V2.6.21: split out of ntp_setup() so standalone-SD boards (which never
+ *  reach GOT_IP, so ntp_setup() itself never ran) still get local-time
+ *  timestamps everywhere localtime_r() is used — ESP-IDF's own SYSTEM_FULL
+ *  log timestamp formatter included, so this alone makes every /log line
+ *  TZ-aware. main.c calls this once at boot, right after config_load();
+ *  ntp_setup() also calls it (below), so a later STA GOT_IP just re-applies
+ *  the same value — harmless.
+ */
+void ntp_set_timezone(const char *tz_posix);
+
 /** @brief Start SNTP with up to three servers and set the local timezone.
  *
  *  Empty server strings are skipped (no slot registered). Non-empty pointers

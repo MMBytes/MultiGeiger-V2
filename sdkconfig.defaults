@@ -42,9 +42,18 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=3
 # user-set value".
 # CONFIG_LWIP_DEBUG is not set
 
-# Log level: INFO by default, can bump to DEBUG via menuconfig if needed
+# Log level: INFO, compile-time ceiling = INFO too. The ceiling was DEBUG
+# (runtime-bumpable tags without a rebuild) until V2.6.21: with DEBUG compiled
+# in, IDF's esp_vfs_select() has a live NULL-deref in its NULL-slot guard
+# (vfs_calls.c:660 ESP_LOGD passes vfs->offset with vfs==NULL) — deterministic
+# LoadProhibited (excvaddr 0xc) on the httpd task after any VFS unregister
+# leaves a hole in s_vfs[] (SD card unmount after card pull; the hole persists
+# until a mount succeeds again, and esp_vfs_unregister never shrinks
+# s_vfs_count). INFO ceiling dead-code-eliminates that line project-wide.
+# Bench-crashed twice 2026-07-16 before this fix. Don't raise back to DEBUG
+# until the upstream ESP_LOGD is fixed.
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y
 
 # Wall-clock timestamp prefix on every log line (YY-MM-DD HH:MM:SS.sss).
 # Pre-NTP: reads from RTC (starts at epoch 1970). Post-NTP: real Sydney local time.

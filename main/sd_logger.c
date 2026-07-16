@@ -15,6 +15,7 @@
 #include "hal.h"
 #include "gnss.h"
 #include "neopixel.h"
+#include "ntp.h"
 #include "sd_card.h"
 #include "telemetry.h"
 #include "util.h"
@@ -123,12 +124,16 @@ static void close_file_for_remount(void) {
 
 /** Build sorted column order + write the header row. Returns false on I/O error. */
 static bool create_file(void) {
+    // V2.6.21: local time (main.c applies tz_posix unconditionally at boot,
+    // before this ever runs) — was gmtime_r/UTC. Compact numeric form, no
+    // offset needed: a filename just needs to be a stable, sortable id, not
+    // self-describing like the DateTime column below.
     time_t now = time(NULL);
-    struct tm tm_utc;
-    gmtime_r(&now, &tm_utc);
+    struct tm tm_local;
+    localtime_r(&now, &tm_local);
 
     char stamp[20];
-    strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm_utc);
+    strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm_local);
     snprintf(s_filename, sizeof(s_filename), "%s_%s.csv", s_chip_id, stamp);
     snprintf(s_path, sizeof(s_path), "%s/%s", SD_MOUNT_POINT, s_filename);
 
@@ -148,8 +153,11 @@ static bool create_file(void) {
     char row[ROW_MAX];
     int n = 0;
     row[0] = '\0';
+    // V2.6.21: no longer hardcoded UTC — DateTime is local time with its own
+    // numeric offset per row (ntp_localtime_str() in write_row() below), so
+    // the header can't bake in a fixed zone label.
     n = append_safe(row, sizeof(row), n,
-                    "DateTime UTC,Uptime [s],GPS Lat,GPS Lon,GPS Alt [m],GPS Sats,GPS HDOP");
+                    "DateTime,Uptime [s],GPS Lat,GPS Lon,GPS Alt [m],GPS Sats,GPS HDOP");
     for (size_t i = 0; i < s_ncols; i++) {
         n = append_safe(row, sizeof(row), n, ",%s", telemetry_get(s_order[i])->header);
     }
@@ -168,13 +176,13 @@ static bool write_row(void) {
     int n = 0;
     row[0] = '\0';
 
-    time_t now = time(NULL);
-    struct tm tm_utc;
-    gmtime_r(&now, &tm_utc);
-    char stamp[24];
-    strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
-
-    n = append_safe(row, sizeof(row), n, "%s,%llu", stamp,
+    // V2.6.21: local time + numeric UTC offset (ntp_localtime_str() — the
+    // same helper syslog.c uses), not gmtime_r's hardcoded "Z". The clock's
+    // actual epoch is still GPS-set UTC underneath (gnss.c settimeofday) —
+    // only this display conversion changes; TZ is applied unconditionally at
+    // boot in main.c so this reflects tz_posix even though standalone mode
+    // never runs ntp_setup()/NTP itself.
+    n = append_safe(row, sizeof(row), n, "%s,%llu", ntp_localtime_str(),
                     (unsigned long long)(esp_timer_get_time() / 1000000LL));
 
     // GPS cells: empty on fix loss, while DateTime above keeps running on

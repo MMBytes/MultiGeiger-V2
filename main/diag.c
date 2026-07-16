@@ -4,6 +4,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 
 static const char *TAG = "diag";
 
@@ -30,6 +31,21 @@ void diag_log_heap(const char *where) {
     ESP_LOGI(TAG,
              "%s heap: INTERNAL free=%u largest=%u min=%u | DMA free=%u largest=%u",
              where,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+}
+
+void diag_log_heap_standalone(void) {
+    uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t min_free  = esp_get_minimum_free_heap_size();
+    uint32_t max_alloc = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG,
+             "free heap: %u / min_free=%u / max_alloc=%u / "
+             "INTERNAL free=%u largest=%u min=%u | DMA free=%u largest=%u",
+             (unsigned)free_heap, (unsigned)min_free, (unsigned)max_alloc,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),

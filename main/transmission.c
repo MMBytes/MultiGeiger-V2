@@ -1411,19 +1411,14 @@ static void tx_run(const tx_context_t *c) {
     // spinlock OR pass via the tx_context_t.
     static int fail_streak[TX_TARGET_COUNT] = {0};
 
-    uint32_t free_heap = esp_get_free_heap_size();
-    uint32_t min_free  = esp_get_minimum_free_heap_size();
-    uint32_t max_alloc = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    // V2.3.17: include min_free so the per-cycle log captures the lifetime
-    // watermark too. Lets us correlate transient-peak events with what was
-    // happening across the codebase, not just FTPS-specific moments
-    // (which the FTPS pre/post heap log already covers).
-    ESP_LOGI(TAG, "free heap before TX: %lu bytes / min_free=%lu / max_alloc=%lu bytes",
-             (unsigned long)free_heap, (unsigned long)min_free, (unsigned long)max_alloc);
-    // V2.4.32: the line above is PSRAM-dominated; the net stack lives in
-    // internal/DMA RAM. Log the capability split each cycle so the multi-day
-    // /log → FTP trail exposes any internal/DMA drain (suspected OTA-stall cause).
-    diag_log_heap("per-cycle");
+    // V2.6.21: one combined line (PSRAM-dominated free/min_free/max_alloc +
+    // the INTERNAL/DMA capability split) via the same diag_log_heap_standalone()
+    // standalone mode uses, so networked and standalone /log output are
+    // identical here — was two separate ESP_LOGI/diag_log_heap("per-cycle")
+    // calls (V2.3.17 / V2.4.32) until this was unified. Tag on this one line
+    // is "diag", not "tx" — it's genuinely shared code now, same as the
+    // standalone path.
+    diag_log_heap_standalone();
     // V2.5.29: surface device-side syslog UDP drops (sendto failures = lwIP
     // pbuf exhaustion under burst — e.g. the boot config dump). Logged from the
     // TX worker (NOT the emit path), so it lands on /log even when syslog itself

@@ -2870,3 +2870,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_coredump_erase);
     ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /coredump.elf /coredump_erase)");
 }
+
+httpd_handle_t http_server_get_handle(void) {
+    return s_server;   // NULL before http_server_start() — callers must check
+}

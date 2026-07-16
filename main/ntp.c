@@ -48,11 +48,15 @@ static void sync_cb(struct timeval *tv) {
     }
 }
 
-void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_posix) {
+void ntp_set_timezone(const char *tz_posix) {
     if (tz_posix && tz_posix[0]) {
         setenv("TZ", tz_posix, 1);
         tzset();
     }
+}
+
+void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_posix) {
+    ntp_set_timezone(tz_posix);
 
     if (esp_sntp_enabled()) {
         esp_sntp_stop();

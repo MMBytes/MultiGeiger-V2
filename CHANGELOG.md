@@ -9,6 +9,64 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.21 — Standalone SD-logging: fix card-pull crash, local-time CSV, unified heap diagnostics
+
+### Fix SD card-pull crash (LoadProhibited, httpd task)
+
+- Bench-crashed twice (2026-07-16) pulling the SD card live on
+  `sparkfun_thing_plus_esp32s3`: `LoadProhibited` at `excvaddr=0xc`, backtrace
+  `esp_vfs_select → httpd_server → httpd_thread`, always on the `httpd` task,
+  always right after an unmount.
+  - Root cause (confirmed via coredump SHA-verified decode, not a race):
+    ESP-IDF's `esp_vfs_unregister_with_id()` NULLs the freed slot in the
+    global `s_vfs[]` VFS table but never shrinks `s_vfs_count`, leaving a
+    *persistent* hole until the next successful mount refills it.
+    `esp_vfs_select()`'s own NULL-slot guard (`vfs_calls.c:660`) then executes
+    `ESP_LOGD(..., vfs->offset)` on a NULL `vfs` — `offset` sits at struct
+    byte-offset `+0xc`, matching both coredumps exactly. Deterministic on
+    httpd's very next `select()`, no concurrency required, once the card is
+    out and every remount keeps failing.
+  - Fix: `CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y` (was
+    `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y`) in `sdkconfig.defaults` — compile-time
+    ceiling drops to INFO, dead-code-eliminating that `ESP_LOGD` line
+    project-wide. Doesn't touch any `wifi:`-tagged driver output (that's all
+    I/W-level, unaffected by the ceiling either way).
+  - `sd_card.c` also gained `run_serialized_with_httpd()`: mount/unmount now
+    run via `httpd_queue_work()` onto the httpd task itself (new
+    `http_server_get_handle()` getter), kept as defense-in-depth against the
+    separate, genuine ESP-IDF-acknowledged race where a cross-task unregister
+    can free a `vfs_entry_t` while another task's in-flight `select()` has
+    already fetched a pointer to it.
+  - Bench-confirmed fixed: full pull → write-fail → unmount → retry-mount-fail
+    (card still out) → retry-mount-succeed (card reinserted) → new CSV
+    created → normal steady-state cycles, zero crashes throughout.
+
+### Local time in standalone CSV (was hardcoded UTC)
+
+- `ntp_setup()`'s `setenv("TZ", ...)` step split into its own
+  `ntp_set_timezone()`, now called unconditionally at boot right after
+  `config_load()`. Standalone boards never reach `ntp_setup()` (no STA, so no
+  `GOT_IP`), so they never got past the UTC default despite `tz_posix` being
+  configured. Harmless on networked boards — `ntp_setup()` re-applies the
+  same value once `GOT_IP` fires.
+- `sd_logger.c`'s CSV filename timestamp and per-row `DateTime` column switch
+  from `gmtime_r()`/hardcoded `"Z"` to local time (`localtime_r()` /
+  `ntp_localtime_str()`, the same helper syslog.c already used) — the
+  underlying clock is still GPS-set UTC underneath, only the display
+  conversion changes.
+
+### Unified per-cycle heap diagnostics
+
+- New `diag_log_heap_standalone()` (`diag.c`/`diag.h`): one combined
+  free/min_free/max_alloc + INTERNAL/DMA capability-split line. Standalone
+  mode never reaches `tx_run()` (bypasses `tx_transmit()` entirely), so it had
+  zero per-cycle heap visibility in `/log` until now; `do_tx_cycle()` in
+  `main.c` calls it directly.
+- `transmission.c`'s `tx_run()` switched to the same helper, replacing its old
+  two-line `ESP_LOGI(...)` + `diag_log_heap("per-cycle")` pair (V2.3.17 /
+  V2.4.32) with one shared line — networked and standalone `/log` output now
+  match exactly here.
+
 ## V2.6.20 — Heltec WiFi LoRa32 V4-R2: fix dead onboard OLED (Vext-gated rail)
 
 - First real V4-R2 unit shipped with the OLED's dedicated I²C bus

@@ -29,12 +29,14 @@
  *
  *    Heltec WiFi LoRa 32 V4-R2: primary bus on the external env-sensor
  *      header (IO48 SDA / IO47 SCL). Secondary bus on the module's fixed
- *      internal OLED bus (IO17 SDA / IO18 SCL) — always-on (no gating
- *      GPIO, unlike FeatherS3-D's LDO2-gated STEMMA2), created eagerly on
- *      first call and never torn down. Unlike every other board's
- *      secondary bus, this one can only ever host the onboard OLED — it
- *      isn't wired to anything else, so there's no "no consumer, shed it"
- *      case to handle.
+ *      internal OLED bus (IO17 SDA / IO18 SCL) — Vext_Ctrl-gated (GPIO36,
+ *      active-LOW MOSFET): V2.6.20 bench finding, the datasheet reading
+ *      that Vext only gates the external Ve header was wrong.
+ *      i2c_bus_get_secondary() drives the gate LOW before creating the
+ *      controller; the rail is never dropped afterwards. Unlike every
+ *      other board's secondary bus, this one can only ever host the
+ *      onboard OLED — it isn't wired to anything else, so there's no
+ *      "no consumer, shed it" case to handle.
  *
  *  Lazy + sheddable secondary lets the multi-page display task and any
  *  future STEMMA2-attached sensor opt into bus 2 without forcing it
@@ -79,9 +81,11 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void);
  *  I²C controller on I²C_NUM_1 / IO15 / IO16. Subsequent calls return
  *  the cached handle.
  *
- *  On Heltec WiFi LoRa 32 V4-R2: lazy init on first call — no gating GPIO
- *  (this board's OLED bus is always powered), creates the I²C controller
- *  on I²C_NUM_1 / IO17 / IO18. Always non-NULL once created; never torn
+ *  On Heltec WiFi LoRa 32 V4-R2: lazy init on first call — drives
+ *  Vext_Ctrl (GPIO36) LOW to power the OLED rail (V2.6.20 — this bus is
+ *  NOT always-on, contrary to the original datasheet reading), waits
+ *  50 ms for the rail to settle, then creates the I²C controller on
+ *  I²C_NUM_1 / IO17 / IO18. Always non-NULL once created; never torn
  *  down (see i2c_bus_finalize()'s log-only branch for this board).
  *
  *  On Heltec V2 / QT Py / any board without a second bus: always returns
@@ -91,8 +95,10 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void);
  *  Calling this on FeatherS3-D enables LDO2 — adds ~5–10 mA continuous draw
  *  (LDO2 quiescent + onboard NeoPixel idle). If no consumer subsequently
  *  calls i2c_bus_secondary_keep_alive(), i2c_bus_finalize() will tear it
- *  back down. On Heltec WiFi LoRa 32 V4-R2 there is no LDO to drop — the
- *  bus stays up regardless.
+ *  back down. On Heltec WiFi LoRa 32 V4-R2 the Vext rail is deliberately
+ *  left ON even without a consumer — the bus is dedicated to the onboard
+ *  OLED, so a missing consumer means a failed probe (anomalous), not a
+ *  power-save opportunity.
  */
 i2c_master_bus_handle_t i2c_bus_get_secondary(void);
 

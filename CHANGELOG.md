@@ -9,13 +9,76 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.22 — Standalone SD-logging: V2.6.19-review deferred items (diagnostic accuracy + doc rot)
+## V2.6.22 — V2.6.19 deferred items + V2.6.20 review follow-ups
+
+Two batches in one (unreleased) version: the deferred-item list from the
+V2.6.19 final review (Part 1), and the findings of a single-agent Fable 5
+MAX review of the v2.6.20 release diff (Part 2 — verdict: sound as shipped,
+zero Critical/High/Medium; all findings were documentation hygiene plus one
+deliberately-investigated robustness item).
+
+### Part 2 — V2.6.20 review follow-ups: Vext doc rot + loud GPIO bring-up
+
+#### F1/F2 — the "no gating GPIO" falsehood, eradicated (Low)
+
+- v2.6.20 fixed the wrong "Vext doesn't gate the OLED" claim in three places
+  but left it standing in three others: `i2c_bus.h`'s per-board behaviour
+  block, its `i2c_bus_get_secondary()` doc comment ("there is no LDO to drop
+  — the bus stays up regardless"), and `i2c_bus_finalize()`'s V4-R2 branch
+  ("No gating GPIO on this board"). All three now state the truth: the OLED
+  bus is Vext_Ctrl-gated (GPIO36, active-LOW), driven before controller
+  creation, and the rail is deliberately never dropped (a missing consumer
+  means a failed OLED probe, not a power-save case). The original V2.6.7 bug
+  was born from a wrong power claim outliving its refutation — this class is
+  now clean.
+
+#### F3/F5 — hal.h PIN_VEXT comment accuracy (Informational)
+
+- Reserved-list GPIO36 bullet no longer claims it was "moved out of this
+  list" while sitting in it: it stays reserved (it's the module's power-gate
+  control, never free GPIO), it's just firmware-driven now.
+- PIN_VEXT comment documents the side effect that the same MOSFET feeds the
+  external "Ve" header (500 mA peripheral rail) — energized from boot on
+  every unit since v2.6.20; relevant to battery deployments.
+
+#### F6 — ESP_ERROR_CHECK on boot-time GPIO bring-up (investigated, applied)
+
+- The review called the unchecked `gpio_reset_pin`/`gpio_set_direction`/
+  `gpio_set_level` triples "house pattern" — investigation showed the house
+  is split: `gpio_config()` users check loudly (tube.c, speaker.c ×
+  ESP_ERROR_CHECK; led.c, neopixel.c × log), the triple was never checked
+  anywhere. Per IDF v6.0 source these calls fail ONLY on invalid or
+  input-only pin constants — a compile-time board-port mistake (classic
+  ESP32's GPIO34-39 are input-only, and `gpio_set_direction` silently no-ops
+  on them; three classic-ESP32 boards live in this tree). Such a mistake is
+  deterministic per board, so it can never pass the bench then fail in the
+  field — abort semantics are safe, same argument as the radio-off
+  `ESP_ERROR_CHECK` pair.
+- Applied to the run-once bring-up sites: all four rail-gate blocks in
+  `i2c_bus.c` (Heltec V2 Vext, TFT-Feather/#5477 I2C power gate, FeatherS3-D
+  LDO2, V4-R2 Vext), the OLED reset-pin setup in `display.c`, and the
+  antenna-select in `main.c`. Hot-path `gpio_set_level` calls (speaker/tube/
+  led per-tick) deliberately left bare — abort risk in pulse paths for zero
+  diagnostic value.
+- Converts a future misport from "every I2C probe times out, bench session
+  to root-cause" (the exact V2.6.7 dead-OLED signature) into an instant
+  first-boot abort naming the offending line.
+
+#### F4 (failure-path Vext asymmetry) — no change
+
+- On `i2c_new_master_bus()` failure the V4-R2 branch leaves Vext on (unlike
+  FeatherS3-D's LDO2 back-off). Verified unreachable in practice: one call
+  site per boot, and bus-controller creation failing is effectively fatal.
+  Documented here; not worth code.
+
+### Part 1 — V2.6.19-review deferred items (diagnostic accuracy + doc rot)
 
 Clears the deferred-item list from the V2.6.19 final review (items 2–7; items
 10/11 re-verified as already matching house style / already in place, no
-change).
+change — though item 10's "house pattern" claim was later overturned for the
+GPIO case, see Part 2 F6).
 
-### /status "Last error" now names the actual error (M2, item 5)
+#### /status "Last error" now names the actual error (M2, item 5)
 
 - `sd_logger.c::fail_cycle()` mixed two error domains into one `int` rendered
   with a bare `%d`: `sd_card_mount()` failures are `esp_err_t` (so
@@ -29,7 +92,7 @@ change).
   could be the cleanup's errno, not the real failure's. Diagnostic accuracy
   only; retry/alert behaviour unchanged.
 
-### /status SD card cosmetics after card pull (M2, items 7)
+#### /status SD card cosmetics after card pull (M2, items 7)
 
 - Row count no longer lingers: after a card pull, /status showed the dead
   file's `rows_written` next to no filename. `close_file_for_remount()` now
@@ -40,7 +103,7 @@ change).
   the new name only after the header row is safely fsync'd — /status can
   never show a half-written name or a name with no live file behind it.
 
-### Header-length contract made explicit (item 4)
+#### Header-length contract made explicit (item 4)
 
 - A future sensor registering a CSV column header longer than 23 chars would
   have silently truncated the CSV header row (data rows still full-width — a
@@ -51,7 +114,7 @@ change).
   Today's longest header is 22 chars — no behaviour change for any current
   sensor.
 
-### Doc rot + cosmetics (items 2, 3, 6)
+#### Doc rot + cosmetics (items 2, 3, 6)
 
 - `sd_logger.c`: two stale claims fixed — "status read unconditionally on
   every board" (the /status card is `HAL_HAS_SD_CARD`-gated since the final
@@ -69,7 +132,7 @@ change).
   adafruit_qtpy_esp32_pico, seeed_xiao_esp32s3); the V2.6.19 GPIO25
   reserved-pin comment rewrapped to house width.
 
-### Verified no-change items (10, 11)
+#### Verified no-change items (10, 11)
 
 - Trailing `append_safe()` calls without `(void)`: grep confirms zero
   `(void)append_safe` casts exist anywhere in `main/` — bare trailing calls

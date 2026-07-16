@@ -403,8 +403,11 @@ static bool try_oled_on_bus(i2c_master_bus_handle_t bus, uint8_t *addr_out) {
     // external 4-pin breakouts have no reset line and PIN_OLED_RST stays
     // undefined → block compiles out. Panel latches reset for ~3 µs
     // minimum; 10 ms either side is plenty.
-    gpio_reset_pin(PIN_OLED_RST);
-    gpio_set_direction(PIN_OLED_RST, GPIO_MODE_OUTPUT);
+    // V2.6.22: ESP_ERROR_CHECK — can only fail on an invalid/input-only
+    // pin constant, i.e. a board-port mistake; abort loudly at first boot
+    // (see the rail-gate blocks in i2c_bus.c for the full rationale).
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_OLED_RST));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_OLED_RST, GPIO_MODE_OUTPUT));
     gpio_set_level(PIN_OLED_RST, 1); vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(PIN_OLED_RST, 0); vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(PIN_OLED_RST, 1); vTaskDelay(pdMS_TO_TICKS(10));

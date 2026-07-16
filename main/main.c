@@ -416,9 +416,12 @@ static void apply_antenna_routing(void) {
     bool external = g_cfg.use_external_antenna;
   #if HAL_ANTENNA_SELECT_VERIFIED
     int level = (external == ANTENNA_SELECT_HIGH_IS_EXTERNAL) ? 1 : 0;
-    gpio_reset_pin(PIN_ANTENNA_SELECT);
-    gpio_set_direction(PIN_ANTENNA_SELECT, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_ANTENNA_SELECT, level);
+    // V2.6.22: ESP_ERROR_CHECK — can only fail on an invalid/input-only
+    // pin constant, i.e. a board-port mistake; abort loudly at first boot
+    // (see the rail-gate blocks in i2c_bus.c for the full rationale).
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_ANTENNA_SELECT));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_ANTENNA_SELECT, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_ANTENNA_SELECT, level));
     ESP_LOGI(TAG, "antenna routing: %s (gpio %d = %d)",
              external ? "EXTERNAL u.FL" : "internal PCB",
              PIN_ANTENNA_SELECT, level);

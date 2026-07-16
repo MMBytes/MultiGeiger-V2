@@ -58,9 +58,16 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     // every probe times out with the misleading "GPIO X is not usable"
     // warning. Driving LOW is harmless on the older modules and required
     // on the newer ones, so always drive.
-    gpio_reset_pin(PIN_VEXT);
-    gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_VEXT, 0);                       // 0 = Vext ON
+    // V2.6.22: ESP_ERROR_CHECK on this and every rail-gate triple below —
+    // these can only fail on an invalid or input-only pin constant, i.e. a
+    // board-port mistake (classic ESP32's GPIO34-39 are input-only and
+    // gpio_set_direction silently no-ops on them). Aborting at first boot
+    // with the offending line beats the alternative: an unpowered rail
+    // where every I2C probe times out — the exact V2.6.7 dead-OLED
+    // signature that took a bench session to root-cause.
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_VEXT));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_VEXT, 0));      // 0 = Vext ON
     vTaskDelay(pdMS_TO_TICKS(50));                     // rail settle + OLED charge-pump warm-up
 #endif
 
@@ -80,9 +87,9 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     // active-HIGH gate pattern on its own PIN_I2C_POWER_GATE (GPIO7,
     // Adafruit's "PIN_I2C_POWER" net) — no TFT on that board, but the same
     // "gate the only I2C bus before any probe" requirement applies.
-    gpio_reset_pin(PIN_I2C_POWER_GATE);
-    gpio_set_direction(PIN_I2C_POWER_GATE, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_I2C_POWER_GATE, 1);              // 1 = rail ON
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_I2C_POWER_GATE));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_I2C_POWER_GATE, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_I2C_POWER_GATE, 1));   // 1 = rail ON
     vTaskDelay(pdMS_TO_TICKS(50));                      // rail settle
 #endif
 
@@ -116,9 +123,9 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
     // Enable LDO2 (powers 3V3.2 → STEMMA2 + onboard NeoPixel rail).
     // Default state of IO39 is hi-Z + internal pull-down → LDO2 OFF →
     // STEMMA2 V+ pin dead, no device can ACK there. Drive HIGH to wake.
-    gpio_reset_pin(GPIO_NUM_39);
-    gpio_set_direction(GPIO_NUM_39, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_NUM_39, 1);
+    ESP_ERROR_CHECK(gpio_reset_pin(GPIO_NUM_39));
+    ESP_ERROR_CHECK(gpio_set_direction(GPIO_NUM_39, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_39, 1));
     vTaskDelay(pdMS_TO_TICKS(10));                     // 3V3.2 rail settle (LDO2 turn-on ~1 ms)
 
     i2c_master_bus_config_t cfg = {
@@ -148,9 +155,9 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
     // Drive Vext_Ctrl LOW here (mirroring Heltec V2's PIN_VEXT pattern in
     // i2c_bus_get_primary() above) before bringing the controller up;
     // bench-confirmed to clear the timeouts and light up the OLED.
-    gpio_reset_pin(PIN_VEXT);
-    gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_VEXT, 0);                       // 0 = Vext ON
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_VEXT));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_VEXT, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_VEXT, 0));      // 0 = Vext ON
     vTaskDelay(pdMS_TO_TICKS(50));                     // rail settle + OLED charge-pump warm-up
 
     i2c_master_bus_config_t cfg = {
@@ -191,10 +198,15 @@ void i2c_bus_finalize(void) {
     }
     // s_bus_secondary == NULL && !kept: secondary was never requested, nothing to do.
 #elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
-    // No gating GPIO on this board — the bus is never a teardown candidate,
-    // it's dedicated permanently to the onboard OLED. This branch exists
-    // only so an OLED probe failure leaves a log trace instead of silently
-    // leaking the I2C_NUM_1 handle with zero diagnostic trail.
+    // Vext (GPIO36, driven in i2c_bus_get_secondary() since V2.6.20) is
+    // deliberately left ON even when no consumer claimed the bus — unlike
+    // FeatherS3-D above, which sheds LDO2 by design when STEMMA2 is
+    // unpopulated. This bus is dedicated permanently to the onboard OLED,
+    // so a missing consumer means the probe failed (anomalous), not that
+    // the rail is unneeded; and the same MOSFET also feeds the external Ve
+    // header. This branch exists only so an OLED probe failure leaves a
+    // log trace instead of silently leaking the I2C_NUM_1 handle with zero
+    // diagnostic trail.
     if (s_bus_secondary && !s_secondary_kept) {
         ESP_LOGW(TAG, "OLED bus is up but no consumer claimed it — "
                       "OLED probe likely failed this boot");

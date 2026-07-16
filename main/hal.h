@@ -625,8 +625,11 @@
     // V2.6.20: bench-confirmed active-LOW MOSFET gating the OLED rail (see
     // HAL_HAS_VEXT_GATE comment above). Driven LOW by
     // i2c_bus_get_secondary() before the OLED bus init, mirroring Heltec
-    // V2's PIN_VEXT pattern.
-    #define PIN_VEXT                36   // Vext_Ctrl — active-LOW MOSFET, gates OLED rail (bench-confirmed)
+    // V2's PIN_VEXT pattern. Side effect: the same MOSFET also feeds the
+    // external "Ve" header (datasheet §3.3 "Power Output", 500 mA
+    // peripheral rail), so anything wired to Ve is energized from boot on
+    // every unit — budget for that on battery deployments.
+    #define PIN_VEXT                36   // Vext_Ctrl — active-LOW MOSFET, gates OLED rail + Ve header (bench-confirmed)
 
     // RESERVED for future LoRaWAN/Meshtastic work (hardware-reservation
     // only per spec §6 — no radio driver, no HAL_HAS_LORA flag, nothing
@@ -658,9 +661,10 @@
     // RESERVED / never repurpose (out of scope or module-internal — see
     // spec §2 and §9, and WiFi_LoRa_32_V4.3.1_Datasheet.pdf Table 2.2.1/2.2.2
     // for the primary source):
-    //   GPIO36        Vext_Ctrl — see PIN_VEXT / HAL_HAS_VEXT_GATE above
-    //                 (V2.6.20: bench-confirmed to gate the OLED rail, now
-    //                 driven — moved out of this reserved/untouched list)
+    //   GPIO36        Vext_Ctrl — see PIN_VEXT / HAL_HAS_VEXT_GATE above.
+    //                 V2.6.20: bench-confirmed to gate the OLED rail and
+    //                 now firmware-driven, but it stays on this list: it
+    //                 is the module's power-gate control, NEVER free GPIO.
     //   GPIO19/20     native USB D-/D+ (module-internal strap pair; this
     //                 board doesn't use native USB but the pins are still
     //                 module wiring, not free GPIO)

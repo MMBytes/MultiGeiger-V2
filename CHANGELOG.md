@@ -132,6 +132,23 @@ GPIO case, see Part 2 F6).
   adafruit_qtpy_esp32_pico, seeed_xiao_esp32s3); the V2.6.19 GPIO25
   reserved-pin comment rewrapped to house width.
 
+#### Geiger-pulse NeoPixel flash: blue, was red (bench-test follow-up)
+
+- On the four boards whose pulse indicator is the NeoPixel (QT Py, SparkFun
+  Thing Plus S3/C5, Adafruit Feather V2), the per-count flash is now dim
+  blue (0,0,20) instead of dim red — a tube pulse can no longer be confused
+  with the solid-red SD-failure alert at a glance, and during an active
+  alert the pixel reads "blue blink per count, solid red in between".
+  Boards whose pulse tick is a plain onboard LED (TFT Feather, #5477, all
+  non-NeoPixel boards) are unaffected. Alert colour unchanged (red, 64,0,0).
+
+#### Per-cycle write confirmation in /log (bench-test follow-up)
+
+- `sd_logger: row N written to <file>` at INFO after every successful
+  (fsync'd) CSV row. Previously only failures logged, so /log showed the
+  sensor readings but never that they landed on the card — "logging fine"
+  and "logging silently stopped" looked identical between error lines.
+
 #### Verified no-change items (10, 11)
 
 - Trailing `append_safe()` calls without `(void)`: grep confirms zero

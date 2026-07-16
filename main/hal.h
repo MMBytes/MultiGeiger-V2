@@ -285,7 +285,7 @@
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
-    #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes red on Geiger pulse
+    #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes blue on Geiger pulse (V2.6.22, was red)
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
     // a QT Py + Adafruit 326 deployment. V2.4.9 removed HAL_MULTIPAGE_ROTATION

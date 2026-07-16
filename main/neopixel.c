@@ -81,11 +81,13 @@ void neopixel_set_alert(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // ---------------------------------------------------------------------------
-// Pulse worker — blocks on task notification, drives a red flash on each.
-// Brightness intentionally low (R=20, G=B=0) to avoid being annoyingly bright
-// in dark rooms while still being visible at arm's length.
+// Pulse worker — blocks on task notification, drives a blue flash on each.
+// Brightness intentionally low (B=20, R=G=0) to avoid being annoyingly bright
+// in dark rooms while still being visible at arm's length. Blue (V2.6.22,
+// was red) so a tube pulse can't be confused with the solid-red SD-failure
+// alert (neopixel_set_alert(64,0,0) from sd_logger.c) at a glance.
 // ---------------------------------------------------------------------------
-#define PULSE_RED_BRIGHTNESS  20
+#define PULSE_BLUE_BRIGHTNESS 20
 #define PULSE_VISIBLE_MS      40
 
 static void pulse_task(void *arg) {
@@ -96,13 +98,15 @@ static void pulse_task(void *arg) {
         // collapse to one visible flash — fine, the human eye couldn't
         // distinguish them anyway.
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        neopixel_set_rgb(PULSE_RED_BRIGHTNESS, 0, 0);
+        neopixel_set_rgb(0, 0, PULSE_BLUE_BRIGHTNESS);
         vTaskDelay(pdMS_TO_TICKS(PULSE_VISIBLE_MS));
         // V2.6.19 (final review A1): restore the sticky alert colour, not a
         // hardcoded black — otherwise a standalone node's solid-red
         // SD-failure alert (neopixel_set_alert()) is wiped by the very next
         // tube pulse, within seconds at background rate. Black when no
         // alert is active, so networked/no-alert behaviour is unchanged.
+        // (With the V2.6.22 blue pulse this also reads correctly during an
+        // active alert: blue blink on each count, solid red in between.)
         neopixel_set_rgb(s_alert_r, s_alert_g, s_alert_b);
     }
 }
@@ -205,10 +209,10 @@ void neopixel_register_pulse_tick(void) {
     // and break the speaker's audio tick, per the design-spec gap found
     // while porting sparkfun_thing_plus_esp32s3). Just the worker task above
     // is needed here; the callback itself stays with speaker.c.
-    ESP_LOGI(TAG, "pulse worker ready (red flash, %d ms) — driven via speaker.c", PULSE_VISIBLE_MS);
+    ESP_LOGI(TAG, "pulse worker ready (blue flash, %d ms) — driven via speaker.c", PULSE_VISIBLE_MS);
 #else
     tube_set_pulse_callback(on_tube_pulse);
-    ESP_LOGI(TAG, "tube-pulse hook registered (red flash, %d ms)", PULSE_VISIBLE_MS);
+    ESP_LOGI(TAG, "tube-pulse hook registered (blue flash, %d ms)", PULSE_VISIBLE_MS);
 #endif
 }
 

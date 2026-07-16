@@ -289,6 +289,11 @@ void sd_logger_cycle(void) {
         fail_cycle(err, false);
         return;
     }
+    // V2.6.22: positive confirmation per cycle — without it /log showed the
+    // sensor readings but never that they actually landed on the card, so
+    // "logging silently stopped" and "logging fine" looked identical between
+    // the (error-only) failure lines. Row is already fsync'd here.
+    ESP_LOGI(TAG, "row %lu written to %s", (unsigned long)s_rows, s_filename);
 
     if (s_fail_streak >= SD_FAIL_STREAK_ALERT) {
         neopixel_set_alert(0, 0, 0);   // recovery: clear the sticky red alert

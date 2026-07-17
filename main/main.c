@@ -1079,9 +1079,11 @@ static void do_tx_cycle(void) {
         return;
     }
 
-    // V2.6.23: LoRaWAN uplink — same freshest-data-wins contract as
-    // tx_transmit (non-blocking enqueue, drop-if-busy). No-op stub on
-    // boards without the radio; gated at runtime by lorawan_enabled inside
+    // V2.6.23: LoRaWAN uplink — same drop-if-busy contract as tx_transmit
+    // (non-blocking enqueue; if the depth-1 queue is full the NEW snapshot is
+    // dropped and the already-queued one is kept — so during a long join the
+    // oldest queued window wins, not the freshest). No-op stub on boards
+    // without the radio; gated at runtime by lorawan_enabled inside
     // lorawan_setup(). Reuses this cycle's counting window verbatim: the
     // payload carries counts + dt, so CPM is derived server-side whatever
     // the interval (spec §5).

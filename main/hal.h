@@ -52,6 +52,11 @@
  *                            attached" checkbox (no auto-detect — see
  *                            fuel_gauge.h for why). 0 elsewhere stubs the
  *                            driver out entirely.
+ *    HAL_HAS_LORAWAN         V2.6.23: 1 = onboard SX1262 LoRa radio with
+ *                            LoRaWAN uplink support (lorawan.cpp — compiled
+ *                            only where CONFIG_GEIGER_LORAWAN is set; the
+ *                            flag gates call sites via lorawan.h's no-op
+ *                            stubs). 0 elsewhere.
  *    HAL_LOG_RING_BYTES      applog ring size — varies by available memory
  *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
  *                            small (6 KB) on internal-DRAM-only boards, larger
@@ -79,6 +84,7 @@
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN         0   // No LoRa radio
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     // V2.4.5: trimmed 60 KB → 45 KB. The 60 KB ring was the largest single
@@ -149,6 +155,7 @@
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN         0   // No LoRa radio
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (V2.3.18)
     // V2.3.24: 16 KB snapshot scratch in PSRAM — negligible vs the 4 MB
     // PSRAM pool, and 2× the Heltec margin since the PSRAM cost is free.
@@ -287,6 +294,7 @@
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes blue on Geiger pulse (V2.6.22, was red)
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN         0   // No LoRa radio
     // V2.4.8 hardcoded HAL_MULTIPAGE_ROTATION=0 here (radiation-only) to match
     // a QT Py + Adafruit 326 deployment. V2.4.9 removed HAL_MULTIPAGE_ROTATION
     // entirely — page-layout selection is now runtime via `display_mode` in
@@ -388,6 +396,7 @@
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN         0   // No LoRa radio
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
     #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (matches FeatherS3-D budget)
@@ -522,6 +531,7 @@
     #define HAL_HAS_SPEAKER           0   // Piezo present but GPIO26 (P) collides with PSRAM SPICS1 — disabled
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN           1   // Onboard SX1262 LoRa radio — see PIN_LORA_* below
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
     // (closest analog: 2 MB in-package PSRAM, not FeatherS3-D's 8 MB external).
@@ -537,10 +547,12 @@
     // GPIO on base V4 (spec §5 confirmed no conflict with LoRa's FEM_PA on
     // this SKU — but that check predates a later finding: GPIO2 is ALSO
     // Heltec's FEM_EN, per Table 2.2.2 row 13, a second/distinct LoRa
-    // front-end-enable signal from GPIO7's VFEM_Control). Same dormant-
-    // conflict shape as GPIO46/DIP1 vs FEM_PA below: harmless today since
-    // nothing drives LoRa (no HAL_HAS_LORA), but this pin is double-booked
-    // and would contend if LoRa work ever starts.
+    // front-end-enable signal from GPIO7's VFEM_Control). Same double-booked
+    // shape as GPIO46/DIP1 vs FEM_PA below — see PIN_LORA_FEM_EN's comment:
+    // V2.6.23's HAL_HAS_LORAWAN=1 makes this pin live on reworked-hardware
+    // boards only (g_cfg.lorawan_fem_en); on unmodified boards this
+    // comparator input stays the sole driver and PIN_LORA_FEM_EN is never
+    // asserted.
     //
     // FUTURE HARDWARE REWORK (not yet built, no PCB revision exists yet):
     // hardware team has been asked to move this input to GPIO6 (J3 pin17,
@@ -631,9 +643,40 @@
     // every unit — budget for that on battery deployments.
     #define PIN_VEXT                36   // Vext_Ctrl — active-LOW MOSFET, gates OLED rail + Ve header (bench-confirmed)
 
-    // RESERVED for future LoRaWAN/Meshtastic work (hardware-reservation
-    // only per spec §6 — no radio driver, no HAL_HAS_LORA flag, nothing
-    // here should need to change when that spec is eventually written):
+    // V2.6.23: SX1262 LoRa radio — module-internal dedicated SPI bus, pins
+    // promoted from the reserved-comment block below to real defines now
+    // that lorawan.cpp drives them. Sources: Heltec V4 pin-mapping diagram
+    // (verified against WiFi_LoRa_32_V4.3.1_Datasheet.pdf) + independent
+    // bring-up confirmation in jgromes/RadioLib discussion #1665.
+    #define PIN_LORA_NSS             8
+    #define PIN_LORA_SCK             9
+    #define PIN_LORA_MOSI           10
+    #define PIN_LORA_MISO           11
+    #define PIN_LORA_RST            12
+    #define PIN_LORA_BUSY           13
+    #define PIN_LORA_DIO1           14
+    // VFEM_Control (J3 pin18): switches power to the LoRa RF front end.
+    // Driven HIGH by lorawan_setup() before radio init (V1.9 precedent).
+    #define PIN_LORA_VFEM            7
+    // FEM_EN = GC1109 FEM enable/CSD (J3 pin13). DOUBLE-BOOKED with this
+    // board's HV cap-full comparator input (PIN_HV_CAP_FULL_INPUT above).
+    // NEVER driven unless g_cfg.lorawan_fem_en is set (reworked-hardware
+    // boards only — driving it on current wiring contends with the live
+    // comparator output). Per RadioLib discussion #1665 the GC1109 must be
+    // enabled for RX; on current wiring the comparator wiggles this line,
+    // so LoRaWAN RX reliability on unmodified boards is a bench question.
+    #define PIN_LORA_FEM_EN          2
+    // FEM_PA (Heltec pin-map name; GC1109 gain-stage select for the 28 dBm
+    // path). DOUBLE-BOOKED with the mainboard's DIP1 switch. NEVER driven
+    // unless g_cfg.lorawan_high_power is set (reworked boards only).
+    #define PIN_LORA_FEM_PA         46
+
+    // FORMERLY "reserved for future LoRaWAN/Meshtastic work" (hardware-
+    // reservation only, spec §6) — as of V2.6.23 the SX1262 SPI bus and
+    // VFEM_Control are LIVE via the PIN_LORA_* defines above
+    // (HAL_HAS_LORAWAN=1, lorawan.cpp). Left below for the per-pin
+    // rationale; GPIO2/GPIO46 still need the double-booked-conflict read
+    // since lorawan.cpp only drives them conditionally:
     //   GPIO8/9/10/11/12/13/14  SX1262 LoRa radio's dedicated internal SPI
     //                 bus: GPIO8=LoRa_NSS, GPIO9=LoRa_SCK, GPIO10=LoRa_MOSI,
     //                 GPIO11=LoRa_MISO, GPIO12=LoRa_RST, GPIO13=LoRa_BUSY,
@@ -642,18 +685,22 @@
     //                 Never appears in the J2/J3 header tables — nothing
     //                 else could claim these pins anyway.
     //   GPIO7         VFEM_Control (LoRa front-end enable, J3 pin18 per the
-    //                 datasheet's own Table 2.2.2). Left undriven.
+    //                 datasheet's own Table 2.2.2). Now driven HIGH by
+    //                 lorawan_setup() — see PIN_LORA_VFEM above.
     //   GPIO2         FEM_EN (LoRa front-end enable, J3 pin13 per Table
     //                 2.2.2 — a second, distinct front-end control signal
-    //                 from GPIO7/VFEM_Control). Left undriven.
+    //                 from GPIO7/VFEM_Control). See PIN_LORA_FEM_EN above:
+    //                 double-booked with PIN_HV_CAP_FULL_INPUT, only driven
+    //                 on reworked-hardware boards (g_cfg.lorawan_fem_en).
     //   GPIO46        FEM_PA (LoRa PA control) per Heltec's own pin-mapping
     //                 diagram — dropped from the datasheet PDF's own summary
     //                 table (same class of gap as GPIO34/VGNSS_Ctrl below),
     //                 but confirmed via direct visual cross-check of the
     //                 diagram against the PDF. Multigeiger's own board also
-    //                 calls this pin "DIP1" (unused input) — no live
-    //                 conflict today since HAL_HAS_LORA isn't implemented,
-    //                 but flag this pin first if/when LoRa work begins.
+    //                 calls this pin "DIP1" (unused input). See
+    //                 PIN_LORA_FEM_PA above: double-booked with the DIP1
+    //                 switch, only driven on reworked-hardware boards
+    //                 (g_cfg.lorawan_high_power).
     //                 Hardware team has been asked to remove/disconnect the
     //                 DIP1 switch on the next PCB revision rather than leave
     //                 this landmine for whoever eventually does LoRa work.
@@ -773,6 +820,7 @@
     // deliberately unused: card presence = mount attempt, one code path with
     // the C5 board (whose SD_DET isn't even connected by default).
     #define HAL_HAS_SD_CARD           1
+    #define HAL_HAS_LORAWAN           0   // No LoRa radio
     #define HAL_SD_USE_SDMMC          1
     #define PIN_SD_CLK               38
     #define PIN_SD_CMD               34
@@ -926,6 +974,7 @@
     // SD_DET (GPIO7) is not connected by default (solder jumper) — unused.
     // Slot is powered from the always-on "3.3V_P" rail (U4/R6 pull-up).
     #define HAL_HAS_SD_CARD           1
+    #define HAL_HAS_LORAWAN           0   // No LoRa radio
     #define HAL_SD_USE_SDMMC          0
     #define PIN_SD_CS                25
     #define PIN_SD_SCK               10
@@ -1032,6 +1081,7 @@
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness — pins verified §2
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO34) — reuses neopixel.c unchanged
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN           0   // No LoRa radio
 
     // Ring/scratch/form-buffer sizes: 2 MB external-QSPI PSRAM — same size
     // class as sparkfun_thing_plus_esp32s3 / heltec_wifi_lora32_v4_r2's
@@ -1135,6 +1185,7 @@
     #define HAL_HAS_SPEAKER           1   // Piezo via PCB harness — pin assignment user-confirmed, see block comment above
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812, PIN_NEOPIXEL_POWER=GPIO2 (NEOPIXEL_I2C_POWER) required before use
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN           0   // No LoRa radio
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
     // (identical 2 MB in-package PSRAM budget).
@@ -1224,6 +1275,7 @@
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness (P=GPIO10, N=GPIO9)
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO21) — reuses neopixel.c unchanged
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN           0   // No LoRa radio
 
     // Dual-LED note: this board defines both PIN_LED_BUILTIN and
     // HAL_HAS_NEOPIXEL. speaker.c's tick_start() prefers PIN_LED_BUILTIN

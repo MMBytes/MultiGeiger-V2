@@ -1086,10 +1086,13 @@ static void do_tx_cycle(void) {
     // payload carries counts + dt, so CPM is derived server-side whatever
     // the interval (spec §5).
     //
-    // Placed BEFORE the wifi_up()/NTP early-returns deliberately: LoRaWAN is
-    // the standalone-deployment uplink (spec §0) — it must fire with WiFi
+    // Placed ahead of the wifi_up()/NTP early-returns deliberately: LoRaWAN
+    // is the standalone-deployment uplink (spec §0) — it must fire with WiFi
     // down and with no NTP sync (the payload carries counts+dt, no wall
-    // time). Only the WiFi TX pipeline below is gated on connectivity.
+    // time). Only the WiFi TX pipeline below is gated on connectivity. (The
+    // one earlier return this still sits after is the standalone-SD branch,
+    // unreachable on the only LoRaWAN board — no SD slot — but a future
+    // SD+LoRa board would need this enqueue lifted above that branch too.)
     if (g_cfg.lorawan_enabled) {
         lorawan_snapshot_t lsnap = {
             .gm_counts     = counts,

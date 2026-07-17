@@ -71,10 +71,26 @@ public:
         if (interruptNum == RADIOLIB_NC) return;
         gpio_set_intr_type((gpio_num_t)interruptNum, (gpio_int_type_t)mode);
         // ISR service may already be installed by tube.c — tolerate that.
+        // The IRAM flag is REQUIRED to match tube.c's existing install (the
+        // service is process-wide; a second install with mismatched flags
+        // returns INVALID_STATE and leaves tube.c's flags in force anyway).
         esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
         if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
             ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(e));
         }
+        // ACCEPTED RISK (whole-branch review 2026-07-18): the callback
+        // RadioLib registers here (its DIO1 handler) lives in flash, not
+        // IRAM, while the dispatcher runs under ESP_INTR_FLAG_IRAM. A DIO1
+        // edge that lands while flash cache is disabled (another task doing
+        // an NVS commit or OTA write) during a Class-A RX window would fault.
+        // Judged tolerable, not silently shipped: RX windows are ~1-2 s per
+        // 150 s cycle (~1% duty) and the worker's own NVS session-write
+        // happens AFTER sendReceive() returns (outside its own RX window), so
+        // the only overlap is a user-initiated /config Save or an OTA landing
+        // in that narrow window on a joined node — low probability, and the
+        // failure is a clean reset, not corruption. Revisit (IRAM trampoline
+        // or uplink-suppress-during-OTA) if field reports show RX-window
+        // resets; the OTA teardown hook already exists for the latter.
         gpio_isr_handler_add((gpio_num_t)interruptNum,
                              reinterpret_cast<gpio_isr_t>(interruptCb), NULL);
         gpio_intr_enable((gpio_num_t)interruptNum);
@@ -361,6 +377,18 @@ static void lorawan_task(void *arg) {
     uint8_t region  = g_cfg.lorawan_region;
     uint8_t subband = g_cfg.lorawan_subband;
 
+    // Clamp region before it indexes k_bands[] below. config.c loads U8
+    // fields from NVS with NO range check (bounds are enforced only on the
+    // /config POST path), so a corrupt or foreign NVS byte >= the table size
+    // would make k_bands[region] an out-of-bounds pointer read → a garbage
+    // LoRaWANBand_t* into LoRaWANNode → crash EVERY boot until an NVS erase
+    // (the bad value persists). Fall back to the AU915 default instead — the
+    // radio must never brick the node (Geiger core stays alive regardless).
+    if (region >= (sizeof(k_bands) / sizeof(k_bands[0]))) {
+        ESP_LOGW(TAG, "lorawan_region %u out of range — defaulting to AU915", region);
+        region = 2;
+    }
+
     if (!radio_init()) { set_state(LORAWAN_ST_HW_FAIL); vTaskDelete(NULL); }
     if (!have_creds) {
         ESP_LOGW(TAG, "credentials missing/malformed — LoRaWAN idle (NO_CONFIG)");
@@ -499,14 +527,25 @@ void lorawan_setup(void) {
 // (not WARN): a dropped cycle is expected/harmless during a long join.
 void lorawan_transmit(const lorawan_snapshot_t *snap) {
     if (!snap) return;
+    // s_q is NULL until lorawan_setup() creates it, and setup() only creates
+    // it when lorawan_enabled was set AT BOOT. But do_tx_cycle() reads
+    // g_cfg.lorawan_enabled LIVE, so a user who ticks "Enable LoRaWAN" and
+    // presses the plain (non-restart) /config Save flips the flag true on a
+    // node whose worker/queue were never created — the next TX cycle would
+    // reach here with s_q == NULL and xQueueSend()'s configASSERT would
+    // panic. Guard it: enabling LoRaWAN is a reboot-required change (the
+    // /config fields are starred), so a live enable correctly no-ops here
+    // until the reboot that actually brings the worker up.
+    if (!s_q) return;
     if (xQueueSend(s_q, snap, 0) != pdTRUE) {
         ESP_LOGD(TAG, "worker busy — snapshot dropped this cycle");
     }
 }
 
 // Idle iff the worker isn't mid-uplink AND nothing is queued for it.
+// s_q NULL (LoRaWAN never armed this boot) reads as idle.
 bool lorawan_is_idle(void) {
-    return !s_busy && uxQueueMessagesWaiting(s_q) == 0;
+    return !s_busy && (s_q == NULL || uxQueueMessagesWaiting(s_q) == 0);
 }
 
 #endif // CONFIG_GEIGER_LORAWAN

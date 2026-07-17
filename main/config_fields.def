@@ -411,3 +411,23 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 
 X_BOOL(standalone_sd,          "sd_stand",   false)
 X_BOOL(standalone_ap_on,       "sd_ap_on",   false)
+
+// --- LoRaWAN (BOARD_HELTEC_WIFI_LORA32_V4_R2 only at runtime) ---------------
+//
+// V2.6.23: fields exist in config_t on EVERY board (a few bytes — the
+// ringfence is on code, not config storage; same portability convention as
+// standalone_ap_on above). Only the V4 board renders them in /config and
+// acts on them. deveui/joineui/appkey hold the TTN-console hex strings
+// verbatim; parsing/endianness happens in lorawan.cpp at use time.
+// lorawan_fem_en and lorawan_high_power drive the GC1109 FEM control pins
+// (GPIO2/GPIO46) that are DOUBLE-BOOKED with mainboard circuits — reworked-
+// hardware boards only; see hal.h PIN_LORA_FEM_EN/PIN_LORA_FEM_PA.
+
+X_BOOL(lorawan_enabled,        "lora_en",      false)
+X_U8  (lorawan_region,         "lora_region",  2, 0, 7)   // 2 = AU915 (table in lorawan.cpp)
+X_U8  (lorawan_subband,        "lora_subband", 2, 0, 8)   // 0 = all channels; TTN uses 2
+X_STR (lorawan_deveui,         CFG_LORA_EUI_MAX + 1, "lora_deveui",  "")
+X_STR (lorawan_joineui,        CFG_LORA_EUI_MAX + 1, "lora_joineui", "")
+X_STR (lorawan_appkey,         CFG_LORA_KEY_MAX + 1, "lora_appkey",  "")
+X_BOOL(lorawan_fem_en,         "lora_fem_en",  false)
+X_BOOL(lorawan_high_power,     "lora_hp",      false)

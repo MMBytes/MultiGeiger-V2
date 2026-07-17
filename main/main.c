@@ -1079,6 +1079,30 @@ static void do_tx_cycle(void) {
         return;
     }
 
+    // V2.6.23: LoRaWAN uplink — same freshest-data-wins contract as
+    // tx_transmit (non-blocking enqueue, drop-if-busy). No-op stub on
+    // boards without the radio; gated at runtime by lorawan_enabled inside
+    // lorawan_setup(). Reuses this cycle's counting window verbatim: the
+    // payload carries counts + dt, so CPM is derived server-side whatever
+    // the interval (spec §5).
+    //
+    // Placed BEFORE the wifi_up()/NTP early-returns deliberately: LoRaWAN is
+    // the standalone-deployment uplink (spec §0) — it must fire with WiFi
+    // down and with no NTP sync (the payload carries counts+dt, no wall
+    // time). Only the WiFi TX pipeline below is gated on connectivity.
+    if (g_cfg.lorawan_enabled) {
+        lorawan_snapshot_t lsnap = {
+            .gm_counts     = counts,
+            .dt_ms         = dt_ms,
+            .tube_nbr      = (uint8_t)g_cfg.tube_type,   // same 0-3 table V1.9/ttn2luft uses
+            .env_valid     = bme_valid,
+            .temperature_c = bme_t,
+            .humidity_pct  = bme_h,
+            .pressure_pa   = bme_p,
+        };
+        lorawan_transmit(&lsnap);
+    }
+
     if (!wifi_up()) {
         ESP_LOGW(TAG, "skipping TX: WiFi down");
         // Still trigger the next DNMS window so we don't lose the cycle's
@@ -1122,25 +1146,6 @@ static void do_tx_cycle(void) {
                      pm_valid, &pm,
                      noise_valid, &noise);
     tx_transmit(&ctx);
-
-    // V2.6.23: LoRaWAN uplink — same freshest-data-wins contract as
-    // tx_transmit (non-blocking enqueue, drop-if-busy). No-op stub on
-    // boards without the radio; gated at runtime by lorawan_enabled inside
-    // lorawan_setup(). Reuses this cycle's counting window verbatim: the
-    // payload carries counts + dt, so CPM is derived server-side whatever
-    // the interval (spec §5).
-    if (g_cfg.lorawan_enabled) {
-        lorawan_snapshot_t lsnap = {
-            .gm_counts     = counts,
-            .dt_ms         = dt_ms,
-            .tube_nbr      = (uint8_t)g_cfg.tube_type,   // same 0-3 table V1.9/ttn2luft uses
-            .env_valid     = bme_valid,
-            .temperature_c = bme_t,
-            .humidity_pct  = bme_h,
-            .pressure_pa   = bme_p,
-        };
-        lorawan_transmit(&lsnap);
-    }
 
     // Start the next LAeq window so the next cycle's read covers the full
     // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —

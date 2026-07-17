@@ -74,6 +74,22 @@ typedef struct {
     #undef X_U8
 } config_t;
 
+/** @brief The single runtime config instance, defined in main.c.
+ *
+ *  V2.6.23: every other module reaches config via a pointer handed to it at
+ *  its own _init()/_start() call (http_server_start(&g_cfg, ...), mqtt_init,
+ *  log_ftp_init, ...) or via values pre-extracted into a context struct
+ *  (tx_context_t) — none of them needed a true extern. `lorawan_setup()` /
+ *  the Task 6 worker task are the first callers whose public signature
+ *  (lorawan.h) is deliberately parameter-free, so this extern is the minimal
+ *  way for lorawan.cpp to reach `lorawan_enabled`/`lorawan_fem_en`/
+ *  `lorawan_high_power`/EUI+key fields without changing that signature.
+ *  Same struct, same lifetime, same single-writer-at-boot-then-httpd
+ *  discipline the pointer-based consumers already rely on — just also
+ *  reachable by name.
+ */
+extern config_t g_cfg;
+
 /** @brief Fill cfg with compile-time defaults. Always safe to call. */
 void config_defaults(config_t *cfg);
 

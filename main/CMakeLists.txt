@@ -105,4 +105,14 @@ idf_component_register(
 if(CONFIG_GEIGER_LORAWAN)
     idf_component_get_property(geiger_radiolib_lib jgromes__radiolib COMPONENT_LIB)
     target_compile_options(${geiger_radiolib_lib} PRIVATE -Wno-error=overloaded-virtual)
+
+    # Task 5: lorawan.cpp itself (this component, __idf_main — NOT the
+    # RadioLib component library target above) also `#include "RadioLib.h"`,
+    # which pulls in the exact same PhysicalLayer.h/CC1101.h/RF69.h/... class
+    # hierarchy and trips the identical -Woverloaded-virtual promotion, this
+    # time in our own TU rather than RadioLib's compiled sources. Scoped to
+    # this one source file (not the whole ${COMPONENT_LIB}) so every other
+    # file in main/ keeps -Werror on overloaded-virtual, per the comment above.
+    set_source_files_properties(lorawan.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-error=overloaded-virtual")
 endif()

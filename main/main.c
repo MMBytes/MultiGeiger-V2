@@ -34,6 +34,7 @@
 #include "display.h"
 #include "http_server.h"
 #include "log_ftp.h"
+#include "lorawan.h"            // V2.6.23: SX1262 LoRaWAN uplink (Heltec V4-R2 only)
 #include "main_status.h"
 #include "mqtt.h"
 #include "neopixel.h"
@@ -58,7 +59,10 @@ static const char *TAG = "v2_main";
 
 // Runtime configuration — loaded from NVS at boot with compile-time defaults
 // as fallback (see config.c). Editable via the /config endpoint.
-static config_t g_cfg;
+// V2.6.23: no longer `static` — lorawan.cpp reads this by the `extern
+// config_t g_cfg;` declaration in config.h (see that comment for why; every
+// other module instead gets a pointer/values handed to it explicitly).
+config_t g_cfg;
 
 // Hardware-derived identity, always populated at boot from the factory MAC.
 // Never stored in NVS; never user-editable. g_chip_id is the canonical
@@ -1453,6 +1457,7 @@ void app_main(void) {
         led_register_pulse_tick();
     }
     tx_setup();
+    lorawan_setup();
     http_server_start(&g_cfg, g_chip_id);
     log_ftp_init(g_chip_id, &g_cfg);
     // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.

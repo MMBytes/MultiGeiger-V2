@@ -9,6 +9,61 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.23 — LoRaWAN uplink (heltec_wifi_lora32_v4_r2) + generalized keep-AP-on
+
+Ships the LoRaWAN feature line built across Tasks 1-8: OTAA/Class A uplink
+support for the `heltec_wifi_lora32_v4_r2` board via RadioLib 7.2.1, plus a
+config-UI checkbox (keep the AP on permanently) that was previously
+SD-standalone-only and is now available on every board.
+
+### LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
+
+- New `lorawan.cpp` drives an SX1262 radio over the module's dedicated
+  internal SPI bus (RadioLib 7.2.1), joining via OTAA and transmitting
+  Class A uplinks on a duty-cycle-guarded schedule.
+- Uplink payloads on FPort 1 (GM counts/interval/firmware version/tube type)
+  and FPort 2 (temperature/humidity/pressure) are byte-identical to the
+  Multigeiger V1.9 Arduino firmware's TTN frames (`lorawan_codec.h`,
+  ported from `transmission.cpp`'s `send_ttn_geiger`/`send_ttn_thp`), so
+  existing TTN Console decoders and ttn2luft ingestion keep working
+  unchanged. A ready-to-paste TTN "Custom Javascript formatter" is now
+  published at `docs/ttn_payload_formatter.js`.
+- `/config` gained an all-region LoRaWAN section (frequency-plan dropdown
+  covering the regions RadioLib supports, DevEUI/JoinEUI/AppKey entry,
+  join status). Session state (DevAddr, session keys, frame counters)
+  persists across reboots in NVS so a device doesn't have to rejoin on
+  every power cycle.
+- Two checkboxes — `lora_fem_en` ("Drive FEM enable (GPIO2)") and
+  `lora_hp` (FEM high-power/PA select, GPIO46) — are exposed for
+  **reworked hardware only**. On stock/unmodified boards, GPIO2 is
+  double-booked with the HV cap-full comparator input and GPIO46 with the
+  mainboard's DIP1 switch; asserting either pin on unmodified wiring would
+  contend with the live signal already driving it, so both default off and
+  must stay off unless the board has had the corresponding copper rework
+  done. See `hal.h`'s `PIN_LORA_FEM_EN`/`PIN_LORA_FEM_PA` comments for the
+  full double-booking rationale, and note that on unmodified boards the
+  GC1109 front-end's RX-enable line is left wiggling by the comparator, so
+  LoRaWAN RX (downlink) reliability there remains an open bench question.
+- Bench status, stated plainly: radio bring-up (SPI init, RadioLib object
+  construction) and the join-request TX + backoff/retry path are
+  bench-verified on real V4-R2 hardware. Join-accept and full end-to-end
+  uplink delivery are **not yet** confirmed — that leg is pending
+  availability of a TTN gateway in range of the bench unit, not a known
+  code defect.
+
+### Generalized keep-AP-on checkbox (all boards)
+
+- The "keep config AP on permanently" checkbox (`sd_ap_on` internally, for
+  history — it started as an SD-standalone-only option) is now honored by
+  `main.c` in every operating mode, not just SD-standalone. One latch
+  (`s_standalone_ap_on_latched`), captured once at boot and never
+  re-read from `g_cfg` afterward, decides whether the AP + httpd stay up
+  forever or the radio fully powers down at the config window's close —
+  same semantics as before, just no longer conditional on SD-standalone
+  being active.
+
+---
+
 ## V2.6.22 — V2.6.19 deferred items + V2.6.20 review follow-ups
 
 Two batches in one (unreleased) version: the deferred-item list from the

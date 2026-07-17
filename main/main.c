@@ -167,6 +167,15 @@ static bool s_arp_after_reconnect_pending = false;
 // and using ONLY the latch below (never g_cfg.standalone_sd/standalone_ap_on
 // directly) makes a live Save a pure no-op until reboot, matching the
 // starred-field contract the /config result page already promises.
+//
+// V2.6.23: s_standalone_ap_on_latched is now honored in ALL modes, not just
+// alongside standalone-SD (was: the AP-window-close branch only consulted
+// it when s_standalone_sd_latched was also true, so a networked node with
+// STA creds could never keep the AP up). See the AP-window-close block
+// below — this latch now short-circuits both the standalone-SD radio-off
+// branch AND the switch-to-STA branch, so any node (SD-standalone,
+// LoRaWAN-standalone, or a plain networked node the user wants permanently
+// reachable at 192.168.4.1) can hold the AP forever.
 static bool s_standalone_sd_latched    = false;
 static bool s_standalone_ap_on_latched = false;
 
@@ -1114,6 +1123,25 @@ static void do_tx_cycle(void) {
                      noise_valid, &noise);
     tx_transmit(&ctx);
 
+    // V2.6.23: LoRaWAN uplink — same freshest-data-wins contract as
+    // tx_transmit (non-blocking enqueue, drop-if-busy). No-op stub on
+    // boards without the radio; gated at runtime by lorawan_enabled inside
+    // lorawan_setup(). Reuses this cycle's counting window verbatim: the
+    // payload carries counts + dt, so CPM is derived server-side whatever
+    // the interval (spec §5).
+    if (g_cfg.lorawan_enabled) {
+        lorawan_snapshot_t lsnap = {
+            .gm_counts     = counts,
+            .dt_ms         = dt_ms,
+            .tube_nbr      = (uint8_t)g_cfg.tube_type,   // same 0-3 table V1.9/ttn2luft uses
+            .env_valid     = bme_valid,
+            .temperature_c = bme_t,
+            .humidity_pct  = bme_h,
+            .pressure_pa   = bme_p,
+        };
+        lorawan_transmit(&lsnap);
+    }
+
     // Start the next LAeq window so the next cycle's read covers the full
     // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —
     // it just enqueues the snapshot) so we don't add the I²C round-trip to
@@ -1727,8 +1755,14 @@ void app_main(void) {
         // running node must have zero effect until reboot (see the latch's
         // declaration comment).
         static bool s_radio_off = false;
-        if (s_standalone_sd_latched) {
-            if (!s_standalone_ap_on_latched && !s_radio_off &&
+        if (s_standalone_ap_on_latched) {
+            // V2.6.23: generalized keep-AP-on (was SD-standalone-only in
+            // V2.6.19). AP + httpd stay up for the life of the boot so a
+            // field node — SD-standalone OR LoRaWAN-standalone OR any node
+            // the user wants permanently reachable — can always be
+            // reconfigured. Costs ~50-80 mA; STA never starts.
+        } else if (s_standalone_sd_latched) {
+            if (!s_radio_off &&
                 (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
                 ESP_LOGI(TAG, "AP window closed — standalone mode, radio off");
                 ESP_ERROR_CHECK(esp_wifi_stop());

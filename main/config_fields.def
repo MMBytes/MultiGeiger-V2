@@ -404,11 +404,14 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 
 // --- Standalone SD-logging mode (V2.6.19) ------------------------------------
 //
-// Only meaningful on HAL_HAS_SD_CARD boards (the /config form renders the
-// block conditionally), but the fields exist on every board so NVS blobs
-// stay portable across board variants. standalone_ap_on is ignored by
-// main.c unless standalone_sd is also set (UI additionally grays it out).
-
+// standalone_sd is only meaningful on HAL_HAS_SD_CARD boards (the /config
+// form renders the sd_stand checkbox conditionally), but the field exists
+// on every board so NVS blobs stay portable across board variants.
+//
+// V2.6.23: standalone_ap_on generalized — main.c now honors it in ALL
+// modes (was: ignored unless standalone_sd was also set). The /config
+// checkbox is rendered unconditionally (no HAL gate) and is no longer a
+// UI sub-toggle of sd_stand.
 X_BOOL(standalone_sd,          "sd_stand",   false)
 X_BOOL(standalone_ap_on,       "sd_ap_on",   false)
 

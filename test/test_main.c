@@ -24,6 +24,7 @@
 
 #include "util.h"
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
+#include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
 
 static int g_failures = 0;
 
@@ -560,6 +561,58 @@ static int test_guard_eff_enabled_returns_window(void) {
 }
 
 // ----------------------------------------------------------------------------
+// lorawan_codec  (V2.6.23-dev T3 — pure payload/hex helpers, V1.9 byte-compat)
+// ----------------------------------------------------------------------------
+
+static int test_lw_hex_decode(void) {
+    uint8_t b[4];
+    if (!lw_hex_decode("DeadBeef", b, 4)) return 0;
+    if (b[0] != 0xDE || b[3] != 0xEF) return 0;
+    if (lw_hex_decode("DEADBEE", b, 4))  return 0;  // too short
+    if (lw_hex_decode("DEADBEEFAA", b, 4)) return 0; // too long
+    if (lw_hex_decode("DEADBEEG", b, 4)) return 0;  // bad char
+    return 1;
+}
+
+static int test_lw_eui_from_hex(void) {
+    uint64_t v = 0;
+    if (!lw_eui_from_hex("70B3D57ED0001234", &v)) return 0;
+    if (v != 0x70B3D57ED0001234ULL) return 0;
+    if (lw_eui_from_hex("70B3", &v)) return 0;      // wrong length
+    return 1;
+}
+
+static int test_lw_pack_version(void) {
+    if (lw_pack_version("V2.6.23") != ((2u<<12)|(6u<<4)|15u)) return 0; // patch clamped
+    if (lw_pack_version("V2.6.7")  != ((2u<<12)|(6u<<4)|7u))  return 0;
+    if (lw_pack_version("garbage") != 0) return 0;
+    return 1;
+}
+
+static int test_lw_build_port1(void) {
+    uint8_t p[10];
+    lw_build_port1(p, 0x01020304u, 0x00A0B0C0u & 0xFFFFFFu, 0x2617u, 3);
+    if (p[0]!=0x01||p[1]!=0x02||p[2]!=0x03||p[3]!=0x04) return 0; // counts BE
+    if (p[4]!=0xA0||p[5]!=0xB0||p[6]!=0xC0) return 0;             // dt u24 BE
+    if (p[7]!=0x26||p[8]!=0x17) return 0;                          // version BE
+    if (p[9]!=3) return 0;                                         // tube nbr
+    return 1;
+}
+
+static int test_lw_build_port2(void) {
+    uint8_t p[5];
+    // 21.7 C, 48.5 %, 101325 Pa -> temp*10=217, hum*2=97, 101325/10=10132
+    if (!lw_build_port2(p, 21.7f, 48.5f, 101325.0f)) return 0;
+    if (p[0]!=(217>>8) || p[1]!=(217&0xFF)) return 0;
+    if (p[2]!=97) return 0;
+    if (p[3]!=(10132>>8) || p[4]!=(10132&0xFF)) return 0;
+    // negative temperature: -5.5 C -> -55 as s16 BE
+    if (!lw_build_port2(p, -5.5f, 10.0f, 90000.0f)) return 0;
+    if (p[0]!=0xFF || p[1]!=(uint8_t)(-55)) return 0;
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
 
@@ -643,6 +696,13 @@ int main(void) {
     RUN(test_guard_eff_disabled_is_zero);
     RUN(test_guard_eff_pcnt_wins);
     RUN(test_guard_eff_enabled_returns_window);
+
+    printf("== lorawan_codec ==\n");
+    RUN(test_lw_hex_decode);
+    RUN(test_lw_eui_from_hex);
+    RUN(test_lw_pack_version);
+    RUN(test_lw_build_port1);
+    RUN(test_lw_build_port2);
 
     printf("\n");
     if (g_failures == 0) {

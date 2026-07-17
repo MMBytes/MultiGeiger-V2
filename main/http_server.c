@@ -51,6 +51,14 @@
 #include "sysinfo.h"           // V2.4.26: reset_reason_str / chip_model_str (also used by mqtt.c)
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
+#include "lorawan.h"           // V2.6.23 (T8): lorawan_get_status()/_state_name()/_region_name()
+                               // for /status; no-op stubs on the ten non-V4-R2 boards (see
+                               // lorawan.h) so this include is unconditional like gnss.h/sgp41.h.
+#if HAL_HAS_LORAWAN
+#include "lorawan_codec.h"     // V2.6.23 (T8): lw_hex_decode() — /config POST EUI/key length
+                               // validation, V4-R2 only. Ringfenced per the brief: other boards
+                               // must not gain even this glue.
+#endif
 
 static const char *TAG = "http";
 
@@ -1070,6 +1078,64 @@ static void format_uploads(char *out, size_t sz) {
     append_safe(out, sz, n, "</div>");
 }
 
+// --- LoRaWAN block (V2.6.23, T8; BOARD_HELTEC_WIFI_LORA32_V4_R2 only) --------
+//
+// HAL_HAS_LORAWAN-gated so the ten other boards' /status pages stay byte-
+// identical (lorawan_get_status()'s no-op stub would otherwise render a
+// "disabled" card everywhere there's no radio to disable). Modeled on the
+// adjacent format_mqtt() — a single target's state, not a multi-row table
+// like format_uploads(), since there's exactly one LoRaWAN radio per node.
+#if HAL_HAS_LORAWAN
+static void format_lorawan(char *out, size_t sz) {
+    lorawan_status_t st;
+    lorawan_get_status(&st);
+
+    const char *state_class =
+        (st.state == LORAWAN_ST_JOINED)   ? "g" :
+        (st.state == LORAWAN_ST_JOINING)  ? "o" :
+        (st.state == LORAWAN_ST_DISABLED) ? "d" : "r";   // no_config / hw_fail
+
+    int n = append_safe(out, sz, 0,
+        "<div class=\"info\"><h3>LoRaWAN (TTN)</h3>"
+        "<b>State:</b> <span class=\"%s\">%s</span><br>"
+        "<b>Region:</b> %s, sub-band %u<br>",
+        state_class, lorawan_state_name(st.state),
+        lorawan_region_name(st.region), (unsigned)st.subband);
+
+    if (st.state == LORAWAN_ST_JOINED) {
+        n = append_safe(out, sz, n, "<b>DevAddr:</b> %08lx<br>", (unsigned long)st.dev_addr);
+    }
+
+    n = append_safe(out, sz, n,
+        "<b>Join attempts:</b> %lu<br>"
+        "<b>Uplinks sent:</b> %lu<br>"
+        "<b>Duty-skipped:</b> %lu<br>"
+        "<b>Failed:</b> %lu",
+        (unsigned long)st.join_attempts,
+        (unsigned long)st.uplinks_sent,
+        (unsigned long)st.duty_skipped,
+        (unsigned long)st.failed);
+    if (st.last_error != 0) {
+        n = append_safe(out, sz, n, " (last error %d)", (int)st.last_error);
+    }
+
+    // format_ago() already renders "never" for a <=0 timestamp — matches
+    // last_uplink_at's "0 = never" contract (lorawan.h).
+    char ago[24];
+    format_ago((int64_t)time(NULL), st.last_uplink_at, ago, sizeof(ago));
+    n = append_safe(out, sz, n, "<br><b>Last uplink:</b> %s", ago);
+
+    // last_dl_rssi == 0 means no downlink has ever been seen (lorawan.h).
+    if (st.last_dl_rssi != 0) {
+        n = append_safe(out, sz, n,
+            "<br><b>Last downlink:</b> RSSI %.0f dBm, SNR %.1f dB",
+            (double)st.last_dl_rssi, (double)st.last_dl_snr);
+    }
+
+    append_safe(out, sz, n, "</div>");
+}
+#endif
+
 // Favicon — radiation trefoil ☢ (U+2622) on yellow, served as SVG.
 static const char s_favicon_svg[] =
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
@@ -1271,6 +1337,9 @@ static esp_err_t status_get(httpd_req_t *req) {
     format_sgp41      (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_pm_info    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
     format_uploads    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+#if HAL_HAS_LORAWAN
+    format_lorawan    (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
+#endif
     format_mqtt       (buf, sizeof(buf)); if (!send_block(req, buf)) goto fail;
 
     if (httpd_resp_send_chunk(req, STATUS_LINKS_HEAD, sizeof(STATUS_LINKS_HEAD) - 1) != ESP_OK) goto fail;
@@ -1347,6 +1416,16 @@ static esp_err_t config_get(httpd_req_t *req) {
     static char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
     // V2.4.15: syslog host esc buffer. CFG_SYSLOG_HOST_MAX=63 × 4 = ~256.
     static char e_slh[256];
+#if HAL_HAS_LORAWAN
+    // V2.6.23 (T8): DevEUI/JoinEUI (CFG_LORA_EUI_MAX=16) and AppKey
+    // (CFG_LORA_KEY_MAX=32) are plain hex strings — no HTML metacharacters
+    // possible in a value that later passes lw_hex_decode — but escaped
+    // anyway for the same reason the GMCMap/ThingSpeak hex-ish fields above
+    // are: defence-in-depth against a stored value that predates/bypasses
+    // POST validation (hand-crafted request, NVS carried over from a future
+    // firmware). Sized 4x worst-case + slack, same convention as e_slh.
+    static char e_lora_deveui[80], e_lora_joineui[80], e_lora_appkey[144];
+#endif
     // V2.4.6: MQTT TLS PEM cert. html_esc worst-case is ~6x for a textarea
     // because every '<' becomes "&lt;" / '"' becomes "&quot;" / '&' becomes
     // "&amp;" — but real PEM is mostly base64 alnum (no escaping needed) +
@@ -1395,6 +1474,11 @@ static esp_err_t config_get(httpd_req_t *req) {
     html_esc(s_cfg->mqtt_topic_prefix, e_mpfx,  sizeof(e_mpfx));
     html_esc(s_cfg->mqtt_tls_ca,       e_mca,   8192);
     html_esc(s_cfg->syslog_host,       e_slh,   sizeof(e_slh));
+#if HAL_HAS_LORAWAN
+    html_esc(s_cfg->lorawan_deveui,    e_lora_deveui,  sizeof(e_lora_deveui));
+    html_esc(s_cfg->lorawan_joineui,   e_lora_joineui, sizeof(e_lora_joineui));
+    html_esc(s_cfg->lorawan_appkey,    e_lora_appkey,  sizeof(e_lora_appkey));
+#endif
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
     // (0 %) followed by 10 % through 100 % in 10 % steps. Builder keeps the
@@ -1429,6 +1513,28 @@ static esp_err_t config_get(httpd_req_t *req) {
                              (s_cfg->tube_type == t) ? " selected" : "",
                              tube_type_name(t), tube_type_menu_suffix(t));
     }
+
+#if HAL_HAS_LORAWAN
+    // V2.6.23 (T8): LoRaWAN region <option> list, table-driven like tube_opts/
+    // br_opts above — one %s instead of 8 per-option "selected" args. Names
+    // match lorawan.cpp's REGION_NAMES (lorawan_region_name()) 1:1; kept as a
+    // literal local table here (rather than calling lorawan_region_name() in
+    // a loop) so this stays plain-string, no round-trip through that API.
+    static char lora_region_opts[320];
+    {
+        static const char *const k_lora_region_names[] = {
+            "EU868", "US915", "AU915", "AS923", "IN865", "KR920", "EU433", "CN470"
+        };
+        int lora_rn = 0;
+        for (uint8_t r = 0; r < 8; r++) {
+            lora_rn = append_safe(lora_region_opts, sizeof(lora_region_opts), lora_rn,
+                                 "<option value=\"%u\"%s>%s</option>",
+                                 (unsigned)r,
+                                 (s_cfg->lorawan_region == r) ? " selected" : "",
+                                 k_lora_region_names[r]);
+        }
+    }
+#endif
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -1572,6 +1678,46 @@ static esp_err_t config_get(httpd_req_t *req) {
         "cycle appends one CSV row of all attached sensor readings to the microSD "
         "card. Requires a FAT32 card and a GPS receiver (clock source &mdash; "
         "logging starts at first fix). <span class=\"r\">*</span></label></div>"
+#endif
+#if HAL_HAS_LORAWAN
+        // V2.6.23 (T8): LoRaWAN /config section — BOARD_HELTEC_WIFI_LORA32_V4_R2
+        // only. All fields are reboot-required: the worker task (lorawan_setup())
+        // reads config_t once at boot, so a plain Save persists to NVS but the
+        // already-running worker keeps its latched values until restart — same
+        // "starred" convention as the other reboot-required fields above.
+        "<h3>LoRaWAN (TTN)</h3>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_en\" "
+        "id=\"lora_en\" %s> Enable LoRaWAN uplinks (SX1262, OTAA join) "
+        "<span class=\"r\">*</span></label></div>"
+        "<label>Region <span class=\"r\">*</span>"
+        "<select name=\"lora_region\">%s</select></label>"
+        "<label>Sub-band (0 = all channels; TTN typically uses a single sub-band) "
+        "<span class=\"r\">*</span>"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"lora_subband\" "
+        "value=\"%u\" min=\"0\" max=\"8\"></label>"
+        "<label>DevEUI (16 hex chars) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"lora_deveui\" value=\"%s\" maxlength=\"16\" "
+        "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
+        "placeholder=\"as shown in TTN console\"></label>"
+        "<label>JoinEUI (16 hex chars) <span class=\"r\">*</span>"
+        "<input type=\"text\" name=\"lora_joineui\" value=\"%s\" maxlength=\"16\" "
+        "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
+        "placeholder=\"as shown in TTN console\"></label>"
+        "<label>AppKey (32 hex chars) <span class=\"r\">*</span>"
+        "<input type=\"password\" name=\"lora_appkey\" value=\"%s\" maxlength=\"32\" "
+        "pattern=\"[0-9a-fA-F]{32}\"></label>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_fem_en\" %s> "
+        "Drive FEM enable (GPIO2) <span class=\"r\">*</span> "
+        "<small style=\"color:#c00\">Hardware-reworked boards ONLY &mdash; on "
+        "standard boards this pin is the HV comparator input and driving it "
+        "can damage the board.</small></label></div>"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
+        "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
+        "<small style=\"color:#c00\">Hardware-reworked boards ONLY.</small>"
+        "</label></div>"
+        "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
+        "enabled, a TX interval of 5 min or more is recommended (TTN Fair Use "
+        "Policy).</p>"
 #endif
         // V2.5.30: heap-guard floor moved here to the BOTTOM of the Hardware
         // section (was in "Other"). No asterisk — read live each TX cycle by
@@ -1880,6 +2026,22 @@ static esp_err_t config_get(httpd_req_t *req) {
 #if HAL_HAS_SD_CARD
         s_cfg->standalone_sd    ? "checked" : "",    // V2.6.19: standalone SD-logging
 #endif
+#if HAL_HAS_LORAWAN
+        // V2.6.23 (T8): LoRaWAN section args — 8 in order: enable, region
+        // <option> list (table-driven, see lora_region_opts above — collapses
+        // what would otherwise be 8 per-option "selected" args into one %s,
+        // same convention as tube_opts/br_opts), sub-band, DevEUI, JoinEUI,
+        // AppKey, FEM enable, high-power enable. Must match the 8 "%s"/"%u"
+        // slots in the "LoRaWAN (TTN)" HTML block above 1:1.
+        s_cfg->lorawan_enabled ? "checked" : "",
+        lora_region_opts,
+        (unsigned)s_cfg->lorawan_subband,
+        e_lora_deveui,
+        e_lora_joineui,
+        e_lora_appkey,
+        s_cfg->lorawan_fem_en     ? "checked" : "",
+        s_cfg->lorawan_high_power ? "checked" : "",
+#endif
         (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
         (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
         (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
@@ -2070,6 +2232,45 @@ static esp_err_t config_post(httpd_req_t *req) {
                 oor = true;   // V2.5.34: out-of-step value kept prior — report it
             }
         }
+#if HAL_HAS_LORAWAN
+        // V2.6.23 (T8): DevEUI/JoinEUI/AppKey need strict hex-length
+        // validation the schema's plain X_STR copy doesn't do — same
+        // "intercept before the generic dispatch" pattern as oled_bright
+        // above. Empty is always accepted (clears the field back to
+        // "not configured"); a non-empty value must decode as exactly
+        // the required hex length via lw_hex_decode() or the whole POST
+        // value is rejected (prior stored value kept, reported below).
+        else if (strcmp(p, "lora_deveui") == 0) {
+            uint8_t scratch[8];
+            if (val[0] == '\0') {
+                cfg_next.lorawan_deveui[0] = 0;
+            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
+                safe_strcpy(cfg_next.lorawan_deveui, val, sizeof(cfg_next.lorawan_deveui));
+            } else {
+                oor = true;
+            }
+        }
+        else if (strcmp(p, "lora_joineui") == 0) {
+            uint8_t scratch[8];
+            if (val[0] == '\0') {
+                cfg_next.lorawan_joineui[0] = 0;
+            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
+                safe_strcpy(cfg_next.lorawan_joineui, val, sizeof(cfg_next.lorawan_joineui));
+            } else {
+                oor = true;
+            }
+        }
+        else if (strcmp(p, "lora_appkey") == 0) {
+            uint8_t scratch[16];
+            if (val[0] == '\0') {
+                cfg_next.lorawan_appkey[0] = 0;
+            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
+                safe_strcpy(cfg_next.lorawan_appkey, val, sizeof(cfg_next.lorawan_appkey));
+            } else {
+                oor = true;
+            }
+        }
+#endif
         // Generic schema dispatch. Returns true if `p` matched a known
         // field; out-of-range numerics keep prior value and set `oor`.
         else if (!config_post_apply_field(&cfg_next, p, val, &oor)) {

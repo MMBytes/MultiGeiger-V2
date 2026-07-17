@@ -422,7 +422,15 @@ static void lorawan_task(void *arg) {
 
         uint8_t p1[10];
         lw_build_port1(p1, snap.gm_counts, snap.dt_ms, s_version_packed, snap.tube_nbr);
-        uint8_t dl[64]; size_t dl_len = 0;
+        // Downlink scratch. MUST be sized for the largest frame RadioLib can
+        // deliver: sendReceive()'s dataDown parameter has NO size argument and
+        // RadioLib writes the decrypted payload straight in (no clamp to the
+        // caller's buffer), setting *dl_len afterward. A network-scheduled
+        // application downlink can be up to RADIOLIB_LORAWAN_MAX_DOWNLINK_SIZE
+        // (250 B) at higher data rates; a smaller buffer here would let a
+        // (MIC-valid) oversized downlink smash this task's stack. 250 B on the
+        // 8 KB worker stack is fine.
+        uint8_t dl[RADIOLIB_LORAWAN_MAX_DOWNLINK_SIZE]; size_t dl_len = 0;
         LoRaWANEvent_t ev_dn;
         int16_t st = node.sendReceive(p1, sizeof(p1), 1, dl, &dl_len, false, NULL, &ev_dn);
         record_uplink_result(st, dl_len, &ev_dn);

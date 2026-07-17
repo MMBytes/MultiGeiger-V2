@@ -8,6 +8,7 @@
 #if CONFIG_GEIGER_LORAWAN
 
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -25,6 +26,7 @@ extern "C" {
 #include "lorawan_codec.h"
 #include "config.h"
 #include "applog.h"
+#include "version.h"   // VERSION_STR -> s_version_packed (lw_pack_version)
 }
 
 static const char *TAG = "lorawan";
@@ -105,7 +107,21 @@ public:
         bus.miso_io_num = PIN_LORA_MISO;
         bus.quadwp_io_num = -1;
         bus.quadhd_io_num = -1;
-        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED));
+        // V2.6.23-dev (T6 finding): Task 5 used SPI_DMA_DISABLED, which caps
+        // spi_device_polling_transmit at 64 DATA bytes per transaction (IDF's
+        // non-DMA CPU-FIFO path). RadioLib's Module::SPItransferStream (see
+        // managed_components/jgromes__radiolib/src/Module.cpp) builds ONE
+        // combined cmd+data buffer per SPI op and calls hal->spiTransfer()
+        // on it ONCE — e.g. SX126x::readBuffer()'s FIFO read is
+        // cmd(2) + up to RADIOLIB_SX126X_MAX_PACKET_LENGTH(255) + status(1)
+        // = up to 258 bytes in a single spiTransfer(), far past 64. LoRaWAN
+        // join-accept/session downlinks and any near-max-length uplink FIFO
+        // write would silently truncate under DMA_DISABLED. SPI_DMA_CH_AUTO
+        // (IDF picks a free DMA channel) plus a matching max_transfer_sz
+        // removes the cap; 512 covers the FIFO's 255-byte worst case with
+        // margin for future RadioLib command growth.
+        bus.max_transfer_sz = 512;
+        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
         spi_device_interface_config_t dev = {};
         dev.clock_speed_hz = 2 * 1000 * 1000;   // SX1262 max 16 MHz; 2 MHz is plenty and forgiving
         dev.mode = 0;
@@ -194,6 +210,22 @@ const char *lorawan_region_name(uint8_t region_idx) {
     return REGION_NAMES[region_idx];
 }
 
+// Config index -> RadioLib band-plan object. Order is FROZEN (the index is
+// persisted in NVS via config_fields.def's lorawan_region); default index
+// 2 = AU915 (user fleet), 0 = EU868 (upstream Multigeiger community).
+// Names for logging reuse REGION_NAMES above (lorawan_region_name()) rather
+// than a second parallel string table.
+//
+// Verified against the fetched RadioLib 7.2.1 headers
+// (managed_components/jgromes__radiolib/src/protocols/LoRaWAN/LoRaWAN.h:495-505):
+// all eight plain band objects (EU868, US915, EU433, AU915, CN470, AS923,
+// KR920, IN865) exist with these exact names — no adaptation needed. AS923
+// also has AS923_2/_3/_4 sub-region-frequency variants; per the task brief
+// this table uses the plain AS923 object only.
+static const LoRaWANBand_t *const k_bands[] = {
+    &EU868, &US915, &AU915, &AS923, &IN865, &KR920, &EU433, &CN470,
+};
+
 const char *lorawan_state_name(lorawan_state_t st) {
     switch (st) {
         case LORAWAN_ST_DISABLED:  return "disabled";
@@ -212,10 +244,208 @@ void lorawan_get_status(lorawan_status_t *out) {
     portEXIT_CRITICAL(&s_status_mux);
 }
 
-// TEMPORARY (Task 5 smoke-test only): runs radio_init() inline on the main
-// task at boot and just logs the result. Task 6 replaces this body with the
-// real worker-task version — its own task, OTAA join with backoff, and the
-// TX queue that lorawan_transmit()/lorawan_is_idle() actually drive.
+// --- Credential parsing ------------------------------------------------------
+
+typedef struct {
+    uint64_t join_eui, dev_eui;
+    uint8_t  app_key[16];
+} lw_creds_t;
+
+// TTN-console strings (verbatim from config) -> RadioLib types. False =>
+// LORAWAN_ST_NO_CONFIG (surfaced on /status; never a crash or a join spam).
+static bool parse_creds(lw_creds_t *c) {
+    return lw_eui_from_hex(g_cfg.lorawan_joineui, &c->join_eui) &&
+           lw_eui_from_hex(g_cfg.lorawan_deveui,  &c->dev_eui)  &&
+           lw_hex_decode(g_cfg.lorawan_appkey, c->app_key, 16);
+}
+
+// --- NVS persistence ---------------------------------------------------------
+
+// Session persistence (spec §4). Nonces after EVERY join attempt — DevNonce
+// reuse across reboots permanently locks a device out of a LoRaWAN 1.0.4
+// network. Session after every successful uplink cycle — lets a rebooted
+// node resume without rejoin. Wear math: ~300 B blob / 150 s cycle over the
+// wear-leveled 24 KB nvs partition ≈ decades; fine.
+static void nvs_save_blob(const char *key, const uint8_t *buf, size_t len) {
+    nvs_handle_t h;
+    if (nvs_open("lorawan", NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_blob(h, key, buf, len) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+}
+static bool nvs_load_blob(const char *key, uint8_t *buf, size_t len) {
+    nvs_handle_t h;
+    if (nvs_open("lorawan", NVS_READONLY, &h) != ESP_OK) return false;
+    size_t got = len;
+    bool ok = (nvs_get_blob(h, key, buf, &got) == ESP_OK) && got == len;
+    nvs_close(h);
+    return ok;
+}
+
+// --- Worker task --------------------------------------------------------------
+
+// Queue depth 1 — freshest-snapshot-wins, same drop-if-busy contract as
+// transmission.c's tx_setup()/tx_transmit() (that's the "same queue-depth-1
+// convention" this mirrors; see lorawan_transmit() below).
+static QueueHandle_t s_q;
+static volatile bool s_busy = false;
+static LoRaWANNode  *s_node = NULL;
+
+// s_version_packed: set once in lorawan_setup() (main task, at boot) via
+// lw_pack_version(VERSION_STR); read (never written) by the worker task
+// thereafter — a plain uint16_t load/store pair needs no locking either way.
+static uint16_t s_version_packed = 0;
+
+static void set_state(lorawan_state_t st) {
+    portENTER_CRITICAL(&s_status_mux);
+    s_status.state = st;
+    portEXIT_CRITICAL(&s_status_mux);
+}
+
+// Classify one sendReceive() outcome under s_status_mux. House rule (memory:
+// no-blocking-calls-in-critical-section): time()/ESP_LOG/RadioLib getters
+// (s_radio.getRSSI()/getSNR() do a live SPI round-trip) are ALL called
+// BEFORE taking the spinlock; only the plain-value stores happen inside it.
+static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t *ev) {
+    int64_t now = (int64_t)time(NULL);           // captured before the lock
+    float rssi = 0.0f, snr = 0.0f;
+    bool have_dl = (dl_len > 0);
+    if (have_dl) {
+        rssi = s_radio.getRSSI();                 // SPI round-trip — before the lock
+        snr  = s_radio.getSNR();
+        ESP_LOGI(TAG, "downlink: port %u, %u bytes", (unsigned)ev->fPort, (unsigned)dl_len);
+    }
+
+    if (st >= RADIOLIB_ERR_NONE) {
+        portENTER_CRITICAL(&s_status_mux);
+        s_status.uplinks_sent++;
+        s_status.last_uplink_at = now;
+        if (have_dl) {
+            s_status.last_dl_rssi = rssi;
+            s_status.last_dl_snr  = snr;
+        }
+        portEXIT_CRITICAL(&s_status_mux);
+    } else if (st == RADIOLIB_ERR_UPLINK_UNAVAILABLE || st == RADIOLIB_ERR_NO_CHANNEL_AVAILABLE) {
+        // Duty-cycle / dwell-time guard: RadioLib itself blocked the send
+        // (regulatory, not a radio/network failure) — expected occasionally
+        // under AS923/EU868 duty-cycle limits, not logged as a failure.
+        portENTER_CRITICAL(&s_status_mux);
+        s_status.duty_skipped++;
+        portEXIT_CRITICAL(&s_status_mux);
+        ESP_LOGI(TAG, "duty-cycle guard: cycle skipped (%d)", st);
+    } else {
+        portENTER_CRITICAL(&s_status_mux);
+        s_status.failed++;
+        s_status.last_error = st;
+        portEXIT_CRITICAL(&s_status_mux);
+        ESP_LOGW(TAG, "uplink failed: %d", st);
+    }
+}
+
+static void lorawan_task(void *arg) {
+    (void)arg;
+
+    // Snapshot every LoRaWAN /config field this task needs ONCE, right at
+    // task entry, before any RadioLib call (including radio_init()'s
+    // s_radio.begin()). A concurrent /config POST replaces g_cfg wholesale
+    // (`*s_cfg = next` in http_server.c, on the httpd task) — re-reading a
+    // multi-byte field (the EUI/key hex strings) mid-copy could tear.
+    // lorawan_region/lorawan_subband are single bytes (can't tear) but are
+    // snapshotted too, for the same "read config once, then never again"
+    // discipline — this task runs for hours (join backoff alone can span
+    // 60 min per retry) and must not act on a value that changed underneath
+    // it mid-loop. g_cfg.lorawan_enabled was already read once in
+    // lorawan_setup() on the MAIN task, before httpd starts — that read
+    // predates any possible /config POST and is not repeated here.
+    lw_creds_t creds;
+    bool have_creds = parse_creds(&creds);
+    uint8_t region  = g_cfg.lorawan_region;
+    uint8_t subband = g_cfg.lorawan_subband;
+
+    if (!radio_init()) { set_state(LORAWAN_ST_HW_FAIL); vTaskDelete(NULL); }
+    if (!have_creds) {
+        ESP_LOGW(TAG, "credentials missing/malformed — LoRaWAN idle (NO_CONFIG)");
+        set_state(LORAWAN_ST_NO_CONFIG); vTaskDelete(NULL);
+    }
+
+    // static: LoRaWANNode has no default constructor and must outlive this
+    // function's stack frame (this loop never returns in practice, but a
+    // static also keeps the object off an 8 KB task stack).
+    static LoRaWANNode node(&s_radio, k_bands[region], subband);
+    s_node = &node;
+    node.beginOTAA(creds.join_eui, creds.dev_eui, NULL, creds.app_key); // NULL nwkKey = LoRaWAN 1.0.x
+
+    // Restore persisted state. Nonces first (join replay protection), then
+    // session (rejoin-free resume). A rejected restore is self-healing: log,
+    // fall through to a clean join. Buffer sized to the larger of the two
+    // (SESSION_BUF_SIZE > NONCES_BUF_SIZE) and reused for both loads.
+    uint8_t buf[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
+    if (nvs_load_blob("nonces", buf, RADIOLIB_LORAWAN_NONCES_BUF_SIZE)) {
+        int16_t st = node.setBufferNonces(buf);
+        if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "nonces restore rejected: %d", st);
+    }
+    if (nvs_load_blob("session", buf, RADIOLIB_LORAWAN_SESSION_BUF_SIZE)) {
+        int16_t st = node.setBufferSession(buf);
+        if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "session restore rejected: %d", st);
+    }
+
+    // Join with exponential backoff: 1,2,4,... capped 60 min (spec §4).
+    // (Loop starts at 60 s — the "1,2,4..." is in minutes: 60 s, 120 s, ...)
+    set_state(LORAWAN_ST_JOINING);
+    uint32_t backoff_s = 60;
+    for (;;) {
+        int16_t st = node.activateOTAA();
+        nvs_save_blob("nonces", node.getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+        portENTER_CRITICAL(&s_status_mux); s_status.join_attempts++; portEXIT_CRITICAL(&s_status_mux);
+        if (st == RADIOLIB_LORAWAN_NEW_SESSION || st == RADIOLIB_LORAWAN_SESSION_RESTORED) {
+            uint32_t dev_addr = node.getDevAddr();   // RadioLib getter — before the lock
+            ESP_LOGI(TAG, "%s — DevAddr %08lx",
+                     st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed" : "joined (OTAA)",
+                     (unsigned long)dev_addr);
+            portENTER_CRITICAL(&s_status_mux);
+            s_status.dev_addr = dev_addr;
+            portEXIT_CRITICAL(&s_status_mux);
+            set_state(LORAWAN_ST_JOINED);
+            break;
+        }
+        portENTER_CRITICAL(&s_status_mux); s_status.last_error = st; portEXIT_CRITICAL(&s_status_mux);
+        ESP_LOGW(TAG, "join failed: %d — retry in %lus", st, (unsigned long)backoff_s);
+        vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
+        if (backoff_s < 3600) backoff_s *= 2;
+    }
+
+    // Uplink loop: one queue slot; freshest-data-wins (drop-if-busy at the
+    // producer, same contract as tx_transmit).
+    lorawan_snapshot_t snap;
+    for (;;) {
+        if (xQueueReceive(s_q, &snap, portMAX_DELAY) != pdTRUE) continue;
+        s_busy = true;
+
+        uint8_t p1[10];
+        lw_build_port1(p1, snap.gm_counts, snap.dt_ms, s_version_packed, snap.tube_nbr);
+        uint8_t dl[64]; size_t dl_len = 0;
+        LoRaWANEvent_t ev_dn;
+        int16_t st = node.sendReceive(p1, sizeof(p1), 1, dl, &dl_len, false, NULL, &ev_dn);
+        record_uplink_result(st, dl_len, &ev_dn);
+
+        if (st >= RADIOLIB_ERR_NONE && snap.env_valid) {
+            uint8_t p2[5];
+            if (lw_build_port2(p2, snap.temperature_c, snap.humidity_pct, snap.pressure_pa)) {
+                dl_len = 0;
+                st = node.sendReceive(p2, sizeof(p2), 2, dl, &dl_len, false, NULL, &ev_dn);
+                record_uplink_result(st, dl_len, &ev_dn);
+            }
+        }
+        // Session after every uplink cycle — cheap insurance for rejoin-free
+        // reboot with an FCnt the network accepts.
+        nvs_save_blob("session", node.getBufferSession(), RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        s_busy = false;
+    }
+}
+
+// Real setup: guards on lorawan_enabled, then creates the queue + worker
+// task. Radio init/join/credential parsing all happen ON the worker task
+// (lorawan_task) — this function never touches the radio or g_cfg's
+// LoRaWAN string fields itself.
 void lorawan_setup(void) {
     portENTER_CRITICAL(&s_status_mux);
     // Value-init (not memset): s_status carries two floats
@@ -227,6 +457,9 @@ void lorawan_setup(void) {
     s_status.subband = g_cfg.lorawan_subband;
     portEXIT_CRITICAL(&s_status_mux);
 
+    // g_cfg.lorawan_enabled read here, once, on the MAIN task at boot,
+    // before httpd starts (so no /config POST can race this read) — safe
+    // per the g_cfg-snapshot rule above; not re-read anywhere else.
     if (!g_cfg.lorawan_enabled) {
         portENTER_CRITICAL(&s_status_mux);
         s_status.state = LORAWAN_ST_DISABLED;
@@ -234,26 +467,38 @@ void lorawan_setup(void) {
         return;
     }
 
-    bool ok = radio_init();
-    portENTER_CRITICAL(&s_status_mux);
-    s_status.state = ok ? LORAWAN_ST_JOINING : LORAWAN_ST_HW_FAIL;
-    portEXIT_CRITICAL(&s_status_mux);
-    if (ok) {
-        ESP_LOGI(TAG, "radio_init OK (smoke test only — Task 6 adds the join/uplink worker)");
+    s_version_packed = lw_pack_version(VERSION_STR);
+
+    s_q = xQueueCreate(1, sizeof(lorawan_snapshot_t));
+    configASSERT(s_q);
+
+    // Same worker-task convention as transmission.c's tx_setup(): pinned to
+    // CPU1 so a multi-second join/uplink RadioLib call (blocking SPI polls +
+    // RX-window waits) never starves CPU0's idle task / task watchdog.
+    // BOARD_HELTEC_WIFI_LORA32_V4_R2 is ESP32-S3 (dual-core) — always the
+    // pinned branch here, unlike tx_setup()'s single-core ESP32-C5 carve-out
+    // (LoRaWAN is this one board only; see file header).
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        lorawan_task, "lorawan", 8192, NULL, (tskIDLE_PRIORITY + 1), NULL, 1);
+    configASSERT(ok == pdPASS);
+    ESP_LOGI(TAG, "LoRaWAN worker task created (join runs in the background)");
+}
+
+// Enqueue one uplink snapshot. Non-blocking; if the queue already holds an
+// unconsumed snapshot (worker still busy joining/uplinking), the new
+// snapshot is dropped rather than replacing the queued one — same
+// drop-if-busy contract as transmission.c's tx_transmit(). Logged at DEBUG
+// (not WARN): a dropped cycle is expected/harmless during a long join.
+void lorawan_transmit(const lorawan_snapshot_t *snap) {
+    if (!snap) return;
+    if (xQueueSend(s_q, snap, 0) != pdTRUE) {
+        ESP_LOGD(TAG, "worker busy — snapshot dropped this cycle");
     }
 }
 
-// TEMPORARY stub — Task 6 replaces this with the real enqueue-to-worker-task
-// logic. No-op for now: nothing calls lorawan_transmit() yet (that wiring is
-// also Task 6's, in the main TX cycle), but the definition must exist so the
-// lorawan.h `#else` (real) branch links.
-void lorawan_transmit(const lorawan_snapshot_t *snap) {
-    (void)snap;
-}
-
-// TEMPORARY stub — always idle until Task 6's worker task exists.
+// Idle iff the worker isn't mid-uplink AND nothing is queued for it.
 bool lorawan_is_idle(void) {
-    return true;
+    return !s_busy && uxQueueMessagesWaiting(s_q) == 0;
 }
 
 #endif // CONFIG_GEIGER_LORAWAN

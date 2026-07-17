@@ -596,6 +596,10 @@ static int test_lw_build_port1(void) {
     if (p[4]!=0xA0||p[5]!=0xB0||p[6]!=0xC0) return 0;             // dt u24 BE
     if (p[7]!=0x26||p[8]!=0x17) return 0;                          // version BE
     if (p[9]!=3) return 0;                                         // tube nbr
+    // Saturation: dt_ms >= 2^24 must clamp to 0xFFFFFF (V2 clamps where
+    // V1.9 silently wrapped — see lorawan_codec.h).
+    lw_build_port1(p, 1, 0x2000000u, 0x2617u, 3);
+    if (p[4] != 0xFF || p[5] != 0xFF || p[6] != 0xFF) return 0;
     return 1;
 }
 
@@ -609,6 +613,10 @@ static int test_lw_build_port2(void) {
     // negative temperature: -5.5 C -> -55 as s16 BE
     if (!lw_build_port2(p, -5.5f, 10.0f, 90000.0f)) return 0;
     if (p[0]!=0xFF || p[1]!=(uint8_t)(-55)) return 0;
+    // Saturation: pressure/10 >= 65536 must clamp to 0xFFFF (700000 Pa
+    // -> 70000 > 65535).
+    if (!lw_build_port2(p, 0.0f, 0.0f, 700000.0f)) return 0;
+    if (p[3] != 0xFF || p[4] != 0xFF) return 0;
     return 1;
 }
 

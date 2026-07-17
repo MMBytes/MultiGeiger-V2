@@ -1,0 +1,14 @@
+menu "MultiGeiger"
+
+    config GEIGER_LORAWAN
+        bool "LoRaWAN uplink support (Heltec WiFi LoRa 32 V4 only)"
+        default n
+        help
+            Compiles main/lorawan.cpp and pulls the jgromes/radiolib
+            managed component. Set ONLY by
+            sdkconfig.defaults.heltec_wifi_lora32_v4_r2 — the SX1262 is
+            module-internal wiring on that board. Other boards must keep
+            this off; the ringfence guarantee is that no RadioLib code
+            links into their binaries.
+
+endmenu

@@ -138,7 +138,7 @@ jobs:
           - board: seeed_xiao_esp32s3
             defines: -DBOARD_SEEED_XIAO_ESP32S3=1 -DMQTT_RICH_STATE=1
           - board: heltec_wifi_lora32_v4_r2
-            defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1 -DCONFIG_GEIGER_LORAWAN=1
           - board: sparkfun_thing_plus_esp32s3
             defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1
           - board: sparkfun_thing_plus_esp32c5

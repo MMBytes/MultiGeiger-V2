@@ -1,3 +1,12 @@
+# V2.6.23: LoRaWAN (heltec_wifi_lora32_v4_r2 only). Deliberately NOT the
+# speaker.c always-compile-stub pattern: compiling lorawan.cpp requires the
+# RadioLib managed component, which only exists when CONFIG_GEIGER_LORAWAN
+# pulled it (see idf_component.yml rules). Keyed off the same single symbol.
+set(GEIGER_LORAWAN_SRCS "")
+if(CONFIG_GEIGER_LORAWAN)
+    list(APPEND GEIGER_LORAWAN_SRCS "lorawan.cpp")
+endif()
+
 idf_component_register(
     SRCS
         "main.c"
@@ -44,6 +53,7 @@ idf_component_register(
         "display_tft.c"
         "neopixel.c"
         "led.c"
+        ${GEIGER_LORAWAN_SRCS}
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -82,3 +92,17 @@ idf_component_register(
         # depending on resolver state. See IDF v6.0 migration guide
         # `docs/en/migration-guides/release-6.x/6.0/protocols.rst:151`.
 )
+
+# V2.6.23: RadioLib's PhysicalLayer base class is overloaded with different
+# default-arg signatures across its module subclasses (SX1262, LR11x0,
+# CC1101, ...) — an upstream design choice, not something fixable from this
+# tree since managed_components/ is gitignored and regenerated on every
+# checkout. That trips -Woverloaded-virtual (pulled in by this project's
+# -Wextra) and gets promoted to a hard error under our global -Werror
+# policy, so the library fails to compile out of the box. Demote it for
+# RadioLib's own translation units only — every other component keeps
+# -Werror on overloaded-virtual.
+if(CONFIG_GEIGER_LORAWAN)
+    idf_component_get_property(geiger_radiolib_lib jgromes__radiolib COMPONENT_LIB)
+    target_compile_options(${geiger_radiolib_lib} PRIVATE -Wno-error=overloaded-virtual)
+endif()

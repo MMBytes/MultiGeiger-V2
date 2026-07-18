@@ -70,13 +70,22 @@ public:
     void attachInterrupt(uint32_t interruptNum, void (*interruptCb)(void), uint32_t mode) override {
         if (interruptNum == RADIOLIB_NC) return;
         gpio_set_intr_type((gpio_num_t)interruptNum, (gpio_int_type_t)mode);
-        // ISR service may already be installed by tube.c — tolerate that.
-        // The IRAM flag is REQUIRED to match tube.c's existing install (the
-        // service is process-wide; a second install with mismatched flags
-        // returns INVALID_STATE and leaves tube.c's flags in force anyway).
-        esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-        if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(e));
+        // Install the shared GPIO ISR service AT MOST ONCE. RadioLib calls
+        // attachInterrupt() around every RX window (many times once joined),
+        // and the driver's gpio_install_isr_service() logs a red ESP_LOGE
+        // "GPIO isr service already installed" on every call after the first
+        // — tube.c installs it at boot, so ours is always a repeat. Without
+        // this guard that benign error spammed /log + syslog on every RX
+        // window forever. The static latch collapses it to the single boot
+        // attempt (whose INVALID_STATE we still tolerate; the IRAM flag must
+        // match tube.c's install — the service is process-wide).
+        static bool s_isr_service_tried = false;
+        if (!s_isr_service_tried) {
+            s_isr_service_tried = true;
+            esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+            if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+                ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(e));
+            }
         }
         // ACCEPTED RISK (whole-branch review 2026-07-18): the callback
         // RadioLib registers here (its DIO1 handler) lives in flash, not

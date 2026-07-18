@@ -299,9 +299,10 @@ static bool nvs_load_blob(const char *key, uint8_t *buf, size_t len) {
 
 // --- Worker task --------------------------------------------------------------
 
-// Queue depth 1 — freshest-snapshot-wins, same drop-if-busy contract as
-// transmission.c's tx_setup()/tx_transmit() (that's the "same queue-depth-1
-// convention" this mirrors; see lorawan_transmit() below).
+// Queue depth 1 — a freshest-wins mailbox: the producer overwrites any
+// unconsumed snapshot (see lorawan_transmit()), so the worker always pulls
+// the latest window. Mirrors transmission.c's queue-depth-1 convention but
+// NOT its drop-if-busy policy — see lorawan_transmit() for why they differ.
 static QueueHandle_t s_q;
 static volatile bool s_busy = false;
 static LoRaWANNode  *s_node = NULL;
@@ -441,8 +442,9 @@ static void lorawan_task(void *arg) {
         if (backoff_s < 3600) backoff_s *= 2;
     }
 
-    // Uplink loop: one queue slot; freshest-data-wins (drop-if-busy at the
-    // producer, same contract as tx_transmit).
+    // Uplink loop: one queue slot; freshest-wins (the producer overwrites
+    // via xQueueOverwrite in lorawan_transmit(), so this pulls the latest
+    // window each time).
     lorawan_snapshot_t snap;
     for (;;) {
         if (xQueueReceive(s_q, &snap, portMAX_DELAY) != pdTRUE) continue;

@@ -520,11 +520,18 @@ void lorawan_setup(void) {
     ESP_LOGI(TAG, "LoRaWAN worker task created (join runs in the background)");
 }
 
-// Enqueue one uplink snapshot. Non-blocking; if the queue already holds an
-// unconsumed snapshot (worker still busy joining/uplinking), the new
-// snapshot is dropped rather than replacing the queued one — same
-// drop-if-busy contract as transmission.c's tx_transmit(). Logged at DEBUG
-// (not WARN): a dropped cycle is expected/harmless during a long join.
+// Enqueue one uplink snapshot into the depth-1 mailbox. Non-blocking and
+// freshest-wins: xQueueOverwrite always replaces any still-unconsumed
+// snapshot with the latest one. This only differs from a plain drop-if-busy
+// send when the worker stays busy across multiple TX cycles — chiefly a long
+// OTAA join, during which the worker sits in its join/backoff loop and never
+// drains the queue. Overwrite guarantees the FIRST uplink after the join
+// carries the current counting window, not the stale one captured when the
+// join began. (Deliberately diverges from tx_transmit()'s drop-if-busy: the
+// WiFi worker drains every cycle, so it never accumulates the multi-hour
+// staleness a join backoff can — the depth-1 "latest value" mailbox is the
+// right model here, and xQueueOverwrite is FreeRTOS's purpose-built
+// primitive for it. Requires a depth-1 queue, which s_q is.)
 void lorawan_transmit(const lorawan_snapshot_t *snap) {
     if (!snap) return;
     // s_q is NULL until lorawan_setup() creates it, and setup() only creates
@@ -532,14 +539,12 @@ void lorawan_transmit(const lorawan_snapshot_t *snap) {
     // g_cfg.lorawan_enabled LIVE, so a user who ticks "Enable LoRaWAN" and
     // presses the plain (non-restart) /config Save flips the flag true on a
     // node whose worker/queue were never created — the next TX cycle would
-    // reach here with s_q == NULL and xQueueSend()'s configASSERT would
+    // reach here with s_q == NULL and xQueueOverwrite()'s configASSERT would
     // panic. Guard it: enabling LoRaWAN is a reboot-required change (the
     // /config fields are starred), so a live enable correctly no-ops here
     // until the reboot that actually brings the worker up.
     if (!s_q) return;
-    if (xQueueSend(s_q, snap, 0) != pdTRUE) {
-        ESP_LOGD(TAG, "worker busy — snapshot dropped this cycle");
-    }
+    xQueueOverwrite(s_q, snap);   // depth-1: always succeeds, never blocks
 }
 
 // Idle iff the worker isn't mid-uplink AND nothing is queued for it.

@@ -280,11 +280,20 @@ bool main_target_enabled(int target_id) {
 
 // --- Strict single-mode WiFi:
 //   boot .. AP_WINDOW_US:     AP only (STA not started — radio unshared)
-//   AP_WINDOW_US onward:       STA only (AP stopped — no fallback AP)
+//   AP_WINDOW_US onward:       STA only (AP stopped — no fallback AP), UNLESS
+//                              a client is still connected to the AP, in which
+//                              case the switch is held until AP_CLIENT_GRACE_US
+//                              after the last client leaves (see below).
 // If STA fails to obtain its first IP within STA_STARTUP_TIMEOUT_US of the
 // switch, reboot to re-enter the AP window. Watchdog disarms permanently
 // after the first GOT_IP — subsequent disconnects retry STA forever.
 #define AP_WINDOW_US           (120 * 1000000LL)
+// V2.6.23: once the AP window elapses, don't close the AP while a client is
+// still associated — hold it, then close this long after the LAST client
+// leaves (so a browser that briefly drops between page loads doesn't trip an
+// instant close). Deliberately short: the AP is only meant for a config
+// session, and holding it defers the STA switch / telemetry.
+#define AP_CLIENT_GRACE_US     (5 * 1000000LL)
 #define STA_STARTUP_TIMEOUT_US (600 * 1000000LL)   // 10 min
 #if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
 // V2.5.34 safety-net (PSRAM/roaming builds only): post-association we delegate
@@ -1763,6 +1772,40 @@ void app_main(void) {
         // running node must have zero effect until reboot (see the latch's
         // declaration comment).
         static bool s_radio_off = false;
+
+        // V2.6.23: keep the boot AP up while a client is actively connected,
+        // so the window close never yanks /config out from under someone
+        // mid-configuration. We ASK THE DRIVER for the associated-station
+        // count (esp_wifi_ap_get_sta_list) instead of maintaining our own
+        // connect/disconnect counter — the driver is the single source of
+        // truth and can't desync from a coalesced/missed event. Evaluated
+        // only after the AP window elapsed and only while the AP is still up
+        // and closeable (not already switched to STA, not standalone-radio-
+        // off). Once the last client leaves we wait out AP_CLIENT_GRACE_US
+        // before closing. Applies to BOTH timed-close branches below; the
+        // permanent keep-AP-on branch never closes so it doesn't consult it.
+        static int64_t s_ap_last_client_us = 0;
+        static bool    s_ap_deferring      = false;
+        bool ap_hold_for_client = false;
+        if (!g_sta_connect_allowed && !s_radio_off &&
+            (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+            wifi_sta_list_t apsta;
+            if (esp_wifi_ap_get_sta_list(&apsta) == ESP_OK && apsta.num > 0) {
+                s_ap_last_client_us = esp_timer_get_time();
+                ap_hold_for_client  = true;
+            } else if (s_ap_last_client_us != 0 &&
+                       (esp_timer_get_time() - s_ap_last_client_us) <= AP_CLIENT_GRACE_US) {
+                ap_hold_for_client = true;   // within grace after last client left
+            }
+            if (ap_hold_for_client && !s_ap_deferring) {
+                ESP_LOGI(TAG, "AP window elapsed but client connected — deferring close");
+                s_ap_deferring = true;
+            } else if (!ap_hold_for_client && s_ap_deferring) {
+                ESP_LOGI(TAG, "AP client gone (+grace) — proceeding with window close");
+                s_ap_deferring = false;
+            }
+        }
+
         if (s_standalone_ap_on_latched) {
             // V2.6.23: generalized keep-AP-on (was SD-standalone-only in
             // V2.6.19). AP + httpd stay up for the life of the boot so a
@@ -1770,14 +1813,14 @@ void app_main(void) {
             // the user wants permanently reachable — can always be
             // reconfigured. Costs ~50-80 mA; STA never starts.
         } else if (s_standalone_sd_latched) {
-            if (!s_radio_off &&
+            if (!s_radio_off && !ap_hold_for_client &&
                 (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
                 ESP_LOGI(TAG, "AP window closed — standalone mode, radio off");
                 ESP_ERROR_CHECK(esp_wifi_stop());
                 ESP_ERROR_CHECK(esp_wifi_deinit());
                 s_radio_off = true;
             }
-        } else if (!g_sta_connect_allowed && g_have_sta_creds &&
+        } else if (!g_sta_connect_allowed && g_have_sta_creds && !ap_hold_for_client &&
                    (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
             ESP_LOGI(TAG, "AP window closed — stopping AP and switching to STA");
 

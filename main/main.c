@@ -1787,7 +1787,14 @@ void app_main(void) {
         static int64_t s_ap_last_client_us = 0;
         static bool    s_ap_deferring      = false;
         bool ap_hold_for_client = false;
+        // Only evaluate when a TIMED close is actually reachable this boot:
+        // not after the STA switch / radio-off (interface gone), not in
+        // permanent keep-AP-on mode (never closes), and only when some close
+        // branch can fire — standalone-SD, or a normal node with STA creds.
+        // (Without this a connecting client would log a spurious "deferring
+        // close" in the always-on-AP / no-creds modes where nothing closes.)
         if (!g_sta_connect_allowed && !s_radio_off &&
+            !s_standalone_ap_on_latched && (s_standalone_sd_latched || g_have_sta_creds) &&
             (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
             wifi_sta_list_t apsta;
             if (esp_wifi_ap_get_sta_list(&apsta) == ESP_OK && apsta.num > 0) {

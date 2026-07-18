@@ -1659,6 +1659,14 @@ static esp_err_t config_get(httpd_req_t *req) {
         "&mdash; shows battery voltage/charge/rate on this page, MQTT, and HA "
         "Discovery. Can't be auto-detected: USB power alone makes the chip read "
         "a plausible battery-shaped voltage even with none attached.%s</label></div>"
+        // Heap-guard floor + confirm cycles. Positioned just above the
+        // keep-AP-on toggle (user request, 2026-07-18). No asterisk — read
+        // live each TX cycle by tx_heap_guard() (V2.5.18), so it applies on
+        // plain Save (no reboot). V2.5.33: confirm window configurable.
+        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\"></label>"
+        "<label>Heap-guard confirm cycles"
+        "<input type=\"text\" inputmode=\"numeric\" name=\"hg_confirm\" value=\"%lu\"></label>"
         // V2.6.23: keep-AP-on checkbox generalized off standalone-SD (was a
         // sub-toggle of sd_stand, HAL_HAS_SD_CARD-gated, greyed/cleared by
         // the syncSdAp() script). main.c now honors s_standalone_ap_on_latched
@@ -1716,17 +1724,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<small style=\"color:#c00\">Hardware-reworked boards ONLY.</small>"
         "</label></div>"
         "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
-        "enabled, a TX interval of 5 min or more is recommended (TTN Fair Use "
-        "Policy).</p>"
+        "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
+        "(TTN Fair Use Policy).</p>"
 #endif
-        // V2.5.30: heap-guard floor moved here to the BOTTOM of the Hardware
-        // section (was in "Other"). No asterisk — read live each TX cycle by
-        // tx_heap_guard() (V2.5.18), so it applies on plain Save (no reboot).
-        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\"></label>"
-        // V2.5.33: confirm window now configurable (was a hard-coded 5).
-        "<label>Heap-guard confirm cycles"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"hg_confirm\" value=\"%lu\"></label>"
         // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
         // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
         // configure here. See the "GNSS / Position" card on /status.
@@ -2022,6 +2022,8 @@ static esp_err_t config_get(httpd_req_t *req) {
         "",                                          // never checked on this board
         " <small>(not available on this board)</small>",
 #endif
+        (unsigned long)s_cfg->heap_guard_floor_kb,   // moved above keep-AP-on (user request)
+        (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
         s_cfg->standalone_ap_on ? "checked" : "",    // V2.6.23: keep-AP-on, now unconditional
 #if HAL_HAS_SD_CARD
         s_cfg->standalone_sd    ? "checked" : "",    // V2.6.19: standalone SD-logging
@@ -2042,8 +2044,6 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->lorawan_fem_en     ? "checked" : "",
         s_cfg->lorawan_high_power ? "checked" : "",
 #endif
-        (unsigned long)s_cfg->heap_guard_floor_kb,   // V2.5.30: bottom of Hardware
-        (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
         (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
         s_cfg->send_madavi  ? "checked" : "",
         s_cfg->madavi_https ? "checked" : "",

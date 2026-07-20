@@ -5,8 +5,9 @@
 #include "hal.h"
 
 // Active only on a board with a plain user LED that neither speaker.c
-// (HAL_HAS_SPEAKER) nor neopixel.c (HAL_HAS_NEOPIXEL) already drives. The
-// XIAO ESP32-S3 is the sole such board today.
+// (HAL_HAS_SPEAKER) nor neopixel.c (HAL_HAS_NEOPIXEL) already drives. Today
+// that's the XIAO ESP32-S3 and the Heltec WiFi LoRa32 V4 R2 (whose piezo is
+// disabled by a GPIO26/PSRAM collision, so speaker.c is fully stubbed there).
 #if defined(PIN_LED_BUILTIN) && !HAL_HAS_SPEAKER && !HAL_HAS_NEOPIXEL
 
 #include "driver/gpio.h"

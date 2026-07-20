@@ -1298,7 +1298,7 @@
     #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
     #define PIN_HV_FET_OUTPUT         8  // L10 (silkscreen A5)
 
-    #define PIN_LED_BUILTIN          13  // R4 (silkscreen D13) — onboard red "#13" LED
+    #define PIN_LED_BUILTIN          13  // R4 (silkscreen D13) — onboard red "#13" LED; since V2.6.24 unused for led_tick (NeoPixel preferred, see dual-LED note above); held OFF
 
     // Speaker — D9/D10 header pads.
     #define PIN_SPEAKER_P            10  // R7 (silkscreen D10)

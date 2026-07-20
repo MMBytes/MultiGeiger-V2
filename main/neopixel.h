@@ -14,8 +14,10 @@
  *  Concurrency model: writes happen on a small dedicated FreeRTOS task that
  *  blocks on a task notification. The tube pulse ISR notifies the task —
  *  ISR-side cost is one xTaskNotifyGiveFromISR. The task drives the pixel
- *  red briefly (~50 ms), then black, then blocks again. Natural rate-limit:
- *  even at high CPM, visible flashes are bounded to ~10/s.
+ *  blue briefly (40 ms, PULSE_VISIBLE_MS; blue since V2.6.22 to stay
+ *  distinguishable from the solid-red SD-failure alert), then restores the
+ *  alert base colour (black by default), then blocks again. Natural
+ *  rate-limit: even at high CPM, visible flashes are bounded to ~10/s.
  */
 
 #include <stdbool.h>
@@ -57,7 +59,7 @@ void neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b);
 void neopixel_set_alert(uint8_t r, uint8_t g, uint8_t b);
 
 /** @brief Register the tube-pulse ISR hook so each Geiger pulse triggers a
- *         brief red flash on the pixel.
+ *         brief blue flash on the pixel.
  *
  *  Calls tube_set_pulse_callback() internally with an IRAM-safe handler —
  *  EXCEPT on boards that also have HAL_HAS_SPEAKER, where speaker.c already

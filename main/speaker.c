@@ -275,9 +275,15 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     ESP_LOGI(TAG, "speaker setup: P=%d N=%d, led_tick drives NeoPixel (led_tick=%d speaker_tick=%d play=%d)",
              PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
-#else
+#elif defined(PIN_LED_BUILTIN)
     ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
              PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
+             led_tick, speaker_tick, play_sound);
+#else
+    // Speaker but no visual indicator at all — a legal (if unlikely) future
+    // combination; tick_start() already no-ops led_tick for it.
+    ESP_LOGI(TAG, "speaker setup: P=%d N=%d, no led_tick indicator (led_tick=%d speaker_tick=%d play=%d)",
+             PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
 #endif
 }

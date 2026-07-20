@@ -22,9 +22,11 @@ Boards that have both a plain user LED and a WS2812 NeoPixel
   "no new code, existing precedent"). At #5477 bench bring-up the user
   chose the NeoPixel as the intended pulse indicator wherever one exists.
 - `speaker.c` `tick_start()` now checks `HAL_HAS_NEOPIXEL` first and falls
-  back to `PIN_LED_BUILTIN` only on NeoPixel-less boards (Heltec V2/V4,
-  feathers3_d). Boards with a NeoPixel and no plain LED (QT Py, SparkFun
-  S3/C5, Feather V2) are unchanged — they already used the NeoPixel.
+  back to `PIN_LED_BUILTIN` only on NeoPixel-less boards (Heltec V2,
+  feathers3_d; the Heltec V4 R2's LED is driven by `led.c`, not this
+  fallback — its speaker is disabled). Boards with a NeoPixel and no plain
+  LED (QT Py, SparkFun S3/C5, Feather V2) are unchanged — they already
+  used the NeoPixel.
 - The red "#13" LED on the two dual-LED Feathers is still configured and
   driven to a deterministic OFF at boot, reserved for future status use.
 

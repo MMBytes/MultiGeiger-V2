@@ -240,6 +240,15 @@ static void set_security_headers(httpd_req_t *req) {
 // runner under `test/` can include them directly. Same semantics as before
 // (html_esc V2.0+, hex_nibble V2.0+, url_decode V2.4.1 B6 RFC-strict).
 
+// V2.6.24: html_esc()'s TRUE worst case is 6 bytes out per byte in (every
+// char -> "&quot;"), per its own doc in util.h. Every escape buffer in this
+// file was historically sized to a ~3-4x convention (traceable to a V2.4.4
+// comment that called "&amp;" the worst case), which made html_esc truncate
+// metacharacter-dense values — and for /config that truncation is not just
+// cosmetic: the form re-displays the shortened value and the next Save
+// PERSISTS it back. Size every escape destination with this macro.
+#define ESC_WORST(max) ((max) * 6 + 1)
+
 // --- GET / (status, no auth) -------------------------------------------------
 
 // V2.5.33: format_uptime() moved to util.h (static inline) so transmission.c's
@@ -289,9 +298,10 @@ static void format_net_info(char *out, size_t sz) {
 
     // ap_name is a user-editable config field, so escape it once for whichever
     // Network branch renders below — same treatment as the joined SSID
-    // (ssid_esc) and the /config page (e_apn). 96 B matches the /config buffer;
-    // html_esc() is bounded so it truncates rather than overflows.
-    char ap_name_esc[96];
+    // (ssid_esc) and the /config page. V2.6.24: sized ESC_WORST (was 96, which
+    // truncated metacharacter-dense names) and static per the V2.4.22 pattern
+    // (httpd runs all handlers on one thread) to keep it off the 8 KB stack.
+    static char ap_name_esc[ESC_WORST(CFG_AP_NAME_MAX)];
     html_esc(s_cfg->ap_name, ap_name_esc, sizeof(ap_name_esc));
 
     if (sta_up) {
@@ -308,8 +318,11 @@ static void format_net_info(char *out, size_t sz) {
         esp_ip4addr_ntoa(&d2.ip.u_addr.ip4, d2_s, sizeof(d2_s));
         bool has_d2 = (d2.ip.u_addr.ip4.addr != 0) &&
                       (d2.ip.u_addr.ip4.addr != d1.ip.u_addr.ip4.addr);
-        char ssid_esc[66];
-        // SSID is up to 32 bytes plus null; escape into 65 + slack.
+        // SSID is up to 32 bytes; the escape buffer takes the full 6x worst
+        // case (V2.6.24, was 66 which truncated quote-heavy joined SSIDs —
+        // this one isn't even our own config, it's whatever AP we joined).
+        // static per the V2.4.22 single-threaded-httpd pattern.
+        static char ssid_esc[ESC_WORST(32)];
         char ssid_raw[33] = {0};
         memcpy(ssid_raw, ap.ssid, sizeof(ap.ssid));
         ssid_raw[32] = 0;
@@ -1395,89 +1408,117 @@ static esp_err_t config_get(httpd_req_t *req) {
 
     // Escape every string field for safe use in value="..." attributes.
     //
-    // V2.4.22: all e_* arrays moved from stack to BSS — collectively
-    // ~4.3 KB, over half the httpd task's 8 KB stack budget when
-    // simultaneously in scope. Same V2.4.20 fix pattern. Safe because
-    // esp_http_server uses a single thread (httpd_thread runs all URI
-    // handlers serially via select), so config_get is never re-entered.
-    // Each html_esc() call below fully overwrites its target buffer
-    // before any reader (the final big snprintf) sees it. BSS cost
-    // ~4.3 KB once, replacing 4.3 KB off every config_get invocation.
-    static char e_ssid[96], e_pw[192], e_chip[96], e_ru[96], e_rp[192];
-    static char e_ntp1[192], e_ntp2[192], e_ntp3[192], e_ap[96];
-    static char e_tz[160];
-    static char e_apn[96], e_host[96];
-    static char e_fhost[192], e_fuser[96], e_fpw[192], e_fpath[192];
-    static char e_osm[80], e_osm_tok[160], e_aqi[160];
-    static char e_osm_st[80], e_osm_st_tok[160];   // V2.5.26: OSM staging
-    // V2.4.4: MQTT fields. e_mhost generously sized — html_esc 4x worst case
-    // (every byte → "&amp;" or similar) over CFG_MQTT_HOST_MAX=63 = ~256;
-    // e_mpfx similarly over CFG_MQTT_PFX_MAX=31.
-    static char e_mhost[256], e_muser[160], e_mpw[256], e_mpfx[128];
-    // V2.4.15: syslog host esc buffer. CFG_SYSLOG_HOST_MAX=63 × 4 = ~256.
-    static char e_slh[256];
+    // V2.6.24: the whole e_* workspace is ONE heap-transient struct, each
+    // field sized ESC_WORST(its source's CFG_*_MAX) — see the ESC_WORST
+    // comment at the top of this file for why the previous ~3-4x static
+    // sizes were wrong (truncate-then-persist-back on Save). Heap rather
+    // than the V2.4.22 BSS statics because at full 6x sizing the workspace
+    // is ~9 KB: as BSS that would tax every board permanently (the Heltec
+    // V2's internal-DRAM budget is the tightest), while as a malloc it
+    // exists only while a /config GET is in flight — a path that already
+    // heap-allocates CFG_FORM_BUF_SIZE (16-32 KB) + the PEM buffer, with a
+    // graceful 500-on-OOM. This also RETURNS the old ~4.4 KB of BSS to the
+    // heap. Stack was never an option (V2.4.22: 8 KB httpd stack budget).
+    // html_esc() fully overwrites each field before the big snprintf reads
+    // it, so plain malloc (no calloc) is sufficient.
+    typedef struct {
+        char ssid       [ESC_WORST(CFG_WIFI_SSID_MAX)];
+        char pw         [ESC_WORST(CFG_WIFI_PSK_MAX)];
+        char chip       [96];   // chip id: digits/dashes only, never expands
+        char ru         [ESC_WORST(CFG_USER_NAME_MAX)];
+        char rp         [ESC_WORST(CFG_PASSWORD_MAX)];
+        char ntp1       [ESC_WORST(CFG_NTP_HOST_MAX)];
+        char ntp2       [ESC_WORST(CFG_NTP_HOST_MAX)];
+        char ntp3       [ESC_WORST(CFG_NTP_HOST_MAX)];
+        char ap         [ESC_WORST(CFG_AP_PW_MAX)];
+        char tz         [ESC_WORST(CFG_TZ_POSIX_MAX)];
+        char apn        [ESC_WORST(CFG_AP_NAME_MAX)];
+        char host       [ESC_WORST(CFG_HOSTNAME_MAX)];
+        char fhost      [ESC_WORST(CFG_FTP_HOST_MAX)];
+        char fuser      [ESC_WORST(CFG_USER_NAME_MAX)];
+        char fpw        [ESC_WORST(CFG_PASSWORD_MAX)];
+        char fpath      [ESC_WORST(CFG_FTP_PATH_MAX)];
+        char osm        [ESC_WORST(CFG_OSM_BOX_MAX)];
+        char osm_tok    [ESC_WORST(CFG_TOKEN_MAX)];
+        char aqi        [ESC_WORST(CFG_TOKEN_MAX)];
+        char osm_st     [ESC_WORST(CFG_OSM_BOX_MAX)];   // V2.5.26: OSM staging
+        char osm_st_tok [ESC_WORST(CFG_TOKEN_MAX)];
+        // V2.5.1: GMCMap + ThingSpeak. Numeric/hex by validation, but escaped
+        // for the same defence-in-depth reason as the LoRa fields below.
+        char gmc_aid    [ESC_WORST(CFG_USER_NAME_MAX)];
+        char gmc_gid    [ESC_WORST(CFG_USER_NAME_MAX)];
+        char ts_key     [ESC_WORST(CFG_TOKEN_MAX)];
+        char ts_pm_key  [ESC_WORST(CFG_TOKEN_MAX)];     // V2.5.4: ThingSpeak PM
+        char mhost      [ESC_WORST(CFG_MQTT_HOST_MAX)];
+        char muser      [ESC_WORST(CFG_USER_NAME_MAX)];
+        char mpw        [ESC_WORST(CFG_PASSWORD_MAX)];
+        char mpfx       [ESC_WORST(CFG_MQTT_PFX_MAX)];
+        char slh        [ESC_WORST(CFG_SYSLOG_HOST_MAX)];   // V2.4.15: syslog
 #if HAL_HAS_LORAWAN
-    // V2.6.23 (T8): DevEUI/JoinEUI (CFG_LORA_EUI_MAX=16) and AppKey
-    // (CFG_LORA_KEY_MAX=32) are plain hex strings — no HTML metacharacters
-    // possible in a value that later passes lw_hex_decode — but escaped
-    // anyway for the same reason the GMCMap/ThingSpeak hex-ish fields above
-    // are: defence-in-depth against a stored value that predates/bypasses
-    // POST validation (hand-crafted request, NVS carried over from a future
-    // firmware). Sized 4x worst-case + slack, same convention as e_slh.
-    static char e_lora_deveui[80], e_lora_joineui[80], e_lora_appkey[144];
+        // V2.6.23 (T8): DevEUI/JoinEUI/AppKey are plain hex strings — no HTML
+        // metacharacters possible in a value that later passes lw_hex_decode —
+        // but escaped anyway: defence-in-depth against a stored value that
+        // predates/bypasses POST validation (hand-crafted request, NVS carried
+        // over from a future firmware).
+        char lora_deveui [ESC_WORST(CFG_LORA_EUI_MAX)];
+        char lora_joineui[ESC_WORST(CFG_LORA_EUI_MAX)];
+        char lora_appkey [ESC_WORST(CFG_LORA_KEY_MAX)];
 #endif
-    // V2.4.6: MQTT TLS PEM cert. html_esc worst-case is ~6x for a textarea
-    // because every '<' becomes "&lt;" / '"' becomes "&quot;" / '&' becomes
-    // "&amp;" — but real PEM is mostly base64 alnum (no escaping needed) +
-    // line markers. 8 KB headroom over CFG_MQTT_CA_CERT_MAX=2400 covers
-    // even pathological inputs without truncation.
-    char *e_mca = malloc(8192);
-    if (!e_mca) {
+    } esc_bufs_t;
+    esc_bufs_t *e = malloc(sizeof(*e));
+    if (!e) {
         free(body);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
         return ESP_OK;
     }
-    html_esc(s_cfg->wifi_ssid,     e_ssid, sizeof(e_ssid));
-    html_esc(s_cfg->wifi_password, e_pw,   sizeof(e_pw));
-    html_esc(s_chip_id,            e_chip, sizeof(e_chip));  // read-only display
-    html_esc(s_cfg->radmon_user,   e_ru,   sizeof(e_ru));
-    html_esc(s_cfg->radmon_password, e_rp, sizeof(e_rp));
-    html_esc(s_cfg->ntp_server,    e_ntp1, sizeof(e_ntp1));
-    html_esc(s_cfg->ntp_server2,   e_ntp2, sizeof(e_ntp2));
-    html_esc(s_cfg->ntp_server3,   e_ntp3, sizeof(e_ntp3));
-    html_esc(s_cfg->tz_posix,      e_tz,   sizeof(e_tz));
-    html_esc(s_cfg->ap_password,   e_ap,   sizeof(e_ap));
-    html_esc(s_cfg->ap_name,       e_apn,  sizeof(e_apn));
-    html_esc(s_cfg->wifi_hostname, e_host, sizeof(e_host));
-    html_esc(s_cfg->ftp_host,      e_fhost, sizeof(e_fhost));
-    html_esc(s_cfg->ftp_user,      e_fuser, sizeof(e_fuser));
-    html_esc(s_cfg->ftp_password,  e_fpw,   sizeof(e_fpw));
-    html_esc(s_cfg->ftp_path,      e_fpath, sizeof(e_fpath));
-    html_esc(s_cfg->osm_box_id,       e_osm,     sizeof(e_osm));
-    html_esc(s_cfg->osm_access_token, e_osm_tok, sizeof(e_osm_tok));
-    html_esc(s_cfg->osm_staging_box_id, e_osm_st,     sizeof(e_osm_st));
-    html_esc(s_cfg->osm_staging_token,  e_osm_st_tok, sizeof(e_osm_st_tok));
-    html_esc(s_cfg->aqi_token,        e_aqi,     sizeof(e_aqi));
-    // V2.5.1: GMCMap + ThingSpeak. Numeric/hex fields, but escape for safety.
-    // V2.6.4: static — same justification as the e_* block above (V2.4.22).
-    static char e_gmc_aid[CFG_USER_NAME_MAX * 3 + 4];
-    static char e_gmc_gid[CFG_USER_NAME_MAX * 3 + 4];
-    static char e_ts_key [CFG_TOKEN_MAX     * 3 + 4];
-    static char e_ts_pm_key [CFG_TOKEN_MAX  * 3 + 4];   // V2.5.4: ThingSpeak PM key
-    html_esc(s_cfg->gmc_account_id,     e_gmc_aid, sizeof(e_gmc_aid));
-    html_esc(s_cfg->gmc_geiger_id,      e_gmc_gid, sizeof(e_gmc_gid));
-    html_esc(s_cfg->thingspeak_api_key, e_ts_key,  sizeof(e_ts_key));
-    html_esc(s_cfg->thingspeak_pm_api_key, e_ts_pm_key, sizeof(e_ts_pm_key));
-    html_esc(s_cfg->mqtt_broker,       e_mhost, sizeof(e_mhost));
-    html_esc(s_cfg->mqtt_user,         e_muser, sizeof(e_muser));
-    html_esc(s_cfg->mqtt_password,     e_mpw,   sizeof(e_mpw));
-    html_esc(s_cfg->mqtt_topic_prefix, e_mpfx,  sizeof(e_mpfx));
-    html_esc(s_cfg->mqtt_tls_ca,       e_mca,   8192);
-    html_esc(s_cfg->syslog_host,       e_slh,   sizeof(e_slh));
+    // V2.4.6: MQTT TLS PEM cert, its own allocation (folding it into the
+    // struct above would make that a single ~23 KB contiguous ask — two
+    // smaller allocs are kinder to a fragmented heap). V2.6.24: sized to the
+    // honest 6x worst case (the old 8192 comment claimed it "covers even
+    // pathological inputs", which 6 x 2400 = 14400 disproves); real PEM is
+    // mostly base64 so the extra 6 KB transient is never touched in practice.
+    char *e_mca = malloc(ESC_WORST(CFG_MQTT_CA_CERT_MAX));
+    if (!e_mca) {
+        free(e);
+        free(body);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_OK;
+    }
+    html_esc(s_cfg->wifi_ssid,     e->ssid, sizeof(e->ssid));
+    html_esc(s_cfg->wifi_password, e->pw,   sizeof(e->pw));
+    html_esc(s_chip_id,            e->chip, sizeof(e->chip));  // read-only display
+    html_esc(s_cfg->radmon_user,   e->ru,   sizeof(e->ru));
+    html_esc(s_cfg->radmon_password, e->rp, sizeof(e->rp));
+    html_esc(s_cfg->ntp_server,    e->ntp1, sizeof(e->ntp1));
+    html_esc(s_cfg->ntp_server2,   e->ntp2, sizeof(e->ntp2));
+    html_esc(s_cfg->ntp_server3,   e->ntp3, sizeof(e->ntp3));
+    html_esc(s_cfg->tz_posix,      e->tz,   sizeof(e->tz));
+    html_esc(s_cfg->ap_password,   e->ap,   sizeof(e->ap));
+    html_esc(s_cfg->ap_name,       e->apn,  sizeof(e->apn));
+    html_esc(s_cfg->wifi_hostname, e->host, sizeof(e->host));
+    html_esc(s_cfg->ftp_host,      e->fhost, sizeof(e->fhost));
+    html_esc(s_cfg->ftp_user,      e->fuser, sizeof(e->fuser));
+    html_esc(s_cfg->ftp_password,  e->fpw,   sizeof(e->fpw));
+    html_esc(s_cfg->ftp_path,      e->fpath, sizeof(e->fpath));
+    html_esc(s_cfg->osm_box_id,       e->osm,     sizeof(e->osm));
+    html_esc(s_cfg->osm_access_token, e->osm_tok, sizeof(e->osm_tok));
+    html_esc(s_cfg->osm_staging_box_id, e->osm_st,     sizeof(e->osm_st));
+    html_esc(s_cfg->osm_staging_token,  e->osm_st_tok, sizeof(e->osm_st_tok));
+    html_esc(s_cfg->aqi_token,        e->aqi,     sizeof(e->aqi));
+    html_esc(s_cfg->gmc_account_id,     e->gmc_aid, sizeof(e->gmc_aid));
+    html_esc(s_cfg->gmc_geiger_id,      e->gmc_gid, sizeof(e->gmc_gid));
+    html_esc(s_cfg->thingspeak_api_key, e->ts_key,  sizeof(e->ts_key));
+    html_esc(s_cfg->thingspeak_pm_api_key, e->ts_pm_key, sizeof(e->ts_pm_key));
+    html_esc(s_cfg->mqtt_broker,       e->mhost, sizeof(e->mhost));
+    html_esc(s_cfg->mqtt_user,         e->muser, sizeof(e->muser));
+    html_esc(s_cfg->mqtt_password,     e->mpw,   sizeof(e->mpw));
+    html_esc(s_cfg->mqtt_topic_prefix, e->mpfx,  sizeof(e->mpfx));
+    html_esc(s_cfg->mqtt_tls_ca,       e_mca,   ESC_WORST(CFG_MQTT_CA_CERT_MAX));
+    html_esc(s_cfg->syslog_host,       e->slh,   sizeof(e->slh));
 #if HAL_HAS_LORAWAN
-    html_esc(s_cfg->lorawan_deveui,    e_lora_deveui,  sizeof(e_lora_deveui));
-    html_esc(s_cfg->lorawan_joineui,   e_lora_joineui, sizeof(e_lora_joineui));
-    html_esc(s_cfg->lorawan_appkey,    e_lora_appkey,  sizeof(e_lora_appkey));
+    html_esc(s_cfg->lorawan_deveui,    e->lora_deveui,  sizeof(e->lora_deveui));
+    html_esc(s_cfg->lorawan_joineui,   e->lora_joineui, sizeof(e->lora_joineui));
+    html_esc(s_cfg->lorawan_appkey,    e->lora_appkey,  sizeof(e->lora_appkey));
 #endif
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
@@ -1960,7 +2001,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<p><a href=\"/\">Back to status</a> &middot; "
         "<a href=\"/update\">Firmware update</a></p>"
         "</body></html>",
-        e_ssid, e_pw, e_host, e_apn, e_ap,   // V2.5.30: e_ap (ap_pw) moved to Network
+        e->ssid, e->pw, e->host, e->apn, e->ap,   // V2.5.30: e->ap (ap_pw) moved to Network
         s_cfg->wifi_11bg_only   ? "checked" : "",
         // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
         // restricts the 2.4GHz protocol set — 5GHz has no 802.11b/g to limit
@@ -1997,7 +2038,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         "",                                                  // never checked on this board
         " <small>(not available on this board)</small>",
 #endif
-        e_chip, s_mac_str,
+        e->chip, s_mac_str,
         s_cfg->tube_enabled ? "checked" : "",
         tube_opts,                              // V2.6.1: table-driven tube dropdown
         s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
@@ -2038,9 +2079,9 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->lorawan_enabled ? "checked" : "",
         lora_region_opts,
         (unsigned)s_cfg->lorawan_subband,
-        e_lora_deveui,
-        e_lora_joineui,
-        e_lora_appkey,
+        e->lora_deveui,
+        e->lora_joineui,
+        e->lora_appkey,
         s_cfg->lorawan_fem_en     ? "checked" : "",
         s_cfg->lorawan_high_power ? "checked" : "",
 #endif
@@ -2053,37 +2094,37 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->send_sealevel_pressure ? "checked" : "",
         s_cfg->send_radmon  ? "checked" : "",
         s_cfg->radmon_https ? "checked" : "",
-        e_ru, e_rp,
+        e->ru, e->rp,
         s_cfg->send_osm ? "checked" : "",
-        e_osm,
-        e_osm_tok,
+        e->osm,
+        e->osm_tok,
         s_cfg->send_osm_staging ? "checked" : "",
-        e_osm_st,
-        e_osm_st_tok,
+        e->osm_st,
+        e->osm_st_tok,
         s_cfg->send_aqi ? "checked" : "",
-        e_aqi,
+        e->aqi,
         s_cfg->send_gmc ? "checked" : "",
-        e_gmc_aid,
-        e_gmc_gid,
+        e->gmc_aid,
+        e->gmc_gid,
         s_cfg->send_thingspeak  ? "checked" : "",
         s_cfg->thingspeak_https ? "checked" : "",
-        e_ts_key,
+        e->ts_key,
         s_cfg->send_thingspeak_pm  ? "checked" : "",
         s_cfg->thingspeak_pm_https ? "checked" : "",
-        e_ts_pm_key,
+        e->ts_pm_key,
         s_cfg->ftp_enabled ? "checked" : "",
         s_cfg->ftp_tls     ? "checked" : "",
-        e_fhost, e_fuser, e_fpw, e_fpath,
+        e->fhost, e->fuser, e->fpw, e->fpath,
         (unsigned long)s_cfg->ftp_interval_min,
         s_cfg->ftp_ps_disabled ? "checked" : "",
         s_cfg->ftp_tls12_only  ? "checked" : "",
         // V2.4.4: MQTT row format args (must match order of %s/%lu/%s/%s/%s/%s in the form HTML above).
         s_cfg->mqtt_enable ? "checked" : "",
-        e_mhost,
+        e->mhost,
         (unsigned long)s_cfg->mqtt_port,
-        e_muser,
-        e_mpw,
-        e_mpfx,
+        e->muser,
+        e->mpw,
+        e->mpfx,
         s_cfg->mqtt_ha_discovery ? "checked" : "",
         // V2.4.6: MQTT TLS row format args (5 in order: enable, then three
         // <option selected> markers for the trust-mode dropdown 0/1/2, then
@@ -2095,7 +2136,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         e_mca,
         // V2.4.15: syslog row format args (3 in order: enable / host / port).
         s_cfg->syslog_enable ? "checked" : "",
-        e_slh,
+        e->slh,
         (unsigned long)s_cfg->syslog_port,
         s_cfg->speaker_tick ? "checked" : "",
         s_cfg->led_tick     ? "checked" : "",
@@ -2107,7 +2148,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         s_cfg->display_mode == 1 ? " selected" : "",
         s_cfg->display_mode == 2 ? " selected" : "",
         br_opts,
-        e_ntp1, e_ntp2, e_ntp3, e_tz);   // V2.5.30: ap_pw/tx_int/heap_guard relocated above
+        e->ntp1, e->ntp2, e->ntp3, e->tz);   // V2.5.30: ap_pw/tx_int/heap_guard relocated above
 
     // V2.3.33: snprintf returns the would-have-been length on truncation,
     // not the bytes actually written. If n >= buffer size the page tail was
@@ -2125,6 +2166,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     esp_err_t err = httpd_resp_send(req, body, n > 0 ? n : 0);
     free(body);
     free(e_mca);
+    free(e);
     return err;
 }
 

@@ -41,6 +41,18 @@ a device whose saved config predates the `send_sc` key entirely (and was
 never re-saved since) loses sensor.community upload after updating to
 V2.6.24 and needs the checkbox re-ticked once.
 
+The same review's class audit led to a full rework of the `/config` +
+`/status` HTML-escape buffers (`http_server.c`): every `e_*` destination
+was sized to a ~3-4x convention while `html_esc()`'s true worst case is
+**6x** (`"` → `&quot;`), so metacharacter-dense values were silently
+truncated — and on `/config` a truncated value re-displayed in the form is
+PERSISTED back by the next Save. All escape destinations are now sized
+`ESC_WORST(source max) = max * 6 + 1`; the `/config` workspace moved from
+~4.4 KB of permanent BSS to a single heap-transient struct that exists
+only while the page renders (returning that BSS to the heap on every
+board, which matters most on the Heltec V2), and the PEM cert buffer grew
+to its honest worst case too.
+
 Also fixes a syslog hostname off-by-one: `syslog.c`'s private hostname
 mirror was a bare `[32]` (31 chars + NUL), silently truncating 32-character
 hostnames in the RFC 5424 HOSTNAME field — while the web form, config

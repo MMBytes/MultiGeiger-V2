@@ -94,7 +94,12 @@ X_U32 (tube_type,              "tube_type",  3,        0,       3)
 
 X_BOOL(send_madavi,            "send_mad",   true)
 X_BOOL(madavi_https,           "mad_https",  true)
-X_BOOL(send_sensorc,           "send_sc",    true)
+// send_sensorc default false since V2.6.24 (user decision): a fresh board
+// shouldn't push to the public sensor.community map until deliberately
+// opted in. Already-provisioned devices are unaffected — every /config
+// save stores "send_sc" explicitly, and config_load() only falls back to
+// this default when the NVS key is absent.
+X_BOOL(send_sensorc,           "send_sc",    false)
 X_BOOL(sensorc_https,          "sc_https",   true)
 X_BOOL(send_radmon,            "send_rad",   false)
 X_BOOL(radmon_https,           "rad_https",  true)

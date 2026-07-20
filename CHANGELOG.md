@@ -30,6 +30,12 @@ Boards that have both a plain user LED and a WS2812 NeoPixel
 - The red "#13" LED on the two dual-LED Feathers is still configured and
   driven to a deterministic OFF at boot, reserved for future status use.
 
+The sensor.community TX target now defaults to **off** on freshly flashed
+boards (`send_sensorc`, `config_fields.def`) — a new device shouldn't
+upload to the public map until its owner deliberately opts in. Devices
+that have saved `/config` at least once are unaffected: the saved
+`send_sc` NVS key always wins over the compile-time default.
+
 Also fixes a syslog hostname off-by-one: `syslog.c`'s private hostname
 mirror was a bare `[32]` (31 chars + NUL), silently truncating 32-character
 hostnames in the RFC 5424 HOSTNAME field — while the web form, config

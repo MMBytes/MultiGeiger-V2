@@ -29,6 +29,7 @@
 
 #include "version.h"           // VERSION_STR
 #include "sysinfo.h"           // reset_reason_str
+#include "config.h"            // CFG_HOSTNAME_MAX — s_hostname mirrors cfg->wifi_hostname
 #include "hal.h"               // BOARD_NAME
 #include "coredump.h"          // coredump_have_dump
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
@@ -38,7 +39,9 @@ static const char *TAG = "syslog";
 
 static int                s_sock = -1;
 static struct sockaddr_in s_addr;
-static char               s_hostname[32] = "geiger";
+// Sized CFG_HOSTNAME_MAX + 1 like the cfg field it mirrors (config_fields.def)
+// — a bare [32] silently truncated 32-char hostnames to 31 (V2.6.24 fix).
+static char               s_hostname[CFG_HOSTNAME_MAX + 1] = "geiger";
 // Re-entrancy guard. Set while syslog_emit is mid-call so any ESP_LOG that
 // somehow fires from within sendto's call chain (lwIP error path? unlikely
 // but defensive) returns immediately instead of recursing.

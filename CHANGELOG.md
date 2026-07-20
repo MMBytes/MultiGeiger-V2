@@ -9,7 +9,7 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards
+## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards; syslog hostname off-by-one
 
 Boards that have both a plain user LED and a WS2812 NeoPixel
 (`adafruit_esp32s3_feather_4mb_2mbpsram` #5477 and
@@ -29,6 +29,15 @@ Boards that have both a plain user LED and a WS2812 NeoPixel
   used the NeoPixel.
 - The red "#13" LED on the two dual-LED Feathers is still configured and
   driven to a deterministic OFF at boot, reserved for future status use.
+
+Also fixes a syslog hostname off-by-one: `syslog.c`'s private hostname
+mirror was a bare `[32]` (31 chars + NUL), silently truncating 32-character
+hostnames in the RFC 5424 HOSTNAME field — while the web form, config
+struct (`CFG_HOSTNAME_MAX + 1`), NVS, and DHCP all carried the full name.
+Now sized `CFG_HOSTNAME_MAX + 1` like the cfg field it mirrors. 32 chars is
+exactly ESP-IDF's `esp_netif_set_hostname()` limit, so the whole chain now
+agrees end-to-end. (Found by the user on #5477 bench: router showed
+`...esp32-S3`, syslog showed `...esp32-S`.)
 
 ---
 

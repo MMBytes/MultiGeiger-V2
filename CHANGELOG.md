@@ -63,6 +63,13 @@ exactly ESP-IDF's `esp_netif_set_hostname()` limit, so the whole chain now
 agrees end-to-end. (Found by the user on #5477 bench: router showed
 `...esp32-S3`, syslog showed `...esp32-S`.)
 
+The DHCP hostname is now displayed on the `/status` Network block (STA and
+AP-mode branches, above the IP) and on the `/update` OTA page (below
+"Current firmware") — on the OTA page it doubles as an "am I about to
+flash the right device?" check on multi-node fleets. The formerly fully
+static `/update` page is streamed as head + escaped hostname + tail chunks
+so the runtime value never passes through a format string.
+
 ---
 
 ## V2.6.23 — LoRaWAN uplink (heltec_wifi_lora32_v4_r2) + generalized keep-AP-on

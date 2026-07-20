@@ -310,6 +310,12 @@ static void format_net_info(char *out, size_t sz) {
     static char ap_name_esc[ESC_WORST(CFG_AP_NAME_MAX)];
     html_esc(s_cfg->ap_name, ap_name_esc, sizeof(ap_name_esc));
 
+    // DHCP hostname (config wifi_hostname) — user-editable, so escaped like
+    // ap_name above. Shown in both the STA and AP branches: main.c sets it on
+    // both netifs before esp_wifi_start().
+    static char host_esc[ESC_WORST(CFG_HOSTNAME_MAX)];
+    html_esc(s_cfg->wifi_hostname, host_esc, sizeof(host_esc));
+
     if (sta_up) {
         esp_netif_ip_info_t ip = { 0 };
         esp_netif_get_ip_info(sta, &ip);
@@ -352,6 +358,7 @@ static void format_net_info(char *out, size_t sz) {
                  "<b>Security:</b> %s &middot; PHY %s &middot; %s &middot; channel %d<br>"
                  "<b>BSSID:</b> %02x:%02x:%02x:%02x:%02x:%02x &nbsp; AID %u<br>"
                  "<b>RSSI:</b> %d dBm<br>"
+                 "<b>Hostname:</b> %s<br>"
                  "<b>IP:</b> %s<br>"
                  "<b>Gateway:</b> %s<br>"
                  "<b>Network Mask:</b> %s<br>"
@@ -365,6 +372,7 @@ static void format_net_info(char *out, size_t sz) {
                  ap.bssid[3], ap.bssid[4], ap.bssid[5],
                  (unsigned)aid,
                  (int)ap.rssi,
+                 host_esc,
                  ip_s, gw_s, nm_s,
                  d1_s, has_d2 ? ", " : "", has_d2 ? d2_s : "",
                  (unsigned long)st.reconnects);
@@ -377,7 +385,7 @@ static void format_net_info(char *out, size_t sz) {
         if (apn) esp_netif_get_ip_info(apn, &ip);
         char ip_s[16];
         esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
-        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>IP:</b> %s (AP mode)</div>", ap_name_esc, ip_s);
+        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>Hostname:</b> %s<br><b>IP:</b> %s (AP mode)</div>", ap_name_esc, host_esc, ip_s);
         return;
     }
 
@@ -2608,7 +2616,12 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
 static esp_err_t update_get(httpd_req_t *req) {
     log_access(req, "GET /update");
     if (!check_auth(req)) return ESP_OK;
-    static const char page[] =
+    // The page was one static string until the DHCP hostname was added
+    // (V2.6.24) — that's runtime config, so the page is now streamed as
+    // head + escaped hostname + tail chunks. Keeping head/tail static
+    // avoids a format-string pass over literals containing '%' (CSS
+    // "width:100%").
+    static const char page_head[] =
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>OTA — MultiGeiger V2</title>"
         "<style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}"
@@ -2620,6 +2633,11 @@ static esp_err_t update_get(httpd_req_t *req) {
         // time. Zero runtime cost. version.h's include here means a tag
         // bump auto-rebuilds this TU.
         "<p><b>Current firmware:</b> <code>" VERSION_STR "</code></p>"
+        // Hostname on the OTA page = "am I about to flash the right
+        // device?" sanity check for multi-node fleets.
+        "<p><b>Hostname:</b> <code>";
+    static const char page_tail[] =
+        "</code></p>"
         "<p>Select a firmware .bin for " UPLOAD_PROMPT_BOARD ".</p>"
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"
@@ -2640,9 +2658,16 @@ static esp_err_t update_get(httpd_req_t *req) {
         " x.send(f);"
         "}"
         "</script></body></html>";
+    // Escaped like the /status buffers: user-editable config, static per the
+    // V2.4.22 single-threaded-httpd pattern.
+    static char host_esc[ESC_WORST(CFG_HOSTNAME_MAX)];
+    html_esc(s_cfg->wifi_hostname, host_esc, sizeof(host_esc));
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
-    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, page_head, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, host_esc, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, page_tail, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 // --- POST /update (stream body into OTA partition) --------------------------

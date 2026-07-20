@@ -2665,12 +2665,19 @@ static esp_err_t update_get(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
     // Per-chunk checks + best-effort terminator, matching status_get's
-    // convention. On this 3-chunk page the checks change no observable
+    // failure convention. On this 3-chunk page the checks change no observable
     // behavior (a failed chunk poisons the session, so the terminator's
     // error would propagate anyway) — they exist so the file has ONE
     // chunk-send failure idiom instead of three.
     if (httpd_resp_send_chunk(req, page_head, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
-    if (httpd_resp_send_chunk(req, host_esc,  HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
+    // Skip the hostname chunk when empty: a zero-length chunk IS httpd's
+    // end-of-stream terminator (httpd_txrx.c emits "0\r\n\r\n" for len 0),
+    // so sending it would truncate the page before the upload form and
+    // desync the keep-alive stream. Reachable: /config accepts an empty
+    // wifi_host and the auto-default refill only runs at boot. status_get
+    // is immune via send_block()'s len==0 skip.
+    if (host_esc[0] &&
+        httpd_resp_send_chunk(req, host_esc,  HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
     if (httpd_resp_send_chunk(req, page_tail, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
     return httpd_resp_send_chunk(req, NULL, 0);
 fail:

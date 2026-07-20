@@ -21,7 +21,11 @@ so the runtime value never passes through a format string.
 `update_get`'s chunk sends use the same per-chunk check +
 best-effort-terminator idiom as `status_get`, so the file carries one
 chunk-send failure convention instead of three; on a 3-chunk page the
-checks are behaviorally inert.
+checks are behaviorally inert. The hostname chunk is skipped when the
+value is empty — a zero-length chunk is httpd's end-of-stream terminator,
+which would have cut the page off before the upload form (reachable: an
+empty `wifi_host` saved on `/config` persists until the boot-time
+auto-default refill).
 
 ---
 

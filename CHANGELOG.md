@@ -9,6 +9,27 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards
+
+Boards that have both a plain user LED and a WS2812 NeoPixel
+(`adafruit_esp32s3_feather_4mb_2mbpsram` #5477 and
+`adafruit_esp32s3_tft_feather` #5483) now flash the **NeoPixel** (blue,
+40 ms) on each Geiger pulse instead of the red "#13" LED.
+
+- WHY: the original port decision routed `led_tick` to `PIN_LED_BUILTIN`
+  purely because that reused `speaker.c`'s existing `#ifdef` chain with zero
+  code changes — not for any GPIO or electrical reason (design spec §2,
+  "no new code, existing precedent"). At #5477 bench bring-up the user
+  chose the NeoPixel as the intended pulse indicator wherever one exists.
+- `speaker.c` `tick_start()` now checks `HAL_HAS_NEOPIXEL` first and falls
+  back to `PIN_LED_BUILTIN` only on NeoPixel-less boards (Heltec V2/V4,
+  feathers3_d). Boards with a NeoPixel and no plain LED (QT Py, SparkFun
+  S3/C5, Feather V2) are unchanged — they already used the NeoPixel.
+- The red "#13" LED on the two dual-LED Feathers is still configured and
+  driven to a deterministic OFF at boot, reserved for future status use.
+
+---
+
 ## V2.6.23 — LoRaWAN uplink (heltec_wifi_lora32_v4_r2) + generalized keep-AP-on
 
 Ships the LoRaWAN feature line built across Tasks 1-8: OTAA/Class A uplink

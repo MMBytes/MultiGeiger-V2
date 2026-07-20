@@ -1100,7 +1100,7 @@
     #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
     #define PIN_HV_FET_OUTPUT         8  // L9 (silkscreen A5)
 
-    #define PIN_LED_BUILTIN          13  // onboard LED
+    #define PIN_LED_BUILTIN          13  // onboard LED — since V2.6.24 unused for led_tick (NeoPixel preferred); held OFF
 
     // Speaker — D9/D10 header pads.
     #define PIN_SPEAKER_P            10  // D10
@@ -1278,11 +1278,13 @@
     #define HAL_HAS_LORAWAN           0   // No LoRa radio
 
     // Dual-LED note: this board defines both PIN_LED_BUILTIN and
-    // HAL_HAS_NEOPIXEL. speaker.c's tick_start() prefers PIN_LED_BUILTIN
-    // when both are present, so the onboard red "#13" LED — not the
-    // NeoPixel — flashes on each Geiger pulse, same as
-    // BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER. The NeoPixel is otherwise unused
-    // by firmware logic (available for future status-color use only).
+    // HAL_HAS_NEOPIXEL. Since V2.6.24, speaker.c's tick_start() prefers the
+    // NeoPixel when both are present (user decision at #5477 bench bring-up,
+    // 2026-07-20 — reverses the original "PIN_LED_BUILTIN wins" port
+    // decision, design spec §2), so the NeoPixel blue-flashes on each Geiger
+    // pulse, same as BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER. The red "#13" LED
+    // is held at a deterministic OFF by speaker_setup() and is otherwise
+    // unused (available for future status use).
 
     // Ring/scratch/form-buffer sizes: 2 MB external-QSPI PSRAM — same size
     // class as BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER (both 1 MB of 2 MB

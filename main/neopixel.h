@@ -73,7 +73,8 @@ void neopixel_register_pulse_tick(void);
  *         callback registration.
  *
  *  For boards with both HAL_HAS_SPEAKER and HAL_HAS_NEOPIXEL (e.g.
- *  sparkfun_thing_plus_esp32s3, which has no separate PIN_LED_BUILTIN):
+ *  sparkfun_thing_plus_esp32s3; since V2.6.24 also the dual-LED Feathers,
+ *  where the NeoPixel is preferred over their PIN_LED_BUILTIN):
  *  speaker.c owns the tube callback slot and calls this from its own
  *  IRAM-resident handler when led_tick is enabled. IRAM-safe, ISR-callable.
  *  No-op on boards without HAL_HAS_NEOPIXEL, or before

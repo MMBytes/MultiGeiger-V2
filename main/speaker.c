@@ -19,18 +19,21 @@
 #include "freertos/task.h"
 
 #include "tube.h"
-#if !defined(PIN_LED_BUILTIN) && HAL_HAS_NEOPIXEL
-#include "neopixel.h"   // neopixel_notify_pulse — visual tick on boards with no onboard LED
+#if HAL_HAS_NEOPIXEL
+#include "neopixel.h"   // neopixel_notify_pulse — led_tick flash, preferred over the plain LED
 #endif
 
 static const char *TAG = "speaker";
 
 // PIN_SPEAKER_P is driven by LEDC (tone generator).
 // PIN_SPEAKER_N is held HIGH during a tick for push-pull drive against PIN_SPEAKER_P.
-// PIN_LED_BUILTIN is the onboard LED, lit during a tick if led_tick is enabled — on
-// boards that don't wire one (e.g. sparkfun_thing_plus_esp32s3), led_tick instead
-// flashes the onboard NeoPixel via neopixel_notify_pulse(), if HAL_HAS_NEOPIXEL.
-// Same "intentionally undefined optional pin" idiom used for PIN_OLED_RESET.
+// led_tick visual: boards with HAL_HAS_NEOPIXEL flash the NeoPixel via
+// neopixel_notify_pulse() — preferred over the plain PIN_LED_BUILTIN even when
+// both exist (V2.6.24, user decision at #5477 bring-up: the RGB pixel is the
+// intended pulse indicator on dual-LED Feathers, reversing the original
+// "PIN_LED_BUILTIN wins" port decision). Boards without a NeoPixel light
+// PIN_LED_BUILTIN instead. Same "intentionally undefined optional pin" idiom
+// used for PIN_OLED_RESET.
 
 #define LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
 #define LEDC_TIMER_NUM  LEDC_TIMER_0
@@ -75,10 +78,10 @@ static void tick_start(void) {
         gpio_set_level(PIN_SPEAKER_N, 1);
     }
     if (s_led_tick) {
-#ifdef PIN_LED_BUILTIN
+#if HAL_HAS_NEOPIXEL
+        neopixel_notify_pulse();   // NeoPixel preferred wherever present (V2.6.24)
+#elif defined(PIN_LED_BUILTIN)
         gpio_set_level(PIN_LED_BUILTIN, 1);
-#elif HAL_HAS_NEOPIXEL
-        neopixel_notify_pulse();   // no onboard LED — flash the NeoPixel instead
 #endif
     }
 }
@@ -87,7 +90,9 @@ static void tick_end(void) {
     ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
     gpio_set_level(PIN_SPEAKER_N, 0);
-#ifdef PIN_LED_BUILTIN
+#if !HAL_HAS_NEOPIXEL && defined(PIN_LED_BUILTIN)
+    // Only the plain-LED tick needs an off-edge here; the NeoPixel worker
+    // times its own 40 ms flash and restores the base colour itself.
     gpio_set_level(PIN_LED_BUILTIN,   0);
 #endif
 }
@@ -249,7 +254,8 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
 
     speaker_set_modes(led_tick, speaker_tick);
     // Claims the single tube-pulse callback slot for this board. On boards
-    // that also have HAL_HAS_NEOPIXEL (no PIN_LED_BUILTIN), this handler is
+    // that also have HAL_HAS_NEOPIXEL (with or without a PIN_LED_BUILTIN —
+    // dual-LED Feathers included), this handler is
     // the ONLY one registered — it drives the NeoPixel directly via
     // neopixel_notify_pulse() in tick_start() rather than letting
     // neopixel_register_pulse_tick() re-register its own callback and
@@ -265,13 +271,13 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
         speaker_play_melody(s_v1_boot_melody);
     }
 
-#ifdef PIN_LED_BUILTIN
-    ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
-             PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
-             led_tick, speaker_tick, play_sound);
-#else
+#if HAL_HAS_NEOPIXEL
     ESP_LOGI(TAG, "speaker setup: P=%d N=%d, led_tick drives NeoPixel (led_tick=%d speaker_tick=%d play=%d)",
              PIN_SPEAKER_P, PIN_SPEAKER_N,
+             led_tick, speaker_tick, play_sound);
+#else
+    ESP_LOGI(TAG, "speaker setup: LED=%d P=%d N=%d (led_tick=%d speaker_tick=%d play=%d)",
+             PIN_LED_BUILTIN, PIN_SPEAKER_P, PIN_SPEAKER_N,
              led_tick, speaker_tick, play_sound);
 #endif
 }

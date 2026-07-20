@@ -9,6 +9,17 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.25 — DHCP hostname shown on /status Network block and /update OTA page
+
+The DHCP hostname is now displayed on the `/status` Network block (STA and
+AP-mode branches, above the IP) and on the `/update` OTA page (below
+"Current firmware") — on the OTA page it doubles as an "am I about to
+flash the right device?" check on multi-node fleets. The formerly fully
+static `/update` page is streamed as head + escaped hostname + tail chunks
+so the runtime value never passes through a format string.
+
+---
+
 ## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards; syslog hostname off-by-one; sensor.community default off on fresh boards
 
 Boards that have both a plain user LED and a WS2812 NeoPixel
@@ -62,13 +73,6 @@ Now sized `CFG_HOSTNAME_MAX + 1` like the cfg field it mirrors. 32 chars is
 exactly ESP-IDF's `esp_netif_set_hostname()` limit, so the whole chain now
 agrees end-to-end. (Found by the user on #5477 bench: router showed
 `...esp32-S3`, syslog showed `...esp32-S`.)
-
-The DHCP hostname is now displayed on the `/status` Network block (STA and
-AP-mode branches, above the IP) and on the `/update` OTA page (below
-"Current firmware") — on the OTA page it doubles as an "am I about to
-flash the right device?" check on multi-node fleets. The formerly fully
-static `/update` page is streamed as head + escaped hostname + tail chunks
-so the runtime value never passes through a format string.
 
 ---
 

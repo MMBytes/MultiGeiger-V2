@@ -2617,7 +2617,7 @@ static esp_err_t update_get(httpd_req_t *req) {
     log_access(req, "GET /update");
     if (!check_auth(req)) return ESP_OK;
     // The page was one static string until the DHCP hostname was added
-    // (V2.6.24) — that's runtime config, so the page is now streamed as
+    // (V2.6.25) — that's runtime config, so the page is now streamed as
     // head + escaped hostname + tail chunks. Keeping head/tail static
     // avoids a format-string pass over literals containing '%' (CSS
     // "width:100%").

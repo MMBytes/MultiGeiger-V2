@@ -2664,10 +2664,19 @@ static esp_err_t update_get(httpd_req_t *req) {
     html_esc(s_cfg->wifi_hostname, host_esc, sizeof(host_esc));
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
-    httpd_resp_send_chunk(req, page_head, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, host_esc, HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, page_tail, HTTPD_RESP_USE_STRLEN);
+    // Per-chunk checks + best-effort terminator, matching status_get's
+    // convention. On this 3-chunk page the checks change no observable
+    // behavior (a failed chunk poisons the session, so the terminator's
+    // error would propagate anyway) — they exist so the file has ONE
+    // chunk-send failure idiom instead of three (V2.6.25 MAX review).
+    if (httpd_resp_send_chunk(req, page_head, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
+    if (httpd_resp_send_chunk(req, host_esc,  HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
+    if (httpd_resp_send_chunk(req, page_tail, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
     return httpd_resp_send_chunk(req, NULL, 0);
+fail:
+    // Best-effort terminate the chunked stream so the socket isn't half-open.
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_FAIL;
 }
 
 // --- POST /update (stream body into OTA partition) --------------------------

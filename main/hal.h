@@ -103,6 +103,12 @@
     // heltec /config tail (page is one malloc'd buffer; the PSRAM boards' 32 KB
     // hid it). 24 KB gives ~7 KB slack incl. a 2.4 KB CA cert; the transient
     // malloc is fine against the heltec's ~64 KB largest free block.
+    // V2.6.24 caveat: with escape buffers now sized to html_esc's 6x worst
+    // case, a maximally metacharacter-dense config could contribute ~23 KB
+    // of escaped content — beyond ANY sane buffer here. That pathological
+    // case is intentionally handled by config_get's loud truncate-and-clamp
+    // (ESP_LOGE) rather than by growing this buffer; realistic configs
+    // (real PEM is metachar-free) stay ~17 KB and fit with slack.
     #define HAL_CFG_FORM_BUF_SIZE   (24 * 1024)
     // V2.3.24: 4 KB snapshot scratch in internal DRAM. Min_free during FTPS
     // handshake on Heltec is already ~11 KB (free ~110 KB, peak transient

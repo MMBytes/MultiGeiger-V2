@@ -47,8 +47,9 @@ was sized to a ~3-4x convention while `html_esc()`'s true worst case is
 **6x** (`"` → `&quot;`), so metacharacter-dense values were silently
 truncated — and on `/config` a truncated value re-displayed in the form is
 PERSISTED back by the next Save. All escape destinations are now sized
-`ESC_WORST(source max) = max * 6 + 1`; the `/config` workspace moved from
-~4.4 KB of permanent BSS to a single heap-transient struct that exists
+`ESC_WORST(source max) = max * 6 + 2` (the +2 covers html_esc's strict
+loop-guard reservation); the `/config` workspace moved from
+~4.5-4.9 KB of permanent BSS to a single heap-transient struct that exists
 only while the page renders (returning that BSS to the heap on every
 board, which matters most on the Heltec V2), and the PEM cert buffer grew
 to its honest worst case too.

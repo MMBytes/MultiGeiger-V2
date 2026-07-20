@@ -247,7 +247,13 @@ static void set_security_headers(httpd_req_t *req) {
 // metacharacter-dense values — and for /config that truncation is not just
 // cosmetic: the form re-displays the shortened value and the next Save
 // PERSISTS it back. Size every escape destination with this macro.
-#define ESC_WORST(max) ((max) * 6 + 1)
+//
+// Why +2, not +1: html_esc's loop guard (`o + 7 < bufsz`, util.h) reserves
+// a full 7 bytes (6-byte escape + NUL) before emitting ANY char, with a
+// STRICT inequality — so emitting the Nth char after N-1 six-byte
+// expansions needs bufsz >= 6N+2. A `6N+1` buffer drops the final char of
+// a max-length all-quotes value (V2.6.24 MAX-review finding).
+#define ESC_WORST(max) ((max) * 6 + 2)
 
 // --- GET / (status, no auth) -------------------------------------------------
 
@@ -1390,10 +1396,11 @@ fail:
 // varied). 16 KB gives ~8 KB headroom; truncation is now also logged at
 // ERROR level (see config_get) so any future near-miss is loud, not silent.
 //
-// V2.4.6: per-board buffer size — moved to hal.h. Heltec V2 stays at 16 KB
-// (tight internal-DRAM budget), FeatherS3-D / QT Py bump to 32 KB to leave
-// room for the MQTT TLS PEM textarea + future config sections without
-// stressing heap on PSRAM-backed boards.
+// V2.4.6: per-board buffer size — moved to hal.h. Heltec V2 runs 24 KB
+// (V2.5.29, tight internal-DRAM budget; the "16 KB" this comment used to
+// claim is two bumps stale), every other board 32 KB — room for the MQTT
+// TLS PEM textarea + future config sections without stressing heap on
+// PSRAM-backed boards.
 #define CFG_FORM_BUF_SIZE HAL_CFG_FORM_BUF_SIZE
 
 static esp_err_t config_get(httpd_req_t *req) {
@@ -1416,7 +1423,7 @@ static esp_err_t config_get(httpd_req_t *req) {
     // is ~9 KB: as BSS that would tax every board permanently (the Heltec
     // V2's internal-DRAM budget is the tightest), while as a malloc it
     // exists only while a /config GET is in flight — a path that already
-    // heap-allocates CFG_FORM_BUF_SIZE (16-32 KB) + the PEM buffer, with a
+    // heap-allocates CFG_FORM_BUF_SIZE (24-32 KB) + the PEM buffer, with a
     // graceful 500-on-OOM. This also RETURNS the old ~4.4 KB of BSS to the
     // heap. Stack was never an option (V2.4.22: 8 KB httpd stack budget).
     // html_esc() fully overwrites each field before the big snprintf reads

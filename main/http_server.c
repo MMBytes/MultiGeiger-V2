@@ -2668,7 +2668,7 @@ static esp_err_t update_get(httpd_req_t *req) {
     // convention. On this 3-chunk page the checks change no observable
     // behavior (a failed chunk poisons the session, so the terminator's
     // error would propagate anyway) — they exist so the file has ONE
-    // chunk-send failure idiom instead of three (V2.6.25 MAX review).
+    // chunk-send failure idiom instead of three.
     if (httpd_resp_send_chunk(req, page_head, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
     if (httpd_resp_send_chunk(req, host_esc,  HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;
     if (httpd_resp_send_chunk(req, page_tail, HTTPD_RESP_USE_STRLEN) != ESP_OK) goto fail;

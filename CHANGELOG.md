@@ -18,10 +18,9 @@ flash the right device?" check on multi-node fleets. The formerly fully
 static `/update` page is streamed as head + escaped hostname + tail chunks
 so the runtime value never passes through a format string.
 
-Post-review polish (single-agent Fable MAX, verdict clean — 0 critical /
-0 important): `update_get`'s chunk sends now use the same per-chunk check +
-best-effort-terminator idiom as `status_get`, purely so the file carries
-one chunk-send failure convention instead of three; on a 3-chunk page the
+`update_get`'s chunk sends use the same per-chunk check +
+best-effort-terminator idiom as `status_get`, so the file carries one
+chunk-send failure convention instead of three; on a 3-chunk page the
 checks are behaviorally inert.
 
 ---

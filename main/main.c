@@ -1480,13 +1480,14 @@ void app_main(void) {
     // power rail (PIN_NEOPIXEL_POWER) is NOT energised when the flash is
     // disabled. Both inits run before registration so the pulse-tick callback
     // finds initialised hardware. The single tube callback slot is claimed by
-    // exactly one of: neopixel.c (HAL_HAS_NEOPIXEL, no HAL_HAS_SPEAKER, QT Py),
-    // led.c (plain user LED with no speaker/NeoPixel, XIAO), or speaker.c itself
-    // (HAL_HAS_SPEAKER, most boards -- including sparkfun_thing_plus_esp32s3,
-    // which has both a speaker AND a NeoPixel: speaker.c keeps the callback and
-    // drives the NeoPixel directly via neopixel_notify_pulse() since the slot
-    // can't be shared -- see neopixel_register_pulse_tick()'s doc comment).
-    // Whichever module(s) don't claim it are stubs for that call.
+    // exactly one of: neopixel.c (HAL_HAS_NEOPIXEL, no HAL_HAS_SPEAKER — QT Py,
+    // SparkFun C5), led.c (plain user LED with no speaker/NeoPixel — XIAO,
+    // Heltec V4 R2), or speaker.c itself (HAL_HAS_SPEAKER, most boards). On
+    // every speaker board that also has a NeoPixel (SparkFun S3, Feather V2,
+    // and since V2.6.24 the dual-LED TFT Feather / #5477 too), speaker.c keeps
+    // the callback and drives the NeoPixel directly via neopixel_notify_pulse()
+    // since the slot can't be shared -- see neopixel_register_pulse_tick()'s
+    // doc comment. Whichever module(s) don't claim it are stubs for that call.
     led_init();
     if (g_cfg.tube_enabled && g_cfg.led_tick) {
         // Final review A1: standalone mode may already have brought the

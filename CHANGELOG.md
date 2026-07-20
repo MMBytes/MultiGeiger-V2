@@ -9,7 +9,7 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards; syslog hostname off-by-one
+## V2.6.24 — led_tick prefers the NeoPixel on dual-LED boards; syslog hostname off-by-one; sensor.community default off on fresh boards
 
 Boards that have both a plain user LED and a WS2812 NeoPixel
 (`adafruit_esp32s3_feather_4mb_2mbpsram` #5477 and
@@ -34,7 +34,12 @@ The sensor.community TX target now defaults to **off** on freshly flashed
 boards (`send_sensorc`, `config_fields.def`) — a new device shouldn't
 upload to the public map until its owner deliberately opts in. Devices
 that have saved `/config` at least once are unaffected: the saved
-`send_sc` NVS key always wins over the compile-time default.
+`send_sc` NVS key always wins over the compile-time default. Since WiFi
+provisioning itself is a `/config` save, every normally-provisioned device
+on a recent firmware already has the key stored. The one edge that flips:
+a device whose saved config predates the `send_sc` key entirely (and was
+never re-saved since) loses sensor.community upload after updating to
+V2.6.24 and needs the checkbox re-ticked once.
 
 Also fixes a syslog hostname off-by-one: `syslog.c`'s private hostname
 mirror was a bare `[32]` (31 chars + NUL), silently truncating 32-character

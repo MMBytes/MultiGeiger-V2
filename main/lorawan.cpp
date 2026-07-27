@@ -20,12 +20,15 @@
 #include "nvs.h"
 #include "RadioLib.h"
 
+#include <sys/time.h>   // settimeofday() — DeviceTimeReq network time sync
+
 extern "C" {
 #include "hal.h"
 #include "lorawan.h"
 #include "lorawan_codec.h"
 #include "config.h"
 #include "applog.h"
+#include "ntp.h"       // ntp_boot_epoch() — "has SNTP ever synced" gate for time sync
 #include "version.h"   // VERSION_STR -> s_version_packed (lw_pack_version)
 }
 
@@ -306,6 +309,44 @@ static bool nvs_load_blob(const char *key, uint8_t *buf, size_t len) {
     return ok;
 }
 
+// Set by lorawan_forget_session() (httpd task), read by the worker's
+// end-of-cycle session save (worker task) — single bool, atomic on this
+// target either way. Once set it stays set until the imminent reboot, so
+// no uplink completing between the NVS erase and the actual restart can
+// re-save the just-erased session blob. The restart is NOT guaranteed to
+// happen within ~2 s: main.c defers it on the WiFi TX worker's idle check,
+// which on a WiFi+LoRa node can hold it for a full TLS upload cycle.
+static volatile bool s_forget_pending = false;
+
+// Session forget for /lorawan_reset (http_server.c). Erases only the NVS
+// blobs — the running worker's in-RAM session is untouched (it isn't built
+// for live restart), so the caller reboots right after. The s_forget_pending
+// flag above suppresses the worker's end-of-cycle session re-save until
+// that reboot lands, making the wipe deterministic.
+void lorawan_forget_session(bool wipe_nonces) {
+    s_forget_pending = true;   // BEFORE the erase — closes the save/erase race
+    nvs_handle_t h;
+    if (nvs_open("lorawan", NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "forget session: nvs_open failed");
+        return;
+    }
+    // ESP_ERR_NVS_NOT_FOUND (blob never written) is success for an erase.
+    esp_err_t e = nvs_erase_key(h, "session");
+    if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "forget session: erase 'session': %s", esp_err_to_name(e));
+    }
+    if (wipe_nonces) {
+        e = nvs_erase_key(h, "nonces");
+        if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGE(TAG, "forget session: erase 'nonces': %s", esp_err_to_name(e));
+        }
+    }
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGW(TAG, "session forgotten (%s) — fresh OTAA join on next boot",
+             wipe_nonces ? "incl. DevNonce history" : "DevNonce history kept");
+}
+
 // --- Worker task --------------------------------------------------------------
 
 // Queue depth 1 — a freshest-wins mailbox: the producer overwrites any
@@ -338,7 +379,9 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
     if (have_dl) {
         rssi = s_radio.getRSSI();                 // SPI round-trip — before the lock
         snr  = s_radio.getSNR();
-        ESP_LOGI(TAG, "downlink: port %u, %u bytes", (unsigned)ev->fPort, (unsigned)dl_len);
+        ESP_LOGI(TAG, "downlink: port %u, %u bytes, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB",
+                 (unsigned)ev->fPort, (unsigned)dl_len, (unsigned long)ev->fCnt,
+                 (double)rssi, (double)snr);
     }
 
     if (st >= RADIOLIB_ERR_NONE) {
@@ -365,6 +408,129 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
         portEXIT_CRITICAL(&s_status_mux);
         ESP_LOGW(TAG, "uplink failed: %d", st);
     }
+}
+
+// Success-path visibility: one INFO line per accepted uplink, with the radio
+// parameters RadioLib reports for the frame actually put on air. Added at
+// user request during the first live-gateway bench session — the silent
+// success path (counters-only, /status) made /log look like LoRaWAN was
+// doing nothing at all. `what` carries the per-port payload summary so the
+// radio-parameter tail isn't duplicated at both call sites.
+//
+// fcnt_wire is passed explicitly (from node.getFCntUp() AFTER the send)
+// rather than taken from ev->fCnt: RadioLib increments its internal fCntUp
+// for the NEXT frame before filling the event struct (LoRaWAN.cpp — the
+// `fCntUp += 1` precedes the eventUp fill), so ev->fCnt reads one higher
+// than what actually went on air. Caught live 2026-07-27: TTN showed
+// f_cnt 79 for a frame this log had claimed as 80. getFCntUp() returns
+// `fCntUp - 1` = the last transmitted frame's counter — TTN-exact.
+static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEvent_t *ev) {
+    // nbTrans caveat (accepted imprecision): RadioLib's transmission counter
+    // is 0-based and its retransmit loop breaks BEFORE incrementing when a
+    // downlink is heard, so "2 TXs, downlink on the 2nd" reports nbTrans=1 —
+    // indistinguishable from "1 TX, no downlink" (also 1). The suffix
+    // therefore only fires for 3+ transmissions; with the default NbTrans=1
+    // it never fires at all. Kept anyway: if ADR ever raises NbTrans, heavy
+    // retransmission still becomes visible here.
+    ESP_LOGI(TAG, "uplink OK: %s FCnt=%lu DR%u %.1f MHz %d dBm%s",
+             what, (unsigned long)fcnt_wire, (unsigned)ev->datarate,
+             (double)ev->freq, (int)ev->power,
+             ev->nbTrans > 1 ? " (retransmitted)" : "");
+}
+
+// --- DeviceTimeReq network time sync (design approved 2026-07-27) -------------
+//
+// Class A nodes can't hear Class B time beacons; the standard Class A
+// equivalent is the DeviceTimeReq MAC command (LoRaWAN 1.0.3+), piggybacked
+// on a normal uplink and answered by the network in the RX window with
+// GPS-epoch time (RadioLib converts to unix UTC, leap seconds included).
+// Cadence: first uplink after boot + 24 h refresh — the ANSWER is a network
+// downlink, and TTN Fair Use allows only 10 downlinks/day, so per-TX-round
+// requests are off the table. No answer this round (networks may serve MAC
+// answers lazily) → the stale s_timesync_last_us re-arms the request on the
+// next cycle until one lands.
+
+#define TIMESYNC_INTERVAL_S   (24UL * 3600UL)   // 24 h between answers
+#define TIMESYNC_STEP_MIN_S   2                 // don't step for less
+// Give-up rule (asymmetric-link guard, 2026-07-27): every request the
+// network hears makes it schedule a DeviceTimeAns DOWNLINK, whether or not
+// the node can hear it. A node with working uplink but dead downlink
+// (gateway hears us, we can't hear it) would otherwise re-request every
+// cycle — ~576 pointless gateway transmissions/day, each one deafening the
+// gateway to every other node while it sends. After this many unanswered
+// attempts, fall back to the normal daily cadence instead.
+#define TIMESYNC_MAX_ATTEMPTS 3
+
+// Uptime SECONDS, not µs: raw esp_timer µs would force a 64-bit stamp
+// (32-bit µs wraps every ~71.6 min — useless against a 24 h interval), but
+// second granularity is ample here and fits uint32_t with a 136-year wrap.
+// 0 = never: the first uplink can't happen inside the boot's first second
+// (join/resume + a full TX interval come first), and even if it somehow
+// did, the cost is one extra harmless request. Worker-task-private, so no
+// cross-task atomicity concern either way — this is purely width hygiene.
+static uint32_t timesync_now_s(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000000LL);
+}
+static uint32_t s_timesync_last_s   = 0;   // uptime s at last DeviceTimeAns (or give-up); 0 = never
+static uint32_t s_timesync_attempts = 0;   // consecutive unanswered requests in the current window
+
+// Stale-answer guard: RadioLib's DeviceTimeAns store is NON-consuming —
+// getMacDeviceTimeAns() re-reads the same stored answer until the next
+// Class A downlink overwrites fOptsDown. Without this, a leftover answer
+// heard hours ago (asymmetric link flapping across a give-up window) would
+// be read by a later window's poll and step a previously-correct clock
+// back. Real network time never repeats byte-identically, so an exact
+// repeat of the previous answer can only be a stale copy.
+static uint32_t s_timesync_prev_unix = 0;
+static uint8_t  s_timesync_prev_frac = 0;
+
+// Shared give-up path: stamp the window as if answered so the next request
+// waits the full daily interval, WARN once per window (not per cycle).
+// Reached from BOTH the no-answer poll and repeated sendMacCommandReq
+// queue failures — the latter must count toward give-up too, else a
+// persistently full FOpts queue would retry + WARN every cycle forever.
+static void timesync_give_up(void) {
+    // Wording covers both give-up causes: unanswered requests (downlink
+    // dead / asymmetric link) AND requests that never went on air (queue
+    // failures) — both paths land here.
+    ESP_LOGW(TAG, "DeviceTime sync unsuccessful after %u attempts (unanswered "
+             "or not queued) — deferring further requests to the daily window",
+             (unsigned)s_timesync_attempts);
+    s_timesync_last_s   = timesync_now_s();
+    s_timesync_attempts = 0;
+}
+
+// Apply one DeviceTimeAns to the system clock. UTC in, settimeofday() UTC —
+// local rendering everywhere already goes through localtime()/the configured
+// POSIX TZ (ntp_set_timezone() at boot), exactly as with NTP, per the user's
+// TZ requirement. Gated on "SNTP has never synced" (ntp_boot_epoch()==0):
+// NTP stays the sole clock authority the moment it ever syncs (house
+// precedent: GNSS time is display-only). Deliberately NOT gated on
+// ntp_time_valid() — that is a clock-plausibility check (past 2026-01-01)
+// that turns true the moment WE set the clock, which would kill the daily
+// re-sync after the first apply.
+static void timesync_apply(uint32_t unix_s, uint8_t frac256) {
+    if (ntp_boot_epoch() != 0) {
+        ESP_LOGI(TAG, "DeviceTimeAns received but NTP has synced meanwhile — ignored");
+        return;
+    }
+    int64_t delta = (int64_t)unix_s - (int64_t)time(NULL);
+    if (delta >= -TIMESYNC_STEP_MIN_S && delta <= TIMESYNC_STEP_MIN_S) {
+        ESP_LOGI(TAG, "network time received: clock already within %+lld s — no step",
+                 (long long)delta);
+        return;
+    }
+    struct timeval tv;
+    tv.tv_sec  = (time_t)unix_s;
+    tv.tv_usec = (suseconds_t)((uint32_t)frac256 * 1000000UL / 256UL);  // DeviceTimeAns fraction = 1/256 s units
+    settimeofday(&tv, NULL);
+    time_t t = (time_t)unix_s;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    char buf[40];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &lt);
+    ESP_LOGI(TAG, "network time applied: %s (DeviceTimeAns, step %+lld s)",
+             buf, (long long)delta);
 }
 
 static void lorawan_task(void *arg) {
@@ -432,13 +598,21 @@ static void lorawan_task(void *arg) {
     uint32_t backoff_s = 60;
     for (;;) {
         int16_t st = node.activateOTAA();
-        nvs_save_blob("nonces", node.getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+        // Same s_forget_pending gate as the uplink loop's session save (the
+        // full save-site class, not just one instance): a join attempt
+        // completing between an operator's "wipe DevNonce history" and the
+        // deferred restart would otherwise re-save the RAM nonces and
+        // silently undo the explicit wipe. Reboot is imminent; a skipped
+        // nonces save costs nothing.
+        if (!s_forget_pending) {
+            nvs_save_blob("nonces", node.getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+        }
         portENTER_CRITICAL(&s_status_mux); s_status.join_attempts++; portEXIT_CRITICAL(&s_status_mux);
         if (st == RADIOLIB_LORAWAN_NEW_SESSION || st == RADIOLIB_LORAWAN_SESSION_RESTORED) {
             uint32_t dev_addr = node.getDevAddr();   // RadioLib getter — before the lock
-            ESP_LOGI(TAG, "%s — DevAddr %08lx",
+            ESP_LOGI(TAG, "%s — DevAddr %08lx, region %s sub-band %u",
                      st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed" : "joined (OTAA)",
-                     (unsigned long)dev_addr);
+                     (unsigned long)dev_addr, lorawan_region_name(region), (unsigned)subband);
             portENTER_CRITICAL(&s_status_mux);
             s_status.dev_addr = dev_addr;
             portEXIT_CRITICAL(&s_status_mux);
@@ -459,6 +633,24 @@ static void lorawan_task(void *arg) {
         if (xQueueReceive(s_q, &snap, portMAX_DELAY) != pdTRUE) continue;
         s_busy = true;
 
+        // DeviceTimeReq piggyback — see the timesync block above for the
+        // full cadence/authority rationale. Queued BEFORE the port-1 frame
+        // is built so it rides in that uplink's FOpts; duplicate requests
+        // are discarded by RadioLib, so re-arming every cycle until an
+        // answer lands is safe.
+        bool want_time = (ntp_boot_epoch() == 0) &&
+                         (s_timesync_last_s == 0 ||
+                          (timesync_now_s() - s_timesync_last_s) >= TIMESYNC_INTERVAL_S);
+        if (want_time) {
+            int16_t tst = node.sendMacCommandReq(RADIOLIB_LORAWAN_MAC_DEVICE_TIME);
+            s_timesync_attempts++;   // queue failures count too — see timesync_give_up()
+            if (tst != RADIOLIB_ERR_NONE) {
+                ESP_LOGW(TAG, "DeviceTimeReq queue failed: %d", tst);
+                want_time = false;   // nothing went on air — don't poll for an answer
+                if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) timesync_give_up();
+            }
+        }
+
         uint8_t p1[10];
         lw_build_port1(p1, snap.gm_counts, snap.dt_ms, s_version_packed, snap.tube_nbr);
         // Downlink scratch. MUST be sized for the largest frame RadioLib can
@@ -470,21 +662,85 @@ static void lorawan_task(void *arg) {
         // (MIC-valid) oversized downlink smash this task's stack. 250 B on the
         // 8 KB worker stack is fine.
         uint8_t dl[RADIOLIB_LORAWAN_MAX_DOWNLINK_SIZE]; size_t dl_len = 0;
-        LoRaWANEvent_t ev_dn;
-        int16_t st = node.sendReceive(p1, sizeof(p1), 1, dl, &dl_len, false, NULL, &ev_dn);
+        LoRaWANEvent_t ev_up, ev_dn;
+        int16_t st = node.sendReceive(p1, sizeof(p1), 1, dl, &dl_len, false, &ev_up, &ev_dn);
         record_uplink_result(st, dl_len, &ev_dn);
+        if (st >= RADIOLIB_ERR_NONE) {
+            char what[64];
+            snprintf(what, sizeof(what), "port 1 (counts=%lu dt=%lu ms)",
+                     (unsigned long)snap.gm_counts, (unsigned long)snap.dt_ms);
+            log_uplink_ok(what, node.getFCntUp(), &ev_up);
+        }
+
+        // Poll for the DeviceTimeAns immediately after the PORT-1 exchange,
+        // not at end of cycle: the answer's time field is captured at the
+        // END of the uplink that carried the request and TTN serves it in
+        // that uplink's RX1, so polling here (a) avoids adding the port-2
+        // exchange's ~3-8 s to the apply latency and (b) can't lose the
+        // stored answer to a port-2 downlink overwriting fOptsDown. A
+        // ~5-6 s residual lag (RX1 delay + air time) is NOT recoverable
+        // through RadioLib's API and is accepted: this feature rescues
+        // standalone nodes from 1970-era timestamps, it is not NTP — and
+        // since the lag is roughly constant, later daily syncs see a ~0
+        // delta and take the no-step path rather than oscillating.
+        if (want_time) {
+            uint32_t unix_s = 0;
+            uint8_t  frac   = 0;
+            bool     fresh  = false;
+            if (node.getMacDeviceTimeAns(&unix_s, &frac, true) == RADIOLIB_ERR_NONE && unix_s != 0) {
+                if (unix_s == s_timesync_prev_unix && frac == s_timesync_prev_frac) {
+                    // See s_timesync_prev_* comment: non-consuming store, a
+                    // byte-identical repeat can only be a stale leftover.
+                    ESP_LOGI(TAG, "DeviceTimeAns identical to previous answer — stale, ignored");
+                } else {
+                    s_timesync_prev_unix = unix_s;
+                    s_timesync_prev_frac = frac;
+                    fresh = true;
+                }
+            }
+            if (fresh) {
+                timesync_apply(unix_s, frac);
+                s_timesync_last_s   = timesync_now_s();
+                s_timesync_attempts = 0;
+            } else if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) {
+                timesync_give_up();
+            }
+        }
 
         if (st >= RADIOLIB_ERR_NONE && snap.env_valid) {
             uint8_t p2[5];
             if (lw_build_port2(p2, snap.temperature_c, snap.humidity_pct, snap.pressure_pa)) {
                 dl_len = 0;
-                st = node.sendReceive(p2, sizeof(p2), 2, dl, &dl_len, false, NULL, &ev_dn);
+                st = node.sendReceive(p2, sizeof(p2), 2, dl, &dl_len, false, &ev_up, &ev_dn);
                 record_uplink_result(st, dl_len, &ev_dn);
+                if (st >= RADIOLIB_ERR_NONE) {
+                    // Log the values DECODED BACK from the wire bytes, not the
+                    // raw snapshot floats: the V1.9-frozen codec TRUNCATES
+                    // (temp*10, hum*2, Pa/10 — all toward zero) while a
+                    // printf %.1f of the raw float ROUNDS, so e.g. T=16.89
+                    // went on air as 16.8 but logged as 16.9 (user-caught
+                    // 2026-07-27 comparing /log against TTN's decoded
+                    // payload). Decoding p2 makes this line match TTN's
+                    // formatter output digit-for-digit, always.
+                    int16_t  traw = (int16_t)(((uint16_t)p2[0] << 8) | p2[1]);
+                    uint16_t praw = (uint16_t)(((uint16_t)p2[3] << 8) | p2[4]);
+                    char what[64];
+                    snprintf(what, sizeof(what), "port 2 (T=%.1f°C H=%.1f%% P=%.1f hPa)",
+                             (double)traw / 10.0, (double)p2[2] / 2.0, (double)praw / 10.0);
+                    log_uplink_ok(what, node.getFCntUp(), &ev_up);
+                }
             }
         }
         // Session after every uplink cycle — cheap insurance for rejoin-free
-        // reboot with an FCnt the network accepts.
-        nvs_save_blob("session", node.getBufferSession(), RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        // reboot with an FCnt the network accepts. Suppressed once
+        // lorawan_forget_session() has run: the imminent-restart window can
+        // exceed the documented ~2 s on WiFi+LoRa nodes (the restart defers
+        // on the WiFi TX worker's idle check, i.e. up to a full TLS upload
+        // cycle), and an uplink completing in that window would silently
+        // re-save the just-erased session, undoing the operator's wipe.
+        if (!s_forget_pending) {
+            nvs_save_blob("session", node.getBufferSession(), RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+        }
         s_busy = false;
     }
 }

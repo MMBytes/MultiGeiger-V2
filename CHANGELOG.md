@@ -9,6 +9,78 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.26 — LoRaWAN observability, session-reset endpoint, network time sync
+
+First-live-gateway release: everything below came out of the first bench
+sessions against a real TTN gateway (OTAA join, uplinks, downlinks all
+verified end-to-end on `heltec_wifi_lora32_v4_r2`).
+
+**Per-uplink logging.** Successful uplinks were previously silent (counters
+on `/status` only), which made `/log` look like LoRaWAN was doing nothing.
+Every accepted uplink now logs one line with the payload summary and the
+radio parameters of the frame actually on air, e.g.
+`uplink OK: port 2 (T=16.8°C H=65.5% P=1018.8 hPa) FCnt=79 DR5 917.4 MHz 10 dBm`.
+Two correctness details so the line matches the TTN console digit-for-digit:
+
+- FCnt comes from `getFCntUp()` after the send, not the uplink event —
+  RadioLib increments its internal counter for the *next* frame before
+  filling the event struct, so `ev.fCnt` reads one higher than the wire.
+- Port-2 values are decoded back from the wire bytes rather than printed
+  from the raw sensor floats: the V1.9-frozen codec truncates (temp×10,
+  hum×2, Pa/10, all toward zero) while `%.1f` rounds, so e.g. a 16.89 °C
+  reading went on air as 16.8 but would have logged as 16.9.
+
+Also new: the join/resume line carries region + sub-band, the downlink line
+carries FCntDown + RSSI/SNR, and each TX cycle logs a one-line health
+summary (`LORA: state=joined up=6 fail=0 duty_skip=0 joins=1 last_err=0`).
+The misleading `skipping TX: WiFi down` became `skipping WiFi TX: WiFi
+down (LoRaWAN uplink unaffected)` — the LoRaWAN enqueue sits deliberately
+ahead of the WiFi/NTP gates, so on radio nodes "TX skipped" never meant
+"nothing was sent". Suffix is compile-gated on `HAL_HAS_LORAWAN` so a
+non-radio board with a stray `lorawan_enabled` NVS byte can't claim an
+uplink path it doesn't have.
+
+**`/lorawan_reset` (POST, auth + CSRF like `/reboot`).** New "LoRaWAN
+session" form on `/config`: erases the persisted session from NVS and
+reboots into a fresh OTAA join — needed when the network-side session dies
+(device deleted/re-added in the TTN console), where the node would
+otherwise "session resumed" forever into a network that no longer accepts
+its frame counter. The DevNonce history is deliberately KEPT by default:
+LoRaWAN 1.0.4 DevNonce is a monotonic counter the join server tracks, so
+wiping it makes every later join-request look like a replay (silently
+dropped). An explicitly-labeled checkbox wipes it too, for the
+re-registered-device case — only after "Reset used DevNonces" in the TTN
+console.
+
+**Network time sync (DeviceTimeReq).** Standalone LoRaWAN nodes have no
+NTP, so log/display timestamps sat in 1970. The worker now piggybacks a
+DeviceTimeReq MAC command on the first uplink after boot and every 24 h
+after; the answer (GPS-epoch, converted to unix UTC by RadioLib) is applied
+via `settimeofday()` with a ±2 s step threshold, and the configured POSIX
+TZ renders it locally — same machinery as NTP, new source. Guards:
+
+- Authority: applied only while SNTP has never synced this session
+  (`ntp_boot_epoch() == 0`). NTP stays the sole clock owner the moment it
+  ever syncs. Deliberately NOT gated on `ntp_time_valid()` — that is a
+  plausibility check (clock past 2026-01-01) that turns true the moment we
+  set the clock ourselves, which would kill the daily re-sync.
+- Downlink budget: once daily, never per-round — every answer is a network
+  downlink and TTN fair use allows 10/day. After 3 unanswered requests
+  (uplink-only/asymmetric link: the network would schedule an unheard
+  downlink per uplink) the worker defers to the daily window with a single
+  warning instead of re-requesting each cycle.
+- Accuracy: the applied time runs ~5-6 s behind true UTC — the answer's
+  time field is captured at the end of the uplink that carried the request
+  and the RX1 delay is not recoverable through RadioLib's API. Accepted:
+  this rescues standalone nodes from 1970-era timestamps, it is not NTP,
+  and since the lag is roughly constant, later daily syncs land inside the
+  ±2 s threshold and take the no-step path. A stale-answer guard ignores a
+  byte-identical repeat of the previous answer (RadioLib's answer store is
+  non-consuming and only cleared by the next downlink), so a leftover
+  answer heard hours ago can never step a previously-correct clock back.
+
+---
+
 ## V2.6.25 — DHCP hostname shown on /status Network block and /update OTA page
 
 The DHCP hostname is now displayed on the `/status` Network block (STA and

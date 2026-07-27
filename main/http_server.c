@@ -2008,6 +2008,23 @@ static esp_err_t config_get(httpd_req_t *req) {
         "<input type=\"submit\" name=\"save_restart\" value=\"Save and restart\">"
         "</div>"
         "</form>"
+#if HAL_HAS_LORAWAN
+        // V2.6.26-pending: own <form> (can't nest inside the main config
+        // form) posting to the authed+CSRF-checked /lorawan_reset endpoint.
+        // Session-only wipe by default; the DevNonce checkbox is the
+        // explicitly-scary re-registered-device path (see lorawan_reset_post).
+        "<h3>LoRaWAN session</h3>"
+        "<form method=\"post\" action=\"/lorawan_reset\" "
+        "onsubmit=\"return confirm('Forget the LoRaWAN session and reboot? "
+        "The device will perform a fresh OTAA join.');\">"
+        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wipe_nonces\" value=\"1\"> "
+        "Also wipe DevNonce history "
+        "<small style=\"color:#c00\">ONLY after &quot;Reset used DevNonces&quot; in the "
+        "TTN console &mdash; otherwise the network silently rejects the next "
+        "joins as replays.</small></label></div>"
+        "<input type=\"submit\" value=\"Forget session and reboot (fresh OTAA join)\">"
+        "</form>"
+#endif
         "<h3>Reboot</h3>"
         "<form method=\"post\" action=\"/reboot\" "
         "onsubmit=\"return confirm('Reboot the device now?');\">"
@@ -2499,6 +2516,51 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     set_security_headers(req);
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
 }
+
+#if HAL_HAS_LORAWAN
+// --- POST /lorawan_reset (forget LoRaWAN session, fresh OTAA join) ----------
+//
+// V2.6.26-pending: erases the persisted LoRaWAN session from NVS and
+// reboots, so the next boot performs a fresh OTAA join instead of resuming.
+// Needed whenever the network-side session dies (device deleted/re-added in
+// the TTN console, join server lost state) — the node would otherwise
+// "session resumed" forever into a network that no longer accepts its FCnt.
+//
+// The optional "wipe_nonces" checkbox additionally erases the DevNonce
+// history. Deliberately NOT the default: LoRaWAN 1.0.4 DevNonce is a
+// monotonic counter the join server tracks, so wiping it makes every
+// subsequent join-request look like a replay (silently dropped) until the
+// operator also clicks "Reset used DevNonces" in the TTN console. Same
+// auth + CSRF gates as /reboot; reboot semantics mirror reboot_post().
+
+static esp_err_t lorawan_reset_post(httpd_req_t *req) {
+    log_access(req, "POST /lorawan_reset");
+    if (!check_auth(req)) return ESP_OK;
+    if (!check_same_origin(req)) return ESP_OK;
+
+    // Tiny form body: either empty or "wipe_nonces=1" (checkbox present only
+    // when ticked — standard HTML form behavior). 64 B is ample; a larger
+    // body is not this form and reads as "checkbox absent".
+    char body[64] = {0};
+    int r = httpd_req_recv(req, body, sizeof(body) - 1);
+    bool wipe_nonces = (r > 0) && (strstr(body, "wipe_nonces=") != NULL);
+
+    lorawan_forget_session(wipe_nonces);
+    main_request_restart();
+    ESP_LOGW(TAG, "LoRaWAN session reset requested via /lorawan_reset (wipe_nonces=%d)",
+             (int)wipe_nonces);
+    const char *ok =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>LoRaWAN session reset</title></head><body>"
+        "<h1>LoRaWAN session forgotten</h1>"
+        "<p>Device will restart in ~2 seconds and perform a fresh OTAA join.</p>"
+        "<p><a href=\"/\">Back to status</a></p>"
+        "</body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    set_security_headers(req);
+    return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+}
+#endif // HAL_HAS_LORAWAN
 
 // --- GET /coredump.elf (download dump) + POST /coredump_erase (clear) -------
 //
@@ -3093,7 +3155,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers = 12;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase
+    hc.max_uri_handlers = 12;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase (+/lorawan_reset on HAL_HAS_LORAWAN boards — 11 of 12 used there, 10 elsewhere)
     hc.lru_purge_enable = true;
     // CRITICAL — DO NOT change esp_http_server's threading model without
     // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
@@ -3153,6 +3215,12 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     static const httpd_uri_t uri_coredump_erase = {
         .uri = "/coredump_erase", .method = HTTP_POST, .handler = coredump_erase_post,
     };
+#if HAL_HAS_LORAWAN
+    static const httpd_uri_t uri_lorawan_reset = {
+        .uri = "/lorawan_reset", .method = HTTP_POST, .handler = lorawan_reset_post,
+    };
+    httpd_register_uri_handler(s_server, &uri_lorawan_reset);
+#endif
     httpd_register_uri_handler(s_server, &uri_favicon);
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_config_get);
@@ -3163,7 +3231,11 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_log_get);
     httpd_register_uri_handler(s_server, &uri_coredump_get);
     httpd_register_uri_handler(s_server, &uri_coredump_erase);
-    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /coredump.elf /coredump_erase)");
+    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /coredump.elf /coredump_erase"
+#if HAL_HAS_LORAWAN
+             " /lorawan_reset"
+#endif
+             ")");
 }
 
 httpd_handle_t http_server_get_handle(void) {

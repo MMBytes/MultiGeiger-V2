@@ -66,6 +66,7 @@ static inline void lorawan_get_status(lorawan_status_t *out) {
 }
 static inline const char *lorawan_state_name(lorawan_state_t st) { (void)st; return "disabled"; }
 static inline const char *lorawan_region_name(uint8_t region_idx) { (void)region_idx; return "?"; }
+static inline void lorawan_forget_session(bool wipe_nonces) { (void)wipe_nonces; }
 #else
 
 /** @brief Create the LoRaWAN task. Radio init happens on the task, not here. */
@@ -89,5 +90,17 @@ const char *lorawan_state_name(lorawan_state_t st);
  *         NULL); used by the /config dropdown and /status.
  */
 const char *lorawan_region_name(uint8_t region_idx);
+
+/** @brief Erase the persisted LoRaWAN session so the next boot does a fresh
+ *         OTAA join (the running worker keeps its in-RAM session — callers
+ *         are expected to reboot right after, see /lorawan_reset).
+ *
+ *  `wipe_nonces=false` keeps the DevNonce history: LoRaWAN 1.0.4 requires
+ *  each join-request's DevNonce to exceed the server's last-seen value, so
+ *  wiping it makes the network silently reject joins as replays. Pass
+ *  `true` ONLY for the device-re-registered case, after "Reset used
+ *  DevNonces" in the TTN console.
+ */
+void lorawan_forget_session(bool wipe_nonces);
 
 #endif

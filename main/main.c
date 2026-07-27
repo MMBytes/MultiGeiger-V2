@@ -832,6 +832,21 @@ static void do_tx_cycle(void) {
                  (unsigned long)n_disconnects, cycle_uptime);
     }
 
+    // One-line LoRaWAN health next to every CYCLE line (user request during
+    // the first live-gateway bench): the per-uplink "uplink OK" lines land
+    // seconds AFTER this cycle's snapshot is enqueued, so this line
+    // summarizes the lifetime counters as-of the previous cycles — a
+    // long-scrollback health read without grepping per-uplink lines.
+    // Compile-time no-op on boards without the radio (stub returns DISABLED).
+    if (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) {
+        lorawan_status_t lst;
+        lorawan_get_status(&lst);
+        ESP_LOGI(TAG, "LORA: state=%s up=%lu fail=%lu duty_skip=%lu joins=%lu last_err=%d",
+                 lorawan_state_name(lst.state), (unsigned long)lst.uplinks_sent,
+                 (unsigned long)lst.failed, (unsigned long)lst.duty_skipped,
+                 (unsigned long)lst.join_attempts, (int)lst.last_error);
+    }
+
     // Cache for /status — see g_last_* declarations + accessors above.
     g_last_dt_ms     = dt_ms;
     g_last_cpm       = cpm;
@@ -1115,15 +1130,24 @@ static void do_tx_cycle(void) {
         lorawan_transmit(&lsnap);
     }
 
+    // "WiFi TX" wording + LoRaWAN suffix: these two gates only skip the
+    // WiFi-based upload pipeline below — the LoRaWAN enqueue above already
+    // fired. The old bare "skipping TX" read as "nothing was sent at all" on
+    // LoRaWAN-standalone nodes (user-reported during the first live-gateway
+    // bench). Suffix is compile-gated on HAL_HAS_LORAWAN so a non-radio
+    // board with a stray lorawan_enabled=true NVS byte can't claim an
+    // uplink path it doesn't have.
     if (!wifi_up()) {
-        ESP_LOGW(TAG, "skipping TX: WiFi down");
+        ESP_LOGW(TAG, "skipping WiFi TX: WiFi down%s",
+                 (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) ? " (LoRaWAN uplink unaffected)" : "");
         // Still trigger the next DNMS window so we don't lose the cycle's
         // worth of integration time waiting for WiFi.
         if (noise_sensor_present()) noise_sensor_trigger();
         return;
     }
     if (!ntp_time_valid()) {
-        ESP_LOGW(TAG, "skipping TX: time not valid (no NTP sync yet)");
+        ESP_LOGW(TAG, "skipping WiFi TX: time not valid (no NTP sync yet)%s",
+                 (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) ? " (LoRaWAN uplink unaffected)" : "");
         if (noise_sensor_present()) noise_sensor_trigger();
         return;
     }

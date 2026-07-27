@@ -459,7 +459,7 @@ static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEve
 // cycle — ~576 pointless gateway transmissions/day, each one deafening the
 // gateway to every other node while it sends. After this many unanswered
 // attempts, fall back to the normal daily cadence instead.
-#define TIMESYNC_MAX_ATTEMPTS 3
+#define TIMESYNC_MAX_ATTEMPTS 5
 
 // Uptime SECONDS, not µs: raw esp_timer µs would force a 64-bit stamp
 // (32-bit µs wraps every ~71.6 min — useless against a 24 h interval), but

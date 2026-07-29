@@ -48,8 +48,20 @@ static char               s_hostname[CFG_HOSTNAME_MAX + 1] = "geiger";
 static bool               s_in_emit = false;
 // V2.5.29: cumulative UDP send accounting. Incremented in emit_packet (under
 // applog's mutex — no atomics needed); read via syslog_get_stats() from the TX
-// cycle. A non-zero drop count = device-side loss (sendto failed, almost always
-// lwIP pbuf-pool exhaustion when a burst outruns the WiFi/lwIP drain).
+// cycle. A non-zero drop count = device-side loss: sendto() is MSG_DONTWAIT
+// with no queue behind it, so anything it rejects is gone.
+//
+// V2.6.28: the dominant cause in the field is a DOWN LINK, not buffer pressure.
+// Once WiFi drops there is no route, sendto() fails immediately on every emit,
+// and the counter steps by the number of lines logged during the outage — so
+// drops arrive as one burst, then stay flat. Observed on esp32-5965048: 163
+// drops in a single 2m25s AP channel-change outage across a 9-day run,
+// otherwise zero (the prior boot logged 160 the same way). lwIP pbuf-pool
+// exhaustion from a burst outrunning the WiFi drain is possible in principle
+// but has not been the observed cause. Read the counter accordingly: a step
+// implies "check for a disconnect around then", not "the log is too chatty".
+// Losses are not permanent — applog's ring keeps the lines for /log and the
+// scheduled FTPS upload.
 static uint32_t           s_tx_count   = 0;
 static uint32_t           s_drop_count = 0;
 

@@ -9,6 +9,53 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.28 — openSenseMap staging log labels, syslog drop-counter documentation
+
+Observability-only release. No behaviour change on any board: same requests,
+same retries, same payloads — only the strings written to the log differ.
+Both items came out of a 9-day log review of `esp32-5965048` (FeatherS3-D,
+V2.6.24, 4,305 cycles).
+
+**openSenseMap STAGING failures no longer log under the production label.**
+(`send_osm_to()` in `main/transmission.c`.) `send_osm()` and
+`send_osm_staging()` share one core, and every `ESP_LOG` inside it hardcoded
+the string `"openSenseMap"`. Only the summary line emitted by the dispatch
+table used `tx_target_name()`, so a staging failure read:
+
+```
+tx: Sending to openSenseMap STAGING (https)
+tx: openSenseMap rc=502 (retry 1/4)          <- actually STAGING
+tx: openSenseMap: all retries exhausted      <- actually STAGING
+tx: openSenseMap STAGING: error (rc=-1)      <- correct
+tx: Sending to openSenseMap (https)
+tx: openSenseMap: ok (rc=201)                <- production was fine
+```
+
+Read literally that says production failed four times and then succeeded,
+which is the opposite of what happened. It also makes the two endpoints
+impossible to tell apart when tallying failures across a long run — the
+retry lines from both land in the same bucket. The core now takes a `label`
+argument and the wrappers pass `tx_target_name()`, so the retry lines cannot
+drift from the summary line even if a target is renamed. Six call sites:
+box-id-empty, `http_client_init` failure, perform error, 4xx-no-retry, the
+per-attempt retry line, and retries-exhausted.
+
+**Syslog drop-counter comment corrected.** (`main/syslog.c`.) The comment
+said a non-zero drop count is "almost always lwIP pbuf-pool exhaustion when
+a burst outruns the WiFi/lwIP drain". The field evidence says otherwise: the
+counter tracks a down link. `sendto()` is `MSG_DONTWAIT` with no queue behind
+it, so once WiFi drops there is no route and every emit fails immediately —
+drops arrive as one burst sized to the outage, then stay flat. The 9-day run
+logged 163 drops, all inside a single 2m25s AP channel-change outage
+(beacon timeout, then 47 x `NO_AP_FOUND` while the AP moved ch 10 -> 6 -> 4),
+and zero otherwise; the prior boot logged 160 the same way. Pbuf exhaustion
+remains possible in principle but has not been observed. The comment now
+says how to read a step in the counter — look for a disconnect at that
+timestamp — and notes the losses are syslog-only, since applog's ring still
+serves `/log` and the scheduled FTPS upload.
+
+---
+
 ## V2.6.27 — LoRaWAN time-sync budget, SerLCD row-write helper, clang-format
 
 Housekeeping release with a single behaviour change, confined to LoRaWAN

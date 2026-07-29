@@ -1068,10 +1068,17 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
 // production (ingress.opensensemap.org) and staging/beta
 // (upload.staging.opensensemap.org) targets share one code path — only the
 // host + per-box credentials differ. Thin wrappers follow.
-static int send_osm_to(const tx_context_t *c, const char *host,
+//
+// V2.6.28: `label` names the calling target in every log line. Before this the
+// strings here were hardcoded "openSenseMap", so a STAGING failure logged as
+// `openSenseMap rc=502 (retry 1/4)` / `openSenseMap: all retries exhausted`
+// and only the dispatch-table summary line carried "openSenseMap STAGING" —
+// staging failures read as production failures in syslog. Callers pass
+// tx_target_name(), so the retry lines can never drift from the summary line.
+static int send_osm_to(const tx_context_t *c, const char *label, const char *host,
                        const char *box_id, const char *token, bool use_insecure) {
     if (box_id[0] == 0) {   // array field — never NULL (V2.5.20 R8)
-        ESP_LOGW(TAG, "openSenseMap[%s]: box_id empty, skipping", host);
+        ESP_LOGW(TAG, "%s[%s]: box_id empty, skipping", label, host);
         return -3;
     }
     char url[160];
@@ -1126,7 +1133,7 @@ static int send_osm_to(const tx_context_t *c, const char *host,
 
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (!client) {
-            ESP_LOGE(TAG, "openSenseMap: http_client_init failed");
+            ESP_LOGE(TAG, "%s: http_client_init failed", label);
             return -1;
         }
         esp_http_client_set_header(client, "Content-Type", "application/json; charset=UTF-8");
@@ -1137,24 +1144,24 @@ static int send_osm_to(const tx_context_t *c, const char *host,
 
         esp_err_t err = esp_http_client_perform(client);
         int rc = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
-        if (err != ESP_OK) ESP_LOGW(TAG, "openSenseMap perform error: %s", esp_err_to_name(err));
+        if (err != ESP_OK) ESP_LOGW(TAG, "%s perform error: %s", label, esp_err_to_name(err));
         esp_http_client_cleanup(client);
 
         if (rc == 201 || rc == 200) return rc;
         if (rc > 0 && rc != 408 && rc < 500) {
-            ESP_LOGW(TAG, "openSenseMap rc=%d (4xx) — not retrying", rc);
+            ESP_LOGW(TAG, "%s rc=%d (4xx) — not retrying", label, rc);
             return rc;
         }
-        ESP_LOGW(TAG, "openSenseMap rc=%d (retry %d/%d)", rc, i + 1, HTTP_MAX_RETRIES);
+        ESP_LOGW(TAG, "%s rc=%d (retry %d/%d)", label, rc, i + 1, HTTP_MAX_RETRIES);
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    ESP_LOGW(TAG, "openSenseMap: all retries exhausted");
+    ESP_LOGW(TAG, "%s: all retries exhausted", label);
     return -1;
 }
 
 // Production openSenseMap — ingress.opensensemap.org.
 static int send_osm(const tx_context_t *c) {
-    return send_osm_to(c, "ingress.opensensemap.org",
+    return send_osm_to(c, tx_target_name(TX_TARGET_OSM), "ingress.opensensemap.org",
                        c->osm_box_id, c->osm_access_token, c->osm.use_insecure);
 }
 
@@ -1162,7 +1169,8 @@ static int send_osm(const tx_context_t *c) {
 // only; the read API is api.staging.opensensemap.org). Same Luftdaten body and
 // raw-token auth as prod; verified 2026-06-13 to accept our format unchanged.
 static int send_osm_staging(const tx_context_t *c) {
-    return send_osm_to(c, "upload.staging.opensensemap.org",
+    return send_osm_to(c, tx_target_name(TX_TARGET_OSM_STAGING),
+                       "upload.staging.opensensemap.org",
                        c->osm_staging_box_id, c->osm_staging_token,
                        c->osm_staging.use_insecure);
 }

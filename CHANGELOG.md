@@ -9,12 +9,14 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
-## V2.6.28 — openSenseMap staging log labels, syslog drop-counter documentation
+## V2.6.28 — openSenseMap and Madavi log labels, syslog drop-counter documentation
 
 Observability-only release. No behaviour change on any board: same requests,
 same retries, same payloads — only the strings written to the log differ.
-Both items came out of a 9-day log review of `esp32-5965048` (FeatherS3-D,
-V2.6.24, 4,305 cycles).
+The openSenseMap and syslog items came out of a 9-day log review of
+`esp32-5965048` (FeatherS3-D, V2.6.24, 4,305 cycles); the Madavi label fix and
+the wider sweep of the drop-counter comment came out of the pre-release review
+of that work.
 
 **openSenseMap STAGING failures no longer log under the production label.**
 (`send_osm_to()` in `main/transmission.c`.) `send_osm()` and

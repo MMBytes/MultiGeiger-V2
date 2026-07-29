@@ -1,0 +1,93 @@
+# Geiger V2 house formatting style.
+#
+# APPLIED TO CHANGED LINES ONLY -- never sweep the whole tree.
+#
+# Use `git clang-format` (or the machine-local `_format.cmd` wrapper, gitignored
+# because it pins an absolute toolchain path), which reformats only the lines
+# already modified in the working tree. Do NOT run bare `clang-format -i` over a
+# file: a full-file pass rewrites ~330 lines of deliberate hand formatting that
+# this config cannot express, for no correctness gain. Measured 2026-07-29 over
+# main/: 28 files touched, and the diff was almost entirely clang-format
+# overriding coherent existing style rather than fixing anything. The three
+# worst-hit constructs -- all data tables whose meaning lives in the column
+# layout -- are:
+#   main/display.c   SSD1306 init sequence (command/argument byte pairs)
+#   main/gnss.c      UBX frame parser (inline enum + state-transition ladder)
+#   main/neopixel.c  RMT symbol timing (.level/.duration pairs)
+# Changed-lines-only formatting leaves those alone for free, which is why this
+# project has no `// clang-format off` markers and no .git-blame-ignore-revs.
+#
+# ColumnLimit 0 = never re-wrap and never re-join; the author owns where lines
+# break, clang-format owns indent + spacing + column alignment. That keeps a
+# formatted diff limited to what you actually edited.
+#
+# Two settings are load-bearing and must not be "tidied up":
+#   SortIncludes: Never   -- als.c includes hal.h BEFORE its `#if HAL_HAS_ALS`
+#                            gate; alphabetising includes changes compilation.
+#   ReflowComments: Never -- protects the ~80-col `// --- Section ---` dividers
+#                            and the hand-wrapped Doxygen-lite comment blocks.
+
+Language: Cpp
+BasedOnStyle: LLVM
+
+ColumnLimit: 0
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# --- Braces / statements -----------------------------------------------------
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse   # keeps the aligned `if/else if/else` ladders
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All                # keeps mqtt_discovery.c's `static bool x(void) { return y(); }` column
+AllowShortCaseLabelsOnASingleLine: true              # keeps `case X:  return "..."` lookup tables
+AllowShortBlocksOnASingleLine: Never
+InsertBraces: false                                # never add braces = never change semantics
+
+# --- Pointers / spacing ------------------------------------------------------
+PointerAlignment: Right                            # `const char *name`
+DerivePointerAlignment: false
+Cpp11BracedListStyle: false                        # keep `{ "Unknown", ... }` inner spaces
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 3                    # matches the `int x;   // note` habit
+
+# --- Alignment (the deliberate column formatting this codebase uses) ---------
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+AlignConsecutiveAssignments:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+AlignConsecutiveDeclarations:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+AlignArrayOfStructures: Left                       # keeps the k_tubes[] style table readable
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 0
+AlignEscapedNewlines: Left
+AlignOperands: Align
+AlignAfterOpenBracket: Align
+
+# --- Includes / comments -----------------------------------------------------
+SortIncludes: Never                                # load-bearing, see header note
+IncludeBlocks: Preserve
+ReflowComments: Never                              # load-bearing, see header note
+
+# --- Preprocessor ------------------------------------------------------------
+IndentPPDirectives: None                           # `#if`/`#define` stay at column 0
+
+# --- Misc --------------------------------------------------------------------
+MaxEmptyLinesToKeep: 2
+KeepEmptyLines:
+  AtStartOfBlock: false
+  AtStartOfFile: true
+  AtEndOfFile: false
+IndentCaseLabels: true
+InsertNewlineAtEOF: true
+SeparateDefinitionBlocks: Leave
+BitFieldColonSpacing: Both

@@ -87,8 +87,8 @@ static void serlcd_set_cursor(uint8_t col, uint8_t row) {
     serlcd_send_special(LCD_SETDDRAMADDR | (col + ROW_OFFSETS[row]));
 }
 
-// Write a NUL-terminated string at the current cursor. Caller positions
-// the cursor first via serlcd_set_cursor().
+// Write a NUL-terminated string at the current cursor. Cursor must already
+// be positioned — in practice serlcd_write_at() is the only caller.
 static void serlcd_write_text(const char *s) {
     size_t n = strlen(s);
     if (n == 0) return;
@@ -96,6 +96,31 @@ static void serlcd_write_text(const char *s) {
                               // unrelated row in HD44780 4-row addressing
     serlcd_write((const uint8_t *)s, n);
     vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+/** @brief Position the cursor and write one row of text in a single call.
+ *
+ *  Every render path in this file draws whole rows at a known start column,
+ *  so position-then-write is the only shape in which this driver ever emits
+ *  text — every call site was an identical pair before V2.6.27 folded them.
+ *  Folding the pair into one call keeps each page's row layout readable as a
+ *  vertical block instead of alternating cursor/text lines, and removes the
+ *  standing risk of a write landing at whatever position the previous page
+ *  happened to leave the cursor.
+ *
+ *  @param col  Start column; clamped to the panel width by serlcd_set_cursor().
+ *  @param row  Target row; likewise clamped.
+ *  @param s    NUL-terminated text. serlcd_write_text() truncates at COLS
+ *              characters, which fully guards the row only when col is 0.
+ *              At col > 0 a string longer than (COLS - col) still runs past
+ *              the row end and wraps into an unrelated row's DDRAM — the
+ *              clamp bounds the write, it does not confine it to the row.
+ *              Pre-existing behaviour, unchanged here; every caller passing
+ *              col > 0 writes a short fixed label well inside the margin.
+ */
+static void serlcd_write_at(uint8_t col, uint8_t row, const char *s) {
+    serlcd_set_cursor(col, row);
+    serlcd_write_text(s);
 }
 
 // ------------------------------------------------------------------
@@ -171,14 +196,11 @@ esp_err_t display_serlcd_init(i2c_master_bus_handle_t bus) {
 void display_serlcd_boot_screen(const char *version_str) {
     if (!s_dev) return;
     display_serlcd_clear();
-    serlcd_set_cursor(3, 0);
-    serlcd_write_text("Multi-Geiger");
+    serlcd_write_at(3, 0, "Multi-Geiger");
     if (version_str) {
-        serlcd_set_cursor(7, 1);
-        serlcd_write_text(version_str);
+        serlcd_write_at(7, 1, version_str);
     }
-    serlcd_set_cursor(3, 3);
-    serlcd_write_text("Initializing...");
+    serlcd_write_at(3, 3, "Initializing...");
 }
 
 // ====================================================================
@@ -196,20 +218,20 @@ void display_serlcd_render_env(const display_snapshot_t *snap) {
     char line[32];
     if (snap->env_valid) {
         snprintf(line, sizeof(line), "Temperature  %5.1f C", snap->env_t_c);
-        serlcd_set_cursor(0, 0); serlcd_write_text(line);
+        serlcd_write_at(0, 0, line);
         snprintf(line, sizeof(line), "Humidity     %5.1f %%", snap->env_h_pct);
-        serlcd_set_cursor(0, 1); serlcd_write_text(line);
+        serlcd_write_at(0, 1, line);
         snprintf(line, sizeof(line), "Pressure    %4d hPa",
                  (int)(snap->env_p_pa / 100.0f + 0.5f));
-        serlcd_set_cursor(0, 2); serlcd_write_text(line);
+        serlcd_write_at(0, 2, line);
     } else {
-        serlcd_set_cursor(0, 0); serlcd_write_text("Temperature   --- C");
-        serlcd_set_cursor(0, 1); serlcd_write_text("Humidity      --- %");
-        serlcd_set_cursor(0, 2); serlcd_write_text("Pressure    --- hPa");
+        serlcd_write_at(0, 0, "Temperature   --- C");
+        serlcd_write_at(0, 1, "Humidity      --- %");
+        serlcd_write_at(0, 2, "Pressure    --- hPa");
     }
     if (snap->noise_valid) {
         snprintf(line, sizeof(line), "Noise    %5.1f dB(A)", snap->noise.laeq);
-        serlcd_set_cursor(0, 3); serlcd_write_text(line);
+        serlcd_write_at(0, 3, line);
     }
 }
 
@@ -223,21 +245,21 @@ void display_serlcd_render_pm_mass(const display_snapshot_t *snap) {
         char line[32];
         snprintf(line, sizeof(line), "PM1.0      %3d ug/m3",
                  (int)(snap->pm.pm1_0 + 0.5f));
-        serlcd_set_cursor(0, 0); serlcd_write_text(line);
+        serlcd_write_at(0, 0, line);
         snprintf(line, sizeof(line), "PM2.5      %3d ug/m3",
                  (int)(snap->pm.pm2_5 + 0.5f));
-        serlcd_set_cursor(0, 1); serlcd_write_text(line);
+        serlcd_write_at(0, 1, line);
         snprintf(line, sizeof(line), "PM4.0      %3d ug/m3",
                  (int)(snap->pm.pm4_0 + 0.5f));
-        serlcd_set_cursor(0, 2); serlcd_write_text(line);
+        serlcd_write_at(0, 2, line);
         snprintf(line, sizeof(line), "PM10       %3d ug/m3",
                  (int)(snap->pm.pm10 + 0.5f));
-        serlcd_set_cursor(0, 3); serlcd_write_text(line);
+        serlcd_write_at(0, 3, line);
     } else {
-        serlcd_set_cursor(0, 0); serlcd_write_text("PM1.0      --- ug/m3");
-        serlcd_set_cursor(0, 1); serlcd_write_text("PM2.5      --- ug/m3");
-        serlcd_set_cursor(0, 2); serlcd_write_text("PM4.0      --- ug/m3");
-        serlcd_set_cursor(0, 3); serlcd_write_text("PM10       --- ug/m3");
+        serlcd_write_at(0, 0, "PM1.0      --- ug/m3");
+        serlcd_write_at(0, 1, "PM2.5      --- ug/m3");
+        serlcd_write_at(0, 2, "PM4.0      --- ug/m3");
+        serlcd_write_at(0, 3, "PM10       --- ug/m3");
     }
 }
 
@@ -250,21 +272,21 @@ void display_serlcd_render_pm_number(const display_snapshot_t *snap) {
         char line[32];
         snprintf(line, sizeof(line), "n0.5      %5d /cm3",
                  (int)(snap->pm.nc0_5 + 0.5f));
-        serlcd_set_cursor(0, 0); serlcd_write_text(line);
+        serlcd_write_at(0, 0, line);
         snprintf(line, sizeof(line), "n1.0      %5d /cm3",
                  (int)(snap->pm.nc1_0 + 0.5f));
-        serlcd_set_cursor(0, 1); serlcd_write_text(line);
+        serlcd_write_at(0, 1, line);
         snprintf(line, sizeof(line), "n2.5      %5d /cm3",
                  (int)(snap->pm.nc2_5 + 0.5f));
-        serlcd_set_cursor(0, 2); serlcd_write_text(line);
+        serlcd_write_at(0, 2, line);
         snprintf(line, sizeof(line), "n4.0      %5d /cm3",
                  (int)(snap->pm.nc4_0 + 0.5f));
-        serlcd_set_cursor(0, 3); serlcd_write_text(line);
+        serlcd_write_at(0, 3, line);
     } else {
-        serlcd_set_cursor(0, 0); serlcd_write_text("n0.5        --- /cm3");
-        serlcd_set_cursor(0, 1); serlcd_write_text("n1.0        --- /cm3");
-        serlcd_set_cursor(0, 2); serlcd_write_text("n2.5        --- /cm3");
-        serlcd_set_cursor(0, 3); serlcd_write_text("n4.0        --- /cm3");
+        serlcd_write_at(0, 0, "n0.5        --- /cm3");
+        serlcd_write_at(0, 1, "n1.0        --- /cm3");
+        serlcd_write_at(0, 2, "n2.5        --- /cm3");
+        serlcd_write_at(0, 3, "n4.0        --- /cm3");
     }
 }
 
@@ -290,15 +312,14 @@ void display_serlcd_render_uploads(void) {
     tx_target_stats_t st;
     char line[32];
     int row = 0;
-    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]) && row < 4; i++) {
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]) && row < ROWS; i++) {
         if (!main_target_enabled(entries[i].id)) continue;
         tx_get_stats(entries[i].id, &st);
         snprintf(line, sizeof(line), "%-9s%lu/%lu",
                  entries[i].label,
                  (unsigned long)st.succeeded,
                  (unsigned long)st.attempted);
-        serlcd_set_cursor(0, row);
-        serlcd_write_text(line);
+        serlcd_write_at(0, (uint8_t)row, line);   // row is bounded 0..3 by the loop guard
         row++;
     }
 }
@@ -315,7 +336,7 @@ void display_serlcd_render_system(void) {
     main_status_t st;
     main_status_snapshot(&st);
     snprintf(line, sizeof(line), "TX Cycles %lu", (unsigned long)st.cycles);
-    serlcd_set_cursor(0, 0); serlcd_write_text(line);
+    serlcd_write_at(0, 0, line);
 
     int64_t us = esp_timer_get_time();
     uint32_t total_s = (uint32_t)(us / 1000000);
@@ -323,15 +344,15 @@ void display_serlcd_render_system(void) {
     int hours = (total_s % 86400) / 3600;
     int mins  = (total_s % 3600) / 60;
     snprintf(line, sizeof(line), "Uptime %dd %dh %dm", days, hours, mins);
-    serlcd_set_cursor(0, 1); serlcd_write_text(line);
+    serlcd_write_at(0, 1, line);
 
     snprintf(line, sizeof(line), "Free %lu bytes",
              (unsigned long)esp_get_free_heap_size());
-    serlcd_set_cursor(0, 2); serlcd_write_text(line);
+    serlcd_write_at(0, 2, line);
 
     snprintf(line, sizeof(line), "Max %lu bytes",
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
-    serlcd_set_cursor(0, 3); serlcd_write_text(line);
+    serlcd_write_at(0, 3, line);
 }
 
 #else  // HAL_HAS_OLED == 0 — board has no display family compiled in.

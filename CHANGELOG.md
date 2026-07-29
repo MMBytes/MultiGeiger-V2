@@ -9,6 +9,58 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.27 — LoRaWAN time-sync budget, SerLCD row-write helper, clang-format
+
+Housekeeping release with a single behaviour change, confined to LoRaWAN
+boards. Everything else is refactor and tooling: the SerLCD panel renders
+byte-for-byte what V2.6.26 rendered.
+
+**LoRaWAN `DeviceTimeReq` give-up budget, 3 → 5 attempts per daily window.**
+(`TIMESYNC_MAX_ATTEMPTS` in `main/lorawan.cpp`; reaches hardware only on
+`heltec_wifi_lora32_v4_r2`.) The node asks the network for the time once per
+24 h and re-arms the request on each TX cycle until a `DeviceTimeAns`
+downlink lands. The give-up rule shipped in V2.6.26 caps how many unanswered
+requests that costs, because every request the network *hears* makes it
+schedule a downlink whether or not the node can receive it — a node with a
+working uplink but a dead downlink would otherwise drive ~576 pointless
+gateway transmissions a day, each one deafening the gateway to every other
+node for its duration. Three attempts proved tight in the case that matters
+most: a cold boot that misses its first windows then sits on 1970 timestamps
+until the next daily window comes round. Five makes that materially less
+likely for a bounded worst case of 5 scheduled downlinks/day — still inside
+TTN's Fair Use allowance of 10.
+
+**`serlcd_write_at()` in `display_serlcd.c`.** Every row this driver draws
+was written as a `serlcd_set_cursor()` + `serlcd_write_text()` pair — 31
+sites, all identical, 27 of them squeezed onto one line to keep each page's
+row layout readable as a block. Folded into a single
+`serlcd_write_at(col, row, s)` so the pairing can't drift apart and a write
+can't land at whatever position the previous page left the cursor at. The
+two underlying statics are deliberately kept rather than merged into the
+helper: they clamp against different failure modes — `serlcd_set_cursor()`
+guards against addressing a non-existent row, `serlcd_write_text()` against
+HD44780's non-linear 4-row DDRAM layout wrapping over-long text onto an
+unrelated row. Net −96 bytes of flash on `feathers3_d` (measured A/B), which
+is the honest measure of how much of this was duplicated call setup.
+
+**`.clang-format`, applied to changed lines only.** New tracked config, used
+via `git clang-format` (local `_format.cmd` wrapper) so it only ever
+reformats lines already edited. A full-tree sweep was measured and rejected:
+over `main/` it rewrote ~5,100 lines across 62 files, of which only about a
+tenth are genuine line splits — the remainder is pure re-indentation and
+comment-column churn, i.e. clang-format overriding coherent existing hand
+formatting rather than fixing anything. Worst hit are `hal.h` (all ~1,240
+lines, because flattening preprocessor indentation destroys the
+`#if`/`#define` board-selection tree) and `http_server.c` (~1,190 lines of
+shredded `// V2.x.y:` annotation columns), followed by the data tables whose
+meaning lives in the column layout: SSD1306 init byte pairs in `display.c`,
+the UBX frame-parser state ladder in `gnss.c`, RMT symbol timing pairs in
+`neopixel.c`. Changed-lines-only preserves all of it for free, so there are
+no `// clang-format off` markers anywhere and no `.git-blame-ignore-revs`.
+Deliberately NOT added to `_build.cmd` beside the cppcheck gate: formatter
+output shifts between major clang-format versions, so a hard gate would fail
+builds on a toolchain upgrade alone.
+
 ## V2.6.26 — LoRaWAN observability, session-reset endpoint, network time sync
 
 First-live-gateway release: everything below came out of the first bench

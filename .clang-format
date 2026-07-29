@@ -5,25 +5,44 @@
 # Use `git clang-format` (or the machine-local `_format.cmd` wrapper, gitignored
 # because it pins an absolute toolchain path), which reformats only the lines
 # already modified in the working tree. Do NOT run bare `clang-format -i` over a
-# file: a full-file pass rewrites ~330 lines of deliberate hand formatting that
-# this config cannot express, for no correctness gain. Measured 2026-07-29 over
-# main/: 28 files touched, and the diff was almost entirely clang-format
-# overriding coherent existing style rather than fixing anything. The three
-# worst-hit constructs -- all data tables whose meaning lives in the column
-# layout -- are:
-#   main/display.c   SSD1306 init sequence (command/argument byte pairs)
-#   main/gnss.c      UBX frame parser (inline enum + state-transition ladder)
-#   main/neopixel.c  RMT symbol timing (.level/.duration pairs)
-# Changed-lines-only formatting leaves those alone for free, which is why this
-# project has no `// clang-format off` markers and no .git-blame-ignore-revs.
+# file: a full-file pass rewrites thousands of lines of deliberate hand
+# formatting that this config cannot express, for no correctness gain.
+# Measured 2026-07-29 over main/ with clang-format 22.1.8: ~5,100 lines rewritten
+# across 62 files. Only about a tenth of those are genuine line splits -- the
+# rest is pure re-indentation and comment-column churn, i.e. clang-format
+# overriding coherent existing style rather than fixing anything. (The split
+# count is method-sensitive: whitespace-insensitive diffs of the same sweep give
+# 525-580 depending on whether you count added, paired or net lines. The ~5,100
+# total is the number that matters and reproduces exactly.) Worst hit:
+#   main/hal.h         all ~1,240 lines: IndentPPDirectives None flattens the
+#                      4-space-indented #if/#define board-selection tree
+#   main/http_server.c ~1,190 lines: trailing-comment realignment shreds the
+#                      hand-aligned `// V2.x.y:` annotation columns
+#   main/display.c     SSD1306 init sequence (command/argument byte pairs)
+#   main/gnss.c        UBX frame parser (inline enum + state-transition ladder)
+#   main/neopixel.c    RMT symbol timing (.level/.duration pairs)
+# The last three are data tables whose meaning lives in the column layout.
+# Changed-lines-only formatting leaves all of it alone for free, which is why
+# this project has no `// clang-format off` markers and no .git-blame-ignore-revs.
+#
+# (Commit 6072f32's message quotes an earlier "~330 lines across 28 files" for
+#  this sweep. That figure was measured with `diff -w`, so it counted only
+#  structural splits and hid every whitespace-only rewrite. The numbers above
+#  supersede it; the pushed commit message can no longer be corrected.)
 #
 # ColumnLimit 0 = never re-wrap and never re-join; the author owns where lines
 # break, clang-format owns indent + spacing + column alignment. That keeps a
 # formatted diff limited to what you actually edited.
 #
 # Two settings are load-bearing and must not be "tidied up":
-#   SortIncludes: Never   -- als.c includes hal.h BEFORE its `#if HAL_HAS_ALS`
-#                            gate; alphabetising includes changes compilation.
+#   SortIncludes: Never   -- not a correctness guard: clang-format only reorders
+#                            within a contiguous run of #includes and can never
+#                            move one across a #if, so gated includes such as
+#                            als.c's `#if HAL_HAS_ALS` block are safe either way.
+#                            It is here to stop churn: enabling sorting rewrites
+#                            the deliberately grouped (system-then-project)
+#                            include blocks of http_server.c, syslog.c, gnss.c
+#                            and display.c on the next unrelated edit.
 #   ReflowComments: Never -- protects the ~80-col `// --- Section ---` dividers
 #                            and the hand-wrapped Doxygen-lite comment blocks.
 

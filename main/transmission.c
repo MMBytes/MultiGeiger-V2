@@ -1427,10 +1427,11 @@ static void tx_run(const tx_context_t *c) {
     // is "diag", not "tx" — it's genuinely shared code now, same as the
     // standalone path.
     diag_log_heap_standalone();
-    // V2.5.29: surface device-side syslog UDP drops (sendto failures = lwIP
-    // pbuf exhaustion under burst — e.g. the boot config dump). Logged from the
-    // TX worker (NOT the emit path), so it lands on /log even when syslog itself
-    // is dropping → self-evident. drops>0 ⇒ device-side loss confirmed.
+    // V2.5.29: surface device-side syslog UDP drops. V2.6.28: a sendto failure
+    // is usually a down link, not pbuf exhaustion under burst — see syslog.c
+    // for the evidence. Logged from the TX worker (NOT the emit path), so it
+    // lands on /log even when syslog itself is dropping → self-evident.
+    // drops>0 ⇒ device-side loss confirmed.
     if (syslog_is_initialized()) {
         uint32_t slog_tx = 0, slog_drops = 0;
         syslog_get_stats(&slog_tx, &slog_drops);

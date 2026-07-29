@@ -51,17 +51,20 @@ static bool               s_in_emit = false;
 // cycle. A non-zero drop count = device-side loss: sendto() is MSG_DONTWAIT
 // with no queue behind it, so anything it rejects is gone.
 //
-// V2.6.28: the dominant cause in the field is a DOWN LINK, not buffer pressure.
-// Once WiFi drops there is no route, sendto() fails immediately on every emit,
-// and the counter steps by the number of lines logged during the outage — so
-// drops arrive as one burst, then stay flat. Observed on esp32-5965048: 163
-// drops in a single 2m25s AP channel-change outage across a 9-day run,
-// otherwise zero (the prior boot logged 160 the same way). lwIP pbuf-pool
-// exhaustion from a burst outrunning the WiFi drain is possible in principle
-// but has not been the observed cause. Read the counter accordingly: a step
-// implies "check for a disconnect around then", not "the log is too chatty".
-// Losses are not permanent — applog's ring keeps the lines for /log and the
-// scheduled FTPS upload.
+// V2.6.28: the dominant observed cause on this fleet is a DOWN LINK, not buffer
+// pressure. Once WiFi drops there is no route, sendto() fails immediately on
+// every emit, and the counter steps by the number of lines logged during the
+// outage — so drops arrive as one burst, then stay flat. Observed on
+// esp32-5965048: 163 drops in a single 2m25s AP channel-change outage across a
+// 9-day run, otherwise zero (the prior boot logged 160 the same way).
+//
+// Burst pressure is NOT hypothetical — it was the pre-pacing failure mode:
+// V2.5.29 confirmed the boot config dump outrunning the WiFi/lwIP drain on the
+// tight-heap heltec and fixed it by yielding after every line (see
+// config_log_summary() in config.c). It has not recurred since. So read the
+// counter accordingly: a step implies "check for a disconnect around then",
+// not "the log is too chatty". Losses are not permanent — applog's ring keeps
+// the lines for /log and the scheduled FTPS upload.
 static uint32_t           s_tx_count   = 0;
 static uint32_t           s_drop_count = 0;
 
@@ -229,9 +232,11 @@ static void emit_packet(const char *line, size_t len) {
         // rather drop the packet than block applog (which holds its
         // mutex while calling us). UDP send is normally sub-ms.
         //
-        // V2.5.29: count the result (was discarded). A sendto failure here is
-        // almost always lwIP pbuf-pool exhaustion when a burst (e.g. the boot
-        // config dump) outruns the WiFi/lwIP drain — previously INVISIBLE.
+        // V2.5.29: count the result (was discarded) — previously INVISIBLE.
+        // V2.6.28: a failure here is usually a DOWN LINK (no route, so every
+        // emit during the outage fails), not lwIP pbuf-pool exhaustion — see
+        // the s_drop_count declaration for the field evidence and for the
+        // V2.5.29 boot-dump burst-pressure history.
         // Count only; the report is logged from the TX cycle via
         // syslog_get_stats() — NEVER ESP_LOG here (it would re-enter applog's
         // non-recursive mutex from the emit path → deadlock).

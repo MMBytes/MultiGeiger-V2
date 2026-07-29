@@ -40,19 +40,31 @@ drift from the summary line even if a target is renamed. Six call sites:
 box-id-empty, `http_client_init` failure, perform error, 4xx-no-retry, the
 per-attempt retry line, and retries-exhausted.
 
-**Syslog drop-counter comment corrected.** (`main/syslog.c`.) The comment
-said a non-zero drop count is "almost always lwIP pbuf-pool exhaustion when
-a burst outruns the WiFi/lwIP drain". The field evidence says otherwise: the
-counter tracks a down link. `sendto()` is `MSG_DONTWAIT` with no queue behind
-it, so once WiFi drops there is no route and every emit fails immediately —
-drops arrive as one burst sized to the outage, then stay flat. The 9-day run
-logged 163 drops, all inside a single 2m25s AP channel-change outage
-(beacon timeout, then 47 x `NO_AP_FOUND` while the AP moved ch 10 -> 6 -> 4),
-and zero otherwise; the prior boot logged 160 the same way. Pbuf exhaustion
-remains possible in principle but has not been observed. The comment now
+**Syslog drop-counter documentation corrected.** The comments said a non-zero
+drop count is "almost always lwIP pbuf-pool exhaustion when a burst outruns
+the WiFi/lwIP drain". The field evidence says otherwise: the counter tracks a
+down link. `sendto()` is `MSG_DONTWAIT` with no queue behind it, so once WiFi
+drops there is no route and every emit fails immediately — drops arrive as one
+burst sized to the outage, then stay flat. The 9-day run logged 163 drops, all
+inside a single 2m25s AP channel-change outage (beacon timeout, then 47 x
+`NO_AP_FOUND` while the AP moved ch 10 -> 6 -> 4), and zero otherwise; the
+prior boot logged 160 the same way.
+
+Burst pressure is not hypothetical, though — it was the *pre-pacing* failure
+mode. V2.5.29 confirmed the boot config dump outrunning the WiFi/lwIP drain on
+the tight-heap heltec and fixed it by yielding after every line (see
+`config_log_summary()` in `main/config.c`), and it has not recurred since. The
+corrected text says that, rather than dismissing pbuf exhaustion outright, and
 says how to read a step in the counter — look for a disconnect at that
-timestamp — and notes the losses are syslog-only, since applog's ring still
-serves `/log` and the scheduled FTPS upload.
+timestamp — noting the losses are syslog-only, since applog's ring still serves
+`/log` and the scheduled FTPS upload.
+
+Corrected in all four places the claim appeared, not just the one that
+prompted it: the `s_drop_count` declaration and the `emit_packet()` increment
+site (`main/syslog.c`), the `syslog_get_stats()` public contract
+(`main/syslog.h`), and the per-cycle reporting site (`main/transmission.c`).
+A single-site fix would have left the file contradicting itself 170 lines
+apart, with the header still stating the refuted cause.
 
 ---
 

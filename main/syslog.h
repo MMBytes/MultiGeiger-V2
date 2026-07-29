@@ -59,9 +59,11 @@ bool syslog_is_initialized(void);
 
 /** @brief Cumulative UDP send stats since boot (either pointer may be NULL).
  *
- *  `dropped` counts `sendto()` failures — almost always lwIP pbuf-pool
- *  exhaustion when a burst (e.g. the boot config dump) outruns the WiFi/lwIP
- *  drain. A non-zero count is a definitive device-side-loss signal; **zero
+ *  `dropped` counts `sendto()` failures — usually a DOWN LINK (no route, so
+ *  every emit during the outage fails), not buffer pressure. Burst-driven
+ *  pbuf-pool exhaustion was the pre-V2.5.29 boot-dump failure mode and has not
+ *  recurred since that release paced the dump.
+ *  A non-zero count is a definitive device-side-loss signal; **zero
  *  does NOT prove zero loss** (WiFi-driver-late, network, and server-side
  *  drops aren't visible here). Read from the TX cycle, never the emit path.
  */

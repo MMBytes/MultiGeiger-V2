@@ -40,6 +40,14 @@ drift from the summary line even if a target is renamed. Six call sites:
 box-id-empty, `http_client_init` failure, perform error, 4xx-no-retry, the
 per-attempt retry line, and retries-exhausted.
 
+**Madavi labels read from the canonical table too.** (`send_madavi()` in
+`main/transmission.c`.) The `http_client_init` failure line said `madavi:`
+lowercase while the result line two statements later said `Madavi:` — the same
+drift the openSenseMap fix above prevents, caught by the same review. All three
+label sites in the function now call `tx_target_name(TX_TARGET_MADAVI)`. Only
+the lowercase line changes what it prints; the other two already emitted
+`"Madavi"` and are string-identical.
+
 **Syslog drop-counter documentation corrected.** The comments said a non-zero
 drop count is "almost always lwIP pbuf-pool exhaustion when a burst outruns
 the WiFi/lwIP drain". The field evidence says otherwise: the counter tracks a

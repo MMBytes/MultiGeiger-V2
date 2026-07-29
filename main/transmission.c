@@ -508,7 +508,7 @@ static int send_madavi(const tx_context_t *c) {
     esp_http_client_handle_t client =
         open_push_client(url, c->madavi.use_insecure, c->chip_id);
     if (!client) {
-        ESP_LOGE(TAG, "madavi: http_client_init failed");
+        ESP_LOGE(TAG, "%s: http_client_init failed", tx_target_name(TX_TARGET_MADAVI));
         return -1;
     }
 
@@ -516,10 +516,15 @@ static int send_madavi(const tx_context_t *c) {
     // + pulse stats (3 fields) + signal + boilerplate. ~1200 bytes is generous.
     char body[1280];
     build_madavi_env_body(c, body, sizeof(body));
-    int rc = post_with_retry(client, "Madavi", "env", NULL, body);
+    // V2.6.28: all three label sites in this function read from s_target_names
+    // via tx_target_name(), same as send_osm_to() — the label can no longer
+    // drift from the dispatch-table summary line if a target is renamed. The
+    // init-failure line above used to say "madavi:" lowercase against
+    // "Madavi:" here, which is exactly the drift this prevents.
+    int rc = post_with_retry(client, tx_target_name(TX_TARGET_MADAVI), "env", NULL, body);
 
     esp_http_client_cleanup(client);
-    ESP_LOGI(TAG, "Madavi: rc=%d", rc);
+    ESP_LOGI(TAG, "%s: rc=%d", tx_target_name(TX_TARGET_MADAVI), rc);
     return rc;
 }
 

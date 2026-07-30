@@ -173,6 +173,14 @@ typedef enum {
 } display_backend_t;
 static display_backend_t s_backend = BACKEND_NONE;
 
+// V2.6.30: human-readable panel identity ("SerLCD 20x4 @0x72",
+// "SSD1309 128x64 @0x3C", "none") for /status and the syslog boot banner.
+// Written once at the probe site that ACK'd inside display_setup() —
+// before any reader task exists — and read via display_backend_str().
+// The initial "none" doubles as the answer for both "probe found nothing"
+// and "display_setup() not yet run".
+static char s_backend_desc[24] = "none";
+
 // SSD1306 datasheet defines exactly two slave addresses, selected by the
 // SA0 pin (sometimes exposed as a solder jumper). 0x3C is the default on
 // Heltec WiFi Kit 32 V2 onboard, the Core Electronics CE09964 SSD1309
@@ -481,6 +489,12 @@ static bool try_serlcd_on_bus(i2c_master_bus_handle_t bus, bool show_display,
     if (display_serlcd_init(bus) != ESP_OK) return false;
 
     s_backend = BACKEND_SERLCD;
+    // V2.6.30: fixed identity by construction of the DRIVER, not the
+    // hardware — display_serlcd.c probes only OpenLCD's default 0x72 and
+    // drives a hardcoded 20x4. (SparkFun also sells 16x2 SerLCDs at the
+    // same 0x72 default; one would ACK here but is unsupported and
+    // misdriven regardless, so this label is what the driver binds.)
+    snprintf(s_backend_desc, sizeof(s_backend_desc), "SerLCD 20x4 @0x72");
     s_show    = show_display;
     s_cleared = !show_display;
     if (!show_display) {
@@ -555,6 +569,10 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
             apply_oled_init_sequence();
             s_show    = show_display;
             s_backend = BACKEND_OLED;
+            // V2.6.30: fold in the probed address — 0x3C vs 0x3D tells the
+            // fleet operator whether the breakout's SA0 jumper is closed.
+            snprintf(s_backend_desc, sizeof(s_backend_desc),
+                     OLED_CHIP_NAME " 128x64 @0x%02X", oled_addr);
             display_set_contrast(brightness_pct);
             ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
                      OLED_CHIP_NAME, oled_addr, bus_label,
@@ -589,6 +607,9 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
             apply_oled_init_sequence();
             s_show    = show_display;
             s_backend = BACKEND_OLED;
+            // V2.6.30: same identity capture as the primary-bus site above.
+            snprintf(s_backend_desc, sizeof(s_backend_desc),
+                     OLED_CHIP_NAME " 128x64 @0x%02X", oled_addr);
             display_set_contrast(brightness_pct);
             i2c_bus_secondary_keep_alive();
             ESP_LOGI(TAG, "display backend: %s at 0x%02X on %s (show=%d brightness=%d%%)",
@@ -671,6 +692,11 @@ const char *display_mode_str(void) {
         case DISPLAY_MODE_ROTATION:  return "rotation (forced)";
         default:                     return "unknown";
     }
+}
+
+// V2.6.30: panel identity for /status + syslog boot banner (see display.h).
+const char *display_backend_str(void) {
+    return s_backend_desc;
 }
 
 void display_boot_screen(void) {
@@ -1244,6 +1270,15 @@ const char *display_mode_str(void) {
     }
 }
 
+// V2.6.30: panel identity (see display.h). Compile-time constant here —
+// the TFT Feather's ST7789 is soldered on, no probe/fallback chain exists
+// (HAL_HAS_TFT boards never enter the I²C display probe). Deliberately
+// reported even if display_tft_init() failed: this string answers "what
+// hardware is fitted", not "is it healthy" — the part is present either way.
+const char *display_backend_str(void) {
+    return "ST7789 TFT 240x135";
+}
+
 void display_boot_screen(void) {
     // V2.6.11 review fix: match display_set_contrast()'s s_show gating —
     // skip the splash render/push entirely when the display was configured
@@ -1306,5 +1341,8 @@ void display_set_status(int index, int value) { (void)index; (void)value; }
 void display_update_snapshot(const display_snapshot_t *snap) { (void)snap; }
 bool display_is_multipage(void) { return false; }
 const char *display_mode_str(void) { return "no display"; }
+// V2.6.30: no display hardware on this board class — fixed "none" keeps
+// the /status line and syslog banner shape identical across the fleet.
+const char *display_backend_str(void) { return "none"; }
 
 #endif  // HAL_HAS_OLED / HAL_HAS_TFT / no-display

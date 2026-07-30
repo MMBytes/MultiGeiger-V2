@@ -130,6 +130,18 @@ bool display_is_multipage(void);
  */
 const char *display_mode_str(void);
 
+/** @brief V2.6.30: human-readable identity of the ATTACHED display panel
+ *  (e.g. "SerLCD 20x4 @0x72", "SSD1309 128x64 @0x3C", "ST7789 TFT 240x135",
+ *  "none"). Complements display_mode_str(): mode says HOW pages are laid
+ *  out, this says WHAT hardware answered the boot probe. Shown on /status
+ *  and echoed in the syslog boot banner so fleet-wide display inventory
+ *  works without serial access (sealed-tube observability). Always
+ *  non-NULL; probe-based backends (OLED/SerLCD) return "none" until
+ *  display_setup() has run, while the TFT backend's fixed panel string
+ *  is always valid (the panel is soldered on).
+ */
+const char *display_backend_str(void);
+
 /** @brief V2.3.30: live-apply OLED contrast / SerLCD backlight brightness.
  *
  *  pct is 10..100 (clamped). For OLED, sends the SSD1306/9 contrast

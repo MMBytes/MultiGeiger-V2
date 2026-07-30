@@ -32,6 +32,7 @@
 #include "config.h"            // CFG_HOSTNAME_MAX — s_hostname mirrors cfg->wifi_hostname
 #include "hal.h"               // BOARD_NAME
 #include "coredump.h"          // coredump_have_dump
+#include "display.h"           // display_backend_str — panel line in banner
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "esp_ota_ops.h"       // esp_ota_get_running_partition — boot slot in banner
 
@@ -141,6 +142,13 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
              coredump_have_dump() ? "PRESENT (/coredump.elf)" : "none",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+    // V2.6.30: attached display panel as a second banner line. The probe
+    // verdict is logged by display.c long before WiFi + syslog exist, so —
+    // like the banner above — it never reaches the server on its own.
+    // display_setup() has always completed by syslog_init() time (main.c
+    // boots the display before WiFi), so the string is final here.
+    ESP_LOGI("boot", "Display: %s", display_backend_str());
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);

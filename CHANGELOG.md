@@ -9,6 +9,32 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.30 — Display hardware identity on /status and in the syslog boot banner
+
+The attached display panel was previously only visible in the boot log
+(`display backend: ...` from `display.c`), which scrolls away on serial and
+never reaches the syslog server — leaving no way to answer "which display is
+on that node" for a sealed deployed unit. New `display_backend_str()`
+(`main/display.c`) captures the probe verdict at the detection site —
+`SerLCD 20x4 @0x72`, `SSD1309 128x64 @0x3C` (chip name per board, address
+as probed so a closed SA0 jumper shows as `@0x3D`), `ST7789 TFT 240x135` on
+the TFT Feather, or `none` — and surfaces it in two places:
+
+- **`/status`**: new **Display hardware** line directly under **Display
+  layout**, so a fleet sweep over HTTP answers the inventory question
+  without serial access.
+- **Syslog boot banner**: a second `boot:` line (`Display: <panel>`) right
+  after the V2.5.22 firmware/reset/partition banner in `syslog_init()`, so
+  the panel identity lands on the syslog server on every boot when syslog
+  is enabled. Ordering is safe by construction: `display_setup()` runs
+  before WiFi (and therefore before `syslog_init()`), so the probe verdict
+  is always final by banner time.
+
+No behavioral change to display driving, probing, or layout resolution —
+this is observability only.
+
+---
+
 ## V2.6.29 — HV blanking window: firmware suppression of the Rev B/C phantom count
 
 New opt-in config setting (under the Dead-time guard on `/config`): **HV

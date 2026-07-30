@@ -549,30 +549,35 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t n
     main_status_snapshot(&st);
 
     snprintf(out, sz,
-        "<div class=\"info\"><h3>System</h3>"
-        "<b>Uptime:</b> %s%s<br>"
-        "<b>Reset reason:</b> %s<br>"
-        "%s"                                  // core-dump line (V2.4.18)
-        "<b>Free heap:</b> %lu bytes<br>"
-        "<b>Min free heap:</b> %lu bytes<br>"
-        "<b>Max allocation:</b> %lu bytes<br>"
-        "<b>I²C errors:</b> %lu since boot<br>"
-        "<b>NTP:</b> %s<br>"
-        // V2.4.9: resolved display layout mode. Shows what display.c
-        // picked at boot (e.g. "auto (resolved: rotation)" or
-        // "radiation (forced)") so the user can confirm the runtime
-        // decision without digging into /log.
-        "<b>Display layout:</b> %s"
-        "</div>",
-        uptime_buf, started_suffix,
-        reset_reason_str(esp_reset_reason()),
-        cd_line,
-        (unsigned long)free_heap,
-        (unsigned long)min_free,
-        (unsigned long)max_alloc,
-        (unsigned long)st.i2c_errors,
-        ntp_line,
-        display_mode_str());
+             "<div class=\"info\"><h3>System</h3>"
+             "<b>Uptime:</b> %s%s<br>"
+             "<b>Reset reason:</b> %s<br>"
+             "%s"   // core-dump line (V2.4.18)
+             "<b>Free heap:</b> %lu bytes<br>"
+             "<b>Min free heap:</b> %lu bytes<br>"
+             "<b>Max allocation:</b> %lu bytes<br>"
+             "<b>I²C errors:</b> %lu since boot<br>"
+             "<b>NTP:</b> %s<br>"
+             // V2.4.9: resolved display layout mode. Shows what display.c
+             // picked at boot (e.g. "auto (resolved: rotation)" or
+             // "radiation (forced)") so the user can confirm the runtime
+             // decision without digging into /log.
+             "<b>Display layout:</b> %s<br>"
+             // V2.6.30: attached panel identity (probe result, e.g. "SerLCD
+             // 20x4 @0x72"), so a fleet sweep over /status answers "which
+             // display is on this node" without serial access to the boot log.
+             "<b>Display hardware:</b> %s"
+             "</div>",
+             uptime_buf, started_suffix,
+             reset_reason_str(esp_reset_reason()),
+             cd_line,
+             (unsigned long)free_heap,
+             (unsigned long)min_free,
+             (unsigned long)max_alloc,
+             (unsigned long)st.i2c_errors,
+             ntp_line,
+             display_mode_str(),
+             display_backend_str());
 }
 
 // --- Cycle block -------------------------------------------------------------

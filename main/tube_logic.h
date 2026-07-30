@@ -84,6 +84,23 @@ guard_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {
     return (!enabled || pcnt_filter) ? 0u : window_us;
 }
 
+/** @brief Effective HV-blanking window given the three config inputs.
+ *
+ *  Counterpart of guard_effective_us() above with the OPPOSITE pcnt policy,
+ *  and the pcnt_filter parameter exists precisely to pin that difference in
+ *  host tests: blanking COMPOSES with the width filter (subtract mode —
+ *  do_tx_cycle/history.c take pcnt count minus hv_blanked), so pcnt_filter is
+ *  deliberately IGNORED here. The V2.6.29 first cut routed this through
+ *  guard_effective_us (pcnt-superseded); a regression back to that now fails
+ *  test_blank_eff_pcnt_composes. config_effective_blank_us() (config.c) is
+ *  the config_t adapter over this.
+ */
+__attribute__((always_inline)) static inline uint32_t
+blank_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {
+    (void)pcnt_filter;   // composes with pcnt (subtract mode) — never suppresses
+    return enabled ? window_us : 0u;
+}
+
 /** @brief V2.6.29: should the HV blanking window drop this would-be count?
  *
  *  The Rev B/C PCB couples one phantom NEGEDGE into GMZ_COUNT per HV charge

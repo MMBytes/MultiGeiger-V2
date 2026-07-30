@@ -832,10 +832,13 @@ static void do_tx_cycle(void) {
         // Poisson tube shows this near-zero; HV-pickup shows it tracking
         // hv_pulses ~1:1 (radiation_overcounting_independent_review.md).
         // V2.6.29: hv_blanked slots after hv_coincident (edt_us stays last) —
-        // would-be counts the HV blanking window dropped (NOT in `counts`, NOT
-        // a subset of any earlier column; counts_without_blank = counts +
-        // hv_blanked). With blanking active on an affected board, expect
-        // hv_blanked ~= hv_pulses while hv_coincident collapses toward 0.
+        // would-be counts the HV blanking window dropped (NOT in `counts`,
+        // disjoint from guard_removed, but — like guard_removed — a SUBSET of
+        // `rejected` above, since rejected = raw_edges − counts = gate rejects
+        // + guard_removed + hv_blanked; don't sum it with rejected.
+        // counts_without_blank = counts + hv_blanked). With blanking active on
+        // an affected board, expect hv_blanked ~= hv_pulses while
+        // hv_coincident collapses toward 0.
         ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu hv_coincident=%lu "
                       "hv_blanked=%lu "
                       "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",

@@ -148,11 +148,15 @@ uint32_t tube_get_blanked_total(void);
  *  @param hv_blanked    Out: V2.6.29 — would-be COUNTS the opt-in HV blanking
  *                       window suppressed since the last call (its true
  *                       marginal effect: counts_without_blank = counts +
- *                       hv_blanked; NOT included in `counts`, NOT a subset of
- *                       guard_removed/rejected). With blanking active on an
- *                       affected board, expect hv_blanked ~= hv_pulses per
- *                       cycle while hv_coincident collapses toward 0 (the
- *                       phantoms stop being counted). 0 when off.
+ *                       hv_blanked; NOT included in `counts` and disjoint
+ *                       from guard_removed, but — like guard_removed — a
+ *                       SUBSET of the DIAG `rejected` total (rejected =
+ *                       raw_edges − counts = gate rejects + guard_removed +
+ *                       hv_blanked), so do not sum it with rejected. With
+ *                       blanking active on an affected board, expect
+ *                       hv_blanked ~= hv_pulses per cycle while
+ *                       hv_coincident collapses toward 0 (the phantoms stop
+ *                       being counted). 0 when off.
  *  @param hist          Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
  *                       (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
  *                       ~1.2 cps pulses land in the top two bins; a fat low-bin

@@ -300,13 +300,16 @@ uint32_t config_effective_guard_us(const config_t *cfg) {
 }
 
 uint32_t config_effective_blank_us(const config_t *cfg) {
-    // V2.6.29: blanking now COMPOSES with pcnt_filter (subtract mode — the
-    // ISR tally of blanked phantoms is subtracted from the width-filtered
-    // count in do_tx_cycle/history.c), so unlike the guard it is no longer
-    // suppressed when pcnt_filter is on: plain enable → window, else 0.
-    // (V2.6.29 shipped it pcnt-superseded via guard_effective_us; that
-    // exclusion now applies to the guard alone.)
-    return cfg->hv_blank ? cfg->hv_blank_us : 0;
+    // V2.6.29: blanking COMPOSES with pcnt_filter (subtract mode — the ISR
+    // tally of blanked phantoms is subtracted from the width-filtered count
+    // in do_tx_cycle/history.c), so unlike the guard it is NOT suppressed
+    // when pcnt_filter is on. The rule lives in the pure, host-tested
+    // blank_effective_us() (tube_logic.h) — which takes pcnt_filter only to
+    // pin, via test, that it ignores it. (The first V2.6.29 cut had this
+    // pcnt-superseded via guard_effective_us; that exclusion now applies to
+    // the guard alone.)
+    return blank_effective_us(cfg->hv_blank, cfg->pcnt_filter,
+                              cfg->hv_blank_us);
 }
 
 esp_err_t config_save(const config_t *cfg) {

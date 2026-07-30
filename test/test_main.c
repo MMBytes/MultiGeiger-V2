@@ -596,6 +596,23 @@ static int test_blank_no_hv_pulse_yet_never_hits(void) {
     return 1;
 }
 
+static int test_blank_eff_disabled_is_zero(void) {
+    EXPECT_INT(blank_effective_us(false, false, 30), 0);
+    EXPECT_INT(blank_effective_us(false, true, 30), 0);
+    return 1;
+}
+
+static int test_blank_eff_pcnt_composes(void) {
+    // THE policy pin of the V2.6.29 subtract-mode rework (Fable review
+    // MINOR-2): unlike the guard, blanking is NOT suppressed by pcnt_filter —
+    // it composes via the subtract mode. The first V2.6.29 cut routed
+    // config_effective_blank_us through guard_effective_us (pcnt-superseded);
+    // a regression back to that policy fails this case.
+    EXPECT_INT(blank_effective_us(true, true, 30), 30);
+    EXPECT_INT(blank_effective_us(true, false, 30), 30);
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // lorawan_codec  (V2.6.23-dev T3 — pure payload/hex helpers, V1.9 byte-compat)
 // ----------------------------------------------------------------------------
@@ -746,6 +763,10 @@ int main(void) {
     RUN(test_blank_hits_inside_window);
     RUN(test_blank_misses_outside_window);
     RUN(test_blank_no_hv_pulse_yet_never_hits);
+
+    printf("== blank_effective_us ==\n");
+    RUN(test_blank_eff_disabled_is_zero);
+    RUN(test_blank_eff_pcnt_composes);
 
     printf("== lorawan_codec ==\n");
     RUN(test_lw_hex_decode);

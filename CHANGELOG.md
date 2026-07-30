@@ -89,9 +89,11 @@ pulse-start stamp, outside the count path.
 Plumbing mirrors the guard throughout: `hv_blank`/`hv_blank_us` config fields
 (NVS + POST via the schema), live-applied on Save (the ISR re-reads a
 volatile each edge — no reboot), boot-applied in `main.c`, dumped in the boot
-config trace. The blank decision itself is a pure host-tested helper
-(`hv_blank_hit`, `main/tube_logic.h`) with four new cases in
-`test/test_main.c`.
+config trace. The blank decision and the composes-with-pcnt policy are pure
+host-tested helpers (`hv_blank_hit` / `blank_effective_us`,
+`main/tube_logic.h`) with six new cases in `test/test_main.c` — including one
+that pins the subtract-mode policy so a regression to a pcnt-suppressed
+blanking window fails the suite.
 
 ---
 

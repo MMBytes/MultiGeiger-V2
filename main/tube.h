@@ -110,6 +110,20 @@ void tube_set_guard_us(uint32_t guard_us);
  */
 void tube_set_blank_us(uint32_t blank_us);
 
+/** @brief V2.6.29: monotonic total of blanked would-be counts since boot.
+ *
+ *  Twin of tube_get_total_counts() (never reset; callers take their own
+ *  deltas, unsigned wrap-safe; 0 while the tube or blanking is off). Exists
+ *  for the PCNT subtract mode: when pcnt_filter is authoritative, phantoms
+ *  wide enough to pass the width filter are still inside the PCNT hardware
+ *  count, which ISR-side blanking cannot reach — so the per-minute history
+ *  sampler (history.c) subtracts this total's delta from the filtered total,
+ *  and do_tx_cycle subtracts the per-cycle hv_blanked from the filtered
+ *  cycle count. ONLY correct on boards whose phantom pulses pass the filter
+ *  (S3 family, coupled pulses >= 4 µs); see config_fields.def hv_blank.
+ */
+uint32_t tube_get_blanked_total(void);
+
 /** @brief V2.5.12: snapshot + reset the raw-edge count profiler.
  *
  *  Permanent diagnostic on the Geiger count path, emitted as the per-cycle

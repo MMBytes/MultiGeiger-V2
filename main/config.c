@@ -216,12 +216,14 @@ void config_log_summary(const config_t *cfg) {
              cfg->deadtime_guard, (unsigned long)cfg->deadtime_guard_us,
              (cfg->deadtime_guard && config_effective_guard_us(cfg) == 0)
                  ? " (superseded by pcnt-filter)" : "");
-    // V2.6.29: HV blanking window — same "superseded" derivation as the guard
-    // line above (label derived from the single-source effective-us policy).
+    // V2.6.29: HV blanking window. Composes with pcnt_filter (subtract mode),
+    // so no "superseded" derivation here — the effective window is simply
+    // enable × window; flag the subtract arithmetic instead so the boot trace
+    // shows which counting mode is in force.
     LOG_PACED("  hv-blank:         enabled=%d window=%luus%s",
               cfg->hv_blank, (unsigned long)cfg->hv_blank_us,
-              (cfg->hv_blank && config_effective_blank_us(cfg) == 0)
-                  ? " (superseded by pcnt-filter)"
+              (cfg->hv_blank && cfg->pcnt_filter)
+                  ? " (subtract mode: pcnt count minus blanked)"
                   : "");
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
@@ -298,11 +300,13 @@ uint32_t config_effective_guard_us(const config_t *cfg) {
 }
 
 uint32_t config_effective_blank_us(const config_t *cfg) {
-    // V2.6.29: HV blanking window adapter — identical policy shape to the
-    // guard above (0 when off OR superseded by pcnt_filter), so it reuses the
-    // same pure, host-tested guard_effective_us() rule (tube_logic.h).
-    return guard_effective_us(cfg->hv_blank, cfg->pcnt_filter,
-                              cfg->hv_blank_us);
+    // V2.6.29: blanking now COMPOSES with pcnt_filter (subtract mode — the
+    // ISR tally of blanked phantoms is subtracted from the width-filtered
+    // count in do_tx_cycle/history.c), so unlike the guard it is no longer
+    // suppressed when pcnt_filter is on: plain enable → window, else 0.
+    // (V2.6.29 shipped it pcnt-superseded via guard_effective_us; that
+    // exclusion now applies to the guard alone.)
+    return cfg->hv_blank ? cfg->hv_blank_us : 0;
 }
 
 esp_err_t config_save(const config_t *cfg) {

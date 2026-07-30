@@ -723,6 +723,22 @@ static void do_tx_cycle(void) {
     bool filtering = g_cfg.pcnt_filter && pcnt_on;
     uint32_t counts = filtering ? pc[TUBE_PCNT_NWIDTHS - 1] : counts_raw;
 
+    // V2.6.29: PCNT subtract mode — pcnt_filter and hv_blank may now run
+    // TOGETHER. The PCNT hardware path has no notion of HV timing, so on
+    // boards whose phantom pulses pass the width filter (S3 family, >=4 µs)
+    // the phantoms sit inside the filtered count; the ISR's per-window
+    // hv_blanked tally is the count of exactly those pulses, so subtract it.
+    // Strictly gated on `filtering`: in plain mode (pcnt off) counts_raw
+    // already excludes blanked edges at the ISR, and with blanking off
+    // diag_hv_blanked is 0 — either way this block is a no-op. Clamped so a
+    // mis-configured board (phantoms NARROWER than the filter, e.g. the
+    // Feather V2 bench board, where PCNT already dropped them = double
+    // subtraction) can't wrap below zero; the double-subtract itself is a
+    // documented operator decision, see config_fields.def hv_blank.
+    if (filtering && diag_hv_blanked > 0) {
+        counts = (counts >= diag_hv_blanked) ? counts - diag_hv_blanked : 0;
+    }
+
     // V2.4.27: hv_pulses returned by tube_read() is cumulative-since-boot
     // (see tube.h). Derive the per-cycle delta here so the legacy HTTPS
     // upload paths (sensor.community / Madavi / Radmon) carry the same
@@ -774,12 +790,27 @@ static void do_tx_cycle(void) {
         if (filtering) {
             uint32_t cpm_raw = (dt_ms > 0)
                 ? (uint32_t)(((uint64_t)counts_raw * 60000ULL) / dt_ms) : 0;
-            uint32_t removed = (counts_raw >= counts) ? (counts_raw - counts) : 0;
+            // V2.6.29: `removed` = the WIDTH filter's own effect. The ISR
+            // reference must be blank-corrected: counts_raw EXCLUDES blanked
+            // phantoms while pc[widest] still INCLUDES them (they pass the
+            // width filter), so the comparable "what the ISR would have
+            // counted" is counts_raw + hv_blanked — verified live on .196
+            // CYCLE #2 (counts_raw=205, pcnt=223, hv_blanked=18: the naive
+            // formula clamps real width removals to 0 by up to hv_blanked).
+            // Reduces to the pre-blank formula when hv_blanked==0. The blank
+            // subtraction is reported as its own clause (0 when hv_blank is
+            // off — line shape stable for log parsers, matching DIAG).
+            uint32_t pcnt_counts = pc[TUBE_PCNT_NWIDTHS - 1];
+            uint32_t isr_ref     = counts_raw + diag_hv_blanked;
+            uint32_t removed     = (isr_ref >= pcnt_counts)
+                                       ? (isr_ref - pcnt_counts)
+                                       : 0;
             ESP_LOGI(TAG, "FILTER: pcnt_filter ON @%luns — CYCLE counts/cpm are "
-                     "POST-filter; pre-filter counts=%lu cpm=%lu (removed %lu)",
+                          "POST-filter; pre-filter counts=%lu cpm=%lu (removed %lu, "
+                          "hv_blanked %lu subtracted)",
                      (unsigned long)tube_pcnt_width_ns(TUBE_PCNT_NWIDTHS - 1),
                      (unsigned long)counts_raw, (unsigned long)cpm_raw,
-                     (unsigned long)removed);
+                     (unsigned long)removed, (unsigned long)diag_hv_blanked);
         }
 
         // V2.5.12: raw-edge profiler dump. rejected = edges suppressed by the
@@ -1503,8 +1534,10 @@ void app_main(void) {
         tube_set_guard_us(config_effective_guard_us(&g_cfg));
         // V2.6.29: optional HV blanking window (off by default) — phantom-pulse
         // suppression for the Rev B/C coupling defect, keyed on the recharge
-        // state machine's FET turn-off stamp. Same opt-in/live-apply/pcnt-
-        // exclusion discipline as the guard; see config_fields.def.
+        // state machine's FET turn-off stamp. Same opt-in/live-apply discipline
+        // as the guard, but it COMPOSES with pcnt_filter (subtract mode in
+        // do_tx_cycle/history.c) instead of being superseded by it; see
+        // config_fields.def.
         tube_set_blank_us(config_effective_blank_us(&g_cfg));
     }
 

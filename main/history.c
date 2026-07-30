@@ -81,7 +81,16 @@ void history_tick(uint32_t now_ms, bool use_filtered) {
     // filter is on, else the raw ISR total — so cpm5/cpm15 stay consistent with
     // the filtered per-cycle CPM. Both totals are monotonic since boot; this is
     // the only place that reads the filtered one for the rolling averages.
-    uint32_t total = use_filtered ? tube_pcnt_filtered_total()
+    // V2.6.29 (PCNT subtract mode): the filtered source additionally subtracts
+    // the monotonic blanked total, mirroring do_tx_cycle's per-cycle
+    // subtraction — phantoms wide enough to pass the width filter are inside
+    // the PCNT count, and hv_blanked is exactly their tally. Both are
+    // monotonic, so the difference's per-minute DELTA is the corrected count;
+    // with blanking off the blanked total is frozen (or 0) and the delta
+    // contribution is zero, and the UNFILTERED branch is untouched — plain
+    // counting mode sees no change. A blank on/off toggle shifts only future
+    // increments, never the level, so no source re-prime is needed.
+    uint32_t total = use_filtered ? (tube_pcnt_filtered_total() - tube_get_blanked_total())
                                   : tube_get_total_counts();
 
     // (Re)prime on the first tick (now_ms unknown at init) OR on a source
@@ -100,6 +109,13 @@ void history_tick(uint32_t now_ms, bool use_filtered) {
 
     uint32_t d = total - s_last_total;        // unsigned, wrap-safe
     s_last_total = total;
+    // V2.6.29: a mis-configured subtract mode (phantoms NARROWER than the
+    // width filter → blanked pulses were never in the PCNT count → double
+    // subtraction) can make the composed filtered total DECREASE within a
+    // minute; the unsigned delta then wraps huge and the clamp below would
+    // paint a 65534 spike on the graph. A top-bit delta is that wrap (a real
+    // 2^31-count minute is physically impossible) — read it as 0.
+    if (d & 0x80000000u) d = 0;
     uint16_t cpm = (d > 0xFFFEu) ? 0xFFFEu : (uint16_t)d;   // 60 s delta == CPM
 
     xSemaphoreTake(s_mux, portMAX_DELAY);

@@ -80,9 +80,15 @@ static portMUX_TYPE mux_cap = portMUX_INITIALIZER_UNLOCKED;
 // (tube_set_blank_us); isr_hv_blanked tallies ONLY would-be COUNTS the window
 // suppressed (its true marginal effect: counts_without_blank = counts +
 // hv_blanked), snapshot+reset per cycle via tube_get_diag.
-static volatile uint64_t isr_last_hv_off_us = 0;
-static volatile uint32_t isr_blank_us       = 0;
-static volatile uint32_t isr_hv_blanked     = 0;
+// V2.6.29: isr_hv_blanked_total is the monotonic twin (never reset, same
+// pattern as isr_gmc_total) — consumed by the PCNT subtract mode: when the
+// width filter is authoritative, phantoms wide enough to pass it are still in
+// the PCNT hardware count, so main.c/history.c subtract the blanked tally
+// (per-cycle / per-minute delta respectively) from the filtered count.
+static volatile uint64_t isr_last_hv_off_us   = 0;
+static volatile uint32_t isr_blank_us         = 0;
+static volatile uint32_t isr_hv_blanked       = 0;
+static volatile uint32_t isr_hv_blanked_total = 0;
 
 // --- V2.6.9: HV-recharge coincidence diagnostic ---
 // isr_last_hv_pulse_us is stamped at the START of every HV charge pulse (the
@@ -298,6 +304,7 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
             if (hv_blank_hit(hv_off != 0 ? clamp_u32(now - hv_off) : UINT32_MAX,
                              isr_blank_us)) {
                 isr_hv_blanked++;
+                isr_hv_blanked_total++;   // V2.6.29: monotonic twin (PCNT subtract mode)
                 break;
             }
             isr_gmc_counts++;
@@ -464,6 +471,17 @@ void tube_set_guard_us(uint32_t guard_us) {
     portENTER_CRITICAL(&mux_gmc);
     isr_guard_us = guard_us;
     portEXIT_CRITICAL(&mux_gmc);
+}
+
+uint32_t tube_get_blanked_total(void) {
+    // V2.6.29: non-destructive read of the monotonic blanked-count total —
+    // same contract as tube_get_total_counts() (callers take their own deltas;
+    // unsigned wrap is safe). Consumed by history.c's PCNT-subtract source.
+    uint32_t v;
+    portENTER_CRITICAL(&mux_gmc);
+    v = isr_hv_blanked_total;
+    portEXIT_CRITICAL(&mux_gmc);
+    return v;
 }
 
 void tube_set_blank_us(uint32_t blank_us) {

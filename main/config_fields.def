@@ -433,11 +433,29 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // Enable via the `hv_blank` checkbox; `hv_blank_us` is the window (5-1000µs,
 // ~30 typical: covers the 3-16µs observed delay band with margin). Both
 // LIVE-APPLIED on /config Save (ISR re-reads the volatile each edge).
-// Tube-gated. MUTUALLY EXCLUSIVE with pcnt_filter (ENFORCED, pcnt_filter
-// wins) for the same reason as the guard above: pcnt_filter makes the PCNT
-// hardware path authoritative for the uploaded count, which ISR-side blanking
-// cannot reach. Same three-way enforcement: config_post force-clear, /config
-// UI grey+untick (syncGuard()), config_effective_blank_us() returns 0.
+// Tube-gated.
+//
+// COMPOSES with pcnt_filter (V2.6.29 pre-release rework; the first cut
+// shipped it guard-style mutually exclusive): when both are on, the SUBTRACT
+// MODE is in force — do_tx_cycle takes (pcnt filtered count − hv_blanked) per
+// cycle and history.c takes the same difference of the two monotonic totals
+// per minute. Valid because the PCNT hardware path has no HV timing, so on
+// boards whose phantom pulses PASS the width filter (S3 family, coupled
+// pulses >=4µs — .196 field data) the phantoms sit inside the filtered count
+// and hv_blanked is exactly their tally. ⚠️ OPERATOR CAVEAT (the reason the
+// first cut was exclusive): on boards whose phantoms are NARROWER than the
+// filter (classic-ESP32 Feather V2 bench board, 1-4µs) the filter already
+// dropped them, so the combination DOUBLE-SUBTRACTS — don't combine there
+// (blanking alone still works; the width filter is what's redundant). Both
+// count paths clamp so a double-subtract can't wrap (per-cycle clamp to 0 in
+// do_tx_cycle; top-bit delta guard in history_tick).
+//
+// Also composes with the dead-time guard (no exclusion between the two ISR
+// features): gmc_classify runs FIRST, so an edge inside both windows tallies
+// as guard_removed, hv_blanked can read fractionally below hv_pulses when the
+// guard is on (~0.5% overlap at a 3ms guard and background rates), and a
+// phantom edge — like any edge — retriggers the guard window (adds ~hv_pulses
+// × guard_us of dead time per cycle, ~0.03% at defaults; negligible).
 X_BOOL(hv_blank,               "hv_blank",    false)
 X_U32 (hv_blank_us,            "hv_blank_us", 30,       5,       1000)
 

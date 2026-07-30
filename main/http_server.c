@@ -1700,19 +1700,25 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<input type=\"text\" inputmode=\"numeric\" name=\"dt_guard_us\" "
                      "id=\"dt_guard_us\" value=\"%lu\"></label>"
                      // V2.6.29: HV blanking window — checkbox + window under the dead-time
-                     // guard (user request). Same pcnt exclusion + live-apply as the guard
-                     // (syncGuard() greys both; server-side force-clear in config_post).
-                     // Phantom-pulse suppression for the Rev B/C PCB coupling defect: one
-                     // phantom count per HV charge pulse, ~10µs after FET turn-off — see
-                     // config_fields.def for the full story + the archive-step warning.
+                     // guard (user request). Live-applied like the guard, but unlike the guard
+                     // it COMPOSES with the PCNT width filter: subtract mode (do_tx_cycle /
+                     // history.c take pcnt count minus hv_blanked), so only syncTube() gates
+                     // these controls. Phantom-pulse suppression for the Rev B/C PCB coupling
+                     // defect: one phantom count per HV charge pulse, ~10µs after FET turn-off
+                     // — see config_fields.def for the full story + the archive-step warning.
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"hv_blank\" "
                      "id=\"hv_blank\" %s> "
                      "HV blanking window &mdash; ignores count edges for the window below after "
                      "each HV charge pulse. Removes the Rev B/C PCB phantom count (one per HV "
                      "pulse, ~10&micro;s after FET turn-off; the <code>hv_coincident</code> "
                      "share). <b>Steps CPM down by the node's phantom share (~6-9%%)</b> &mdash; "
-                     "deliberate archive decision. Mutually exclusive with the PCNT width "
-                     "filter above; suppressed counts logged as <code>hv_blanked</code>.</label></div>"
+                     "deliberate archive decision. Suppressed counts are logged as "
+                     "<code>hv_blanked</code>. Works together with the PCNT width filter "
+                     "(blanked phantoms are subtracted from the filtered count) &mdash; "
+                     "<b>combine them only on boards whose phantom pulses PASS the filter</b> "
+                     "(ESP32-S3 family, &ge;4&micro;s): where the filter already drops the "
+                     "phantoms (e.g. classic-ESP32 Feather V2) the combination double-subtracts. "
+                     "Also composes with the dead-time guard.</label></div>"
                      "<label>Blanking window (&micro;s, 5&ndash;1000; ~30 typical &mdash; covers "
                      "the 3-16&micro;s observed phantom delay with margin) "
                      "<input type=\"text\" inputmode=\"numeric\" name=\"hv_blank_us\" "
@@ -1895,7 +1901,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // tube" is off (server-side enforcement in config_post mirrors this).
                      "function syncTube(){"
                      "var t=document.getElementById('tube_en');"
-                     "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
+                     // V2.6.29: hv_blank/hv_blank_us are tube-gated ONLY (they compose with
+                     // the PCNT filter via the subtract mode, unlike the guard) — so they
+                     // ride the syncTube() array, not syncGuard()'s pcnt-driven greying.
+                     "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w',"
+                     "'hv_blank','hv_blank_us'];"
                      "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
                      "if(!e)continue;"
                      "if(t.checked){e.disabled=false;}"
@@ -1905,16 +1915,16 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // V2.5.30: dead-time guard is mutually exclusive with the PCNT width filter
                      // (pcnt_filter wins — it makes the PCNT path authoritative, bypassing the
                      // ISR guard). Greyed + unticked when the tube is off OR PCNT is on. Mirrors
-                     // the server-side force-clear in config_post.
-                     // V2.6.29: the HV blanking window shares the guard's exact gating rule
-                     // (tube on + PCNT off), so its two controls ride the same function.
+                     // the server-side force-clear in config_post. (V2.6.29: the HV blanking
+                     // controls do NOT ride this rule — they compose with PCNT via the subtract
+                     // mode, so they're gated by syncTube() alone.)
                      "function syncGuard(){"
                      "var t=document.getElementById('tube_en');"
                      "var p=document.getElementById('pcnt_filt');"
-                     "var a=['dt_guard','dt_guard_us','hv_blank','hv_blank_us'];"
-                     "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
-                     "if(!t.checked||p.checked){if(e.type=='checkbox')e.checked=false;e.disabled=true;}"
-                     "else{e.disabled=false;}}"
+                     "var g=document.getElementById('dt_guard');"
+                     "var gw=document.getElementById('dt_guard_us');"
+                     "if(!t.checked||p.checked){g.checked=false;g.disabled=true;gw.disabled=true;}"
+                     "else{g.disabled=false;gw.disabled=false;}"
                      "}"
                      "syncTube();</script>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
@@ -2438,10 +2448,10 @@ static esp_err_t config_post(httpd_req_t *req) {
     // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
     // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
     // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
-    // V2.6.29: the HV blanking window is ISR-side too — same exclusion.
+    // (V2.6.29: hv_blank deliberately NOT cleared here — it COMPOSES with
+    // pcnt_filter via the subtract mode; see config_fields.def hv_blank.)
     if (cfg_next.pcnt_filter) {
         cfg_next.deadtime_guard = false;
-        cfg_next.hv_blank       = false;
     }
 
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg

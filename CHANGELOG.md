@@ -50,18 +50,48 @@ board, expect `hv_blanked` ≈ `hv_pulses` while `hv_coincident` collapses to
 guard: the phantoms are *in* the multi-year archive, so enabling this steps a
 node's CPM down by its artifact share (~6–9%). Hardware-first remains the
 plan (mod C / Rev D layout separation of CAP_FULL from GMZ); this is the
-fallback and the per-node diagnostic. Mutually exclusive with `pcnt_filter`
-(enforced the same three ways as the guard: `config_post` force-clear, UI
-grey+untick via `syncGuard()`, `config_effective_blank_us()` returns 0) —
-pcnt makes the PCNT hardware count authoritative, which ISR-side blanking
-cannot reach.
+fallback and the per-node diagnostic.
+
+**Composes with the PCNT width filter (subtract mode).** The two features
+target different artifacts with a strong operational reason to run both on
+the deployed FeatherS3-D: 19 days of its syslog show the width filter
+removing a *temperature-driven* narrow-pulse population (near-zero overnight,
+peaking 4.7–4.8% of counts at 13:00–15:00) while the phantom rides at a flat
+~8%. When both are enabled, the ISR's `hv_blanked` tally is subtracted from
+the width-filtered count — per cycle in `do_tx_cycle`, and per minute in the
+CPM-history sampler via a new monotonic blanked total
+(`tube_get_blanked_total()`). Valid because the PCNT hardware path has no HV
+timing, so phantoms wide enough to pass the filter (S3 family, ≥4 µs) sit
+inside the filtered count and `hv_blanked` is exactly their tally. ⚠️ Only
+combine on such boards: where the filter already drops the phantoms (classic
+ESP32 Feather V2, 1–4 µs) the combination double-subtracts — both count paths
+clamp (cycle count to 0; the history delta's top-bit wrap reads as 0) so a
+mis-configuration degrades visibly rather than corrupting the graph. The
+`FILTER:` log line now reports the two effects separately (`removed` = width
+filter only, plus an `hv_blanked N subtracted` clause), and the boot config
+trace flags "(subtract mode: pcnt count minus blanked)" when both are on.
+The dead-time guard keeps its V2.5.30 mutual exclusion with PCNT unchanged.
+
+**Also composes with the dead-time guard** (no exclusion between the two
+ISR-side features): the guard classifies first, so an edge inside both
+windows tallies as `guard_removed`, and `hv_blanked` can read fractionally
+below `hv_pulses` when the guard is on (~0.5% overlap at a 3 ms guard and
+background rates).
+
+**Plain counting mode is untouched.** With all three features off the count
+path is behaviorally identical: the ISR blank branch is dead code at
+`blank_us == 0` (host-tested constant-false), the subtract mode is gated on
+the filter being active, and the history sampler's unfiltered branch is
+unchanged. The only unconditional addition is the FET turn-off timestamp in
+the recharge ISR — a stamp write in the same pattern as the V2.6.9
+pulse-start stamp, outside the count path.
 
 Plumbing mirrors the guard throughout: `hv_blank`/`hv_blank_us` config fields
 (NVS + POST via the schema), live-applied on Save (the ISR re-reads a
 volatile each edge — no reboot), boot-applied in `main.c`, dumped in the boot
-config trace with the same "(superseded by pcnt-filter)" derivation. The
-blank decision itself is a pure host-tested helper (`hv_blank_hit`,
-`main/tube_logic.h`) with four new cases in `test/test_main.c`.
+config trace. The blank decision itself is a pure host-tested helper
+(`hv_blank_hit`, `main/tube_logic.h`) with four new cases in
+`test/test_main.c`.
 
 ---
 

@@ -68,16 +68,16 @@ gmc_classify(uint32_t edt, bool past_gate, uint32_t guard_us) {
     return past_gate ? GMC_COUNT : GMC_REJECT;
 }
 
-/** @brief Effective window (µs) for an ISR-path count feature vs pcnt_filter.
+/** @brief Effective dead-time-guard window given the three config inputs.
  *
- *  Single source of the on/off policy (V2.5.30): the feature is OFF (0) when
- *  its enable is clear OR when pcnt_filter is on — pcnt_filter makes the PCNT
- *  hardware path authoritative for the uploaded count, which no ISR-side
- *  suppression can reach, so the two are mutually exclusive and pcnt_filter
- *  wins. V2.6.29: shared by BOTH ISR-path features — the dead-time guard
- *  (config_effective_guard_us) and the HV blanking window
- *  (config_effective_blank_us); the config.c wrappers are thin adapters over
- *  this so the rule is host-testable without pulling in config_t / NVS.
+ *  Single source of the on/off policy (V2.5.30): the guard is OFF (0) when its
+ *  enable is clear OR when pcnt_filter is on — pcnt_filter makes the PCNT
+ *  hardware path authoritative for the uploaded count, which the ISR guard
+ *  cannot reach, so the two are mutually exclusive and pcnt_filter wins.
+ *  config_effective_guard_us() (config.c) is a thin wrapper over this so the
+ *  rule is host-testable without pulling in config_t / NVS / esp_err.
+ *  (The HV blanking window does NOT use this rule — it composes with
+ *  pcnt_filter via the subtract mode instead; see config_effective_blank_us.)
  */
 __attribute__((always_inline)) static inline uint32_t
 guard_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {

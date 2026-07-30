@@ -1593,594 +1593,616 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<title>Config — MultiGeiger V2</title>"
-        "<style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}"
-        "label{display:block;margin-top:.8em}"
-        "input[type=text],input[type=password],input[type=number]{width:100%%;padding:.4em;box-sizing:border-box}"
-        "input[type=submit]{padding:.6em 1.2em;margin-top:1.2em;font-size:1em}"
-        ".chk{display:inline-block;margin-right:1em;margin-top:.4em}"
-        // V2.5.7: indent each TX target's config fields under its enable checkbox.
-        ".cfg{margin:.1em 0 .9em 1.7em;padding-left:.8em;border-left:2px solid #ccc}"
-        ".cfg label{margin-top:.5em}"
-        // V2.3.24: browsers' user-agent stylesheet shrinks <code> to ~85 % of
-        // body text. Override so the chip-id / MAC values stay visually equal
-        // to the surrounding label text — monospace is the distinguishing cue,
-        // not size.
-        "code{font-size:1em}"
-        // V2.3.24: red asterisk class for "requires reboot" field markers.
-        // Paired with two submit buttons (Save / Save and restart) so the
-        // user picks the right one based on whether they touched any of the
-        // marked fields.
-        ".r{color:#c00;font-weight:bold}"
-        // Stack the two submit buttons with a small gap; suppress the
-        // .8em label-style top margin browsers apply when an input lives
-        // inside a non-label parent.
-        ".btns{margin-top:1.2em}.btns input{margin-right:.6em}</style>"
-        "</head><body><h1>Configuration</h1>"
-        "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
-        "use <b>Save and restart</b> at the bottom when changing these.</p>"
-        "<form method=\"post\" action=\"/config\">"
-        "<h3>Network</h3>"
-        "<label>WiFi SSID <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
-        "<label>WiFi password <span class=\"r\">*</span>"
-        "<input type=\"password\" name=\"wifi_pw\" value=\"%s\"></label>"
-        "<label>DHCP hostname (visible in router) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"wifi_host\" value=\"%s\" maxlength=\"32\"></label>"
-        "<label>AP SSID (used in AP / fallback mode) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
-        // V2.5.30: moved here (below AP SSID) from the old "Other" section.
-        "<label>Web admin and access point password"
-        "<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
-        "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
-        "%s</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
-        "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span>"
-        "%s</label></div>"
-        "<script>function syncHt20(){"
-        "var bg=document.getElementById('wifi_11bg');"
-        "var ht=document.getElementById('wifi_ht20');"
-        "if(bg.checked){ht.checked=true;ht.disabled=true;}"
-        "else{ht.disabled=false;}"
-        "}syncHt20();</script>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" "
-        "id=\"wifi_ps_dis\" onchange=\"syncFtpPs()\" %s> "
-        "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops) "
-        "<span class=\"r\">*</span></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ext_a\" "
-        "id=\"wifi_ext_a\" %s %s> Use External Antenna Port <span class=\"r\">*</span>"
-        "%s</label></div>"
-        "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
-        "MAC: <code>%s</code></p>"
-        "<h3>Hardware</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" "
-        "id=\"tube_en\" onchange=\"syncTube()\" %s> "
-        "Enable Geiger tube (HV pump, pulse counter, radiation uploads). "
-        "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
-        "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
-        "<span class=\"r\">*</span></label></div>"
-        // V2.6.1: tube type — picks the cps→µSv/h dose conversion factor (the only
-        // tube-dependent term; CPM is unchanged). Options are pre-built into
-        // `tube_opts` from the shared tube_types table above. Live-applied (no `*`):
-        // dose is recomputed each cycle from the saved tube_type.
-        "<label>Geiger tube type "
-        "<select name=\"tube_type\" id=\"tube_type\">"
-        "%s"
-        "</select> <small>(sets the CPM&rarr;&micro;Sv/h factor; CPM unaffected; "
-        "live on Save)</small></label>"
-        // V2.5.16: PCNT pulse-width filter — indented under the tube enable like
-        // the TX sub-options, and tube-gated via syncTube() (greyed when the
-        // tube is off; it can't run without count pulses).
-        "<div class=\"cfg\">"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filt\" "
-        "id=\"pcnt_filt\" onchange=\"syncGuard()\" %s> "
-        "PCNT pulse-width filter &mdash; drops count-line pulses narrower than the "
-        "width below (removes the ESP32-S3 narrow-pulse over-count). When ON it "
-        "<b>changes the counted CPM</b> (dose/uploads use the filtered count); the log "
-        "still shows the full <code>DIAG</code>/<code>PCNT</code> data and a "
-        "<code>FILTER:</code> line with the pre-filter CPM. "
-        "<span class=\"r\">*</span></label></div>"
-        "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
-        "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
-        "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label>"
-        // V2.5.30: dead-time guard — checkbox + window, indented under the tube
-        // enable alongside the PCNT filter. MUTUALLY EXCLUSIVE with PCNT: syncGuard()
-        // greys+unticks this when PCNT is on (pcnt_filter wins — it makes the PCNT
-        // hardware path authoritative, bypassing the ISR guard). Live-applied (no
-        // `*`). Time-domain twin of the width filter: collapses 1-5ms re-triggers.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"dt_guard\" "
-        "id=\"dt_guard\" %s> "
-        "Dead-time guard &mdash; collapses 1-5ms afterpulse/re-trigger trains to one "
-        "count (time domain; reaches what the width filter can't). <b>Mutually "
-        "exclusive with the PCNT width filter above</b> &mdash; if PCNT is on it "
-        "takes the count and this is forced off.</label></div>"
-        "<label>Guard window (&micro;s, 200&ndash;20000; ~3000 typical) "
-        "<input type=\"text\" inputmode=\"numeric\" name=\"dt_guard_us\" "
-        "id=\"dt_guard_us\" value=\"%lu\"></label></div>"
-        // V2.5.19: I²C pin-out route toggle. Board-gated like the antenna switch
-        // (greyed + force-off on boards without HAL_HAS_I2C_PINOUT_SWITCH). 3 %s
-        // slots: disabled-attr, checked-attr, trailing note.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"i2c_pinout\" "
-        "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
-        "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
-        "<span class=\"r\">*</span>%s</label></div>"
-        // V2.6.6: battery-attached toggle. Board-gated like the antenna switch
-        // and i2c_pinout above (greyed + force-off on boards without
-        // HAL_HAS_FUEL_GAUGE). 3 %s slots: disabled-attr, checked-attr,
-        // trailing note. No asterisk — live-apply, no reboot needed.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"batt_present\" "
-        "id=\"batt_present\" %s %s> Battery attached (MAX17048 fuel gauge) "
-        "&mdash; shows battery voltage/charge/rate on this page, MQTT, and HA "
-        "Discovery. Can't be auto-detected: USB power alone makes the chip read "
-        "a plausible battery-shaped voltage even with none attached.%s</label></div>"
-        // Heap-guard floor + confirm cycles. Positioned just above the
-        // keep-AP-on toggle (user request, 2026-07-18). No asterisk — read
-        // live each TX cycle by tx_heap_guard() (V2.5.18), so it applies on
-        // plain Save (no reboot). V2.5.33: confirm window configurable.
-        "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\"></label>"
-        "<label>Heap-guard confirm cycles"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"hg_confirm\" value=\"%lu\"></label>"
-        // V2.6.23: keep-AP-on checkbox generalized off standalone-SD (was a
-        // sub-toggle of sd_stand, HAL_HAS_SD_CARD-gated, greyed/cleared by
-        // the syncSdAp() script). main.c now honors s_standalone_ap_on_latched
-        // in ALL modes (see the latch's declaration comment in main.c), so
-        // this renders unconditionally on every board and no longer has any
-        // JS coupling to sd_stand.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sd_ap_on\" "
-        "id=\"sd_ap_on\" %s> Keep config AP on permanently (no STA WiFi "
-        "&mdash; node stays reachable at 192.168.4.1) "
-        "<span class=\"r\">*</span></label></div>"
+                     "<!doctype html><html><head><meta charset=\"utf-8\">"
+                     "<title>Config — MultiGeiger V2</title>"
+                     "<style>body{font-family:system-ui;max-width:40em;margin:2em auto;padding:0 1em}"
+                     "label{display:block;margin-top:.8em}"
+                     "input[type=text],input[type=password],input[type=number]{width:100%%;padding:.4em;box-sizing:border-box}"
+                     "input[type=submit]{padding:.6em 1.2em;margin-top:1.2em;font-size:1em}"
+                     ".chk{display:inline-block;margin-right:1em;margin-top:.4em}"
+                     // V2.5.7: indent each TX target's config fields under its enable checkbox.
+                     ".cfg{margin:.1em 0 .9em 1.7em;padding-left:.8em;border-left:2px solid #ccc}"
+                     ".cfg label{margin-top:.5em}"
+                     // V2.3.24: browsers' user-agent stylesheet shrinks <code> to ~85 % of
+                     // body text. Override so the chip-id / MAC values stay visually equal
+                     // to the surrounding label text — monospace is the distinguishing cue,
+                     // not size.
+                     "code{font-size:1em}"
+                     // V2.3.24: red asterisk class for "requires reboot" field markers.
+                     // Paired with two submit buttons (Save / Save and restart) so the
+                     // user picks the right one based on whether they touched any of the
+                     // marked fields.
+                     ".r{color:#c00;font-weight:bold}"
+                     // Stack the two submit buttons with a small gap; suppress the
+                     // .8em label-style top margin browsers apply when an input lives
+                     // inside a non-label parent.
+                     ".btns{margin-top:1.2em}.btns input{margin-right:.6em}</style>"
+                     "</head><body><h1>Configuration</h1>"
+                     "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
+                     "use <b>Save and restart</b> at the bottom when changing these.</p>"
+                     "<form method=\"post\" action=\"/config\">"
+                     "<h3>Network</h3>"
+                     "<label>WiFi SSID <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
+                     "<label>WiFi password <span class=\"r\">*</span>"
+                     "<input type=\"password\" name=\"wifi_pw\" value=\"%s\"></label>"
+                     "<label>DHCP hostname (visible in router) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"wifi_host\" value=\"%s\" maxlength=\"32\"></label>"
+                     "<label>AP SSID (used in AP / fallback mode) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
+                     // V2.5.30: moved here (below AP SSID) from the old "Other" section.
+                     "<label>Web admin and access point password"
+                     "<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
+                     "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
+                     "%s</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ht20\" "
+                     "id=\"wifi_ht20\" %s> Limit to 20MHz <span class=\"r\">*</span>"
+                     "%s</label></div>"
+                     "<script>function syncHt20(){"
+                     "var bg=document.getElementById('wifi_11bg');"
+                     "var ht=document.getElementById('wifi_ht20');"
+                     "if(bg.checked){ht.checked=true;ht.disabled=true;}"
+                     "else{ht.disabled=false;}"
+                     "}syncHt20();</script>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ps_dis\" "
+                     "id=\"wifi_ps_dis\" onchange=\"syncFtpPs()\" %s> "
+                     "Disable WiFi power save (always-on radio; may reduce mesh re-keying drops) "
+                     "<span class=\"r\">*</span></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ext_a\" "
+                     "id=\"wifi_ext_a\" %s %s> Use External Antenna Port <span class=\"r\">*</span>"
+                     "%s</label></div>"
+                     "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
+                     "MAC: <code>%s</code></p>"
+                     "<h3>Hardware</h3>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"tube_en\" "
+                     "id=\"tube_en\" onchange=\"syncTube()\" %s> "
+                     "Enable Geiger tube (HV pump, pulse counter, radiation uploads). "
+                     "Uncheck for non-Geiger deployments &mdash; disables HV/ISR/gptimer at boot "
+                     "and skips Madavi geiger POST, sensor.community X-PIN 19, and Radmon. "
+                     "<span class=\"r\">*</span></label></div>"
+                     // V2.6.1: tube type — picks the cps→µSv/h dose conversion factor (the only
+                     // tube-dependent term; CPM is unchanged). Options are pre-built into
+                     // `tube_opts` from the shared tube_types table above. Live-applied (no `*`):
+                     // dose is recomputed each cycle from the saved tube_type.
+                     "<label>Geiger tube type "
+                     "<select name=\"tube_type\" id=\"tube_type\">"
+                     "%s"
+                     "</select> <small>(sets the CPM&rarr;&micro;Sv/h factor; CPM unaffected; "
+                     "live on Save)</small></label>"
+                     // V2.5.16: PCNT pulse-width filter — indented under the tube enable like
+                     // the TX sub-options, and tube-gated via syncTube() (greyed when the
+                     // tube is off; it can't run without count pulses).
+                     "<div class=\"cfg\">"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"pcnt_filt\" "
+                     "id=\"pcnt_filt\" onchange=\"syncGuard()\" %s> "
+                     "PCNT pulse-width filter &mdash; drops count-line pulses narrower than the "
+                     "width below (removes the ESP32-S3 narrow-pulse over-count). When ON it "
+                     "<b>changes the counted CPM</b> (dose/uploads use the filtered count); the log "
+                     "still shows the full <code>DIAG</code>/<code>PCNT</code> data and a "
+                     "<code>FILTER:</code> line with the pre-filter CPM. "
+                     "<span class=\"r\">*</span></label></div>"
+                     "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
+                     "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label>"
+                     // V2.5.30: dead-time guard — checkbox + window, indented under the tube
+                     // enable alongside the PCNT filter. MUTUALLY EXCLUSIVE with PCNT: syncGuard()
+                     // greys+unticks this when PCNT is on (pcnt_filter wins — it makes the PCNT
+                     // hardware path authoritative, bypassing the ISR guard). Live-applied (no
+                     // `*`). Time-domain twin of the width filter: collapses 1-5ms re-triggers.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"dt_guard\" "
+                     "id=\"dt_guard\" %s> "
+                     "Dead-time guard &mdash; collapses 1-5ms afterpulse/re-trigger trains to one "
+                     "count (time domain; reaches what the width filter can't). <b>Mutually "
+                     "exclusive with the PCNT width filter above</b> &mdash; if PCNT is on it "
+                     "takes the count and this is forced off.</label></div>"
+                     "<label>Guard window (&micro;s, 200&ndash;20000; ~3000 typical) "
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"dt_guard_us\" "
+                     "id=\"dt_guard_us\" value=\"%lu\"></label>"
+                     // V2.6.29: HV blanking window — checkbox + window under the dead-time
+                     // guard (user request). Same pcnt exclusion + live-apply as the guard
+                     // (syncGuard() greys both; server-side force-clear in config_post).
+                     // Phantom-pulse suppression for the Rev B/C PCB coupling defect: one
+                     // phantom count per HV charge pulse, ~10µs after FET turn-off — see
+                     // config_fields.def for the full story + the archive-step warning.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"hv_blank\" "
+                     "id=\"hv_blank\" %s> "
+                     "HV blanking window &mdash; ignores count edges for the window below after "
+                     "each HV charge pulse. Removes the Rev B/C PCB phantom count (one per HV "
+                     "pulse, ~10&micro;s after FET turn-off; the <code>hv_coincident</code> "
+                     "share). <b>Steps CPM down by the node's phantom share (~6-9%%)</b> &mdash; "
+                     "deliberate archive decision. Mutually exclusive with the PCNT width "
+                     "filter above; suppressed counts logged as <code>hv_blanked</code>.</label></div>"
+                     "<label>Blanking window (&micro;s, 5&ndash;1000; ~30 typical &mdash; covers "
+                     "the 3-16&micro;s observed phantom delay with margin) "
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"hv_blank_us\" "
+                     "id=\"hv_blank_us\" value=\"%lu\"></label></div>"
+                     // V2.5.19: I²C pin-out route toggle. Board-gated like the antenna switch
+                     // (greyed + force-off on boards without HAL_HAS_I2C_PINOUT_SWITCH). 3 %s
+                     // slots: disabled-attr, checked-attr, trailing note.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"i2c_pinout\" "
+                     "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
+                     "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
+                     "<span class=\"r\">*</span>%s</label></div>"
+                     // V2.6.6: battery-attached toggle. Board-gated like the antenna switch
+                     // and i2c_pinout above (greyed + force-off on boards without
+                     // HAL_HAS_FUEL_GAUGE). 3 %s slots: disabled-attr, checked-attr,
+                     // trailing note. No asterisk — live-apply, no reboot needed.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"batt_present\" "
+                     "id=\"batt_present\" %s %s> Battery attached (MAX17048 fuel gauge) "
+                     "&mdash; shows battery voltage/charge/rate on this page, MQTT, and HA "
+                     "Discovery. Can't be auto-detected: USB power alone makes the chip read "
+                     "a plausible battery-shaped voltage even with none attached.%s</label></div>"
+                     // Heap-guard floor + confirm cycles. Positioned just above the
+                     // keep-AP-on toggle (user request, 2026-07-18). No asterisk — read
+                     // live each TX cycle by tx_heap_guard() (V2.5.18), so it applies on
+                     // plain Save (no reboot). V2.5.33: confirm window configurable.
+                     "<label>Heap-guard auto-reboot floor (KB, 0 = off)"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"heap_guard\" value=\"%lu\"></label>"
+                     "<label>Heap-guard confirm cycles"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"hg_confirm\" value=\"%lu\"></label>"
+                     // V2.6.23: keep-AP-on checkbox generalized off standalone-SD (was a
+                     // sub-toggle of sd_stand, HAL_HAS_SD_CARD-gated, greyed/cleared by
+                     // the syncSdAp() script). main.c now honors s_standalone_ap_on_latched
+                     // in ALL modes (see the latch's declaration comment in main.c), so
+                     // this renders unconditionally on every board and no longer has any
+                     // JS coupling to sd_stand.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sd_ap_on\" "
+                     "id=\"sd_ap_on\" %s> Keep config AP on permanently (no STA WiFi "
+                     "&mdash; node stays reachable at 192.168.4.1) "
+                     "<span class=\"r\">*</span></label></div>"
 #if HAL_HAS_SD_CARD
-        // V2.6.19: standalone SD-logging block (2026-07-15 design spec §2).
-        "<h3>Standalone mode</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sd_stand\" "
-        "id=\"sd_stand\" %s> Standalone mode (SD logging, "
-        "radio off). After the boot AP window the radio turns off and every TX "
-        "cycle appends one CSV row of all attached sensor readings to the microSD "
-        "card. Requires a FAT32 card and a GPS receiver (clock source &mdash; "
-        "logging starts at first fix). <span class=\"r\">*</span></label></div>"
+                     // V2.6.19: standalone SD-logging block (2026-07-15 design spec §2).
+                     "<h3>Standalone mode</h3>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sd_stand\" "
+                     "id=\"sd_stand\" %s> Standalone mode (SD logging, "
+                     "radio off). After the boot AP window the radio turns off and every TX "
+                     "cycle appends one CSV row of all attached sensor readings to the microSD "
+                     "card. Requires a FAT32 card and a GPS receiver (clock source &mdash; "
+                     "logging starts at first fix). <span class=\"r\">*</span></label></div>"
 #endif
 #if HAL_HAS_LORAWAN
-        // V2.6.23 (T8): LoRaWAN /config section — BOARD_HELTEC_WIFI_LORA32_V4_R2
-        // only. All fields are reboot-required: the worker task (lorawan_setup())
-        // reads config_t once at boot, so a plain Save persists to NVS but the
-        // already-running worker keeps its latched values until restart — same
-        // "starred" convention as the other reboot-required fields above.
-        "<h3>LoRaWAN (TTN)</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_en\" "
-        "id=\"lora_en\" %s> Enable LoRaWAN uplinks (SX1262, OTAA join) "
-        "<span class=\"r\">*</span></label></div>"
-        "<label>Region <span class=\"r\">*</span>"
-        "<select name=\"lora_region\">%s</select></label>"
-        "<label>Sub-band (0 = all channels; TTN typically uses a single sub-band) "
-        "<span class=\"r\">*</span>"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"lora_subband\" "
-        "value=\"%u\" min=\"0\" max=\"8\"></label>"
-        "<label>DevEUI (16 hex chars) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"lora_deveui\" value=\"%s\" maxlength=\"16\" "
-        "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
-        "placeholder=\"as shown in TTN console\"></label>"
-        "<label>JoinEUI (16 hex chars) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"lora_joineui\" value=\"%s\" maxlength=\"16\" "
-        "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
-        "placeholder=\"as shown in TTN console\"></label>"
-        "<label>AppKey (32 hex chars) <span class=\"r\">*</span>"
-        "<input type=\"password\" name=\"lora_appkey\" value=\"%s\" maxlength=\"32\" "
-        "pattern=\"[0-9a-fA-F]{32}\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_fem_en\" %s> "
-        "Drive FEM enable (GPIO2) <span class=\"r\">*</span> "
-        "<small style=\"color:#c00\">Hardware-reworked boards ONLY &mdash; on "
-        "standard boards this pin is the HV comparator input and driving it "
-        "can damage the board.</small></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
-        "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
-        "<small style=\"color:#c00\">Hardware-reworked boards ONLY.</small>"
-        "</label></div>"
-        "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
-        "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
-        "(TTN Fair Use Policy).</p>"
+                     // V2.6.23 (T8): LoRaWAN /config section — BOARD_HELTEC_WIFI_LORA32_V4_R2
+                     // only. All fields are reboot-required: the worker task (lorawan_setup())
+                     // reads config_t once at boot, so a plain Save persists to NVS but the
+                     // already-running worker keeps its latched values until restart — same
+                     // "starred" convention as the other reboot-required fields above.
+                     "<h3>LoRaWAN (TTN)</h3>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_en\" "
+                     "id=\"lora_en\" %s> Enable LoRaWAN uplinks (SX1262, OTAA join) "
+                     "<span class=\"r\">*</span></label></div>"
+                     "<label>Region <span class=\"r\">*</span>"
+                     "<select name=\"lora_region\">%s</select></label>"
+                     "<label>Sub-band (0 = all channels; TTN typically uses a single sub-band) "
+                     "<span class=\"r\">*</span>"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"lora_subband\" "
+                     "value=\"%u\" min=\"0\" max=\"8\"></label>"
+                     "<label>DevEUI (16 hex chars) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"lora_deveui\" value=\"%s\" maxlength=\"16\" "
+                     "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
+                     "placeholder=\"as shown in TTN console\"></label>"
+                     "<label>JoinEUI (16 hex chars) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"lora_joineui\" value=\"%s\" maxlength=\"16\" "
+                     "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
+                     "placeholder=\"as shown in TTN console\"></label>"
+                     "<label>AppKey (32 hex chars) <span class=\"r\">*</span>"
+                     "<input type=\"password\" name=\"lora_appkey\" value=\"%s\" maxlength=\"32\" "
+                     "pattern=\"[0-9a-fA-F]{32}\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_fem_en\" %s> "
+                     "Drive FEM enable (GPIO2) <span class=\"r\">*</span> "
+                     "<small style=\"color:#c00\">Hardware-reworked boards ONLY &mdash; on "
+                     "standard boards this pin is the HV comparator input and driving it "
+                     "can damage the board.</small></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
+                     "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
+                     "<small style=\"color:#c00\">Hardware-reworked boards ONLY.</small>"
+                     "</label></div>"
+                     "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
+                     "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
+                     "(TTN Fair Use Policy).</p>"
 #endif
-        // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
-        // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
-        // configure here. See the "GNSS / Position" card on /status.
-        // V2.5.7: each target = main enable (+ inline HTTPS) at the left margin,
-        // with its config fields indented in a .cfg block. Station altitude +
-        // sea-level toggle live under sensor.community (its only consumer — the
-        // old standalone "BME280 (environmental)" section was retired).
-        "<h3>Transmission targets</h3>"
-        // V2.5.30: TX interval moved here to the TOP of Transmission targets
-        // (was in "Other").
-        "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sc_https\" %s> HTTPS</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Station altitude (m above sea level)"
-        "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sl\" %s> "
-        "Send pressure-at-sealevel</label></div></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_rad\" id=\"send_rad\" %s> "
-        "Radmon &mdash; radiation-only</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
-        "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
-        "openSenseMap (HTTPS only)</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Box ID (24-char MongoDB ObjectId &mdash; per-device on opensensemap.org)"
-        "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
-        "<label>Access Token (optional &mdash; only if your box has authentication enabled)"
-        "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm_st\" %s> "
-        "openSenseMap STAGING (HTTPS only)</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Staging Box ID (beta &mdash; per-device on staging.opensensemap.org)"
-        "<input type=\"text\" name=\"osm_st_box\" value=\"%s\" maxlength=\"25\"></label>"
-        "<label>Staging Access Token (optional)"
-        "<input type=\"password\" name=\"osm_st_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
-        "aqi.eco (HTTPS only)</label></div>"
-        "<div class=\"cfg\">"
-        "<label>aqi.eco token"
-        "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" id=\"send_gmc\" %s> "
-        "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Account ID"
-        "<input type=\"text\" name=\"gmc_aid\" value=\"%s\" maxlength=\"32\"></label>"
-        "<label>Geiger Counter ID"
-        "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" id=\"send_ts\" %s> "
-        "ThingSpeak &mdash; radiation-only</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Channel Write API Key"
-        "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label></div>"
-        // V2.5.4: ThingSpeak (Particulate Matter) — independent channel for the
-        // SPS30 dust node. field1-4=PM1.0/2.5/4.0/10, 5-7=T/H/P, 8=typ. size.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts_pm\" %s> "
-        "ThingSpeak (Particulate Matter) &mdash; SPS30 dust node (separate channel)</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_pm_https\" %s> HTTPS</label></div>"
-        "<div class=\"cfg\">"
-        "<label>Channel Write API Key"
-        "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label></div>"
-        "<h3>FTP log upload</h3>"
-        "<p>Periodically uploads the in-memory log ring (same content as "
-        "<a href=\"/log\">/log</a>) to a LAN FTP server. Passive mode. "
-        "Leave user/password empty for anonymous login.</p>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_en\" %s> "
-        "Enable FTP log upload</label></div>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_tls\" %s> "
-        "Use explicit TLS (AUTH TLS on port 21) &mdash; certificate NOT verified</label></div>"
-        "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
-        "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
-        "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
-        "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
-        "<label>Upload interval (minutes) (Max 10090)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
-        "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
-        "(prevents DTIM-delayed TCP ACKs; auto-cleared if WiFi PS is already disabled above)</label></div>"
-        "<script>function syncFtpPs(){"
-        "var w=document.getElementById('wifi_ps_dis');"
-        "var f=document.getElementById('ftp_ps_dis');"
-        "if(w.checked){f.checked=false;f.disabled=true;}"
-        "else{f.disabled=false;}"
-        "}syncFtpPs();"
-        // V2.5.4: radiation upload targets are meaningless without the tube.
-        // Grey + force-uncheck Radmon/GMCMap/ThingSpeak when "Enable Geiger
-        // tube" is off (server-side enforcement in config_post mirrors this).
-        "function syncTube(){"
-        "var t=document.getElementById('tube_en');"
-        "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
-        "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
-        "if(!e)continue;"
-        "if(t.checked){e.disabled=false;}"
-        "else{e.checked=false;e.disabled=true;}}"
-        "syncGuard();"
-        "}"
-        // V2.5.30: dead-time guard is mutually exclusive with the PCNT width filter
-        // (pcnt_filter wins — it makes the PCNT path authoritative, bypassing the
-        // ISR guard). Greyed + unticked when the tube is off OR PCNT is on. Mirrors
-        // the server-side force-clear in config_post.
-        "function syncGuard(){"
-        "var t=document.getElementById('tube_en');"
-        "var p=document.getElementById('pcnt_filt');"
-        "var g=document.getElementById('dt_guard');"
-        "var gw=document.getElementById('dt_guard_us');"
-        "if(!t.checked||p.checked){g.checked=false;g.disabled=true;gw.disabled=true;}"
-        "else{g.disabled=false;gw.disabled=false;}"
-        "}"
-        "syncTube();</script>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
-        "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
-        "<h3>MQTT (Home Assistant / Mosquitto)</h3>"
-        "<p>Publish-only MQTT 3.1.1 client. Per TX cycle, sends one JSON state "
-        "message to <code>&lt;prefix&gt;/&lt;chip-id&gt;/state</code> with all "
-        "present-sensor readings. If the device drops abruptly (power loss, "
-        "WiFi failure, crash), the broker publishes <code>offline</code> to "
-        "<code>&lt;prefix&gt;/&lt;chip-id&gt;/availability</code> on the "
-        "device's behalf (MQTT Last-Will-and-Testament), so Home Assistant "
-        "flips the entity to <i>unavailable</i> within ~90 seconds instead "
-        "of showing the stale last reading as fresh. If <i>HA Discovery</i> "
-        "is on, retained config payloads land at "
-        "<code>homeassistant/sensor/geiger_&lt;chip-id&gt;/&hellip;/config</code> "
-        "on every reconnect so Home Assistant auto-creates the entities.</p>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_en\" %s> "
-        "Enable MQTT publishing <span class=\"r\">*</span></label></div>"
-        "<label>Broker host (or IP) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"mqtt_brk\" value=\"%s\" maxlength=\"63\"></label>"
-        "<label>Broker port <span class=\"r\">*</span>"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"mqtt_port\" value=\"%lu\"></label>"
-        "<label>Username (optional)"
-        "<input type=\"text\" name=\"mqtt_user\" value=\"%s\" maxlength=\"32\"></label>"
-        "<label>Password (optional)"
-        "<input type=\"password\" name=\"mqtt_pw\" value=\"%s\" maxlength=\"64\"></label>"
-        "<label>Topic prefix <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"mqtt_pfx\" value=\"%s\" maxlength=\"31\"></label>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_ha\" %s> "
-        "Publish Home Assistant Discovery payloads "
-        "<span class=\"r\">*</span></label></div>"
-        // V2.4.6: MQTT TLS rows. Master enable + mode dropdown + CA textarea.
-        // PEM textarea is conditionally relevant (only Mode B uses it) but
-        // always rendered to keep the form layout stable across mode changes;
-        // an unused PEM is just dead bytes in NVS.
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_tls\" %s> "
-        "Use TLS to broker (mqtts:// — change port to 8883 if applicable) "
-        "<span class=\"r\">*</span></label></div>"
-        "<label>TLS trust mode <span class=\"r\">*</span>"
-        "<select name=\"mqtt_tls_m\">"
-        "<option value=\"0\"%s>A &mdash; Mozilla CA bundle (Let&#39;s Encrypt etc.)</option>"
-        "<option value=\"1\"%s>B &mdash; Custom CA cert (paste PEM below)</option>"
-        "<option value=\"2\"%s>D &mdash; Skip server verification (LAN only!)</option>"
-        "</select></label>"
-        "<label>CA cert PEM (Mode B only) <span class=\"r\">*</span>"
-        "<textarea name=\"mqtt_tls_ca\" rows=\"8\" maxlength=\"2400\" "
-        "style=\"width:100%%;font-family:monospace;font-size:0.85em;box-sizing:border-box\" "
-        "placeholder=\"-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----\""
-        ">%s</textarea></label>"
-        // V2.4.15: UDP syslog client. Plaintext UDP — LAN-only. rsyslog on
-        // the broker host (or any syslog receiver) catches every ESP_LOG
-        // line emitted after STA connect. Boot logs stay in the on-device
-        // ring buffer (visible via /log). See [[reference_syslog_pi_setup]].
-        "<h3>Syslog (UDP)</h3>"
-        "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">"
-        "Per-line UDP shipping (RFC 5424) of every device log entry to a LAN "
-        "syslog server (e.g. <code>rsyslog</code> on the same Pi running the "
-        "MQTT broker). Plaintext — for trusted-LAN use only. Tiny heap "
-        "footprint (~0 KB persistent) and zero retry/buffer state, making it "
-        "the cheapest log-shipping path on Heltec V2.</p>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"syslog_en\" %s> "
-        "Enable syslog forwarding <span class=\"r\">*</span></label></div>"
-        "<label>Syslog server host (or IP) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"syslog_h\" value=\"%s\" maxlength=\"63\"></label>"
-        "<label>Syslog UDP port <span class=\"r\">*</span>"
-        "<input type=\"text\" inputmode=\"numeric\" name=\"syslog_p\" value=\"%lu\"></label>"
-        "<h3>Tick, LED and display</h3>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
-        "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"led_tick\" %s> "
-        "Indicator flash on each GM pulse (LED or NeoPixel, board-dependent) <span class=\"r\">*</span></label></div><br>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
-        "Play boot chirp <span class=\"r\">*</span></label></div><br>"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
-        "Enable Display <span class=\"r\">*</span></label></div>"
-        // V2.4.9: display layout mode dropdown. AUTO uses panel-based rule
-        // (SerLCD or SSD1309 → rotation; SSD1306 → radiation). Explicit
-        // overrides bypass the auto rule entirely.
-        "<label>Display layout <span class=\"r\">*</span>"
-        "<select name=\"disp_mode\">"
-        "<option value=\"0\"%s>Auto (panel-based: small OLED &rarr; radiation, big OLED / SerLCD &rarr; rotation)</option>"
-        "<option value=\"1\"%s>Radiation only (Heltec-style single page)</option>"
-        "<option value=\"2\"%s>Rotation (Env / PM / Number / Uploads / System)</option>"
-        "</select></label>"
-        "<label>Display brightness "
-        "<select name=\"oled_bright\">%s</select>"
-        " <small>(live — applies on Save without reboot)</small></label>"
-        "<h3>Time</h3>"
-        "<label>NTP server 1 <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"ntp\" value=\"%s\"></label>"
-        "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
-        "<label>NTP server 3 (optional) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"ntp3\" value=\"%s\"></label>"
-        "<label>Timezone (POSIX TZ) <span class=\"r\">*</span>"
-        "<input type=\"text\" name=\"tz_posix\" value=\"%s\" maxlength=\"47\">"
-        "<small>e.g. <code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney), "
-        "<code>CET-1CEST,M3.5.0,M10.5.0/3</code> (Germany), "
-        "<code>UTC0</code> (UTC). See <code>man tzset</code>.</small></label>"
-        // V2.5.30: ap_pw moved to Network (below AP SSID), tx_int_ms to the top of
-        // Transmission targets, heap_guard to the bottom of Hardware — leaving this
-        // section Time-only (header renamed from "Other" to "Time" above).
-        // V2.3.24: two submit buttons. The clicked button's name=value is the
-        // only one included in the POST body (standard HTML form behaviour),
-        // so the handler distinguishes via the "save_restart" key. Plain
-        // "Save" leaves the device running with the new NVS values applied
-        // live to the fields that read s_cfg per cycle / per request — see
-        // asterisk legend at the top of the form for which fields don't.
-        "<div class=\"btns\">"
-        "<input type=\"submit\" name=\"save\" value=\"Save\">"
-        "<input type=\"submit\" name=\"save_restart\" value=\"Save and restart\">"
-        "</div>"
-        "</form>"
+                     // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
+                     // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
+                     // configure here. See the "GNSS / Position" card on /status.
+                     // V2.5.7: each target = main enable (+ inline HTTPS) at the left margin,
+                     // with its config fields indented in a .cfg block. Station altitude +
+                     // sea-level toggle live under sensor.community (its only consumer — the
+                     // old standalone "BME280 (environmental)" section was retired).
+                     "<h3>Transmission targets</h3>"
+                     // V2.5.30: TX interval moved here to the TOP of Transmission targets
+                     // (was in "Other").
+                     "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sc_https\" %s> HTTPS</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Station altitude (m above sea level)"
+                     "<input type=\"text\" inputmode=\"decimal\" name=\"alt_m\" value=\"%.1f\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sl\" %s> "
+                     "Send pressure-at-sealevel</label></div></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_rad\" id=\"send_rad\" %s> "
+                     "Radmon &mdash; radiation-only</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
+                     "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
+                     "openSenseMap (HTTPS only)</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Box ID (24-char MongoDB ObjectId &mdash; per-device on opensensemap.org)"
+                     "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
+                     "<label>Access Token (optional &mdash; only if your box has authentication enabled)"
+                     "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm_st\" %s> "
+                     "openSenseMap STAGING (HTTPS only)</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Staging Box ID (beta &mdash; per-device on staging.opensensemap.org)"
+                     "<input type=\"text\" name=\"osm_st_box\" value=\"%s\" maxlength=\"25\"></label>"
+                     "<label>Staging Access Token (optional)"
+                     "<input type=\"password\" name=\"osm_st_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
+                     "aqi.eco (HTTPS only)</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>aqi.eco token"
+                     "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" id=\"send_gmc\" %s> "
+                     "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Account ID"
+                     "<input type=\"text\" name=\"gmc_aid\" value=\"%s\" maxlength=\"32\"></label>"
+                     "<label>Geiger Counter ID"
+                     "<input type=\"text\" name=\"gmc_gid\" value=\"%s\" maxlength=\"32\"></label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts\" id=\"send_ts\" %s> "
+                     "ThingSpeak &mdash; radiation-only</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Channel Write API Key"
+                     "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     // V2.5.4: ThingSpeak (Particulate Matter) — independent channel for the
+                     // SPS30 dust node. field1-4=PM1.0/2.5/4.0/10, 5-7=T/H/P, 8=typ. size.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts_pm\" %s> "
+                     "ThingSpeak (Particulate Matter) &mdash; SPS30 dust node (separate channel)</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_pm_https\" %s> HTTPS</label></div>"
+                     "<div class=\"cfg\">"
+                     "<label>Channel Write API Key"
+                     "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<h3>FTP log upload</h3>"
+                     "<p>Periodically uploads the in-memory log ring (same content as "
+                     "<a href=\"/log\">/log</a>) to a LAN FTP server. Passive mode. "
+                     "Leave user/password empty for anonymous login.</p>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_en\" %s> "
+                     "Enable FTP log upload</label></div>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_tls\" %s> "
+                     "Use explicit TLS (AUTH TLS on port 21) &mdash; certificate NOT verified</label></div>"
+                     "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
+                     "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
+                     "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
+                     "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
+                     "<label>Upload interval (minutes) (Max 10090)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
+                     "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
+                     "(prevents DTIM-delayed TCP ACKs; auto-cleared if WiFi PS is already disabled above)</label></div>"
+                     "<script>function syncFtpPs(){"
+                     "var w=document.getElementById('wifi_ps_dis');"
+                     "var f=document.getElementById('ftp_ps_dis');"
+                     "if(w.checked){f.checked=false;f.disabled=true;}"
+                     "else{f.disabled=false;}"
+                     "}syncFtpPs();"
+                     // V2.5.4: radiation upload targets are meaningless without the tube.
+                     // Grey + force-uncheck Radmon/GMCMap/ThingSpeak when "Enable Geiger
+                     // tube" is off (server-side enforcement in config_post mirrors this).
+                     "function syncTube(){"
+                     "var t=document.getElementById('tube_en');"
+                     "var a=['send_rad','send_gmc','send_ts','pcnt_filt','pcnt_filt_w'];"
+                     "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
+                     "if(!e)continue;"
+                     "if(t.checked){e.disabled=false;}"
+                     "else{e.checked=false;e.disabled=true;}}"
+                     "syncGuard();"
+                     "}"
+                     // V2.5.30: dead-time guard is mutually exclusive with the PCNT width filter
+                     // (pcnt_filter wins — it makes the PCNT path authoritative, bypassing the
+                     // ISR guard). Greyed + unticked when the tube is off OR PCNT is on. Mirrors
+                     // the server-side force-clear in config_post.
+                     // V2.6.29: the HV blanking window shares the guard's exact gating rule
+                     // (tube on + PCNT off), so its two controls ride the same function.
+                     "function syncGuard(){"
+                     "var t=document.getElementById('tube_en');"
+                     "var p=document.getElementById('pcnt_filt');"
+                     "var a=['dt_guard','dt_guard_us','hv_blank','hv_blank_us'];"
+                     "for(var i=0;i<a.length;i++){var e=document.getElementById(a[i]);"
+                     "if(!t.checked||p.checked){if(e.type=='checkbox')e.checked=false;e.disabled=true;}"
+                     "else{e.disabled=false;}}"
+                     "}"
+                     "syncTube();</script>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_t12only\" %s> "
+                     "Limit FTPS to TLS 1.2 (only tick if your FTPS server can't handle TLS 1.3)</label></div>"
+                     "<h3>MQTT (Home Assistant / Mosquitto)</h3>"
+                     "<p>Publish-only MQTT 3.1.1 client. Per TX cycle, sends one JSON state "
+                     "message to <code>&lt;prefix&gt;/&lt;chip-id&gt;/state</code> with all "
+                     "present-sensor readings. If the device drops abruptly (power loss, "
+                     "WiFi failure, crash), the broker publishes <code>offline</code> to "
+                     "<code>&lt;prefix&gt;/&lt;chip-id&gt;/availability</code> on the "
+                     "device's behalf (MQTT Last-Will-and-Testament), so Home Assistant "
+                     "flips the entity to <i>unavailable</i> within ~90 seconds instead "
+                     "of showing the stale last reading as fresh. If <i>HA Discovery</i> "
+                     "is on, retained config payloads land at "
+                     "<code>homeassistant/sensor/geiger_&lt;chip-id&gt;/&hellip;/config</code> "
+                     "on every reconnect so Home Assistant auto-creates the entities.</p>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_en\" %s> "
+                     "Enable MQTT publishing <span class=\"r\">*</span></label></div>"
+                     "<label>Broker host (or IP) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"mqtt_brk\" value=\"%s\" maxlength=\"63\"></label>"
+                     "<label>Broker port <span class=\"r\">*</span>"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"mqtt_port\" value=\"%lu\"></label>"
+                     "<label>Username (optional)"
+                     "<input type=\"text\" name=\"mqtt_user\" value=\"%s\" maxlength=\"32\"></label>"
+                     "<label>Password (optional)"
+                     "<input type=\"password\" name=\"mqtt_pw\" value=\"%s\" maxlength=\"64\"></label>"
+                     "<label>Topic prefix <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"mqtt_pfx\" value=\"%s\" maxlength=\"31\"></label>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_ha\" %s> "
+                     "Publish Home Assistant Discovery payloads "
+                     "<span class=\"r\">*</span></label></div>"
+                     // V2.4.6: MQTT TLS rows. Master enable + mode dropdown + CA textarea.
+                     // PEM textarea is conditionally relevant (only Mode B uses it) but
+                     // always rendered to keep the form layout stable across mode changes;
+                     // an unused PEM is just dead bytes in NVS.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_tls\" %s> "
+                     "Use TLS to broker (mqtts:// — change port to 8883 if applicable) "
+                     "<span class=\"r\">*</span></label></div>"
+                     "<label>TLS trust mode <span class=\"r\">*</span>"
+                     "<select name=\"mqtt_tls_m\">"
+                     "<option value=\"0\"%s>A &mdash; Mozilla CA bundle (Let&#39;s Encrypt etc.)</option>"
+                     "<option value=\"1\"%s>B &mdash; Custom CA cert (paste PEM below)</option>"
+                     "<option value=\"2\"%s>D &mdash; Skip server verification (LAN only!)</option>"
+                     "</select></label>"
+                     "<label>CA cert PEM (Mode B only) <span class=\"r\">*</span>"
+                     "<textarea name=\"mqtt_tls_ca\" rows=\"8\" maxlength=\"2400\" "
+                     "style=\"width:100%%;font-family:monospace;font-size:0.85em;box-sizing:border-box\" "
+                     "placeholder=\"-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----\""
+                     ">%s</textarea></label>"
+                     // V2.4.15: UDP syslog client. Plaintext UDP — LAN-only. rsyslog on
+                     // the broker host (or any syslog receiver) catches every ESP_LOG
+                     // line emitted after STA connect. Boot logs stay in the on-device
+                     // ring buffer (visible via /log). See [[reference_syslog_pi_setup]].
+                     "<h3>Syslog (UDP)</h3>"
+                     "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">"
+                     "Per-line UDP shipping (RFC 5424) of every device log entry to a LAN "
+                     "syslog server (e.g. <code>rsyslog</code> on the same Pi running the "
+                     "MQTT broker). Plaintext — for trusted-LAN use only. Tiny heap "
+                     "footprint (~0 KB persistent) and zero retry/buffer state, making it "
+                     "the cheapest log-shipping path on Heltec V2.</p>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"syslog_en\" %s> "
+                     "Enable syslog forwarding <span class=\"r\">*</span></label></div>"
+                     "<label>Syslog server host (or IP) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"syslog_h\" value=\"%s\" maxlength=\"63\"></label>"
+                     "<label>Syslog UDP port <span class=\"r\">*</span>"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"syslog_p\" value=\"%lu\"></label>"
+                     "<h3>Tick, LED and display</h3>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"sp_tick\" %s> "
+                     "Speaker tick on each GM pulse <span class=\"r\">*</span></label></div><br>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"led_tick\" %s> "
+                     "Indicator flash on each GM pulse (LED or NeoPixel, board-dependent) <span class=\"r\">*</span></label></div><br>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"play_sound\" %s> "
+                     "Play boot chirp <span class=\"r\">*</span></label></div><br>"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"show_disp\" %s> "
+                     "Enable Display <span class=\"r\">*</span></label></div>"
+                     // V2.4.9: display layout mode dropdown. AUTO uses panel-based rule
+                     // (SerLCD or SSD1309 → rotation; SSD1306 → radiation). Explicit
+                     // overrides bypass the auto rule entirely.
+                     "<label>Display layout <span class=\"r\">*</span>"
+                     "<select name=\"disp_mode\">"
+                     "<option value=\"0\"%s>Auto (panel-based: small OLED &rarr; radiation, big OLED / SerLCD &rarr; rotation)</option>"
+                     "<option value=\"1\"%s>Radiation only (Heltec-style single page)</option>"
+                     "<option value=\"2\"%s>Rotation (Env / PM / Number / Uploads / System)</option>"
+                     "</select></label>"
+                     "<label>Display brightness "
+                     "<select name=\"oled_bright\">%s</select>"
+                     " <small>(live — applies on Save without reboot)</small></label>"
+                     "<h3>Time</h3>"
+                     "<label>NTP server 1 <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"ntp\" value=\"%s\"></label>"
+                     "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
+                     "<label>NTP server 3 (optional) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"ntp3\" value=\"%s\"></label>"
+                     "<label>Timezone (POSIX TZ) <span class=\"r\">*</span>"
+                     "<input type=\"text\" name=\"tz_posix\" value=\"%s\" maxlength=\"47\">"
+                     "<small>e.g. <code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney), "
+                     "<code>CET-1CEST,M3.5.0,M10.5.0/3</code> (Germany), "
+                     "<code>UTC0</code> (UTC). See <code>man tzset</code>.</small></label>"
+                     // V2.5.30: ap_pw moved to Network (below AP SSID), tx_int_ms to the top of
+                     // Transmission targets, heap_guard to the bottom of Hardware — leaving this
+                     // section Time-only (header renamed from "Other" to "Time" above).
+                     // V2.3.24: two submit buttons. The clicked button's name=value is the
+                     // only one included in the POST body (standard HTML form behaviour),
+                     // so the handler distinguishes via the "save_restart" key. Plain
+                     // "Save" leaves the device running with the new NVS values applied
+                     // live to the fields that read s_cfg per cycle / per request — see
+                     // asterisk legend at the top of the form for which fields don't.
+                     "<div class=\"btns\">"
+                     "<input type=\"submit\" name=\"save\" value=\"Save\">"
+                     "<input type=\"submit\" name=\"save_restart\" value=\"Save and restart\">"
+                     "</div>"
+                     "</form>"
 #if HAL_HAS_LORAWAN
-        // V2.6.26-pending: own <form> (can't nest inside the main config
-        // form) posting to the authed+CSRF-checked /lorawan_reset endpoint.
-        // Session-only wipe by default; the DevNonce checkbox is the
-        // explicitly-scary re-registered-device path (see lorawan_reset_post).
-        "<h3>LoRaWAN session</h3>"
-        "<form method=\"post\" action=\"/lorawan_reset\" "
-        "onsubmit=\"return confirm('Forget the LoRaWAN session and reboot? "
-        "The device will perform a fresh OTAA join.');\">"
-        "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wipe_nonces\" value=\"1\"> "
-        "Also wipe DevNonce history "
-        "<small style=\"color:#c00\">ONLY after &quot;Reset used DevNonces&quot; in the "
-        "TTN console &mdash; otherwise the network silently rejects the next "
-        "joins as replays.</small></label></div>"
-        "<input type=\"submit\" value=\"Forget session and reboot (fresh OTAA join)\">"
-        "</form>"
+                     // V2.6.26-pending: own <form> (can't nest inside the main config
+                     // form) posting to the authed+CSRF-checked /lorawan_reset endpoint.
+                     // Session-only wipe by default; the DevNonce checkbox is the
+                     // explicitly-scary re-registered-device path (see lorawan_reset_post).
+                     "<h3>LoRaWAN session</h3>"
+                     "<form method=\"post\" action=\"/lorawan_reset\" "
+                     "onsubmit=\"return confirm('Forget the LoRaWAN session and reboot? "
+                     "The device will perform a fresh OTAA join.');\">"
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wipe_nonces\" value=\"1\"> "
+                     "Also wipe DevNonce history "
+                     "<small style=\"color:#c00\">ONLY after &quot;Reset used DevNonces&quot; in the "
+                     "TTN console &mdash; otherwise the network silently rejects the next "
+                     "joins as replays.</small></label></div>"
+                     "<input type=\"submit\" value=\"Forget session and reboot (fresh OTAA join)\">"
+                     "</form>"
 #endif
-        "<h3>Reboot</h3>"
-        "<form method=\"post\" action=\"/reboot\" "
-        "onsubmit=\"return confirm('Reboot the device now?');\">"
-        "<input type=\"submit\" value=\"Reboot now\">"
-        "</form>"
-        "<p><a href=\"/\">Back to status</a> &middot; "
-        "<a href=\"/update\">Firmware update</a></p>"
-        "</body></html>",
-        e->ssid, e->pw, e->host, e->apn, e->ap,   // V2.5.30: e->ap (ap_pw) moved to Network
-        s_cfg->wifi_11bg_only   ? "checked" : "",
-        // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
-        // restricts the 2.4GHz protocol set — 5GHz has no 802.11b/g to limit
-        // it to, so apply_radio_limits_sta() (main.c) always leaves 5GHz at
-        // its fullest protocol set. Disclose that scoping here rather than
-        // implying (as the label alone would) that the whole device is
-        // capped to legacy rates on every band.
+                     "<h3>Reboot</h3>"
+                     "<form method=\"post\" action=\"/reboot\" "
+                     "onsubmit=\"return confirm('Reboot the device now?');\">"
+                     "<input type=\"submit\" value=\"Reboot now\">"
+                     "</form>"
+                     "<p><a href=\"/\">Back to status</a> &middot; "
+                     "<a href=\"/update\">Firmware update</a></p>"
+                     "</body></html>",
+                     e->ssid, e->pw, e->host, e->apn, e->ap,   // V2.5.30: e->ap (ap_pw) moved to Network
+                     s_cfg->wifi_11bg_only ? "checked" : "",
+    // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
+    // restricts the 2.4GHz protocol set — 5GHz has no 802.11b/g to limit
+    // it to, so apply_radio_limits_sta() (main.c) always leaves 5GHz at
+    // its fullest protocol set. Disclose that scoping here rather than
+    // implying (as the label alone would) that the whole device is
+    // capped to legacy rates on every band.
 #if CONFIG_SOC_WIFI_SUPPORT_5G
-        " <small>(2.4GHz only &mdash; this board's 5GHz radio stays "
-        "unrestricted)</small>",
+                     " <small>(2.4GHz only &mdash; this board's 5GHz radio stays "
+                     "unrestricted)</small>",
 #else
-        "",
+                     "",
 #endif
-        s_cfg->wifi_ht20_only   ? "checked" : "",
-        // V2.6.17: on CONFIG_SOC_WIFI_HE_SUPPORT chips (ESP32-C5 today),
-        // apply_radio_limits_sta() (main.c) caps 2.4GHz at 20MHz regardless
-        // of this checkbox once 802.11ax is in the protocol mask (IDF only
-        // allows WIFI_BW40 without 11AC/11AX in the mask) — confirmed live.
-        // Disclose the no-op rather than implying the checkbox still gates
-        // a real 40MHz mode on these boards.
+                     s_cfg->wifi_ht20_only ? "checked" : "",
+    // V2.6.17: on CONFIG_SOC_WIFI_HE_SUPPORT chips (ESP32-C5 today),
+    // apply_radio_limits_sta() (main.c) caps 2.4GHz at 20MHz regardless
+    // of this checkbox once 802.11ax is in the protocol mask (IDF only
+    // allows WIFI_BW40 without 11AC/11AX in the mask) — confirmed live.
+    // Disclose the no-op rather than implying the checkbox still gates
+    // a real 40MHz mode on these boards.
 #if CONFIG_SOC_WIFI_HE_SUPPORT
-        " <small>(no effect on this board &mdash; its 802.11ax radio runs "
-        "at 20MHz in every mode)</small>",
+                     " <small>(no effect on this board &mdash; its 802.11ax radio runs "
+                     "at 20MHz in every mode)</small>",
 #else
-        "",
+                     "",
 #endif
-        s_cfg->wifi_ps_disabled ? "checked" : "",
+                     s_cfg->wifi_ps_disabled ? "checked" : "",
 #if HAL_HAS_ANTENNA_SWITCH
-        "",                                                  // not disabled on this board
-        s_cfg->use_external_antenna ? "checked" : "",        // current state
-        "",                                                  // no trailing note
+                     "",                                             // not disabled on this board
+                     s_cfg->use_external_antenna ? "checked" : "",   // current state
+                     "",                                             // no trailing note
 #else
-        "disabled",                                          // greyed out
-        "",                                                  // never checked on this board
-        " <small>(not available on this board)</small>",
+                     "disabled",   // greyed out
+                     "",           // never checked on this board
+                     " <small>(not available on this board)</small>",
 #endif
-        e->chip, s_mac_str,
-        s_cfg->tube_enabled ? "checked" : "",
-        tube_opts,                              // V2.6.1: table-driven tube dropdown
-        s_cfg->pcnt_filter  ? "checked" : "",   // V2.5.16: indented under tube_en
-        (unsigned long)s_cfg->pcnt_filter_width_ns,  // V2.5.16: filter width input
-        s_cfg->deadtime_guard ? "checked" : "",      // V2.5.30: guard enable checkbox
-        (unsigned long)s_cfg->deadtime_guard_us,     // V2.5.30: guard window µs
+                     e->chip, s_mac_str,
+                     s_cfg->tube_enabled ? "checked" : "",
+                     tube_opts,                                    // V2.6.1: table-driven tube dropdown
+                     s_cfg->pcnt_filter ? "checked" : "",          // V2.5.16: indented under tube_en
+                     (unsigned long)s_cfg->pcnt_filter_width_ns,   // V2.5.16: filter width input
+                     s_cfg->deadtime_guard ? "checked" : "",       // V2.5.30: guard enable checkbox
+                     (unsigned long)s_cfg->deadtime_guard_us,      // V2.5.30: guard window µs
+                     s_cfg->hv_blank ? "checked" : "",             // V2.6.29: HV blanking enable checkbox
+                     (unsigned long)s_cfg->hv_blank_us,            // V2.6.29: blanking window µs
 #if HAL_HAS_I2C_PINOUT_SWITCH
-        "",                                          // not disabled on this board
-        s_cfg->i2c_pinout ? "checked" : "",          // current state
-        "",                                          // no trailing note
+                     "",                                   // not disabled on this board
+                     s_cfg->i2c_pinout ? "checked" : "",   // current state
+                     "",                                   // no trailing note
 #else
-        "disabled",                                  // greyed out
-        "",                                          // never checked on this board
-        " <small>(not available on this board)</small>",
+                     "disabled",   // greyed out
+                     "",           // never checked on this board
+                     " <small>(not available on this board)</small>",
 #endif
 #if HAL_HAS_FUEL_GAUGE
-        "",                                          // not disabled on this board
-        s_cfg->batt_present ? "checked" : "",        // current state
-        "",                                          // no trailing note
+                     "",                                     // not disabled on this board
+                     s_cfg->batt_present ? "checked" : "",   // current state
+                     "",                                     // no trailing note
 #else
-        "disabled",                                  // greyed out
-        "",                                          // never checked on this board
-        " <small>(not available on this board)</small>",
+                     "disabled",   // greyed out
+                     "",           // never checked on this board
+                     " <small>(not available on this board)</small>",
 #endif
-        (unsigned long)s_cfg->heap_guard_floor_kb,   // moved above keep-AP-on (user request)
-        (unsigned long)s_cfg->heap_guard_confirm_cycles,  // V2.5.33: confirm cycles box
-        s_cfg->standalone_ap_on ? "checked" : "",    // V2.6.23: keep-AP-on, now unconditional
+                     (unsigned long)s_cfg->heap_guard_floor_kb,         // moved above keep-AP-on (user request)
+                     (unsigned long)s_cfg->heap_guard_confirm_cycles,   // V2.5.33: confirm cycles box
+                     s_cfg->standalone_ap_on ? "checked" : "",          // V2.6.23: keep-AP-on, now unconditional
 #if HAL_HAS_SD_CARD
-        s_cfg->standalone_sd    ? "checked" : "",    // V2.6.19: standalone SD-logging
+                     s_cfg->standalone_sd ? "checked" : "",   // V2.6.19: standalone SD-logging
 #endif
 #if HAL_HAS_LORAWAN
-        // V2.6.23 (T8): LoRaWAN section args — 8 in order: enable, region
-        // <option> list (table-driven, see lora_region_opts above — collapses
-        // what would otherwise be 8 per-option "selected" args into one %s,
-        // same convention as tube_opts/br_opts), sub-band, DevEUI, JoinEUI,
-        // AppKey, FEM enable, high-power enable. Must match the 8 "%s"/"%u"
-        // slots in the "LoRaWAN (TTN)" HTML block above 1:1.
-        s_cfg->lorawan_enabled ? "checked" : "",
-        lora_region_opts,
-        (unsigned)s_cfg->lorawan_subband,
-        e->lora_deveui,
-        e->lora_joineui,
-        e->lora_appkey,
-        s_cfg->lorawan_fem_en     ? "checked" : "",
-        s_cfg->lorawan_high_power ? "checked" : "",
+                     // V2.6.23 (T8): LoRaWAN section args — 8 in order: enable, region
+                     // <option> list (table-driven, see lora_region_opts above — collapses
+                     // what would otherwise be 8 per-option "selected" args into one %s,
+                     // same convention as tube_opts/br_opts), sub-band, DevEUI, JoinEUI,
+                     // AppKey, FEM enable, high-power enable. Must match the 8 "%s"/"%u"
+                     // slots in the "LoRaWAN (TTN)" HTML block above 1:1.
+                     s_cfg->lorawan_enabled ? "checked" : "",
+                     lora_region_opts,
+                     (unsigned)s_cfg->lorawan_subband,
+                     e->lora_deveui,
+                     e->lora_joineui,
+                     e->lora_appkey,
+                     s_cfg->lorawan_fem_en ? "checked" : "",
+                     s_cfg->lorawan_high_power ? "checked" : "",
 #endif
-        (unsigned long)s_cfg->tx_interval_ms,        // V2.5.30: top of Transmission targets
-        s_cfg->send_madavi  ? "checked" : "",
-        s_cfg->madavi_https ? "checked" : "",
-        s_cfg->send_sensorc ? "checked" : "",
-        s_cfg->sensorc_https ? "checked" : "",
-        (double)s_cfg->station_altitude_m,            // V2.5.7: moved under sensor.community
-        s_cfg->send_sealevel_pressure ? "checked" : "",
-        s_cfg->send_radmon  ? "checked" : "",
-        s_cfg->radmon_https ? "checked" : "",
-        e->ru, e->rp,
-        s_cfg->send_osm ? "checked" : "",
-        e->osm,
-        e->osm_tok,
-        s_cfg->send_osm_staging ? "checked" : "",
-        e->osm_st,
-        e->osm_st_tok,
-        s_cfg->send_aqi ? "checked" : "",
-        e->aqi,
-        s_cfg->send_gmc ? "checked" : "",
-        e->gmc_aid,
-        e->gmc_gid,
-        s_cfg->send_thingspeak  ? "checked" : "",
-        s_cfg->thingspeak_https ? "checked" : "",
-        e->ts_key,
-        s_cfg->send_thingspeak_pm  ? "checked" : "",
-        s_cfg->thingspeak_pm_https ? "checked" : "",
-        e->ts_pm_key,
-        s_cfg->ftp_enabled ? "checked" : "",
-        s_cfg->ftp_tls     ? "checked" : "",
-        e->fhost, e->fuser, e->fpw, e->fpath,
-        (unsigned long)s_cfg->ftp_interval_min,
-        s_cfg->ftp_ps_disabled ? "checked" : "",
-        s_cfg->ftp_tls12_only  ? "checked" : "",
-        // V2.4.4: MQTT row format args (must match order of %s/%lu/%s/%s/%s/%s in the form HTML above).
-        s_cfg->mqtt_enable ? "checked" : "",
-        e->mhost,
-        (unsigned long)s_cfg->mqtt_port,
-        e->muser,
-        e->mpw,
-        e->mpfx,
-        s_cfg->mqtt_ha_discovery ? "checked" : "",
-        // V2.4.6: MQTT TLS row format args (5 in order: enable, then three
-        // <option selected> markers for the trust-mode dropdown 0/1/2, then
-        // the CA cert PEM body).
-        s_cfg->mqtt_tls_enable ? "checked" : "",
-        s_cfg->mqtt_tls_mode == 0 ? " selected" : "",
-        s_cfg->mqtt_tls_mode == 1 ? " selected" : "",
-        s_cfg->mqtt_tls_mode == 2 ? " selected" : "",
-        e_mca,
-        // V2.4.15: syslog row format args (3 in order: enable / host / port).
-        s_cfg->syslog_enable ? "checked" : "",
-        e->slh,
-        (unsigned long)s_cfg->syslog_port,
-        s_cfg->speaker_tick ? "checked" : "",
-        s_cfg->led_tick     ? "checked" : "",
-        s_cfg->play_sound   ? "checked" : "",
-        s_cfg->show_display ? "checked" : "",
-        // V2.4.9: display layout mode dropdown (3 args — selected markers
-        // for the three options Auto/Radiation/Rotation).
-        s_cfg->display_mode == 0 ? " selected" : "",
-        s_cfg->display_mode == 1 ? " selected" : "",
-        s_cfg->display_mode == 2 ? " selected" : "",
-        br_opts,
-        e->ntp1, e->ntp2, e->ntp3, e->tz);   // V2.5.30: ap_pw/tx_int/heap_guard relocated above
+                     (unsigned long)s_cfg->tx_interval_ms,   // V2.5.30: top of Transmission targets
+                     s_cfg->send_madavi ? "checked" : "",
+                     s_cfg->madavi_https ? "checked" : "",
+                     s_cfg->send_sensorc ? "checked" : "",
+                     s_cfg->sensorc_https ? "checked" : "",
+                     (double)s_cfg->station_altitude_m,   // V2.5.7: moved under sensor.community
+                     s_cfg->send_sealevel_pressure ? "checked" : "",
+                     s_cfg->send_radmon ? "checked" : "",
+                     s_cfg->radmon_https ? "checked" : "",
+                     e->ru, e->rp,
+                     s_cfg->send_osm ? "checked" : "",
+                     e->osm,
+                     e->osm_tok,
+                     s_cfg->send_osm_staging ? "checked" : "",
+                     e->osm_st,
+                     e->osm_st_tok,
+                     s_cfg->send_aqi ? "checked" : "",
+                     e->aqi,
+                     s_cfg->send_gmc ? "checked" : "",
+                     e->gmc_aid,
+                     e->gmc_gid,
+                     s_cfg->send_thingspeak ? "checked" : "",
+                     s_cfg->thingspeak_https ? "checked" : "",
+                     e->ts_key,
+                     s_cfg->send_thingspeak_pm ? "checked" : "",
+                     s_cfg->thingspeak_pm_https ? "checked" : "",
+                     e->ts_pm_key,
+                     s_cfg->ftp_enabled ? "checked" : "",
+                     s_cfg->ftp_tls ? "checked" : "",
+                     e->fhost, e->fuser, e->fpw, e->fpath,
+                     (unsigned long)s_cfg->ftp_interval_min,
+                     s_cfg->ftp_ps_disabled ? "checked" : "",
+                     s_cfg->ftp_tls12_only ? "checked" : "",
+                     // V2.4.4: MQTT row format args (must match order of %s/%lu/%s/%s/%s/%s in the form HTML above).
+                     s_cfg->mqtt_enable ? "checked" : "",
+                     e->mhost,
+                     (unsigned long)s_cfg->mqtt_port,
+                     e->muser,
+                     e->mpw,
+                     e->mpfx,
+                     s_cfg->mqtt_ha_discovery ? "checked" : "",
+                     // V2.4.6: MQTT TLS row format args (5 in order: enable, then three
+                     // <option selected> markers for the trust-mode dropdown 0/1/2, then
+                     // the CA cert PEM body).
+                     s_cfg->mqtt_tls_enable ? "checked" : "",
+                     s_cfg->mqtt_tls_mode == 0 ? " selected" : "",
+                     s_cfg->mqtt_tls_mode == 1 ? " selected" : "",
+                     s_cfg->mqtt_tls_mode == 2 ? " selected" : "",
+                     e_mca,
+                     // V2.4.15: syslog row format args (3 in order: enable / host / port).
+                     s_cfg->syslog_enable ? "checked" : "",
+                     e->slh,
+                     (unsigned long)s_cfg->syslog_port,
+                     s_cfg->speaker_tick ? "checked" : "",
+                     s_cfg->led_tick ? "checked" : "",
+                     s_cfg->play_sound ? "checked" : "",
+                     s_cfg->show_display ? "checked" : "",
+                     // V2.4.9: display layout mode dropdown (3 args — selected markers
+                     // for the three options Auto/Radiation/Rotation).
+                     s_cfg->display_mode == 0 ? " selected" : "",
+                     s_cfg->display_mode == 1 ? " selected" : "",
+                     s_cfg->display_mode == 2 ? " selected" : "",
+                     br_opts,
+                     e->ntp1, e->ntp2, e->ntp3, e->tz);   // V2.5.30: ap_pw/tx_int/heap_guard relocated above
 
     // V2.3.33: snprintf returns the would-have-been length on truncation,
     // not the bytes actually written. If n >= buffer size the page tail was
@@ -2409,14 +2431,17 @@ static esp_err_t config_post(httpd_req_t *req) {
         cfg_next.send_thingspeak = false;
         cfg_next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
         cfg_next.deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
+        cfg_next.hv_blank        = false;   // V2.6.29: HV blanking needs count pulses
     }
 
     // V2.5.30: dead-time guard is mutually exclusive with pcnt_filter — the guard
     // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
     // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
     // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
+    // V2.6.29: the HV blanking window is ISR-side too — same exclusion.
     if (cfg_next.pcnt_filter) {
         cfg_next.deadtime_guard = false;
+        cfg_next.hv_blank       = false;
     }
 
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
@@ -2455,6 +2480,9 @@ static esp_err_t config_post(httpd_req_t *req) {
     // is off, the value was already force-cleared to 0 above.
     if (tube_is_enabled()) {
         tube_set_guard_us(config_effective_guard_us(s_cfg));
+        // V2.6.29: live-apply the HV blanking window the same way — the count
+        // ISR re-reads its volatile each edge, so Save takes effect immediately.
+        tube_set_blank_us(config_effective_blank_us(s_cfg));
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");

@@ -68,16 +68,43 @@ gmc_classify(uint32_t edt, bool past_gate, uint32_t guard_us) {
     return past_gate ? GMC_COUNT : GMC_REJECT;
 }
 
-/** @brief Effective dead-time-guard window given the three config inputs.
+/** @brief Effective window (µs) for an ISR-path count feature vs pcnt_filter.
  *
- *  Single source of the on/off policy (V2.5.30): the guard is OFF (0) when its
- *  enable is clear OR when pcnt_filter is on — pcnt_filter makes the PCNT
- *  hardware path authoritative for the uploaded count, which the ISR guard
- *  cannot reach, so the two are mutually exclusive and pcnt_filter wins.
- *  config_effective_guard_us() (config.c) is a thin wrapper over this so the
- *  rule is host-testable without pulling in config_t / NVS / esp_err.
+ *  Single source of the on/off policy (V2.5.30): the feature is OFF (0) when
+ *  its enable is clear OR when pcnt_filter is on — pcnt_filter makes the PCNT
+ *  hardware path authoritative for the uploaded count, which no ISR-side
+ *  suppression can reach, so the two are mutually exclusive and pcnt_filter
+ *  wins. V2.6.29: shared by BOTH ISR-path features — the dead-time guard
+ *  (config_effective_guard_us) and the HV blanking window
+ *  (config_effective_blank_us); the config.c wrappers are thin adapters over
+ *  this so the rule is host-testable without pulling in config_t / NVS.
  */
 __attribute__((always_inline)) static inline uint32_t
 guard_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {
     return (!enabled || pcnt_filter) ? 0u : window_us;
+}
+
+/** @brief V2.6.29: should the HV blanking window drop this would-be count?
+ *
+ *  The Rev B/C PCB couples one phantom NEGEDGE into GMZ_COUNT per HV charge
+ *  pulse — deterministically ~10 µs (9-16 observed; 3-10 during a boot train
+ *  as the rail rises) after FET turn-off, the first ring-down trough of the
+ *  L1 flyback (80 kHz SRF). See reference_radiation_data_analysis 2026-07-21/26.
+ *  Because the trigger time is known from the recharge state machine itself,
+ *  a short deaf window keyed on the FET turn-off stamp removes the phantom
+ *  by CAUSE — immune to the pulse-width variation (MCU- and hardware-mod-
+ *  dependent) that makes the 4 µs PCNT width filter a non-fix fleet-wide.
+ *
+ *  @param off_gap  Gap (µs) from the most recent FET turn-off to this edge,
+ *                  clamped (clamp_u32); callers pass UINT32_MAX when no HV
+ *                  pulse has fired yet so the edge can never be blanked.
+ *  @param blank_us Blanking window; 0 disables (default).
+ *
+ *  Applied ONLY to edges classified GMC_COUNT (past gate + guard): blanked
+ *  edges are tallied separately (hv_blanked) as the window's true marginal
+ *  effect, so counts_without_blank == counts + hv_blanked.
+ */
+__attribute__((always_inline)) static inline bool
+hv_blank_hit(uint32_t off_gap, uint32_t blank_us) {
+    return (blank_us != 0) && (off_gap <= blank_us);
 }

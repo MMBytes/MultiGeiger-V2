@@ -90,6 +90,26 @@ uint32_t tube_get_total_counts(void);
  */
 void tube_set_guard_us(uint32_t guard_us);
 
+/** @brief V2.6.29: set the opt-in HV blanking window (µs). 0 = OFF (default).
+ *
+ *  Phantom-pulse suppression for the Rev B/C PCB coupling defect: each HV
+ *  charge pulse couples one phantom NEGEDGE into GMZ_COUNT ~10 µs after FET
+ *  turn-off (the first L1 flyback ring-down trough — see
+ *  reference_radiation_data_analysis 2026-07-21/26). Once set, a would-be
+ *  count landing within @p blank_us of the most recent FET turn-off (stamped
+ *  every pulse in recharge_tick's S_PULSE_L, so mid-train and boot-train
+ *  pulses are covered too) is dropped and tallied as `hv_blanked` instead.
+ *  Keyed on the CAUSE (the recharge state machine's own clock), so unlike the
+ *  4 µs PCNT width filter it is immune to the coupled pulse's width varying
+ *  with MCU input stage or hardware mods. Dead-time cost ~= hv_pulses ×
+ *  blank_us per cycle (a few hundred µs per 3-min cycle — ppm-level).
+ *  Applied LIVE like the guard (ISR re-reads the volatile each edge); also
+ *  set at boot. Steps CPM down by the node's phantom share (~6-9% on
+ *  affected boards) — archive-continuity decision, hence opt-in; see
+ *  config_fields.def.
+ */
+void tube_set_blank_us(uint32_t blank_us);
+
 /** @brief V2.5.12: snapshot + reset the raw-edge count profiler.
  *
  *  Permanent diagnostic on the Geiger count path, emitted as the per-cycle
@@ -111,13 +131,22 @@ void tube_set_guard_us(uint32_t guard_us);
  *                       Poisson tube shows this tracking background rate
  *                       (near-zero at typical HV cadence); electrical pickup
  *                       from the charge pump shows it tracking hv_pulses 1:1.
+ *  @param hv_blanked    Out: V2.6.29 — would-be COUNTS the opt-in HV blanking
+ *                       window suppressed since the last call (its true
+ *                       marginal effect: counts_without_blank = counts +
+ *                       hv_blanked; NOT included in `counts`, NOT a subset of
+ *                       guard_removed/rejected). With blanking active on an
+ *                       affected board, expect hv_blanked ~= hv_pulses per
+ *                       cycle while hv_coincident collapses toward 0 (the
+ *                       phantoms stop being counted). 0 when off.
  *  @param hist          Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
  *                       (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
  *                       ~1.2 cps pulses land in the top two bins; a fat low-bin
  *                       population is count-node ringing/noise.
  */
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
-                   uint32_t *hv_coincident, uint32_t hist[TUBE_DIAG_NBUCKETS]);
+                   uint32_t *hv_coincident, uint32_t *hv_blanked,
+                   uint32_t hist[TUBE_DIAG_NBUCKETS]);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

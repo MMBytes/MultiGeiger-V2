@@ -561,6 +561,42 @@ static int test_guard_eff_enabled_returns_window(void) {
 }
 
 // ----------------------------------------------------------------------------
+// hv_blank_hit  (V2.6.29 HV blanking window — phantom-pulse suppression)
+// ----------------------------------------------------------------------------
+
+static int test_blank_off_never_hits(void) {
+    // blank_us==0 disables the window — even a gap of 0 (edge exactly at the
+    // FET turn-off instant) must not be blanked.
+    EXPECT_INT(hv_blank_hit(0, 0), 0);
+    EXPECT_INT(hv_blank_hit(10, 0), 0);
+    return 1;
+}
+
+static int test_blank_hits_inside_window(void) {
+    // The measured phantom delay band (3-16µs after FET turn-off) falls inside
+    // the default 30µs window. Boundary: gap == blank_us is INSIDE (<=), same
+    // convention as the dead-time guard's edt <= guard_us.
+    EXPECT_INT(hv_blank_hit(10, 30), 1);
+    EXPECT_INT(hv_blank_hit(3, 30), 1);
+    EXPECT_INT(hv_blank_hit(30, 30), 1);
+    return 1;
+}
+
+static int test_blank_misses_outside_window(void) {
+    // A genuine tube pulse arriving after the window must count normally.
+    EXPECT_INT(hv_blank_hit(31, 30), 0);
+    EXPECT_INT(hv_blank_hit(1000000, 30), 0);
+    return 1;
+}
+
+static int test_blank_no_hv_pulse_yet_never_hits(void) {
+    // Before the first HV pulse the ISR passes UINT32_MAX (same first-edge
+    // convention as edt), which can never be <= any window in range.
+    EXPECT_INT(hv_blank_hit(UINT32_MAX, 1000), 0);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // lorawan_codec  (V2.6.23-dev T3 — pure payload/hex helpers, V1.9 byte-compat)
 // ----------------------------------------------------------------------------
 
@@ -704,6 +740,12 @@ int main(void) {
     RUN(test_guard_eff_disabled_is_zero);
     RUN(test_guard_eff_pcnt_wins);
     RUN(test_guard_eff_enabled_returns_window);
+
+    printf("== hv_blank_hit ==\n");
+    RUN(test_blank_off_never_hits);
+    RUN(test_blank_hits_inside_window);
+    RUN(test_blank_misses_outside_window);
+    RUN(test_blank_no_hv_pulse_yet_never_hits);
 
     printf("== lorawan_codec ==\n");
     RUN(test_lw_hex_decode);

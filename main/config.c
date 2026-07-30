@@ -216,6 +216,13 @@ void config_log_summary(const config_t *cfg) {
              cfg->deadtime_guard, (unsigned long)cfg->deadtime_guard_us,
              (cfg->deadtime_guard && config_effective_guard_us(cfg) == 0)
                  ? " (superseded by pcnt-filter)" : "");
+    // V2.6.29: HV blanking window — same "superseded" derivation as the guard
+    // line above (label derived from the single-source effective-us policy).
+    LOG_PACED("  hv-blank:         enabled=%d window=%luus%s",
+              cfg->hv_blank, (unsigned long)cfg->hv_blank_us,
+              (cfg->hv_blank && config_effective_blank_us(cfg) == 0)
+                  ? " (superseded by pcnt-filter)"
+                  : "");
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
     // UI, so dump it only where it's actually configurable rather than printing
@@ -288,6 +295,14 @@ uint32_t config_effective_guard_us(const config_t *cfg) {
     // (tube_logic.h); this is the config_t adapter over it.
     return guard_effective_us(cfg->deadtime_guard, cfg->pcnt_filter,
                               cfg->deadtime_guard_us);
+}
+
+uint32_t config_effective_blank_us(const config_t *cfg) {
+    // V2.6.29: HV blanking window adapter — identical policy shape to the
+    // guard above (0 when off OR superseded by pcnt_filter), so it reuses the
+    // same pure, host-tested guard_effective_us() rule (tube_logic.h).
+    return guard_effective_us(cfg->hv_blank, cfg->pcnt_filter,
+                              cfg->hv_blank_us);
 }
 
 esp_err_t config_save(const config_t *cfg) {

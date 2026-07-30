@@ -122,6 +122,16 @@ esp_err_t config_save(const config_t *cfg);
  */
 uint32_t config_effective_guard_us(const config_t *cfg);
 
+/** @brief Effective HV blanking window (µs) to hand to tube_set_blank_us().
+ *
+ *  V2.6.29: same single-source policy shape as config_effective_guard_us —
+ *  0 (off) when the `hv_blank` enable is clear OR when `pcnt_filter` is on
+ *  (pcnt makes the PCNT hardware path authoritative, which ISR-side blanking
+ *  cannot reach; pcnt_filter wins). Otherwise returns `hv_blank_us`. Used by
+ *  both the boot path (main.c) and the live /config apply (http_server.c).
+ */
+uint32_t config_effective_blank_us(const config_t *cfg);
+
 /** @brief Pre-clear all bool fields in `next`.
  *
  *  Helper for the HTTP POST handler: form submissions only include

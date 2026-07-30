@@ -407,6 +407,40 @@ X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 X_BOOL(deadtime_guard,         "dt_guard",    false)
 X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 
+// --- HV blanking window / phantom-pulse suppression (V2.6.29) ---------------
+//
+// Opt-in deaf window on the count input after each HV charge pulse — the
+// firmware-side mitigation for the Rev B/C PCB coupling defect: every HV
+// recharge pulse couples ONE phantom NEGEDGE into GMZ_COUNT, deterministically
+// ~10µs (9-16 observed) after FET turn-off = the first ring-down trough of the
+// L1 flyback (80kHz SRF). Confirmed 1:1 per-edge on 4 boards incl. the
+// deployed FeatherS3-D (.196: hv_coincident==hv_pulses every cycle, ~6-9% of
+// counts). See reference_radiation_data_analysis 2026-07-09..26.
+//
+// Keyed on the recharge state machine's OWN turn-off stamp (the cause), not on
+// pulse width (the symptom) — the coupled pulse's width varies with MCU input
+// stage and hardware mods (C3 value, drain-track damping), which is exactly
+// why the 4µs PCNT width filter is NOT a fleet-safe fix for this. Dead-time
+// cost is ppm-level (hv_pulses × window per cycle).
+//
+// DELIBERATELY OPT-IN (same archive discipline as the dead-time guard): the
+// phantoms are IN the multi-year archive, so enabling this steps a node's CPM
+// DOWN by its artifact share (~6-9%). Hardware-first remains the plan (mod C /
+// Rev D layout); this is the fallback + diagnostic. Per-cycle suppressed
+// count is logged on the DIAG line as hv_blanked (expect ~= hv_pulses, with
+// hv_coincident collapsing to ~0).
+//
+// Enable via the `hv_blank` checkbox; `hv_blank_us` is the window (5-1000µs,
+// ~30 typical: covers the 3-16µs observed delay band with margin). Both
+// LIVE-APPLIED on /config Save (ISR re-reads the volatile each edge).
+// Tube-gated. MUTUALLY EXCLUSIVE with pcnt_filter (ENFORCED, pcnt_filter
+// wins) for the same reason as the guard above: pcnt_filter makes the PCNT
+// hardware path authoritative for the uploaded count, which ISR-side blanking
+// cannot reach. Same three-way enforcement: config_post force-clear, /config
+// UI grey+untick (syncGuard()), config_effective_blank_us() returns 0.
+X_BOOL(hv_blank,               "hv_blank",    false)
+X_U32 (hv_blank_us,            "hv_blank_us", 30,       5,       1000)
+
 // --- Standalone SD-logging mode (V2.6.19) ------------------------------------
 //
 // standalone_sd is only meaningful on HAL_HAS_SD_CARD boards (the /config

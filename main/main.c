@@ -689,8 +689,10 @@ static void do_tx_cycle(void) {
     uint32_t diag_raw_edges = 0;
     uint32_t diag_guard_removed = 0;   // V2.5.30: edges dropped by the dead-time guard
     uint32_t diag_hv_coincident = 0;   // V2.6.9: counted edges landing in the HV-pulse coincidence window
+    uint32_t diag_hv_blanked               = 0;   // V2.6.29: would-be counts dropped by the HV blanking window
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
-    tube_get_diag(&diag_raw_edges, &diag_guard_removed, &diag_hv_coincident, diag_hist);
+    tube_get_diag(&diag_raw_edges, &diag_guard_removed, &diag_hv_coincident,
+                  &diag_hv_blanked, diag_hist);
 
     // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read
     // advances each unit's per-cycle delta base, so re-reading would zero the
@@ -798,10 +800,17 @@ static void do_tx_cycle(void) {
         // it), tested against hv_pulses/cum on the CYCLE line above: a real
         // Poisson tube shows this near-zero; HV-pickup shows it tracking
         // hv_pulses ~1:1 (radiation_overcounting_independent_review.md).
+        // V2.6.29: hv_blanked slots after hv_coincident (edt_us stays last) —
+        // would-be counts the HV blanking window dropped (NOT in `counts`, NOT
+        // a subset of any earlier column; counts_without_blank = counts +
+        // hv_blanked). With blanking active on an affected board, expect
+        // hv_blanked ~= hv_pulses while hv_coincident collapses toward 0.
         ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu hv_coincident=%lu "
-                 "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
+                      "hv_blanked=%lu "
+                      "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
                  (unsigned long)diag_guard_removed, (unsigned long)diag_hv_coincident,
+                 (unsigned long)diag_hv_blanked,
                  (unsigned long)diag_hist[0], (unsigned long)diag_hist[1],
                  (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
@@ -1492,6 +1501,11 @@ void app_main(void) {
     // also live-applied from config_post on /config Save (review #4).
     if (g_cfg.tube_enabled) {
         tube_set_guard_us(config_effective_guard_us(&g_cfg));
+        // V2.6.29: optional HV blanking window (off by default) — phantom-pulse
+        // suppression for the Rev B/C coupling defect, keyed on the recharge
+        // state machine's FET turn-off stamp. Same opt-in/live-apply/pcnt-
+        // exclusion discipline as the guard; see config_fields.def.
+        tube_set_blank_us(config_effective_blank_us(&g_cfg));
     }
 
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)

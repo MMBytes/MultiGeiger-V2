@@ -66,6 +66,24 @@ static volatile bool     isr_gmc_cap_full = false;
 static portMUX_TYPE mux_hv  = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE mux_cap = portMUX_INITIALIZER_UNLOCKED;
 
+// --- V2.6.29: opt-in HV blanking window (phantom-pulse suppression) ---
+// The Rev B/C PCB couples one phantom NEGEDGE into GMZ_COUNT per HV charge
+// pulse, ~10 µs after FET turn-off (the first L1 flyback ring-down trough —
+// see tube_logic.h hv_blank_hit and reference_radiation_data_analysis).
+// isr_last_hv_off_us is stamped at FET turn-off (S_PULSE_L in recharge_tick,
+// under mux_hv like the S_PULSE_H stamp — same 64-bit-on-32-bit-core locking
+// rationale as isr_last_hv_pulse_us above). Turn-off, NOT the CAP_FULL edge,
+// is the trigger: hv_coincident field data shows one phantom per PULSE, and
+// on a multi-pulse top-up only the last pulse trips CAP_FULL — gating there
+// would miss the earlier pulses' phantoms (and every boot-train pulse).
+// isr_blank_us (0 = OFF) mirrors the guard's live-apply pattern
+// (tube_set_blank_us); isr_hv_blanked tallies ONLY would-be COUNTS the window
+// suppressed (its true marginal effect: counts_without_blank = counts +
+// hv_blanked), snapshot+reset per cycle via tube_get_diag.
+static volatile uint64_t isr_last_hv_off_us = 0;
+static volatile uint32_t isr_blank_us       = 0;
+static volatile uint32_t isr_hv_blanked     = 0;
+
 // --- V2.6.9: HV-recharge coincidence diagnostic ---
 // isr_last_hv_pulse_us is stamped at the START of every HV charge pulse (the
 // S_PULSE_H edge in recharge_tick below — the gptimer ISR, NOT the GPIO count
@@ -148,6 +166,15 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
         }
         if (state == S_PULSE_L) {
             gpio_set_level(PIN_HV_FET_OUTPUT, 0);
+            // V2.6.29: stamp FET turn-off — the drain flyback (and its phantom
+            // count ~10 µs later on Rev B/C boards) starts at THIS instant, so
+            // this is the zero-point for the HV blanking window. Stamped for
+            // EVERY pulse (mid-train ones too), unlike the CAP_FULL edge which
+            // only the final pulse of a top-up trips. Same lock as the
+            // S_PULSE_H stamp above (64-bit store, two independent ISRs).
+            portENTER_CRITICAL_ISR(&mux_hv);
+            isr_last_hv_off_us = (uint64_t)esp_timer_get_time();
+            portEXIT_CRITICAL_ISR(&mux_hv);
             state = S_CHECK;
             next_state = PERIODS(1000);
             return false;
@@ -193,9 +220,12 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     // taking mux_gmc below — the two critical sections are sequential, not
     // nested, so this never risks a lock-order deadlock against recharge_tick
     // (which only ever takes mux_hv/mux_cap, never mux_gmc).
-    uint64_t hv_last;
+    // V2.6.29: the FET turn-off stamp (HV blanking zero-point) rides the same
+    // snapshot — both are mux_hv-owned 64-bit stamps written by recharge_tick.
+    uint64_t hv_last, hv_off;
     portENTER_CRITICAL_ISR(&mux_hv);
     hv_last = isr_last_hv_pulse_us;
+    hv_off  = isr_last_hv_off_us;
     portEXIT_CRITICAL_ISR(&mux_hv);
 
     portENTER_CRITICAL_ISR(&mux_gmc);
@@ -254,6 +284,22 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
             isr_guard_removed++;
             break;
         case GMC_COUNT:
+            // V2.6.29: HV blanking window — LAST gate before an edge becomes a
+            // count, so isr_hv_blanked is the window's true marginal effect
+            // (counts_without_blank = counts + hv_blanked; edges the 190µs gate
+            // or the guard already own are tallied there, not here). A blanked
+            // edge is the PCB's phantom, not a tube event: it must not become
+            // the new "last counted pulse" (that would extend dead time against
+            // the NEXT real pulse), feed min/max stats, tick the speaker/LED,
+            // or tally hv_coincident — hence the early break before all of
+            // those. hv_off==0 = no HV pulse since boot, nothing to blank
+            // against (hv_blank_hit gets UINT32_MAX, same first-edge convention
+            // as edt above).
+            if (hv_blank_hit(hv_off != 0 ? clamp_u32(now - hv_off) : UINT32_MAX,
+                             isr_blank_us)) {
+                isr_hv_blanked++;
+                break;
+            }
             isr_gmc_counts++;
             isr_gmc_total++;            // V2.5.6: monotonic history counter
             if (last != 0) {           // inter-pulse stats only between two counted pulses
@@ -420,17 +466,31 @@ void tube_set_guard_us(uint32_t guard_us) {
     portEXIT_CRITICAL(&mux_gmc);
 }
 
+void tube_set_blank_us(uint32_t blank_us) {
+    // V2.6.29: set the HV blanking window (effective µs from
+    // config_effective_blank_us; 0 disables). Same live-apply pattern as
+    // tube_set_guard_us above — single volatile uint32_t the ISR re-reads each
+    // edge, mux_gmc for consistency with the other ISR-shared writers, called
+    // at boot AND from config_post on /config Save (no reboot needed).
+    portENTER_CRITICAL(&mux_gmc);
+    isr_blank_us = blank_us;
+    portEXIT_CRITICAL(&mux_gmc);
+}
+
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
-                   uint32_t *hv_coincident, uint32_t hist[TUBE_DIAG_NBUCKETS]) {
+                   uint32_t *hv_coincident, uint32_t *hv_blanked,
+                   uint32_t hist[TUBE_DIAG_NBUCKETS]) {
     // V2.5.12: snapshot + reset under the same lock as the ISR writer,
     // mirroring tube_read()'s window-reset discipline so the diag window tiles
     // cleanly cycle-to-cycle. V2.5.30: guard_removed rides the same snapshot.
     // V2.6.9: hv_coincident too — it's written under mux_gmc (see gmc_count_isr),
     // not mux_hv, so it belongs in this critical section, not a separate one.
+    // V2.6.29: hv_blanked joins for the same reason.
     portENTER_CRITICAL(&mux_gmc);
     *raw_edges     = isr_raw_edges;
     *guard_removed = isr_guard_removed;
     *hv_coincident = isr_hv_coincident;
+    *hv_blanked    = isr_hv_blanked;
     for (int i = 0; i < TUBE_DIAG_NBUCKETS; i++) {
         hist[i] = isr_dt_hist[i];
         isr_dt_hist[i] = 0;
@@ -438,5 +498,6 @@ void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
     isr_raw_edges     = 0;
     isr_guard_removed = 0;
     isr_hv_coincident  = 0;
+    isr_hv_blanked     = 0;
     portEXIT_CRITICAL(&mux_gmc);
 }

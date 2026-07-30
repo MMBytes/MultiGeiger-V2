@@ -9,6 +9,62 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.29 — HV blanking window: firmware suppression of the Rev B/C phantom count
+
+New opt-in config setting (under the Dead-time guard on `/config`): **HV
+blanking window** — a short deaf window on the count input after each HV
+charge pulse. It is the firmware-side mitigation for the Rev B/C PCB coupling
+defect established by the July 2026 bench investigation: every HV recharge
+pulse couples exactly one phantom NEGEDGE into `GMZ_COUNT`, deterministically
+~10 µs (9–16 observed; 3–10 during a boot train) after FET turn-off — the
+first ring-down trough of the L1 flyback (80 kHz SRF). On the deployed
+FeatherS3-D at Oatlands the artifact is visible as `hv_coincident` ==
+`hv_pulses` on every single cycle, ~6–9% of counted pulses.
+
+**Keyed on the cause, not the symptom.** The recharge state machine stamps
+FET turn-off (`S_PULSE_L` in `recharge_tick`, `main/tube.c`) and the count
+ISR drops any would-be count landing within the window (default 30 µs, range
+5–1000) of that stamp. Two deliberate choices:
+
+- **Turn-off stamp, not the CAP_FULL edge.** Field data shows one phantom per
+  *pulse*, and on a multi-pulse top-up only the last pulse trips CAP_FULL —
+  gating there would miss the earlier pulses' phantoms and every boot-train
+  pulse. The turn-off stamp covers all of them (CAP_FULL rises at the same
+  instant anyway, so the measured 10 µs delay applies unchanged).
+- **Time-domain, not width-domain.** The C3-substitution and mod-B bench
+  tests both proved the coupled pulse's *width* shifts with hardware details
+  (bigger C3 or a lower-loss drain path widens it past the 4 µs PCNT filter),
+  so width filtering is not a fleet-safe fix. The blanking window keys on the
+  recharge state machine's own clock and is immune to all of that.
+
+**Accounting discipline (same as the dead-time guard):** the blank check is
+the last gate before an edge becomes a count, so the new per-cycle DIAG field
+`hv_blanked` (after `hv_coincident`, `edt_us` stays positionally last) is the
+window's true marginal effect — `counts_without_blank = counts + hv_blanked`.
+A blanked edge never updates the last-counted-pulse time, min/max stats,
+`hv_coincident`, or the speaker/LED tick. With blanking active on an affected
+board, expect `hv_blanked` ≈ `hv_pulses` while `hv_coincident` collapses to
+~0. Dead-time cost is ppm-level (`hv_pulses` × window per cycle).
+
+**Deliberately opt-in** — same archive discipline as the V2.5.30 dead-time
+guard: the phantoms are *in* the multi-year archive, so enabling this steps a
+node's CPM down by its artifact share (~6–9%). Hardware-first remains the
+plan (mod C / Rev D layout separation of CAP_FULL from GMZ); this is the
+fallback and the per-node diagnostic. Mutually exclusive with `pcnt_filter`
+(enforced the same three ways as the guard: `config_post` force-clear, UI
+grey+untick via `syncGuard()`, `config_effective_blank_us()` returns 0) —
+pcnt makes the PCNT hardware count authoritative, which ISR-side blanking
+cannot reach.
+
+Plumbing mirrors the guard throughout: `hv_blank`/`hv_blank_us` config fields
+(NVS + POST via the schema), live-applied on Save (the ISR re-reads a
+volatile each edge — no reboot), boot-applied in `main.c`, dumped in the boot
+config trace with the same "(superseded by pcnt-filter)" derivation. The
+blank decision itself is a pure host-tested helper (`hv_blank_hit`,
+`main/tube_logic.h`) with four new cases in `test/test_main.c`.
+
+---
+
 ## V2.6.28 — openSenseMap and Madavi log labels, syslog drop-counter documentation
 
 Observability-only release. No behaviour change on any board: same requests,

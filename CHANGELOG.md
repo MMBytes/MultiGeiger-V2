@@ -33,8 +33,9 @@ matching monotonic wide total feeding the cpm5/cpm15 rolling averages
 (`history.c`, once-per-cycle lump cadence). Cool cycles are unchanged
 (removed=0 → wide=hv_blanked, the V2.6.29 subtraction); warm cycles no longer
 double-subtract (removed≈hv_blanked → wide≈0). Replaying the formula over the
-full 10,099-cycle field dataset: pre-blanking cycles bit-identical, and the
-post-V2.6.29 era flattens to ~66 CPM across every temperature band. The
+full 10,099-cycle field dataset: pre-blanking cycles identical except a single
+boot charge-train cycle, and the post-V2.6.29 era flattens to ~66 CPM across
+every temperature band. The
 V2.6.29 operator caveat ("don't combine blanking with the width filter on
 narrow-phantom boards — double-subtracts") is retired: on such boards the
 subtraction now collapses to ~0 (statistically — a cycle mixing pileup with
@@ -49,9 +50,10 @@ Two observability changes:
   the narrow-phantom share, a free per-cycle phantom-width-vs-temperature
   telemetry channel.
 - **Blanking-only nodes keep the PCNT comb**: enabling `hv_blank` without
-  `pcnt_filter` now also brings up the width comb as a passive diagnostic
-  (counts stay ISR-based — the comb is parallel hardware and never touches
-  the count path; only the `pcnt_filter` substitution ever does).
+  `pcnt_filter` now also brings up the width comb at boot as a passive
+  diagnostic (counts stay ISR-based — the comb is parallel hardware and never
+  touches the count path; only the `pcnt_filter` substitution ever does; a
+  live Save starts blanking immediately, the comb from the next restart).
 
 Deployment note: on nodes running pcnt+blank (.196), warm-hour CPM steps
 **up** by the previously double-subtracted share — the mirror of the V2.6.29

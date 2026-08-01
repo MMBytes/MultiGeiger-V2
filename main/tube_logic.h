@@ -105,7 +105,7 @@ blank_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {
  *         width-filtered PCNT count this cycle (the correct subtract amount).
  *
  *  The V2.6.29 subtract mode took (pcnt count − hv_blanked) assuming every
- *  blanked phantom passed the width filter. Field data (.196, 2026-08-01,
+ *  blanked phantom passed the width filter. Field data (deployed Rev B node, 2026-08-01,
  *  reference_radiation_data_analysis) showed the phantom's width is
  *  TEMPERATURE-dependent: ≥4 µs cool (inside the PCNT count, subtraction
  *  correct) but <4 µs warm (already dropped by the width filter — subtracting

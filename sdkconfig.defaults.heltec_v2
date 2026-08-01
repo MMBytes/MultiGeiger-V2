@@ -23,7 +23,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 # V2.5.30 RE-TEST on ESP-IDF 6.0.1 — two variants:
 #
 # TEST 1 (DYNAMIC_BUFFER only = the Kconfig-canonical config; both FREE_* default
-# off): FAILED. Flashed to heltec_v2 (.52, chip 12276328, FTPS live) and it
+# off): FAILED. Flashed to heltec_v2 (chip 12276328, FTPS live) and it
 # PANICKED on the FIRST FTPS upload (uptime 360 s) — TLSF
 # `block_next ... !block_is_last(block)` heap-corruption assert inside
 # mbedtls_ssl_session_reset, called from our hand-rolled log_ftp.c::io_close.
@@ -34,7 +34,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 # not the corrupter; the overrun is upstream in the dynamic-buffer transfer churn).
 #
 # TEST 2 (all three on — adds FREE_CONFIG_DATA + FREE_CA_CERT, the aggressive
-# ~20-30 KB variant): ALSO FAILED. Flashed to .52, PANICKED on the first FTPS
+# ~20-30 KB variant): ALSO FAILED. Flashed to the same board, PANICKED on the first FTPS
 # upload (uptime 371 s) with the SAME TLSF block_is_last assert in
 # io_close→session_reset — but the free site moved a THIRD time, now the cipher
 # transform keys (mbedtls_ssl_transform_free→psa_destroy_key→...→

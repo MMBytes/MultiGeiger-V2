@@ -416,7 +416,7 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // recharge pulse couples ONE phantom NEGEDGE into GMZ_COUNT, deterministically
 // ~10µs (9-16 observed) after FET turn-off = the first ring-down trough of the
 // L1 flyback (80kHz SRF). Confirmed 1:1 per-edge on 4 boards incl. the
-// deployed FeatherS3-D (.196: hv_coincident==hv_pulses every cycle, ~6-9% of
+// deployed FeatherS3-D field node (hv_coincident==hv_pulses every cycle, ~6-9% of
 // counts). See reference_radiation_data_analysis 2026-07-09..26.
 //
 // Keyed on the recharge state machine's OWN turn-off stamp (the cause), not on
@@ -443,7 +443,7 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // subtracts only the wide-phantom share pcnt_blank_wide() derives from the
 // width filter's own removal tally, and history.c subtracts the matching
 // monotonic wide total. This replaced the raw (pcnt − hv_blanked) formula
-// after .196 field data (2026-08-01) showed phantom width is TEMPERATURE-
+// after field data (2026-08-01) showed phantom width is TEMPERATURE-
 // dependent (>=4µs cool, <4µs above ~15°C tube temp): the raw subtraction
 // double-subtracted warm-hour phantoms the width filter had already dropped
 // (−6 CPM at summer temps). The V2.6.29 operator caveat ("don't combine on

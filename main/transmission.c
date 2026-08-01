@@ -608,7 +608,7 @@ static void build_sensorc_noise_body(const tx_context_t *c, char *buf, size_t ca
 //                                                       prefix to strip
 // V2.3.2 → V2.3.15-pre1 wrongly sent SPS30_-prefixed names on PIN 1 → server
 // returned HTTP 400 on every PM POST because it didn't recognise the fields.
-// Surfaced in the wild on the dust node 10.11.12.72 once SPS30 was actually
+// Surfaced in the wild on the SPS30 dust node once SPS30 was actually
 // wired and pm_valid started being true. V2.3.15-pre2 strips the prefix here.
 //
 // Note Madavi / OSM / aqi.eco use DIFFERENT routing (field-name prefix matters

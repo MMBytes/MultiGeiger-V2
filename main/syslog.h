@@ -37,7 +37,7 @@
  *  immediately as a no-op (disabled). After this returns, `syslog_emit()`
  *  will start shipping lines.
  *
- *  @param host        Server hostname or IPv4 string (e.g. "10.11.12.150")
+ *  @param host        Server hostname or IPv4 string (e.g. "192.0.2.10")
  *  @param port        UDP port (typically 514)
  *  @param hostname    Hostname to embed in the syslog header — typically
  *                     the device's WiFi hostname so rsyslog can route by

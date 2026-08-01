@@ -729,7 +729,7 @@ static void do_tx_cycle(void) {
     // boards whose phantom pulses pass the width filter (S3 family, >=4 µs)
     // the phantoms sit inside the filtered count and must be subtracted out.
     // V2.6.31: subtract only the phantoms STILL IN the PCNT count. The
-    // phantom's width is temperature-dependent (.196 field data 2026-08-01:
+    // phantom's width is temperature-dependent (field data 2026-08-01:
     // >=4 µs cool, <4 µs above ~15 °C tube temp), so the V2.6.29 full
     // hv_blanked subtraction double-subtracted warm-hour phantoms the width
     // filter had already dropped (−6 CPM at summer temps). pcnt_blank_wide()
@@ -802,8 +802,8 @@ static void do_tx_cycle(void) {
             // reference must be blank-corrected: counts_raw EXCLUDES blanked
             // phantoms while pc[widest] still INCLUDES them (they pass the
             // width filter), so the comparable "what the ISR would have
-            // counted" is counts_raw + hv_blanked — verified live on .196
-            // CYCLE #2 (counts_raw=205, pcnt=223, hv_blanked=18: the naive
+            // counted" is counts_raw + hv_blanked — verified live on the trial
+            // field node's CYCLE #2 (counts_raw=205, pcnt=223, hv_blanked=18: the naive
             // formula clamps real width removals to 0 by up to hv_blanked).
             // Reduces to the pre-blank formula when hv_blanked==0.
             // V2.6.31: the subtracted amount is now blanked_wide (width-aware,
@@ -1540,7 +1540,7 @@ void app_main(void) {
     // pcnt_filter) as a pure DIAGNOSTIC: the comb is passive parallel hardware
     // — counts/cpm stay ISR-based (the `filtering` substitution stays strictly
     // pcnt_filter-gated) — but the PCNT w_ns log line keeps flowing, which is
-    // the phantom-width-vs-temperature telemetry the 2026-08-01 .196 analysis
+    // the phantom-width-vs-temperature telemetry the 2026-08-01 field analysis
     // ran on.
     if (g_cfg.tube_enabled && (g_cfg.pcnt_filter || g_cfg.hv_blank)) {
         tube_pcnt_init(g_cfg.pcnt_filter_width_ns);

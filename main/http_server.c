@@ -2617,7 +2617,7 @@ static esp_err_t lorawan_reset_post(httpd_req_t *req) {
 // with CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y. ESP-IDF writes the dump
 // during the panic handler; this endpoint streams the partition bytes
 // out so the operator can decode them off-device with:
-//   espcoredump.py info_corefile -t elf -c oatlands.elf build_<board>/geiger_v2.elf
+//   espcoredump.py info_corefile -t elf -c prod_node.elf build_<board>/geiger_v2.elf
 //
 // Both endpoints are basic-auth gated. The GET is not CSRF-checked (it's
 // idempotent, read-only); the POST erase is CSRF-checked like /config,

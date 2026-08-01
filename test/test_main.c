@@ -615,13 +615,13 @@ static int test_blank_eff_pcnt_composes(void) {
 
 // ----------------------------------------------------------------------------
 // pcnt_blank_wide  (V2.6.31 width-aware subtract — phantom width is
-// temperature-dependent, see tube_logic.h; numbers below are real .196 cycles)
+// temperature-dependent, see tube_logic.h; numbers below are real field-node cycles)
 // ----------------------------------------------------------------------------
 
 static int test_bwide_cool_phantoms_wide(void) {
     // Cool tube: width filter removed nothing, all 18 phantoms passed it and
     // sit inside the PCNT count → subtract all 18 (V2.6.29 behavior preserved).
-    // (.196 night cycle: pcnt=230, isr=212, blanked=18 → removed 0 → wide 18.)
+    // (field-node night cycle: pcnt=230, isr=212, blanked=18 → removed 0 → wide 18.)
     EXPECT_INT(pcnt_blank_wide(230, 212, 18), 18);
     return 1;
 }
@@ -630,7 +630,7 @@ static int test_bwide_warm_phantoms_narrow(void) {
     // Warm tube: phantoms shrank under the 4 µs tooth, the width filter
     // already dropped all 18 → nothing left in pcnt to subtract. This is the
     // double-subtract case the V2.6.29 code got wrong (−6 CPM warm afternoons).
-    // (.196 afternoon cycle: pcnt=212, isr=212, blanked=18 → removed 18 → wide 0.)
+    // (field-node afternoon cycle: pcnt=212, isr=212, blanked=18 → removed 18 → wide 0.)
     EXPECT_INT(pcnt_blank_wide(212, 212, 18), 0);
     return 1;
 }

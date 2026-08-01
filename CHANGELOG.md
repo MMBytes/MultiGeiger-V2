@@ -11,7 +11,7 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ## V2.6.31 — Width-aware blanking subtraction: fix the warm-weather double-subtract
 
-Field analysis of the deployed FeatherS3-D at Oatlands (10,099 syslog cycles,
+Field analysis of a deployed FeatherS3-D field node (10,099 syslog cycles,
 11 Jul – 1 Aug 2026) established that the Rev B/C phantom pulse's **width is
 temperature-dependent**: ≥4 µs when the tube is cool, shrinking below the
 4 µs PCNT filter tooth above ~15 °C tube temperature (the "1–4 µs thermal
@@ -55,7 +55,7 @@ Two observability changes:
   touches the count path; only the `pcnt_filter` substitution ever does; a
   live Save starts blanking immediately, the comb from the next restart).
 
-Deployment note: on nodes running pcnt+blank (.196), warm-hour CPM steps
+Deployment note: on nodes running pcnt+blank (the trial field node), warm-hour CPM steps
 **up** by the previously double-subtracted share — the mirror of the V2.6.29
 step down, dated here for archive continuity.
 
@@ -96,7 +96,7 @@ defect established by the July 2026 bench investigation: every HV recharge
 pulse couples exactly one phantom NEGEDGE into `GMZ_COUNT`, deterministically
 ~10 µs (9–16 observed; 3–10 during a boot train) after FET turn-off — the
 first ring-down trough of the L1 flyback (80 kHz SRF). On the deployed
-FeatherS3-D at Oatlands the artifact is visible as `hv_coincident` ==
+FeatherS3-D field node the artifact is visible as `hv_coincident` ==
 `hv_pulses` on every single cycle, ~6–9% of counted pulses.
 
 **Keyed on the cause, not the symptom.** The recharge state machine stamps
@@ -974,7 +974,7 @@ GPIO case, see Part 2 F6).
   `sntp_retry()` — the whole round-robin-on-failure state machine doesn't
   exist in the binary, so a dead/unreachable server 1 is retried forever
   (exponential backoff, capped ~1h) instead of ever falling through to
-  servers 2/3. Root-caused on a C5 bench unit: `10.11.12.150`'s
+  servers 2/3. Root-caused on a C5 bench unit: the LAN NTP server's
   `chrony.service` stopped, and the device never fell back to its two
   configured public NTP servers despite them being reachable the whole
   time — the boot log's `"SNTP started (3 server(s): ...)"` line was
@@ -1513,7 +1513,7 @@ GPIO case, see Part 2 F6).
 
 **What:** Enable the ESP-IDF Wi-Fi roaming app on the PSRAM boards (FeatherS3-D, QT Py PICO, XIAO S3; Heltec **excluded**) with low-RSSI + legacy roaming, and append the connected AP's `bssid`/`ch` to every `CYCLE` log line.
 
-**Why:** A node (`esp32-5965048`, `.198`) lost its strong AP to a beacon timeout (`reason=200`), reconnected to a **−82 dBm** mesh BSSID, and **stuck there for ~75 minutes** (≈1 in 3 uploads failing — `HTTP_EAGAIN`, connect timeouts, TLS `Socket is not connected`) until a second beacon timeout *luckily* landed it on a −31 dBm AP. Connect-time selection was already optimal (`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL`), but nothing re-evaluated the link **while associated**, so a node that lands on a weak BSSID never recovers until a full disconnect. The per-cycle line logged `rssi` but not *which* AP, so the pattern was invisible in syslog.
+**Why:** A node (`esp32-5965048`) lost its strong AP to a beacon timeout (`reason=200`), reconnected to a **−82 dBm** mesh BSSID, and **stuck there for ~75 minutes** (≈1 in 3 uploads failing — `HTTP_EAGAIN`, connect timeouts, TLS `Socket is not connected`) until a second beacon timeout *luckily* landed it on a −31 dBm AP. Connect-time selection was already optimal (`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL`), but nothing re-evaluated the link **while associated**, so a node that lands on a weak BSSID never recovers until a full disconnect. The per-cycle line logged `rssi` but not *which* AP, so the pattern was invisible in syslog.
 
 **How:** Per-board `sdkconfig.defaults` (PSRAM only) set `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y` (with its `IDF_EXPERIMENTAL_FEATURES` gate): **low-RSSI trigger** (threshold −72 dBm; healthy APs here are −29..−31) + **legacy roam** (forcible disconnect→reconnect to a stronger BSSID — works without AP 802.11k/v, which this mesh lacks: `pmf:0`); **periodic-scan monitor OFF** (active scans every 30 s would punch holes in the 180 s TX cycle) and **802.11v/BTM OFF**. The app runs in the supplicant `eloop` (no new task) and auto-wires through the default `esp_netif_create_default_wifi_sta` handlers we already use. **Reconnect ownership:** the roaming app's disconnect hook calls `esp_wifi_connect()` itself, so under `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP` `main.c` now **defers** its own `EV_DISCONNECTED → esp_wifi_connect()` (avoiding two lifecycle owners racing the supplicant); non-PSRAM Heltec keeps the hand-rolled reconnect via the `#else`. Both `CYCLE` log shapes now trail `bssid=… ch=…` so a roam (or a stuck weak link) is visible in syslog. **⚠️ Espressif marks the roaming app EXPERIMENTAL — bench-validate on one node before fleet OTA.**
 
@@ -1527,7 +1527,7 @@ GPIO case, see Part 2 F6).
 1. **Tier-1 PSRAM offload** (all PSRAM boards — feathers3_d, QT Py PICO, XIAO S3; Heltec excluded, no PSRAM): WiFi/lwIP pbufs+PCBs and mbedTLS record buffers now allocate from PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`), and the malloc internal-only threshold drops 16384 → 4096.
 2. **Configurable heap-guard confirm window** — new `/config` field "Heap-guard confirm cycles" (`hg_confirm`, default 10, range 2–240), replacing the hard-coded 5. The heap-guard log line now also reports node **uptime**. The explanatory blurb under the floor field was removed.
 
-**Why:** Field forensics on esp32-5965048 (`.198`) showed the guard was rebooting on a **transient, self-healing** fragmentation dip, not the slow month-scale creep it was designed for. The INTERNAL largest-free block sat steady at 68 KB for 37 h, then a single inbound `/config` (plus per-cycle outbound TLS churn) left a small long-lived buffer mid-arena that bisected it to 39 KB — below the 44 KB floor. The dip self-heals in 3–5 cycles (observed coalescing back to 68 KB), but the 5-cycle confirm window occasionally caught it and rebooted for nothing. Routing those network/TLS buffers to PSRAM removes the bisecting allocator at the source (the real fix); the confirm-window bump to 10 rides out any residual transient (the belt-and-braces); the uptime line lets the syslog reader tell a genuine slow creep from a same-day false-positive at a glance.
+**Why:** Field forensics on esp32-5965048 showed the guard was rebooting on a **transient, self-healing** fragmentation dip, not the slow month-scale creep it was designed for. The INTERNAL largest-free block sat steady at 68 KB for 37 h, then a single inbound `/config` (plus per-cycle outbound TLS churn) left a small long-lived buffer mid-arena that bisected it to 39 KB — below the 44 KB floor. The dip self-heals in 3–5 cycles (observed coalescing back to 68 KB), but the 5-cycle confirm window occasionally caught it and rebooted for nothing. Routing those network/TLS buffers to PSRAM removes the bisecting allocator at the source (the real fix); the confirm-window bump to 10 rides out any residual transient (the belt-and-braces); the uptime line lets the syslog reader tell a genuine slow creep from a same-day false-positive at a glance.
 
 **How:** `tx_heap_guard()` takes `confirm_cycles` from the new config field (wired through `config_fields.def` → `tx_context_t` → `main.c`) and appends `Uptime: Nd HHh MMm` (via `esp_timer_get_time()`) to the reboot log line. PSRAM knobs added to each `sdkconfig.defaults.<board>` for the three PSRAM boards only. The 4 MB `/log` ring was already PSRAM-resident (V2.3.18) and is unaffected. ESP32-PICO-V3-02 is rev-3 silicon so the rev<3 PSRAM cache workaround does not apply.
 
@@ -1708,7 +1708,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
 
 **What:** The `heap_guard_floor_kb` INTERNAL-fragmentation auto-reboot (V2.5.14) moved from `periodic.c::periodic_heap_guard()` — called every main-loop tick (~1 Hz) — to `transmission.c::tx_heap_guard()`, evaluated **once per TX cycle** (~180 s) on the same resting heap snapshot the per-cycle `diag: per-cycle heap` line already reports. The predicate is now a fragmentation test, not a bare floor test: it counts a cycle only when `INTERNAL largest < floor` **AND** `INTERNAL free_total > 2×floor`; 5 consecutive qualifying cycles (~15 min) trigger the reboot.
 
-**Why:** The V2.5.14 guard sampled at 1 Hz on the main task, so it saw the **transient** largest-free dip that *any* inbound HTTP connection causes — the lwIP/TCP receive buffers are DMA-capable INTERNAL RAM, and a held-open `GET /log` (a chunked stream) drops INTERNAL `largest` for the duration. Root-caused 2026-06-09 from the .150 syslog: each `HEAP GUARD` line landed 2–3 s after a `GET /log from 10.11.12.67` (the monitor host) — the monitoring's own log fetches were rebooting the Feather every ~4 h, while the per-cycle heap was flat-healthy (`largest=70k`) the rest of the time. The old gating (2 h arm-delay, 6 h rate-limit, `tx_is_idle()` sample, 3-sample debounce) couldn't catch it: `tx_is_idle()` only sees the TX worker, not the HTTP server task serving `/log`, and the 3-sample (~3 s) window sat right inside the stream.
+**Why:** The V2.5.14 guard sampled at 1 Hz on the main task, so it saw the **transient** largest-free dip that *any* inbound HTTP connection causes — the lwIP/TCP receive buffers are DMA-capable INTERNAL RAM, and a held-open `GET /log` (a chunked stream) drops INTERNAL `largest` for the duration. Root-caused 2026-06-09 from the .150 syslog: each `HEAP GUARD` line landed 2–3 s after a `GET /log from the monitor host` (the monitor host) — the monitoring's own log fetches were rebooting the Feather every ~4 h, while the per-cycle heap was flat-healthy (`largest=70k`) the rest of the time. The old gating (2 h arm-delay, 6 h rate-limit, `tx_is_idle()` sample, 3-sample debounce) couldn't catch it: `tx_is_idle()` only sees the TX worker, not the HTTP server task serving `/log`, and the 3-sample (~3 s) window sat right inside the stream.
 
 **How:** The `free_total > 2×floor` arm is the load-bearing transient filter — a connection that grabs net buffers drops **both** largest and free, so it fails the arm and never counts; only genuine fragmentation (largest low while free stays high — the OTA-stall / long-tail-OOM precursor) qualifies. The check rides the per-cycle snapshot via a new `tx_context_t.heap_guard_floor_kb` field (copied from `g_cfg` in `build_tx_context`), so it reads exactly the floor it logs, on the TX worker's quiescent pre-upload moment. Reboot still goes through `main_request_restart()` (the same path `/reboot` uses). **Deleted:** `periodic_heap_guard()`, the `tx_is_idle()` guard-gate, the arm-delay, the 6 h rate-limit, and `s_last_reboot_ms`; `periodic_loop()` loses its `heap_guard_floor_kb` parameter. The `heap_guard_floor_kb` config knob is unchanged (existing nodes' setting carries over). **No NVS persistence:** a production node (no PCNT comb) boots with a healthy largest block and cannot enter the state, so it can't boot-loop; the one residual loop risk is the experimental PCNT width-comb taking an unlucky INTERNAL boot-split, accepted on the bench (`pcnt_filter` off by default).
 
@@ -2099,7 +2099,7 @@ Did **not** tear down the MQTT client on `STA_DISCONNECTED` — that's heavier (
 
 ## V2.4.29
 
-**Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from coredump on esp32-5965048 (Oatlands prod, V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.
+**Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from coredump on esp32-5965048 (prod field node, V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.
 
 ### Root cause
 
@@ -2144,7 +2144,7 @@ The counter is cumulative since boot; only way to reset is reboot (matches `reco
 
 V2.4.27 left the question "could a marginal supply be causing the +30% CPM / odd spikes?" The first guess was a MAX17048 fuel gauge driver + VBUS-present digital read, both of which got dropped after talking through the actual hardware:
 
-- **MAX17048 fuel gauge** — measures battery cell voltage. Without a LiPo attached (current Oatlands deployment), both VCELL and SoC report ~0 / 0 %. No signal, just clutter on HA. Dropped.
+- **MAX17048 fuel gauge** — measures battery cell voltage. Without a LiPo attached (current field deployment), both VCELL and SoC report ~0 / 0 %. No signal, just clutter on HA. Dropped.
 - **GPIO 34 VBUS-present** — digital line, not analog (ESP32-S3 ADCs only exist on GPIO 1-20). Without a battery, the firmware can't run with USB unplugged, so this would publish a constant `1` forever. Dropped.
 - **Precise 5 V / 3.3 V measurement** — neither rail has an exposed sense pin on the FeatherS3-D. Would require external resistor divider mod to a free ADC1 pin (GPIO 6 = A4 is the only candidate). Not in scope.
 
@@ -2168,7 +2168,7 @@ A rising `i2c_err` paired with stable `reset_reason` = bus or sensor problem (ca
 
 ### Notes
 
-- **DNMS-equipped nodes only**: on first boot, `noise_sensor_read()` *may* return ESP_FAIL if the LAeq integration window (~150 s, started by `noise_sensor_init()`) hasn't quite finalised by the time the first TX cycle runs — a millisecond-level race. If it loses the race, the counter ticks once at the first cycle and is stable afterwards. Nodes without DNMS attached (e.g. the Oatlands SPS30+SHT45+BMP581 dust node) skip the call entirely and start the counter at 0.
+- **DNMS-equipped nodes only**: on first boot, `noise_sensor_read()` *may* return ESP_FAIL if the LAeq integration window (~150 s, started by `noise_sensor_init()`) hasn't quite finalised by the time the first TX cycle runs — a millisecond-level race. If it loses the race, the counter ticks once at the first cycle and is stable afterwards. Nodes without DNMS attached (e.g. the SPS30+SHT45+BMP581 dust node) skip the call entirely and start the counter at 0.
 - All sensor drivers in V2.4.x use the new IDF v6.0 I²C master driver (`i2c_master.h`) — no v4.x legacy paths involved.
 
 ---
@@ -2229,7 +2229,7 @@ V2.4.27 removes the geiger body entirely. The environmental body still goes (and
 
 **All boards (Heltec V2 included)** — `geiger/<id>/state` JSON gains six system fields:
 
-- `ip` (string, "10.11.12.198")
+- `ip` (string, "192.0.2.42")
 - `rssi` (dBm)
 - `heap_free`, `heap_min`, `heap_max_alloc` (bytes)
 - `reset_reason` (string: "POWER_ON" / "PANIC" / "TASK_WDT" / etc. — same enum the /status page already shows)
@@ -2551,7 +2551,7 @@ No partition change. No `sdkconfig` change. Drop-in OTA upgrade from V2.4.19, V2
 
 ### Motivation
 
-2026-05-21 incident on bench sensor esp32-5963724 @10.11.12.193. WiFi dropped overnight at `19:32:11` with `reason=34`, sensor reconnected cleanly within 13 s with a fresh DHCP lease. Madavi HTTPS uploads continued to succeed every 150 s for the next ~14 h. But MQTT to the LAN broker at `10.11.12.150:8883` was stuck in an endless retry loop — `sock=N select() timeout` every 20-25 s, surviving the FTP-time MQTT teardown+restart at `09:14:14` unchanged.
+2026-05-21 incident on bench sensor esp32-5963724. WiFi dropped overnight at `19:32:11` with `reason=34`, sensor reconnected cleanly within 13 s with a fresh DHCP lease. Madavi HTTPS uploads continued to succeed every 150 s for the next ~14 h. But MQTT to the LAN broker at `192.0.2.10:8883` was stuck in an endless retry loop — `sock=N select() timeout` every 20-25 s, surviving the FTP-time MQTT teardown+restart at `09:14:14` unchanged.
 
 Diagnosis via `tcpdump` on the broker showed the sensor's SYNs arriving and the broker's SYN-ACKs leaving within 100 µs — but the sensor's repeated SYNs all carried the same TCP sequence number, proving the SYN-ACKs never reached the sensor's radio. `ping`, `curl`, all broker-initiated traffic to the sensor was 100 % loss while the broker's ARP cache showed the correct sensor MAC as REACHABLE.
 
@@ -2671,7 +2671,7 @@ Per-device migration is a one-time event:
 2. Cable-flash the merged-bin image at `0x0` (do NOT `erase_flash` first — preserves NVS).
 3. Subsequent OTAs work normally; every future panic is recoverable via `GET /coredump.elf`.
 
-The three currently-deployed sensors (Heltec V2 bench, FeatherS3-D bench, FeatherS3-D prod at Oatlands) all need the one-time cable flash. After that the coredump partition stays put forever — no further partition-table changes anticipated.
+The three currently-deployed sensors (Heltec V2 bench, FeatherS3-D bench, FeatherS3-D prod field node) all need the one-time cable flash. After that the coredump partition stays put forever — no further partition-table changes anticipated.
 
 ### RAM cost
 
@@ -3088,7 +3088,7 @@ V2.4.11's `ntp_time_valid()`-only gate didn't actually defer MQTT on soft reboot
 Observed in the V2.4.11 boot log on `esp32-176432` (Heltec V2, soft-reboot after OTA):
 
 ```
-21:48:37.686 v2_main: MQTT deferred until NTP sync (broker=10.11.12.150:8883)
+21:48:37.686 v2_main: MQTT deferred until NTP sync (broker=192.0.2.150:8883)
 21:48:38.885 v2_main: NTP synced — starting MQTT client     <-- 1.2 s later, no STA yet
 21:48:48.905 esp-tls: [sock=57] select() timeout
 21:49:13.936 esp-tls: [sock=57] select() timeout
@@ -3096,7 +3096,7 @@ Observed in the V2.4.11 boot log on `esp32-176432` (Heltec V2, soft-reboot after
 21:50:03.995 esp-tls: [sock=57] select() timeout
 21:50:29.025 esp-tls: [sock=57] select() timeout
 21:50:37.895 v2_main: AP window closed — stopping AP and switching to STA
-07:50:41.668 v2_main: GOT_IP #1: 10.11.12.197 ...           <-- 2 min wasted
+07:50:41.668 v2_main: GOT_IP #1: 192.0.2.197 ...           <-- 2 min wasted
 07:50:45.069 mqtt: CONNECTED to broker
 ```
 
@@ -3215,7 +3215,7 @@ The `config: ` block printed at boot was missing the fields added since V2.4.2. 
 
 ```
 config:   display:          mode=0(auto)
-config:   mqtt:             enabled=1 broker=10.11.12.150:8883 user=geiger pw=<set>
+config:   mqtt:             enabled=1 broker=192.0.2.150:8883 user=geiger pw=<set>
 config:   mqtt:             topic_prefix=geiger ha_discovery=1
 config:   mqtt.tls:         enabled=1 mode=1(B:custom) ca=<set>
 ```
@@ -3234,11 +3234,11 @@ Pre-V2.4.11 `mqtt_init()` was called during the AP boot window, before any STA c
 V2.4.11 holds back the `mqtt_init()` call until `ntp_time_valid()` returns true (wall clock > 2025-01-01). New boot log shape:
 
 ```
-v2_main: MQTT deferred until NTP sync (broker=10.11.12.150:8883)
+v2_main: MQTT deferred until NTP sync (broker=192.0.2.150:8883)
 ...
 ntp: sync OK: 2026-05-19T00:04:21 AEST
 v2_main: NTP synced — starting MQTT client
-mqtt: started — uri=mqtts://10.11.12.150:8883 tls_mode=B (custom CA cert) ...
+mqtt: started — uri=mqtts://192.0.2.150:8883 tls_mode=B (custom CA cert) ...
 mqtt: CONNECTED to broker
 ```
 

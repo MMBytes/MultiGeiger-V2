@@ -29,7 +29,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # sntp_retry() (components/lwip/lwip/src/apps/sntp/sntp.c) — the entire
 # multi-server failover state machine doesn't exist in the binary, so a dead
 # server 1 is retried forever (exponential backoff, capped ~1h) instead of
-# ever falling through to servers 2/3. Root-caused when 10.11.12.150's
+# ever falling through to servers 2/3. Root-caused when the LAN NTP server's
 # chrony.service died and a C5 bench unit never fell back to its two public
 # NTP servers despite them being configured and reachable. Bumped to 3 to
 # match the 3 server slots ntp.c actually tries to fill.

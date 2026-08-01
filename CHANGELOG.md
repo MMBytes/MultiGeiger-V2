@@ -9,6 +9,54 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.31 — Width-aware blanking subtraction: fix the warm-weather double-subtract
+
+Field analysis of the deployed FeatherS3-D at Oatlands (10,099 syslog cycles,
+11 Jul – 1 Aug 2026) established that the Rev B/C phantom pulse's **width is
+temperature-dependent**: ≥4 µs when the tube is cool, shrinking below the
+4 µs PCNT filter tooth above ~15 °C tube temperature (the "1–4 µs thermal
+population" of the V2.6.29 investigation *is* the phantom). That broke the
+V2.6.29 subtract mode's core assumption — that every blanked phantom also
+sits inside the width-filtered PCNT count. On warm afternoons the width
+filter had already dropped the phantoms, and subtracting the full
+`hv_blanked` tally on top **double-subtracted** them: measured ~1.5 CPM
+under-read at 17–18 °C, projected ~5–6 CPM (−8%) at summer tube temperatures.
+
+**The fix** (`pcnt_blank_wide()` in `main/tube_logic.h`, host-tested): derive
+the wide-phantom share from the width filter's own removal tally —
+
+    removed = (counts_raw + hv_blanked) − pcnt_counts   (clamped ≥ 0)
+    wide    = hv_blanked − removed                      (clamped to [0, hv_blanked])
+
+— and subtract only `wide` from the filtered count (`do_tx_cycle`), with a
+matching monotonic wide total feeding the cpm5/cpm15 rolling averages
+(`history.c`, once-per-cycle lump cadence). Cool cycles are unchanged
+(removed=0 → wide=hv_blanked, the V2.6.29 subtraction); warm cycles no longer
+double-subtract (removed≈hv_blanked → wide≈0). Replaying the formula over the
+full 10,099-cycle field dataset: pre-blanking cycles bit-identical, and the
+post-V2.6.29 era flattens to ~66 CPM across every temperature band. The
+V2.6.29 operator caveat ("don't combine blanking with the width filter on
+narrow-phantom boards — double-subtracts") is retired: the combination is now
+a no-op there by construction.
+
+Two observability changes:
+
+- **FILTER log line** now reports both tallies —
+  `(removed N, hv_blanked B, W wide subtracted)` replaces
+  `(removed N, hv_blanked B subtracted)` (log parsers take note). `B − W` is
+  the narrow-phantom share, a free per-cycle phantom-width-vs-temperature
+  telemetry channel.
+- **Blanking-only nodes keep the PCNT comb**: enabling `hv_blank` without
+  `pcnt_filter` now also brings up the width comb as a passive diagnostic
+  (counts stay ISR-based — the comb is parallel hardware and never touches
+  the count path; only the `pcnt_filter` substitution ever does).
+
+Deployment note: on nodes running pcnt+blank (.196), warm-hour CPM steps
+**up** by the previously double-subtracted share — the mirror of the V2.6.29
+step down, dated here for archive continuity.
+
+---
+
 ## V2.6.30 — Display hardware identity on /status and in the syslog boot banner
 
 The attached display panel was previously only visible in the boot log

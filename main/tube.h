@@ -116,13 +116,32 @@ void tube_set_blank_us(uint32_t blank_us);
  *  deltas, unsigned wrap-safe; 0 while the tube or blanking is off). Exists
  *  for the PCNT subtract mode: when pcnt_filter is authoritative, phantoms
  *  wide enough to pass the width filter are still inside the PCNT hardware
- *  count, which ISR-side blanking cannot reach — so the per-minute history
- *  sampler (history.c) subtracts this total's delta from the filtered total,
- *  and do_tx_cycle subtracts the per-cycle hv_blanked from the filtered
- *  cycle count. ONLY correct on boards whose phantom pulses pass the filter
- *  (S3 family, coupled pulses >= 4 µs); see config_fields.def hv_blank.
+ *  count, which ISR-side blanking cannot reach — so the subtract mode takes
+ *  the blanked share back out of the filtered count. V2.6.31: the amount
+ *  subtracted is no longer this raw tally but its width-aware subset (below);
+ *  this total stays as-is for DIAG and as pcnt_blank_wide()'s input.
  */
 uint32_t tube_get_blanked_total(void);
+
+/** @brief V2.6.31: accumulate one cycle's WIDE-phantom subtraction.
+ *
+ *  Called once per cycle by do_tx_cycle with pcnt_blank_wide()'s result — the
+ *  share of blanked phantoms actually inside the width-filtered PCNT count
+ *  (phantom width is temperature-dependent, so the raw blanked total
+ *  over-subtracts on warm days; see tube_logic.h). Lives in tube.c beside its
+ *  raw sibling so history.c keeps a single provider for monotonic tube
+ *  totals. Main-task only (do_tx_cycle and history_tick share the main loop),
+ *  but guarded by the same lock as the ISR totals for uniformity.
+ */
+void tube_note_blanked_wide(uint32_t wide);
+
+/** @brief V2.6.31: monotonic total of wide-phantom subtractions since boot.
+ *
+ *  Replaces tube_get_blanked_total() as the history.c subtrahend. Updates
+ *  once per TX cycle (lump cadence), not per blank window — see the
+ *  history_tick comment for why the rolling averages tolerate that.
+ */
+uint32_t tube_get_blanked_wide_total(void);
 
 /** @brief V2.5.12: snapshot + reset the raw-edge count profiler.
  *

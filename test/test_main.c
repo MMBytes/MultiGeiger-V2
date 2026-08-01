@@ -614,6 +614,64 @@ static int test_blank_eff_pcnt_composes(void) {
 }
 
 // ----------------------------------------------------------------------------
+// pcnt_blank_wide  (V2.6.31 width-aware subtract — phantom width is
+// temperature-dependent, see tube_logic.h; numbers below are real .196 cycles)
+// ----------------------------------------------------------------------------
+
+static int test_bwide_cool_phantoms_wide(void) {
+    // Cool tube: width filter removed nothing, all 18 phantoms passed it and
+    // sit inside the PCNT count → subtract all 18 (V2.6.29 behavior preserved).
+    // (.196 night cycle: pcnt=230, isr=212, blanked=18 → removed 0 → wide 18.)
+    EXPECT_INT(pcnt_blank_wide(230, 212, 18), 18);
+    return 1;
+}
+
+static int test_bwide_warm_phantoms_narrow(void) {
+    // Warm tube: phantoms shrank under the 4 µs tooth, the width filter
+    // already dropped all 18 → nothing left in pcnt to subtract. This is the
+    // double-subtract case the V2.6.29 code got wrong (−6 CPM warm afternoons).
+    // (.196 afternoon cycle: pcnt=212, isr=212, blanked=18 → removed 18 → wide 0.)
+    EXPECT_INT(pcnt_blank_wide(212, 212, 18), 0);
+    return 1;
+}
+
+static int test_bwide_mixed_proportional(void) {
+    // Shoulder-hours cycle: 8 of 18 phantoms narrow (removed), 10 still wide.
+    EXPECT_INT(pcnt_blank_wide(222, 212, 18), 10);
+    return 1;
+}
+
+static int test_bwide_removed_exceeds_blanked_clamps(void) {
+    // Width filter removed MORE than the phantom tally (real narrow pulses /
+    // glitch floor on top, the XIAO-class population): wide clamps to 0, never
+    // wraps — the subtraction must not manufacture negative counts.
+    EXPECT_INT(pcnt_blank_wide(200, 212, 18), 0);
+    return 1;
+}
+
+static int test_bwide_pcnt_exceeds_isr_pileup(void) {
+    // PCNT sees pulses the ISR's 190 µs gate absorbed (pileup): pcnt > isr+B,
+    // removed clamps to 0 → subtract the full blanked tally, exactly the
+    // V2.6.29 behavior (and no uint32 underflow in the removed term).
+    EXPECT_INT(pcnt_blank_wide(235, 212, 18), 18);
+    return 1;
+}
+
+static int test_bwide_blanking_off_is_noop(void) {
+    // blanked==0 (blanking disabled or clean board) → nothing to subtract,
+    // whatever the width filter did.
+    EXPECT_INT(pcnt_blank_wide(230, 212, 0), 0);
+    EXPECT_INT(pcnt_blank_wide(212, 230, 0), 0);
+    return 1;
+}
+
+static int test_bwide_zero_cycle(void) {
+    // Dead-quiet cycle (tube fault / startup): all zeros must yield zero.
+    EXPECT_INT(pcnt_blank_wide(0, 0, 0), 0);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // lorawan_codec  (V2.6.23-dev T3 — pure payload/hex helpers, V1.9 byte-compat)
 // ----------------------------------------------------------------------------
 
@@ -767,6 +825,15 @@ int main(void) {
     printf("== blank_effective_us ==\n");
     RUN(test_blank_eff_disabled_is_zero);
     RUN(test_blank_eff_pcnt_composes);
+
+    printf("== pcnt_blank_wide ==\n");
+    RUN(test_bwide_cool_phantoms_wide);
+    RUN(test_bwide_warm_phantoms_narrow);
+    RUN(test_bwide_mixed_proportional);
+    RUN(test_bwide_removed_exceeds_blanked_clamps);
+    RUN(test_bwide_pcnt_exceeds_isr_pileup);
+    RUN(test_bwide_blanking_off_is_noop);
+    RUN(test_bwide_zero_cycle);
 
     printf("== lorawan_codec ==\n");
     RUN(test_lw_hex_decode);

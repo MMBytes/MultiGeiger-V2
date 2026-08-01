@@ -101,6 +101,49 @@ blank_effective_us(bool enabled, bool pcnt_filter, uint32_t window_us) {
     return enabled ? window_us : 0u;
 }
 
+/** @brief V2.6.31: how many blanked phantoms are actually INSIDE the
+ *         width-filtered PCNT count this cycle (the correct subtract amount).
+ *
+ *  The V2.6.29 subtract mode took (pcnt count − hv_blanked) assuming every
+ *  blanked phantom passed the width filter. Field data (.196, 2026-08-01,
+ *  reference_radiation_data_analysis) showed the phantom's width is
+ *  TEMPERATURE-dependent: ≥4 µs cool (inside the PCNT count, subtraction
+ *  correct) but <4 µs warm (already dropped by the width filter — subtracting
+ *  again double-counts the removal, −6 CPM at summer tube temps). The width
+ *  filter's own removal tally is the missing signal: phantoms it removed
+ *  cannot still be in the PCNT count, so
+ *
+ *      removed = (counts_raw + blanked) − pcnt_counts   (clamped ≥ 0)
+ *      wide    = blanked − removed                      (clamped to [0, blanked])
+ *
+ *  `counts_raw + blanked` reconstructs the would-be-counted stream (the ISR
+ *  already dropped blanked edges), same reference as the FILTER log line.
+ *  Removals are overwhelmingly the narrow phantoms (removed ≤ hv_blanked in
+ *  >99.8% of 9k field cycles); a real narrow pulse mis-attributed here costs
+ *  one phantom LEFT IN the count (fail-high ~0.013 CPM), never a lost count.
+ *
+ *  Truth table (B = blanked, field-validated by CSV replay 2026-08-01):
+ *   - cool, phantoms wide:    removed=0  → wide=B  (same subtraction as V2.6.29)
+ *   - warm, phantoms narrow:  removed≈B  → wide≈0  (double-subtract eliminated)
+ *   - mixed:                  proportional
+ *   - PCNT>ISR pileup (real pulses inside the 190 µs ISR gate): removed
+ *     clamps 0 → wide=B — identical to V2.6.29, no underflow
+ *   - Feather-V2 class (phantoms always narrow): wide≈0 — blanking becomes a
+ *     no-op under pcnt, retiring the documented double-subtract operator
+ *     caveat (config_fields.def hv_blank) by construction.
+ *
+ *  @param pcnt_counts  This cycle's width-filtered PCNT count (widest tooth).
+ *  @param counts_raw   This cycle's ISR counted total (excludes blanked).
+ *  @param blanked      This cycle's ISR hv_blanked tally.
+ *  @return             Subtract THIS from pcnt_counts (≤ blanked, never wraps).
+ */
+__attribute__((always_inline)) static inline uint32_t
+pcnt_blank_wide(uint32_t pcnt_counts, uint32_t counts_raw, uint32_t blanked) {
+    uint32_t would_count = counts_raw + blanked;
+    uint32_t removed     = (would_count >= pcnt_counts) ? (would_count - pcnt_counts) : 0;
+    return (blanked >= removed) ? (blanked - removed) : 0;
+}
+
 /** @brief V2.6.29: should the HV blanking window drop this would-be count?
  *
  *  The Rev B/C PCB couples one phantom NEGEDGE into GMZ_COUNT per HV charge

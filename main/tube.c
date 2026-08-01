@@ -484,6 +484,29 @@ uint32_t tube_get_blanked_total(void) {
     return v;
 }
 
+// V2.6.31: monotonic total of WIDE-phantom subtractions (pcnt_blank_wide
+// results), the width-aware subset of isr_hv_blanked_total. NOT ISR-written —
+// do_tx_cycle accumulates it once per cycle — but read/written under mux_gmc
+// like the other monotonic totals so a future non-main-task reader can't tear
+// it. history.c subtracts THIS (not the raw blanked total) from the filtered
+// count source.
+static uint32_t s_blanked_wide_total = 0;
+
+void tube_note_blanked_wide(uint32_t wide) {
+    portENTER_CRITICAL(&mux_gmc);
+    s_blanked_wide_total += wide;
+    portEXIT_CRITICAL(&mux_gmc);
+}
+
+uint32_t tube_get_blanked_wide_total(void) {
+    // Same non-destructive contract as tube_get_blanked_total above.
+    uint32_t v;
+    portENTER_CRITICAL(&mux_gmc);
+    v = s_blanked_wide_total;
+    portEXIT_CRITICAL(&mux_gmc);
+    return v;
+}
+
 void tube_set_blank_us(uint32_t blank_us) {
     // V2.6.29: set the HV blanking window (effective µs from
     // config_effective_blank_us; 0 disables). Same live-apply pattern as

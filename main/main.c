@@ -51,6 +51,7 @@
 #include "telemetry.h"          // V2.6.19: standalone mode — neutral column registry
 #include "transmission.h"
 #include "tube.h"
+#include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
 #include "tube_pcnt.h"   // V2.5.16: optional PCNT pulse-width comb diagnostic
 #include "util.h"
 #include "version.h"
@@ -726,17 +727,24 @@ static void do_tx_cycle(void) {
     // V2.6.29: PCNT subtract mode — pcnt_filter and hv_blank may now run
     // TOGETHER. The PCNT hardware path has no notion of HV timing, so on
     // boards whose phantom pulses pass the width filter (S3 family, >=4 µs)
-    // the phantoms sit inside the filtered count; the ISR's per-window
-    // hv_blanked tally is the count of exactly those pulses, so subtract it.
-    // Strictly gated on `filtering`: in plain mode (pcnt off) counts_raw
-    // already excludes blanked edges at the ISR, and with blanking off
-    // diag_hv_blanked is 0 — either way this block is a no-op. Clamped so a
-    // mis-configured board (phantoms NARROWER than the filter, e.g. the
-    // Feather V2 bench board, where PCNT already dropped them = double
-    // subtraction) can't wrap below zero; the double-subtract itself is a
-    // documented operator decision, see config_fields.def hv_blank.
+    // the phantoms sit inside the filtered count and must be subtracted out.
+    // V2.6.31: subtract only the phantoms STILL IN the PCNT count. The
+    // phantom's width is temperature-dependent (.196 field data 2026-08-01:
+    // >=4 µs cool, <4 µs above ~15 °C tube temp), so the V2.6.29 full
+    // hv_blanked subtraction double-subtracted warm-hour phantoms the width
+    // filter had already dropped (−6 CPM at summer temps). pcnt_blank_wide()
+    // (tube_logic.h, host-tested) derives the wide-phantom share from the
+    // width filter's own removal tally. Strictly gated on `filtering`: in
+    // plain mode (pcnt off) counts_raw already excludes blanked edges at the
+    // ISR, and with blanking off diag_hv_blanked is 0 — either way this block
+    // is a no-op. The monotonic twin feeds history.c's rolling cpm5/cpm15
+    // (per-cycle lump cadence — see the note in history_tick).
+    uint32_t blanked_wide = 0;
     if (filtering && diag_hv_blanked > 0) {
-        counts = (counts >= diag_hv_blanked) ? counts - diag_hv_blanked : 0;
+        blanked_wide = pcnt_blank_wide(pc[TUBE_PCNT_NWIDTHS - 1], counts_raw,
+                                       diag_hv_blanked);
+        counts       = (counts >= blanked_wide) ? counts - blanked_wide : 0;
+        tube_note_blanked_wide(blanked_wide);
     }
 
     // V2.4.27: hv_pulses returned by tube_read() is cumulative-since-boot
@@ -797,9 +805,14 @@ static void do_tx_cycle(void) {
             // counted" is counts_raw + hv_blanked — verified live on .196
             // CYCLE #2 (counts_raw=205, pcnt=223, hv_blanked=18: the naive
             // formula clamps real width removals to 0 by up to hv_blanked).
-            // Reduces to the pre-blank formula when hv_blanked==0. The blank
-            // subtraction is reported as its own clause (0 when hv_blank is
-            // off — line shape stable for log parsers, matching DIAG).
+            // Reduces to the pre-blank formula when hv_blanked==0.
+            // V2.6.31: the subtracted amount is now blanked_wide (width-aware,
+            // see pcnt_blank_wide) — report BOTH the raw blank tally and the
+            // wide share actually subtracted: their difference is the narrow
+            // phantom population, i.e. a free per-cycle phantom-width-vs-
+            // temperature telemetry channel (log parsers: clause shape changed
+            // from "hv_blanked N subtracted" to "hv_blanked N, N wide
+            // subtracted" in V2.6.31).
             uint32_t pcnt_counts = pc[TUBE_PCNT_NWIDTHS - 1];
             uint32_t isr_ref     = counts_raw + diag_hv_blanked;
             uint32_t removed     = (isr_ref >= pcnt_counts)
@@ -807,10 +820,11 @@ static void do_tx_cycle(void) {
                                        : 0;
             ESP_LOGI(TAG, "FILTER: pcnt_filter ON @%luns — CYCLE counts/cpm are "
                           "POST-filter; pre-filter counts=%lu cpm=%lu (removed %lu, "
-                          "hv_blanked %lu subtracted)",
+                          "hv_blanked %lu, %lu wide subtracted)",
                      (unsigned long)tube_pcnt_width_ns(TUBE_PCNT_NWIDTHS - 1),
                      (unsigned long)counts_raw, (unsigned long)cpm_raw,
-                     (unsigned long)removed, (unsigned long)diag_hv_blanked);
+                     (unsigned long)removed, (unsigned long)diag_hv_blanked,
+                     (unsigned long)blanked_wide);
         }
 
         // V2.5.12: raw-edge profiler dump. rejected = edges suppressed by the
@@ -1522,7 +1536,13 @@ void app_main(void) {
     // pcnt_filter is on, do_tx_cycle uses the widest-tooth count as the
     // authoritative CPM (and logs the full comb + pre-filter values). Tube-gated:
     // pointless without count pulses.
-    if (g_cfg.tube_enabled && g_cfg.pcnt_filter) {
+    // V2.6.31: also brought up in blanking-only mode (hv_blank without
+    // pcnt_filter) as a pure DIAGNOSTIC: the comb is passive parallel hardware
+    // — counts/cpm stay ISR-based (the `filtering` substitution stays strictly
+    // pcnt_filter-gated) — but the PCNT w_ns log line keeps flowing, which is
+    // the phantom-width-vs-temperature telemetry the 2026-08-01 .196 analysis
+    // ran on.
+    if (g_cfg.tube_enabled && (g_cfg.pcnt_filter || g_cfg.hv_blank)) {
         tube_pcnt_init(g_cfg.pcnt_filter_width_ns);
     }
 

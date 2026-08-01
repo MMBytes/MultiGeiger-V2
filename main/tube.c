@@ -81,10 +81,10 @@ static portMUX_TYPE mux_cap = portMUX_INITIALIZER_UNLOCKED;
 // suppressed (its true marginal effect: counts_without_blank = counts +
 // hv_blanked), snapshot+reset per cycle via tube_get_diag.
 // V2.6.29: isr_hv_blanked_total is the monotonic twin (never reset, same
-// pattern as isr_gmc_total) — consumed by the PCNT subtract mode: when the
-// width filter is authoritative, phantoms wide enough to pass it are still in
-// the PCNT hardware count, so main.c/history.c subtract the blanked tally
-// (per-cycle / per-minute delta respectively) from the filtered count.
+// pattern as isr_gmc_total). V2.6.31: the subtract mode switched to the
+// width-aware wide share (pcnt_blank_wide via the per-cycle tube_get_diag
+// snapshot + s_blanked_wide_total below), leaving this total's accessor
+// unreferenced — kept as a diagnostics API, see tube.h.
 static volatile uint64_t isr_last_hv_off_us   = 0;
 static volatile uint32_t isr_blank_us         = 0;
 static volatile uint32_t isr_hv_blanked       = 0;

@@ -362,7 +362,9 @@ X_BOOL(pcnt_filter,           "pcnt_filt",   false)
 // experiment found ~4µs but the optimum is temperature-sensitive (the Heltec's
 // narrow-pulse fraction climbs as it warms), so it's tunable per node. Bounded
 // to stay under the APB glitch-filter ceiling (~12.8µs). Reboot-required (the
-// glitch filter is set at unit init). Only meaningful when pcnt_filter is on.
+// glitch filter is set at unit init). Meaningful when pcnt_filter is on (sets
+// the authoritative filter tooth) — and since V2.6.31 also with hv_blank
+// alone, where it sets the passive diagnostic comb's widest tooth.
 X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 
 // --- Dead-time guard / burst-collapse (V2.5.30) -----------------------------
@@ -453,6 +455,11 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // V2.6.31: enabling hv_blank ALONE (pcnt_filter off) now also brings up the
 // PCNT width comb as a passive diagnostic — counts stay ISR-based, but the
 // per-cycle PCNT w_ns log line keeps flowing (phantom-width telemetry).
+// Comb init happens at BOOT: a live /config Save of hv_blank starts blanking
+// immediately (ISR volatile) but the comb only appears from the next restart.
+// Flip side on a node already booted with hv_blank: the pre-armed comb makes
+// a later pcnt_filter tick take effect LIVE on Save (history re-primes on
+// the source switch) instead of at the next restart.
 //
 // Also composes with the dead-time guard (no exclusion between the two ISR
 // features): gmc_classify runs FIRST, so an edge inside both windows tallies

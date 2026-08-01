@@ -118,8 +118,11 @@ void tube_set_blank_us(uint32_t blank_us);
  *  wide enough to pass the width filter are still inside the PCNT hardware
  *  count, which ISR-side blanking cannot reach — so the subtract mode takes
  *  the blanked share back out of the filtered count. V2.6.31: the amount
- *  subtracted is no longer this raw tally but its width-aware subset (below);
- *  this total stays as-is for DIAG and as pcnt_blank_wide()'s input.
+ *  subtracted is the width-aware subset (below), which made this accessor
+ *  UNREFERENCED in firmware — the per-cycle paths use tube_get_diag()'s
+ *  hv_blanked snapshot instead. Kept as a diagnostics API (the monotonic
+ *  counter costs two ISR increments either way); delete both together if
+ *  it is still unused when the blanking feature next changes.
  */
 uint32_t tube_get_blanked_total(void);
 

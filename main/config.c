@@ -223,7 +223,7 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  hv-blank:         enabled=%d window=%luus%s",
               cfg->hv_blank, (unsigned long)cfg->hv_blank_us,
               (cfg->hv_blank && cfg->pcnt_filter)
-                  ? " (subtract mode: pcnt count minus blanked)"
+                  ? " (subtract mode: pcnt count minus wide-blanked share)"
                   : "");
     // i2c_pinout only does anything where the alternate pads exist
     // (HAL_HAS_I2C_PINOUT_SWITCH); elsewhere it's force-disabled + greyed in the
@@ -300,9 +300,10 @@ uint32_t config_effective_guard_us(const config_t *cfg) {
 }
 
 uint32_t config_effective_blank_us(const config_t *cfg) {
-    // V2.6.29: blanking COMPOSES with pcnt_filter (subtract mode — the ISR
-    // tally of blanked phantoms is subtracted from the width-filtered count
-    // in do_tx_cycle/history.c), so unlike the guard it is NOT suppressed
+    // V2.6.29: blanking COMPOSES with pcnt_filter (subtract mode — V2.6.31:
+    // only the WIDE share of the blanked phantoms, pcnt_blank_wide(), is
+    // subtracted from the width-filtered count in do_tx_cycle/history.c),
+    // so unlike the guard it is NOT suppressed
     // when pcnt_filter is on. The rule lives in the pure, host-tested
     // blank_effective_us() (tube_logic.h) — which takes pcnt_filter only to
     // pin, via test, that it ignores it. (The first V2.6.29 cut had this

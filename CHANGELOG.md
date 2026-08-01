@@ -36,8 +36,10 @@ double-subtract (removed≈hv_blanked → wide≈0). Replaying the formula over 
 full 10,099-cycle field dataset: pre-blanking cycles bit-identical, and the
 post-V2.6.29 era flattens to ~66 CPM across every temperature band. The
 V2.6.29 operator caveat ("don't combine blanking with the width filter on
-narrow-phantom boards — double-subtracts") is retired: the combination is now
-a no-op there by construction.
+narrow-phantom boards — double-subtracts") is retired: on such boards the
+subtraction now collapses to ~0 (statistically — a cycle mixing pileup with
+narrow phantoms can still mis-attribute a bounded count or two; the clamps
+hold either way).
 
 Two observability changes:
 

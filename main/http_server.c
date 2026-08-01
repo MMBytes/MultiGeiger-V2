@@ -1706,11 +1706,16 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "id=\"dt_guard_us\" value=\"%lu\"></label>"
                      // V2.6.29: HV blanking window — checkbox + window under the dead-time
                      // guard (user request). Live-applied like the guard, but unlike the guard
-                     // it COMPOSES with the PCNT width filter: subtract mode (do_tx_cycle /
-                     // history.c take pcnt count minus hv_blanked), so only syncTube() gates
-                     // these controls. Phantom-pulse suppression for the Rev B/C PCB coupling
-                     // defect: one phantom count per HV charge pulse, ~10µs after FET turn-off
-                     // — see config_fields.def for the full story + the archive-step warning.
+                     // it COMPOSES with the PCNT width filter: subtract mode (V2.6.31: do_tx_cycle
+                     // / history.c subtract only the wide-blanked share, pcnt_blank_wide), so
+                     // only syncTube() gates these controls. Phantom-pulse suppression for the
+                     // Rev B/C PCB coupling defect: one phantom count per HV charge pulse, ~10µs
+                     // after FET turn-off — see config_fields.def for the full story + the
+                     // archive-step warning. V2.6.31 side effect: with hv_blank saved, the comb
+                     // comes up at next boot even with pcnt_filter off — so on such a node a
+                     // later pcnt_filter tick takes effect LIVE on Save (the comb is pre-armed;
+                     // history re-primes on the source switch), not at the next restart as the
+                     // `*` marker suggests for the cold-start case.
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"hv_blank\" "
                      "id=\"hv_blank\" %s> "
                      "HV blanking window &mdash; ignores count edges for the window below after "
@@ -1722,7 +1727,8 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "board: only the phantoms still inside the filtered count are subtracted "
                      "(width-aware since V2.6.31 &mdash; phantom width varies with tube "
                      "temperature). Enabling blanking alone also keeps the PCNT width-comb "
-                     "diagnostic logging. Also composes with the dead-time guard.</label></div>"
+                     "diagnostic logging (comb active from the next restart). Also composes "
+                     "with the dead-time guard.</label></div>"
                      "<label>Blanking window (&micro;s, 5&ndash;1000; ~30 typical &mdash; covers "
                      "the 3-16&micro;s observed phantom delay with margin) "
                      "<input type=\"text\" inputmode=\"numeric\" name=\"hv_blank_us\" "
@@ -2854,7 +2860,8 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // (progress / verify / SUCCESS / FAILED) reach the syslog server —
     // including failures, which used to be invisible server-side.
     tube_pcnt_stop(); // V2.5.16: release the opt-in PCNT comb's internal DRAM
-                      // (no-op when pcnt_filter is off — the common case)
+                      // (no-op when the comb never came up; V2.6.31: it also
+                      // runs with hv_blank alone, not just pcnt_filter)
     // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
     // this the poll re-armed both within ~1 s of the stops above, undoing
     // the V2.4.13 heap-freeing intent during the bulk of the OTA write.

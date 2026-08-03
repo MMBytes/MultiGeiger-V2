@@ -1,12 +1,12 @@
 esp-web-tools — vendored (self-hosted) copy
 ===========================================
 
-Pinned version : 10.2.1
-Source         : https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-10.2.1.tgz
+Pinned version : 10.4.0
+Source         : https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-10.4.0.tgz
 Vendored from  : package/dist/web/  (the whole directory — install-button.js
                  is the entry, but it dynamically imports the sibling hashed
                  chunks at runtime, so all files are required)
-Vendored on    : 2026-06-05
+Vendored on    : 2026-08-04
 
 Why vendored instead of CDN
 ---------------------------
@@ -22,7 +22,7 @@ How to upgrade
 --------------
 PowerShell, from the repo root:
 
-    $v   = "10.2.1"                       # <- set to the new version
+    $v   = "10.4.0"                       # <- set to the new version
     $tmp = Join-Path $env:TEMP "ewt"
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $tmp | Out-Null

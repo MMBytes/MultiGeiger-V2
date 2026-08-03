@@ -2015,7 +2015,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // overrides bypass the auto rule entirely.
                      "<label>Display layout <span class=\"r\">*</span>"
                      "<select name=\"disp_mode\">"
-                     "<option value=\"0\"%s>Auto (panel-based: small OLED &rarr; radiation, big OLED / SerLCD &rarr; rotation)</option>"
+                     "<option value=\"0\"%s>Auto (panel-based: small OLED &rarr; radiation, big OLED / SerLCD / TFT &rarr; rotation)</option>"
                      "<option value=\"1\"%s>Radiation only (Heltec-style single page)</option>"
                      "<option value=\"2\"%s>Rotation (Env / PM / Number / Uploads / System)</option>"
                      "</select></label>"

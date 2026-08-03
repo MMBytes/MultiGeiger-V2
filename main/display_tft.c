@@ -49,6 +49,13 @@ static const char *TAG = "tft";
 #define GLYPH_W 16
 #define GLYPH_H 16
 
+// V2.6.32: 4x scale — 32x32 px per character, 7 col x 4 row grid. Used by
+// the high-visibility layouts (Env page, Radiation page's big CPM) after
+// bench feedback that the 2x Env text was too small on this panel. Line
+// formats on 4x pages must fit 7 characters (8 chars = 256 px > 240).
+#define GLYPH4_W 32
+#define GLYPH4_H 32
+
 static esp_lcd_panel_io_handle_t s_io = NULL;
 static esp_lcd_panel_handle_t s_panel = NULL;
 static uint16_t *s_fb = NULL;   // TFT_W * TFT_H px, PSRAM-resident RGB565
@@ -68,34 +75,46 @@ static void fb_set_px(int x, int y, uint16_t color) {
     s_fb[y * TFT_W + x] = color;
 }
 
-// Draws one FONT8 glyph at 2x scale (each source pixel becomes a 2x2
-// block). FONT8 is declared extern in display.h and defined once, at
-// file scope, in display.c — shared verbatim with the OLED backend so
-// there is only one glyph table in the whole firmware image.
-static void draw_glyph_2x(int x, int y, char ch, uint16_t color) {
+// Draws one FONT8 glyph at an integer scale (each source pixel becomes a
+// scale x scale block). FONT8 is declared extern in display.h and defined
+// once, at file scope, in display.c — shared verbatim with the OLED
+// backend so there is only one glyph table in the whole firmware image.
+//
+// Bit order: FONT8 is dhepper/font8x8 layout — bit 0 (LSB) of each row
+// byte is the LEFTMOST pixel, same convention transpose_char() in
+// display.c relies on. V2.6.32: was `0x80 >> col` (MSB-first), which
+// mirrored every glyph in place — first-hardware bring-up fix.
+static void draw_glyph_scaled(int x, int y, char ch, uint16_t color, int scale) {
     if (ch < 0x20 || ch > 0x7E) ch = ' ';
     const uint8_t *rows = FONT8[(unsigned char)ch - 0x20];
     for (int row = 0; row < 8; row++) {
         uint8_t bits = rows[row];
         for (int col = 0; col < 8; col++) {
-            if (!(bits & (0x80 >> col))) continue;
-            int px = x + col * 2;
-            int py = y + row * 2;
-            fb_set_px(px,     py,     color);
-            fb_set_px(px + 1, py,     color);
-            fb_set_px(px,     py + 1, color);
-            fb_set_px(px + 1, py + 1, color);
+            if (!(bits & (1u << col))) continue;
+            int px = x + col * scale;
+            int py = y + row * scale;
+            for (int dy = 0; dy < scale; dy++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    fb_set_px(px + dx, py + dy, color);
+                }
+            }
         }
     }
 }
 
-static void draw_string_2x(int x, int y, const char *s, uint16_t color) {
+static void draw_string_scaled(int x, int y, const char *s, uint16_t color, int scale) {
     if (!s) return;
     int cx = x;
     for (; *s; s++) {
-        draw_glyph_2x(cx, y, *s, color);
-        cx += GLYPH_W;
+        draw_glyph_scaled(cx, y, *s, color, scale);
+        cx += 8 * scale;
     }
+}
+
+// 2x convenience wrapper — keeps the many existing 15-col-grid call
+// sites below unchanged.
+static void draw_string_2x(int x, int y, const char *s, uint16_t color) {
+    draw_string_scaled(x, y, s, color, 2);
 }
 
 // Pushes the whole framebuffer to the panel in one transfer. esp_lcd's
@@ -239,6 +258,9 @@ void display_tft_boot_screen(const char *version_str) {
 // fields, formatted for this panel's 15 col x 8 row (2x font) grid.
 // ====================================================================
 
+// V2.6.32: 4x glyphs (was 2x) after bench feedback that the Env text was
+// too small on this panel. All formats fit the 4x grid's 7-char line
+// limit — the hPa and dB lines drop their value/unit space for it.
 void display_tft_render_env(const display_snapshot_t *snap) {
     if (!s_fb || !snap) return;
     fb_fill(TFT_COLOR_BLACK);
@@ -246,19 +268,19 @@ void display_tft_render_env(const display_snapshot_t *snap) {
     char line[16];
     if (snap->env_valid) {
         snprintf(line, sizeof(line), "%5.1f C", snap->env_t_c);
-        draw_string_2x(0, 0 * GLYPH_H, line, TFT_COLOR_WHITE);
+        draw_string_scaled(0, 0 * GLYPH4_H, line, TFT_COLOR_WHITE, 4);
         snprintf(line, sizeof(line), "%5.1f %%", snap->env_h_pct);
-        draw_string_2x(0, 1 * GLYPH_H, line, TFT_COLOR_WHITE);
-        snprintf(line, sizeof(line), "%4d hPa", (int)(snap->env_p_pa / 100.0f + 0.5f));
-        draw_string_2x(0, 2 * GLYPH_H, line, TFT_COLOR_WHITE);
+        draw_string_scaled(0, 1 * GLYPH4_H, line, TFT_COLOR_WHITE, 4);
+        snprintf(line, sizeof(line), "%4dhPa", (int)(snap->env_p_pa / 100.0f + 0.5f));
+        draw_string_scaled(0, 2 * GLYPH4_H, line, TFT_COLOR_WHITE, 4);
     } else {
-        draw_string_2x(0, 0 * GLYPH_H, "--- C", TFT_COLOR_WHITE);
-        draw_string_2x(0, 1 * GLYPH_H, "--- %", TFT_COLOR_WHITE);
-        draw_string_2x(0, 2 * GLYPH_H, "--- hPa", TFT_COLOR_WHITE);
+        draw_string_scaled(0, 0 * GLYPH4_H, "--- C", TFT_COLOR_WHITE, 4);
+        draw_string_scaled(0, 1 * GLYPH4_H, "--- %", TFT_COLOR_WHITE, 4);
+        draw_string_scaled(0, 2 * GLYPH4_H, "---hPa", TFT_COLOR_WHITE, 4);
     }
     if (snap->noise_valid) {
-        snprintf(line, sizeof(line), "%5.1f dB", snap->noise.laeq);
-        draw_string_2x(0, 3 * GLYPH_H, line, TFT_COLOR_WHITE);
+        snprintf(line, sizeof(line), "%5.1fdB", snap->noise.laeq);
+        draw_string_scaled(0, 3 * GLYPH4_H, line, TFT_COLOR_WHITE, 4);
     }
     fb_push();
 }
@@ -360,6 +382,68 @@ void display_tft_render_uploads(void) {
     fb_push();
 }
 
+// Local copy of display.c's format_time() — same tiny-static-per-backend
+// reasoning as fmt_n_value() above (7 lines, not worth a shared header).
+static void fmt_uptime(int secs, char *out, size_t outsz) {
+    int mins  = secs / 60;
+    int hours = secs / 3600;
+    if (secs < 60) snprintf(out, outsz, "%2ds", secs);
+    else if (mins < 60) snprintf(out, outsz, "%2dm", mins);
+    else if (hours < 24) snprintf(out, outsz, "%2dh", hours);
+    else {
+        int days = secs / 86400;
+        snprintf(out, outsz, "%2dd", days % 100);
+    }
+}
+
+// V2.6.32: shared layout for both radiation entry points (rotation page
+// and single-page radiation mode) — the OLED display_running() layout
+// scaled to this panel: uptime + nSv/h header at 2x, Heltec-style big
+// CPM at 4x, centred, with a 2x "CPM" unit label under it.
+static void render_radiation_page(int time_sec, int rad_nsvph, int cpm) {
+    if (!s_fb) return;
+    fb_fill(TFT_COLOR_BLACK);
+
+    // Clamp to the field widths — values beyond 5 digits (or negative,
+    // impossible but the format-truncation warning reasons over the full
+    // int range) would shift the layout. 99999 nSv/h = 100 µSv/h; far
+    // beyond any reading this firmware's tubes produce outside a fault.
+    if (rad_nsvph < 0) rad_nsvph = 0;
+    if (rad_nsvph > 99999) rad_nsvph = 99999;
+    if (cpm < 0) cpm = 0;
+    if (cpm > 99999) cpm = 99999;
+
+    char ts[4];
+    fmt_uptime(time_sec, ts, sizeof(ts));
+    char line[24];
+    // 3+1+5+6 = 15 chars — exactly the 2x grid's full row width.
+    snprintf(line, sizeof(line), "%3s %5d nSv/h", ts, rad_nsvph);
+    draw_string_2x(0, 0, line, TFT_COLOR_WHITE);
+
+    // Big CPM: 5 digits x 32 px = 160 px, centred → x=40. Rows 48..79
+    // sit clear of the header (0..15) and the unit label (104..119).
+    char digits[8];
+    snprintf(digits, sizeof(digits), "%5d", cpm);
+    draw_string_scaled(40, 48, digits, TFT_COLOR_WHITE, 4);
+
+    // "CPM" at 2x = 48 px, centred → x=96.
+    draw_string_2x(96, 104, "CPM", TFT_COLOR_WHITE);
+    fb_push();
+}
+
+void display_tft_render_radiation(const display_snapshot_t *snap) {
+    if (!s_fb || !snap) return;
+    // Uptime is read live (not from the snapshot) so the header keeps
+    // ticking every rotation pass, matching the Uploads/System pages'
+    // live-read pattern.
+    int up_s = (int)(esp_timer_get_time() / 1000000LL);
+    render_radiation_page(up_s, (int)snap->rad_nsvph, (int)snap->rad_cpm);
+}
+
+void display_tft_render_running(int time_sec, int rad_nsvph, int cpm) {
+    render_radiation_page(time_sec, rad_nsvph, cpm);
+}
+
 void display_tft_render_system(void) {
     if (!s_fb) return;
     fb_fill(TFT_COLOR_BLACK);
@@ -416,5 +500,11 @@ void display_tft_render_pm_mass(const display_snapshot_t *snap) { (void)snap; }
 void display_tft_render_pm_number(const display_snapshot_t *snap) { (void)snap; }
 void display_tft_render_uploads(void) {}
 void display_tft_render_system(void) {}
+void      display_tft_render_radiation(const display_snapshot_t *snap) { (void)snap; }
+void      display_tft_render_running(int time_sec, int rad_nsvph, int cpm) {
+    (void)time_sec;
+    (void)rad_nsvph;
+    (void)cpm;
+}
 
 #endif  // HAL_HAS_TFT

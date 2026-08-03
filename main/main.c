@@ -941,7 +941,9 @@ static void do_tx_cycle(void) {
     if (!display_is_multipage()) {
         display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
     } else {
-        (void)time_sec; (void)rad_nsvph; (void)cpm_disp;
+        // V2.6.32: rad_nsvph/cpm_disp now feed the snapshot below (TFT
+        // rotation Radiation page); uptime is read live at render time.
+        (void)time_sec;
     }
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
@@ -1113,6 +1115,9 @@ static void do_tx_cycle(void) {
             .pm          = pm,
             .noise_valid = noise_valid,
             .noise       = noise,
+            .rad_valid   = g_cfg.tube_enabled,
+            .rad_nsvph   = rad_nsvph,
+            .rad_cpm     = cpm_disp,
         };
         display_update_snapshot(&snap);
     }

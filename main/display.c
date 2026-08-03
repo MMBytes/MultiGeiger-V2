@@ -1143,13 +1143,18 @@ static void display_task(void *arg) {
 // V2.6.11: Adafruit ESP32-S3 TFT Feather onboard ST7789 color TFT.
 // Mutually exclusive with HAL_HAS_OLED (see hal.h) — this board has no
 // I2C OLED/SerLCD path, so there's no probe/fallback chain like the
-// branch above: the panel is always fitted, and display_setup() always
-// resolves to the 5-page rotation (no radiation single-page layout is
-// implemented for this backend — the color landscape panel suits the
-// rotation grid, and every deployment of this board so far pairs it
-// with at least one sensor). Rendering itself lives in display_tft.c;
-// this branch only owns the display_task rotation loop and the public
-// display_*() dispatch, mirroring the structure above.
+// branch above: the panel is always fitted. Rendering itself lives in
+// display_tft.c; this branch only owns the display_task rotation loop
+// and the public display_*() dispatch, mirroring the structure above.
+//
+// V2.6.32: radiation support (first-hardware feedback — a tube-only
+// board previously showed no CPM anywhere; the V2.6.11 "every deployment
+// pairs it with at least one sensor" assumption predated real hardware).
+// The rotation gains a Radiation page (first, gated on snapshot
+// rad_valid = tube_enabled), and mode=RADIATION now resolves to the
+// OLED-style single-page layout rendered per TX cycle via
+// display_running(). AUTO resolves to rotation (big-panel rule, same as
+// the OLED branch's SSD1309/SerLCD arm).
 // ====================================================================
 
 #include "display_tft.h"
@@ -1179,7 +1184,8 @@ static uint8_t s_brightness_pct = 80;   // V2.6.11 review fix: same
 #define PAGE_DWELL_MS 7000
 
 typedef enum {
-    PAGE_ENV = 0,
+    PAGE_RADIATION = 0,   // V2.6.32: first page — the core reading
+    PAGE_ENV,
     PAGE_PM_MASS,
     PAGE_PM_NUMBER,
     PAGE_UPLOADS,
@@ -1189,6 +1195,7 @@ typedef enum {
 
 static void render_page(display_page_t page) {
     switch (page) {
+        case PAGE_RADIATION: display_tft_render_radiation(&s_snap); break;
         case PAGE_ENV:       display_tft_render_env(&s_snap);       break;
         case PAGE_PM_MASS:   display_tft_render_pm_mass(&s_snap);   break;
         case PAGE_PM_NUMBER: display_tft_render_pm_number(&s_snap); break;
@@ -1215,9 +1222,12 @@ static void display_task(void *arg) {
 
         // Build rotation list — env / PM pages gated on sensor presence.
         // Uploads + System always shown. Identical gating to the OLED
-        // branch's display_task().
+        // branch's display_task(). V2.6.32: Radiation first, gated on
+        // rad_valid (= tube_enabled, set with the first TX-cycle snapshot
+        // — the page appears once cycle #1 lands, ~150 s after boot).
         display_page_t pages[PAGE_COUNT];
         int n_pages = 0;
+        if (s_snap.rad_valid) pages[n_pages++] = PAGE_RADIATION;
         if (env_sensor_present()) pages[n_pages++] = PAGE_ENV;
         if (pm_sensor_present()) {
             pages[n_pages++] = PAGE_PM_MASS;
@@ -1240,8 +1250,15 @@ static void display_task(void *arg) {
     }
 }
 
+// V2.6.32: resolved layout — rotation unless mode=RADIATION forces the
+// single page. AUTO → rotation: this 240x135 landscape panel is the
+// largest in the fleet, same big-panel rule as the OLED branch's
+// SSD1309/SerLCD arm.
+static bool s_is_multipage = true;
+
 bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode) {
     s_resolved_mode = mode;
+    s_is_multipage  = (mode != DISPLAY_MODE_RADIATION);
 
     esp_err_t err = display_tft_init();
     if (err != ESP_OK) {
@@ -1252,19 +1269,24 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     s_show = show_display;
     display_set_contrast(brightness_pct);
 
-    xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "display backend: ST7789 TFT (show=%d brightness=%d%%)",
-             show_display, brightness_pct);
+    // Single-page (radiation) boots skip the rotation task — main.c
+    // renders via display_running() once per TX cycle instead, same
+    // split as the OLED branch.
+    if (s_is_multipage) {
+        xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+    }
+    ESP_LOGI(TAG, "display backend: ST7789 TFT (show=%d brightness=%d%% mode=%s)",
+             show_display, brightness_pct, display_mode_str());
     return true;
 }
 
 bool display_is_multipage(void) {
-    return true;
+    return s_is_multipage;
 }
 
 const char *display_mode_str(void) {
     switch (s_resolved_mode) {
-        case DISPLAY_MODE_RADIATION: return "radiation (unsupported on TFT, showing rotation)";
+        case DISPLAY_MODE_RADIATION: return "radiation (forced)";
         case DISPLAY_MODE_ROTATION:  return "rotation (forced)";
         default:                     return "auto (resolved: rotation)";
     }
@@ -1305,11 +1327,22 @@ void display_set_contrast(uint8_t pct) {
     display_tft_set_backlight(pct);
 }
 
+// V2.6.32: single-page radiation layout (mode=RADIATION). Same contract
+// as the OLED branch: main.c calls this once per TX cycle only when
+// rotation is off; when use_display goes false, blank the panel once
+// and stay dark until it comes back.
+static bool s_cleared = false;
+
 void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
-    // No radiation single-page layout on this backend — see the comment
-    // at the top of this HAL_HAS_TFT branch. Safety stub, same pattern as
-    // the SerLCD backend's stub above.
-    (void)time_sec; (void)rad_nsvph; (void)cpm; (void)use_display;
+    if (!use_display) {
+        if (!s_cleared) {
+            display_tft_clear();
+            s_cleared = true;
+        }
+        return;
+    }
+    s_cleared = false;
+    display_tft_render_running(time_sec, rad_nsvph, cpm);
 }
 
 void display_set_status(int index, int value) {

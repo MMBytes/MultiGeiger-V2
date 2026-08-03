@@ -9,6 +9,54 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.32 — TFT Feather first hardware: fix mirrored glyphs, radiation page, 4× Env text
+
+First contact between the V2.6.11 ST7789 TFT backend and real glass —
+the backend for the Adafruit ESP32-S3 TFT Feather (#5483) was written
+against the datasheet only; hardware arrived 3 Aug 2026. Bring-up
+verdict: panel orientation (`swap_xy`/`mirror`/40-53 px RAM gap), init
+order, and PSRAM framebuffer are all correct, but the first session on
+real hardware surfaced one rendering bug and two design gaps, all fixed
+here.
+
+**Mirrored glyphs (bug)**: every glyph rendered horizontally mirrored in
+its own 16×16 cell (string order and line positions intact;
+mirror-symmetric characters like M/i/n/x looked fine, everything else
+read backwards — "2"→"S", "6"→"ð", "3"→"Є"). Root cause
+(`main/display_tft.c` glyph loop): the shared `FONT8` table is
+dhepper/font8x8 layout, where **bit 0 (LSB) of each row byte is the
+leftmost pixel** — the convention the OLED backend's `transpose_char()`
+(display.c) honors with `1u << col`. The TFT glyph loop tested
+`0x80 >> col` (MSB-first), reversing every row byte's pixel order.
+One-line fix: test `1u << col`. display.h's FONT8 doc comment claimed
+the same wrong "bit 7 = leftmost" convention — corrected.
+
+**Radiation support (design gap)**: a tube-only board (no env/PM
+sensors) showed no radiation reading anywhere — the V2.6.11 backend
+shipped without any radiation layout on the assumption that "every
+deployment of this board pairs it with at least one sensor", and its
+rotation collapsed to Uploads + System.
+
+- New **Radiation page in the rotation**, shown first, gated on the new
+  snapshot fields `rad_valid`/`rad_nsvph`/`rad_cpm` (written by main.c
+  once per TX cycle; `rad_valid` mirrors `tube_enabled`). Layout mirrors
+  the OLED single-page screen scaled to this panel: uptime + nSv/h
+  header at 2×, big centred CPM at 4× (32 px glyphs), "CPM" unit label.
+  Uptime is read live at render time (Uploads/System pattern); the page
+  appears once cycle #1 lands (~150 s after boot).
+- **mode=RADIATION now honored**: resolves to the OLED-style single-page
+  layout (no rotation task; main.c renders via `display_running()` once
+  per TX cycle — previously a stub that silently fell back to rotation).
+  AUTO still resolves to rotation (big-panel rule). The `/config` Auto
+  caption now mentions TFT explicitly.
+
+**4× Env page (too-small text)**: temp/hum/pressure (+ dB when a noise
+reading is valid that cycle) now render at 32 px — double the previous
+size — via a generalized integer-scale glyph renderer
+(`draw_glyph_scaled()`; the 2× path is a wrapper). 4× lines fit
+7 characters, so the hPa/dB lines drop their value–unit space
+(`1013hPa`).
+
 ## V2.6.31 — Width-aware blanking subtraction: fix the warm-weather double-subtract
 
 Field analysis of a deployed FeatherS3-D field node (10,099 syslog cycles,

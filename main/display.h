@@ -40,10 +40,13 @@
 #include "noise_sensor.h"   // noise_sample_t
 
 /** @brief 8x8 bitmap font, printable ASCII 0x20..0x7E (95 glyphs), row-major
- *  (each byte one row, bit 7 = leftmost column). Defined once in display.c
- *  at file scope (public domain, dhepper/font8x8 "basic" subset) so both
- *  the OLED backend and the ST7789 TFT backend (display_tft.c, V2.6.11)
- *  draw from the same glyph data — no second font table, no GFX library.
+ *  (each byte one row, bit 0 = LEFTMOST column — dhepper/font8x8 is
+ *  LSB-first; V2.6.32 fixed this doc line and the TFT glyph loop, which
+ *  both assumed MSB-first and mirrored every TFT glyph on first hardware).
+ *  Defined once in display.c at file scope (public domain, dhepper/font8x8
+ *  "basic" subset) so both the OLED backend and the ST7789 TFT backend
+ *  (display_tft.c, V2.6.11) draw from the same glyph data — no second
+ *  font table, no GFX library.
  */
 extern const uint8_t FONT8[95][8];
 
@@ -63,6 +66,14 @@ typedef struct {
     pm_sample_t pm;
     bool   noise_valid;
     noise_sample_t noise;
+    // V2.6.32: radiation values for the TFT rotation's Radiation page —
+    // cycle-derived (CPM/nSv/h only exist per TX cycle), so they ride the
+    // snapshot rather than a live accessor. rad_valid mirrors tube_enabled;
+    // the two ints are the same values main.c passes to display_running()
+    // on single-page (radiation-mode) boards. OLED/SerLCD ignore them.
+    bool           rad_valid;
+    int32_t        rad_nsvph;
+    int32_t        rad_cpm;
 } display_snapshot_t;
 
 // Status subsystem indices.
@@ -110,9 +121,10 @@ typedef enum {
  *  init — caller passes g_cfg.oled_brightness_pct.
  *
  *  V2.4.9: mode selects the page layout. DISPLAY_MODE_AUTO resolves at
- *  setup time by querying env_sensor_present() / pm_sensor_present() /
- *  noise_sensor_present() / als_present() / veml7700_present() — any
- *  hit picks rotation, none picks radiation.
+ *  setup time PANEL-based (V2.6.32 doc fix — an earlier sensor-presence
+ *  rule was replaced long ago): small OLED (SSD1306/SSD1315) → radiation
+ *  single page; big panels (SSD1309, SerLCD, ST7789 TFT) → rotation.
+ *  Matches the /config Auto caption.
  *
  *  Returns true if the panel answered probe; false otherwise, after which
  *  subsequent calls are no-ops.

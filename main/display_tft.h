@@ -62,3 +62,17 @@ void display_tft_render_pm_mass(const display_snapshot_t *snap);
 void display_tft_render_pm_number(const display_snapshot_t *snap);
 void display_tft_render_uploads(void);
 void display_tft_render_system(void);
+
+/** @brief V2.6.32: Radiation page for the rotation — reads rad_nsvph /
+ *  rad_cpm from the snapshot (written per TX cycle by main.c), uptime
+ *  live. Layout mirrors the OLED single-page radiation screen: uptime +
+ *  nSv/h header, big centred CPM.
+ */
+void display_tft_render_radiation(const display_snapshot_t *snap);
+
+/** @brief V2.6.32: single-page radiation-mode entry point — same layout
+ *  as display_tft_render_radiation() but fed directly from display.c's
+ *  display_running() args (mode=RADIATION boards, one render per TX
+ *  cycle, no rotation task).
+ */
+void display_tft_render_running(int time_sec, int rad_nsvph, int cpm);

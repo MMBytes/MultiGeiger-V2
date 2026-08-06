@@ -97,6 +97,10 @@ const char *env_sensor_name(void);
 
 /** @brief Call once per measurement cycle to conditionally fire the SHT45
  *         built-in heater (see sht45.h for policy details).
+ *
+ *  `now_ms` must be esp_timer_get_time()/1000 — sht45_read() compares the
+ *  heater blackout deadline against that clock, so a tick-derived value
+ *  would silently mis-time the window.
  */
 void env_sensor_heat_periodic(uint32_t now_ms, float humidity_pct);
 

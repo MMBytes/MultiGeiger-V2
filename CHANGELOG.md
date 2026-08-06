@@ -9,6 +9,55 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.33 — SHT45 heater: fire-and-forget + 3 s blackout, serve cached reading
+
+Syslog review of the deployed field node showed 270 occurrences of
+`sht45: measure_high write: ESP_ERR_INVALID_RESPONSE` across four humid
+mornings (1–4 Aug 2026), each exactly one per
+`SHT45 heater activated` log line (fires at RH > 80 %) — a perfect 1:1
+correlation, and zero occurrences outside heater windows.
+
+Root cause (`main/sht45.c`, `sht45_heat_periodic()`): the code sends
+`CMD_HEATER_200MW = 0x39` — per SHT4x datasheet table 8 a **200 mW / 1 s**
+pulse — but held the driver mutex for only 120 ms, sized for the 0.1 s
+variant (0x32) that the adjacent comment wrongly described. The SHT45
+NACKs every command for the full heater duration, so the mutex came free
+~880 ms early and sgp41.c's 1 Hz RH/T compensation read landed
+mid-pulse, failing with `ESP_ERR_INVALID_RESPONSE` once per activation.
+
+Fix — fire-and-forget with a blackout deadline, rather than blocking for
+the pulse (which would have stalled callers ~1 s and disturbed
+sgp41_task's `vTaskDelayUntil` cadence; Sensirion's Gas Index Algorithm
+is only validated for steady 1 s sampling):
+
+- `sht45_heat_periodic()` sends the heater command and returns
+  immediately, recording a **3 s blackout deadline**
+  (`HEATER_BLACKOUT_MS`): 1 s deaf pulse + ~2 s die cool-down. The old
+  post-pulse discard-read is dropped — the SHT4x has no result-readout
+  obligation; the next measure command replaces the unread result.
+- `sht45_read()` checks the deadline (wrap-safe) and, inside the window,
+  serves the **cached pre-heat reading** (V2.6.19 telemetry cache) with
+  ESP_OK instead of touching the bus. The cache is fresh in practice:
+  the heater's humidity gate is normally the same cycle's successful
+  SHT45 reading, taken ≤ ~1 s earlier. Rare interleavings can leave the
+  cache cold (a concurrent read failing between gate and pulse, or a
+  fallback chip's humidity satisfying the gate on fused boards when the
+  SHT45 read failed) — those return ESP_ERR_INVALID_STATE and callers
+  degrade exactly as on a pre-fix read failure, for ≤ 3 s. Otherwise
+  callers see no failure, no blocking, and no warm-biased post-heat
+  sample.
+
+The 1 s pulse is deliberately kept (rather than switching to 0x32 to
+match the old 120 ms wait) — it is the behaviour the fleet has actually
+been running, and the stronger recondition suits the outdoor
+PTFE-membrane variant (SHT45-AD1F-R2, Adafruit 6174) at sustained high
+humidity. Stale "100 ms" claims corrected in `sht45.c`/`sht45.h`
+comments. Heater duty cycle stays 0.17 % (1 s per 10 min), far below
+the datasheet's 10 % limit. No behaviour change while the heater is
+inactive (RH ≤ 80 %).
+
+---
+
 ## V2.6.32 — TFT Feather first hardware: fix mirrored glyphs, radiation page, 4× Env text
 
 First contact between the V2.6.11 ST7789 TFT backend and real glass —

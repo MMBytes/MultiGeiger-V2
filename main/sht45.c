@@ -3,6 +3,7 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -17,16 +18,30 @@ static const char *TAG = "sht45";
 // Commands (datasheet table 8)
 #define CMD_MEASURE_HIGH    0xFD   // high-precision T+RH, ~8.2 ms
 #define CMD_READ_SERIAL     0x89   // read 32-bit factory serial; ~1 ms
-#define CMD_HEATER_200MW    0x39   // 200 mW for 0.1 s, then measure
+#define CMD_HEATER_200MW    0x39   // 200 mW for 1 s, then measure
 #define CMD_SOFT_RESET      0x94
 
 // Heater interval: only activate when humidity > this and 10 min have elapsed.
 #define HEATER_HUMIDITY_THR  80.0f
 #define HEATER_INTERVAL_MS   (10 * 60 * 1000UL)
 
+// V2.6.33: blackout window after sending CMD_HEATER_200MW. Two phases, one
+// deadline: (a) the sensor NACKs every command for the full 1 s pulse
+// (datasheet table 8 — 0x39 is the 1 s variant, NOT 0.1 s as the code
+// claimed pre-V2.6.33), and (b) the die then needs a couple of seconds to
+// shed the heat before a live reading reflects ambient again. During the
+// window sht45_read() serves the pre-heat cache instead of touching the bus
+// — see the comment there for why that is safe.
+#define HEATER_BLACKOUT_MS 3000
+
 static i2c_master_dev_handle_t s_dev  = NULL;
 static bool                    s_ready = false;
 static uint32_t                s_last_heat_ms = 0;
+
+// V2.6.33: end of the current heater blackout window (esp_timer millis).
+// 0 = no window active. Written by sht45_heat_periodic() and cleared lazily
+// by sht45_read(), both under s_mutex.
+static uint32_t s_heat_until_ms = 0;
 
 // V2.6.15: sgp41.c's background task now calls sht45_read() once per second
 // for RH/T compensation, alongside the main task's own periodic sht45_read()
@@ -308,6 +323,41 @@ static esp_err_t sht45_read_unlocked(float *temperature_c, float *humidity_pct) 
 
 esp_err_t sht45_read(float *temperature_c, float *humidity_pct) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    // V2.6.33: during the heater blackout window, serve the pre-heat cache
+    // instead of touching the bus. Two reasons a live read is wrong here:
+    // for the first ~1 s the sensor NACKs every command (that was the
+    // `measure_high write: ESP_ERR_INVALID_RESPONSE` seen once per heater
+    // activation on the deployed field node, 1–4 Aug 2026 — sgp41.c's 1 Hz
+    // compensation read landing mid-pulse), and for the remainder the die
+    // is still shedding heater heat, so a live reading would be warm/dry-
+    // biased. The cache is guaranteed fresh at activation time: the heater
+    // only fires right after a successful read in the same TX cycle (its
+    // humidity gate IS that reading), so "stale" here means ≤ ~1 s old
+    // ambient data — strictly better than either failing (callers fall back
+    // to default compensation ticks) or reporting a hot die. Serving the
+    // cache also keeps sgp41_task's vTaskDelayUntil cadence exact; the Gas
+    // Index Algorithm is only validated for steady 1 s sampling.
+    if (s_heat_until_ms != 0) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if ((int32_t)(s_heat_until_ms - now_ms) > 0) {
+            if (s_tm_valid) {
+                if (temperature_c) *temperature_c = s_tm_t_c;
+                if (humidity_pct) *humidity_pct = s_tm_h_pct;
+                if (s_mutex) xSemaphoreGive(s_mutex);
+                return ESP_OK;
+            }
+            // Rare but reachable: a concurrent read can fail (invalidating
+            // the cache) between the heater's humidity gate and its pulse,
+            // and on fused boards a fallback chip's humidity can satisfy the
+            // gate in a cycle where the SHT45's own read failed. Callers
+            // treat this like any read failure (≤ 3 s of fallback values).
+            if (s_mutex) xSemaphoreGive(s_mutex);
+            return ESP_ERR_INVALID_STATE;
+        }
+        s_heat_until_ms = 0;   // window over — back to live reads
+    }
+
     esp_err_t err = sht45_read_unlocked(temperature_c, humidity_pct);
     if (s_mutex) xSemaphoreGive(s_mutex);
     return err;
@@ -319,15 +369,39 @@ void sht45_heat_periodic(uint32_t now_ms, float humidity_pct) {
     if (s_last_heat_ms != 0 &&
         (uint32_t)(now_ms - s_last_heat_ms) < HEATER_INTERVAL_MS) return;
 
-    // CMD_HEATER_200MW triggers a 200 mW / 100 ms heat pulse and then takes
-    // a measurement. The result is discarded — we just want the heat effect.
-    // The next normal sht45_read() call will get fresh post-heat readings.
+    // CMD_HEATER_200MW (0x39) runs the heater at 200 mW for 1 s, then takes
+    // a measurement we never read out — the next measure command simply
+    // replaces the unread result (no readout obligation in the datasheet).
+    // The 1 s pulse is deliberate (vs the 0.1 s 0x32 variant): it is the
+    // behaviour the fleet has always run, and the stronger recondition
+    // suits the outdoor PTFE-membrane variant (SHT45-AD1F-R2) at sustained
+    // high humidity.
+    //
+    // V2.6.33: fire-and-forget + blackout deadline, replacing a 120 ms
+    // mutex-held wait that was sized for the 0.1 s command while 0x39 was
+    // what got sent. The sensor NACKs all commands for the full 1 s pulse,
+    // so the mutex came free ~880 ms early and sgp41.c's 1 Hz compensation
+    // read failed mid-pulse once per activation (270× on the deployed field
+    // node, 1–4 Aug 2026). Blocking here for the pulse instead would fix
+    // the error but stall the caller AND break sgp41_task's validated 1 s
+    // sampling cadence — so we return immediately and let sht45_read()
+    // serve the pre-heat cache until the deadline (pulse + die cool-down)
+    // passes. See HEATER_BLACKOUT_MS and the sht45_read() comment.
     ESP_LOGI(TAG, "SHT45 heater activated (RH=%.1f%%)", humidity_pct);
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    send_cmd(CMD_HEATER_200MW);
-    vTaskDelay(pdMS_TO_TICKS(120));   // 100 ms pulse + 20 ms settle
-    uint8_t discard[6];
-    i2c_master_receive(s_dev, discard, sizeof(discard), 50);
+    esp_err_t err = send_cmd(CMD_HEATER_200MW);
+    if (err == ESP_OK) {
+        s_heat_until_ms = now_ms + HEATER_BLACKOUT_MS;
+        // 0 is the "no window active" sentinel — dodge the 1-in-2^32 uint32
+        // wrap collision that would silently skip this window's protection.
+        // cppcheck-suppress knownConditionTrueFalse ; false positive: the
+        // analyzer ignores uint32 wrap — now_ms + 3000 IS 0 for
+        // now_ms == 0xFFFFF448, the exact case this guards.
+        if (s_heat_until_ms == 0) s_heat_until_ms = 1;
+    } else {
+        // No pulse started → no blackout. Log and retry in 10 min.
+        ESP_LOGW(TAG, "heater cmd write: %s", esp_err_to_name(err));
+    }
     if (s_mutex) xSemaphoreGive(s_mutex);
     s_last_heat_ms = now_ms;
 }

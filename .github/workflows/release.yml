@@ -1,5 +1,6 @@
 # Release workflow — fire on tag push, build all 11 boards, create the GitHub
-# Release with all 55 artefacts attached, and publish the web flasher to Pages.
+# Release with all 66 artefacts attached (11 boards × 5 .bin + 1 elf .zip),
+# and publish the web flasher to Pages.
 #
 # Trigger:
 #   git tag V2.4.2 && git push --tags
@@ -105,15 +106,16 @@ jobs:
         run: |
           set -e
           # KEEP IN SYNC with the matrix in _build-boards.yml. Each board
-          # contributes exactly 5 .bin files: geiger_v2, _merged, bootloader,
-          # partition-table, ota_data_initial. Independent guard on the count.
-          # (The per-board count of 5 is unrelated to and does not need to
+          # contributes exactly 6 files: 5 .bin (geiger_v2, _merged, bootloader,
+          # partition-table, ota_data_initial) + 1 .zip (elf_<board> debug
+          # symbols for coredump forensics). Independent guard on the count.
+          # (The per-board count of 6 is unrelated to and does not need to
           # change with the number of boards — see EXPECTED_BOARDS below.)
           EXPECTED_BOARDS=11
-          EXPECTED=$(( EXPECTED_BOARDS * 5 ))
-          COUNT=$(find artefacts -maxdepth 1 -type f -name '*.bin' | wc -l)
+          EXPECTED=$(( EXPECTED_BOARDS * 6 ))
+          COUNT=$(find artefacts -maxdepth 1 -type f \( -name '*.bin' -o -name '*.zip' \) | wc -l)
           if [ "$COUNT" != "$EXPECTED" ]; then
-            echo "::error::expected $EXPECTED .bin artefacts ($EXPECTED_BOARDS boards × 5 per board), found $COUNT — update EXPECTED_BOARDS in release.yml if the matrix in _build-boards.yml changed"
+            echo "::error::expected $EXPECTED artefacts ($EXPECTED_BOARDS boards × 6 per board: 5 .bin + 1 elf .zip), found $COUNT — update EXPECTED_BOARDS in release.yml if the matrix in _build-boards.yml changed"
             ls -la artefacts/
             exit 1
           fi
@@ -169,12 +171,12 @@ jobs:
           # assets to it instead of creating a duplicate.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::notice::release $TAG already exists, uploading assets (--clobber)"
-            gh release upload "$TAG" artefacts/*.bin --clobber
+            gh release upload "$TAG" artefacts/*.bin artefacts/*.zip --clobber
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes-file release_notes.md \
-              artefacts/*.bin
+              artefacts/*.bin artefacts/*.zip
           fi
           echo "::notice::release ready at $(gh release view "$TAG" --json url -q .url)"
 

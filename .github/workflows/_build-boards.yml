@@ -160,7 +160,8 @@ jobs:
               "$BD/geiger_v2_merged_$B.bin" \
               "$BD/bootloader/bootloader.bin" \
               "$BD/partition_table/partition-table.bin" \
-              "$BD/ota_data_initial.bin"
+              "$BD/ota_data_initial.bin" \
+              "$BD/geiger_v2.elf"
           do
               if [ ! -f "$src" ]; then
                   echo "::error::missing build output: $src"
@@ -173,7 +174,15 @@ jobs:
           cp "$BD/bootloader/bootloader.bin"           "stage/bootloader_$B.bin"
           cp "$BD/partition_table/partition-table.bin" "stage/partition-table_$B.bin"
           cp "$BD/ota_data_initial.bin"                "stage/ota_data_initial_$B.bin"
-          echo "Staged 5 artefacts for $B:"
+          # Debug symbols for coredump forensics: espcoredump/addr2line need the
+          # EXACT .elf that produced the released .bin, and rebuild-from-tag only
+          # stays byte-identical while the same IDF toolchain is still installed
+          # locally — field nodes crash on releases that are months old. Zipped
+          # (~12-15 MB elf -> a few MB) with a board-suffixed member name so
+          # extracting several boards' archives side by side can't collide.
+          cp "$BD/geiger_v2.elf" "geiger_v2_$B.elf"
+          zip -9 "stage/elf_$B.zip" "geiger_v2_$B.elf"
+          echo "Staged 6 artefacts for $B:"
           ls -la stage/
 
       - name: Upload firmware artefacts (CI build)

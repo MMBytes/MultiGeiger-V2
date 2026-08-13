@@ -7242,18 +7242,6 @@
 			)
 		)
 	)
-	(gr_text "+"
-		(at 144.816196 141.54757 0)
-		(layer "F.SilkS")
-		(uuid "1c0da6cd-100d-42be-a9d7-c6416ca9bbd9")
-		(effects
-			(font
-				(size 1 1)
-				(thickness 0.15)
-			)
-			(justify left bottom)
-		)
-	)
 	(gr_text "MultiGeiger 2.0 Rev B V2"
 		(at 164.516196 151.84757 0)
 		(layer "F.SilkS" knockout)

@@ -9,6 +9,89 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.6.34 — BREAKING: pin maps cut over to the Rev B/C V2 carriers and the V1.10 mainboard; per-board ELF debug symbols
+
+### Hardware pin cutover (breaking)
+
+Nine of the eleven board targets change their Geiger wiring in place —
+there are no new build targets and no runtime hardware detect. The
+firmware version is the cutover line:
+
+- **Original hardware (first-run carriers, V1.9 mainboards): stay on
+  ≤ V2.6.33.** Flashing ≥ V2.6.34 there drives the HV FET PWM into the
+  tube's pulse pickup and reads "counts" off the FET gate trace.
+- **Updated hardware (Rev B V2 / Rev C V2 carriers, V1.10 mainboards):
+  require ≥ V2.6.34.**
+
+On the eight socket-carrier boards the update swaps the `GMZ_COUNT` and
+`HV_FET_OUT` socket pads: the sensitive count input moves to the far-edge
+pad (A5/SCK position), physically clear of the HV aggressor pair
+(cap-full comparator + FET gate PWM) which now routes together on A0/A1
+next to the HV corner. Why: the carrier-layout crosstalk from the HV
+switching node into the adjacent count trace convicted in the
+phantom-count investigation — fixed in copper, mirrored here as an exact
+`PIN_GMC_COUNT_INPUT` ↔ `PIN_HV_FET_OUTPUT` value swap per board
+(`hal.h` carries per-board ≤V2.6.33 wiring notes). `heltec_v2` (both
+flash variants) is unchanged — the German V1.x mainboard hosting it was
+not updated for that module.
+
+`heltec_wifi_lora32_v4_r2` instead follows the V1.10 mainboard rework of
+the V1.9 board: the cap-full comparator moves GPIO2 → GPIO6 (freeing
+GPIO2 for its Heltec-side `FEM_EN` LoRa role — the old double-booking is
+gone, the pad is left unwired), and the piezo becomes usable for the
+first time on this module (`HAL_HAS_SPEAKER=1`, P leg rerouted
+GPIO26 → GPIO4 away from the in-package PSRAM chip-select collision that
+had forced the speaker off, N leg unchanged on GPIO5).
+
+The GPIO2 ownership change also simplifies the `/config` LoRaWAN
+section: the "Drive FEM enable (GPIO2)" checkbox is removed — the GC1109
+front end is required for LoRa RX, so the firmware now always enables it
+when LoRaWAN is on (a config option whose only non-default value is
+"broken RX" is not a choice; the old stored setting is ignored, and
+per-key NVS storage makes the removal migration-free). The 28 dBm
+high-power option remains opt-in — a regulatory/EIRP decision — but
+drops its hardware-rework warning, since the V1.10 board also removed
+the DIP switch that used to share GPIO46. The boot config dump gains the
+LoRaWAN group it had been missing since V2.6.23 (EUIs in clear, AppKey
+masked, on the LoRaWAN board only).
+
+One board-specific trap now documented in `hal.h`: on the SparkFun Thing
+Plus ESP32-C5, the count input's new pin (IO6) also carries the board's
+default-open "ST" power-status solder jumper. A closed ST jumper pins
+the count node — symptom: CPM ≈ 0 with perfectly healthy HV telemetry.
+ST must stay factory-open.
+
+The OTA upload page (`/update`) now states the required hardware
+revision for the nine affected boards next to the board name — with no
+runtime detect, that human checkpoint is the only guard against flashing
+a swapped-pin build onto original hardware.
+
+### Per-board ELF debug symbols in release assets
+
+Every GitHub release now attaches `elf_<board>.zip` (containing
+`geiger_v2_<board>.elf`) alongside the five firmware images per board —
+66 assets total for the 11-board matrix, up from 55.
+
+Why: analysing a device coredump (`espcoredump` / `addr2line`) requires
+the **exact** ELF that produced the running binary — the released `.bin`
+images are no help for symbolication. Until now the only route for a
+release build was rebuild-from-tag and byte-compare, which stays
+byte-identical only while the same ESP-IDF toolchain version is still
+installed locally; field nodes routinely crash on releases that are
+months old, so "old tag, newer toolchain" is the normal case, not the
+edge case. Shipping the ELF with each release removes that dependency
+from this release forward (older tags still need the rebuild route).
+
+CI-only part of this release — no firmware behaviour differs from it.
+`_build-boards.yml` verifies the ELF exists and stages it zipped, with a
+board-suffixed member name so extracting several boards' archives into
+one directory cannot collide. `release.yml`'s independent asset-count
+guard moves from 5 to 6 files per board and both release-upload paths
+(fresh create and re-run `--clobber`) include the zips. The Pages web
+flasher is untouched — it copies only the merged flash images.
+
+---
+
 ## V2.6.33 — SHT45 heater: fire-and-forget + 3 s blackout, serve cached reading
 
 Syslog review of the deployed field node showed 270 occurrences of
@@ -277,7 +360,7 @@ blanking window fails the suite.
 Observability-only release. No behaviour change on any board: same requests,
 same retries, same payloads — only the strings written to the log differ.
 The openSenseMap and syslog items came out of a 9-day log review of
-`esp32-5965048` (FeatherS3-D, V2.6.24, 4,305 cycles); the Madavi label fix and
+a deployed FeatherS3-D field node (V2.6.24, 4,305 cycles); the Madavi label fix and
 the wider sweep of the drop-counter comment came out of the pre-release review
 of that work.
 
@@ -494,9 +577,9 @@ Boards that have both a plain user LED and a WS2812 NeoPixel
 
 - WHY: the original port decision routed `led_tick` to `PIN_LED_BUILTIN`
   purely because that reused `speaker.c`'s existing `#ifdef` chain with zero
-  code changes — not for any GPIO or electrical reason (design spec §2,
-  "no new code, existing precedent"). At #5477 bench bring-up the user
-  chose the NeoPixel as the intended pulse indicator wherever one exists.
+  code changes — not for any GPIO or electrical reason. At #5477 bench
+  bring-up the NeoPixel was settled on as the intended pulse indicator
+  wherever one exists.
 - `speaker.c` `tick_start()` now checks `HAL_HAS_NEOPIXEL` first and falls
   back to `PIN_LED_BUILTIN` only on NeoPixel-less boards (Heltec V2,
   feathers3_d; the Heltec V4 R2's LED is driven by `led.c`, not this
@@ -517,7 +600,7 @@ a device whose saved config predates the `send_sc` key entirely (and was
 never re-saved since) loses sensor.community upload after updating to
 V2.6.24 and needs the checkbox re-ticked once.
 
-The same review's class audit led to a full rework of the `/config` +
+An audit of the same buffer-sizing class led to a full rework of the `/config` +
 `/status` HTML-escape buffers (`http_server.c`): every `e_*` destination
 was sized to a ~3-4x convention while `html_esc()`'s true worst case is
 **6x** (`"` → `&quot;`), so metacharacter-dense values were silently
@@ -536,7 +619,7 @@ hostnames in the RFC 5424 HOSTNAME field — while the web form, config
 struct (`CFG_HOSTNAME_MAX + 1`), NVS, and DHCP all carried the full name.
 Now sized `CFG_HOSTNAME_MAX + 1` like the cfg field it mirrors. 32 chars is
 exactly ESP-IDF's `esp_netif_set_hostname()` limit, so the whole chain now
-agrees end-to-end. (Found by the user on #5477 bench: router showed
+agrees end-to-end. (Spotted on the #5477 bench: the router showed
 `...esp32-S3`, syslog showed `...esp32-S`.)
 
 ---
@@ -596,17 +679,16 @@ SD-standalone-only and is now available on every board.
 
 ---
 
-## V2.6.22 — V2.6.19 deferred items + V2.6.20 review follow-ups
+## V2.6.22 — SD/status diagnostic accuracy, loud GPIO bring-up, doc-rot cleanup
 
-Two batches in one (unreleased) version: the deferred-item list from the
-V2.6.19 final review (Part 1), and the findings of a single-agent Fable 5
-MAX review of the v2.6.20 release diff (Part 2 — verdict: sound as shipped,
-zero Critical/High/Medium; all findings were documentation hygiene plus one
-deliberately-investigated robustness item).
+A hardening and diagnostics batch: /status now reports SD-card errors
+accurately (correct error domain, no stale values after a card pull),
+boot-time GPIO setup aborts loudly on a board-port mistake instead of
+failing silently, and the Geiger-pulse NeoPixel flash is now visually
+distinct from the SD-failure alert. Plus a set of stale documentation
+claims corrected. No changes to counting, uploads, or storage formats.
 
-### Part 2 — V2.6.20 review follow-ups: Vext doc rot + loud GPIO bring-up
-
-#### F1/F2 — the "no gating GPIO" falsehood, eradicated (Low)
+### Vext power-gating doc rot eradicated (Heltec V4-R2)
 
 - v2.6.20 fixed the wrong "Vext doesn't gate the OLED" claim in three places
   but left it standing in three others: `i2c_bus.h`'s per-board behaviour
@@ -619,7 +701,7 @@ deliberately-investigated robustness item).
   was born from a wrong power claim outliving its refutation — this class is
   now clean.
 
-#### F3/F5 — hal.h PIN_VEXT comment accuracy (Informational)
+### hal.h PIN_VEXT comment accuracy
 
 - Reserved-list GPIO36 bullet no longer claims it was "moved out of this
   list" while sitting in it: it stays reserved (it's the module's power-gate
@@ -628,14 +710,14 @@ deliberately-investigated robustness item).
   external "Ve" header (500 mA peripheral rail) — energized from boot on
   every unit since v2.6.20; relevant to battery deployments.
 
-#### F6 — ESP_ERROR_CHECK on boot-time GPIO bring-up (investigated, applied)
+### ESP_ERROR_CHECK on boot-time GPIO bring-up
 
-- The review called the unchecked `gpio_reset_pin`/`gpio_set_direction`/
-  `gpio_set_level` triples "house pattern" — investigation showed the house
-  is split: `gpio_config()` users check loudly (tube.c, speaker.c ×
-  ESP_ERROR_CHECK; led.c, neopixel.c × log), the triple was never checked
-  anywhere. Per IDF v6.0 source these calls fail ONLY on invalid or
-  input-only pin constants — a compile-time board-port mistake (classic
+- The `gpio_reset_pin`/`gpio_set_direction`/`gpio_set_level` triples used
+  at boot were never error-checked anywhere (unlike the `gpio_config()`
+  call sites, which all check loudly: tube.c, speaker.c ×
+  ESP_ERROR_CHECK; led.c, neopixel.c × log). Per IDF v6.0 source these
+  calls fail ONLY on invalid or input-only pin constants — a compile-time
+  board-port mistake (classic
   ESP32's GPIO34-39 are input-only, and `gpio_set_direction` silently no-ops
   on them; three classic-ESP32 boards live in this tree). Such a mistake is
   deterministic per board, so it can never pass the bench then fail in the
@@ -651,21 +733,7 @@ deliberately-investigated robustness item).
   to root-cause" (the exact V2.6.7 dead-OLED signature) into an instant
   first-boot abort naming the offending line.
 
-#### F4 (failure-path Vext asymmetry) — no change
-
-- On `i2c_new_master_bus()` failure the V4-R2 branch leaves Vext on (unlike
-  FeatherS3-D's LDO2 back-off). Verified unreachable in practice: one call
-  site per boot, and bus-controller creation failing is effectively fatal.
-  Documented here; not worth code.
-
-### Part 1 — V2.6.19-review deferred items (diagnostic accuracy + doc rot)
-
-Clears the deferred-item list from the V2.6.19 final review (items 2–7; items
-10/11 re-verified as already matching house style / already in place, no
-change — though item 10's "house pattern" claim was later overturned for the
-GPIO case, see Part 2 F6).
-
-#### /status "Last error" now names the actual error (M2, item 5)
+### /status "Last error" now names the actual error
 
 - `sd_logger.c::fail_cycle()` mixed two error domains into one `int` rendered
   with a bare `%d`: `sd_card_mount()` failures are `esp_err_t` (so
@@ -679,7 +747,7 @@ GPIO case, see Part 2 F6).
   could be the cleanup's errno, not the real failure's. Diagnostic accuracy
   only; retry/alert behaviour unchanged.
 
-#### /status SD card cosmetics after card pull (M2, items 7)
+### /status SD-card cosmetics after a card pull
 
 - Row count no longer lingers: after a card pull, /status showed the dead
   file's `rows_written` next to no filename. `close_file_for_remount()` now
@@ -690,7 +758,7 @@ GPIO case, see Part 2 F6).
   the new name only after the header row is safely fsync'd — /status can
   never show a half-written name or a name with no live file behind it.
 
-#### Header-length contract made explicit (item 4)
+### CSV header-length contract made explicit
 
 - A future sensor registering a CSV column header longer than 23 chars would
   have silently truncated the CSV header row (data rows still full-width — a
@@ -701,12 +769,12 @@ GPIO case, see Part 2 F6).
   Today's longest header is 22 chars — no behaviour change for any current
   sensor.
 
-#### Doc rot + cosmetics (items 2, 3, 6)
+### Doc rot + cosmetics
 
 - `sd_logger.c`: two stale claims fixed — "status read unconditionally on
-  every board" (the /status card is `HAL_HAS_SD_CARD`-gated since the final
-  review) and "init called unconditionally from main.c" (mode-gated since the
-  A2 boot-latch).
+  every board" (the /status card is `HAL_HAS_SD_CARD`-gated) and "init
+  called unconditionally from main.c" (it is gated on the SD boot-latch
+  mode).
 - `sd_logger.h`: "DateTime UTC" column doc updated for V2.6.21's local-time
   change (header is now "DateTime", local time with numeric UTC offset;
   filename stamp likewise local).
@@ -719,7 +787,7 @@ GPIO case, see Part 2 F6).
   adafruit_qtpy_esp32_pico, seeed_xiao_esp32s3); the V2.6.19 GPIO25
   reserved-pin comment rewrapped to house width.
 
-#### Geiger-pulse NeoPixel flash: blue, was red (bench-test follow-up)
+### Geiger-pulse NeoPixel flash: blue, was red
 
 - On the four boards whose pulse indicator is the NeoPixel (QT Py, SparkFun
   Thing Plus S3/C5, Adafruit Feather V2), the per-count flash is now dim
@@ -729,24 +797,12 @@ GPIO case, see Part 2 F6).
   Boards whose pulse tick is a plain onboard LED (TFT Feather, #5477, all
   non-NeoPixel boards) are unaffected. Alert colour unchanged (red, 64,0,0).
 
-#### Per-cycle write confirmation in /log (bench-test follow-up)
+### Per-cycle write confirmation in /log
 
 - `sd_logger: row N written to <file>` at INFO after every successful
   (fsync'd) CSV row. Previously only failures logged, so /log showed the
   sensor readings but never that they landed on the card — "logging fine"
   and "logging silently stopped" looked identical between error lines.
-
-#### Verified no-change items (10, 11)
-
-- Trailing `append_safe()` calls without `(void)`: grep confirms zero
-  `(void)append_safe` casts exist anywhere in `main/` — bare trailing calls
-  ARE the house style (http_server.c, transmission.c, mqtt.c, sd_logger.c
-  all agree); cppcheck gate is clean on it. Left as-is.
-- `ESP_ERROR_CHECK` on the standalone radio-off `esp_wifi_stop()`/
-  `esp_wifi_deinit()` pair (main.c): abort re-verified unreachable — the
-  branch only runs after WiFi init succeeded at boot, and both calls can
-  only fail with `ESP_ERR_WIFI_NOT_INIT`. Consistent with the adjacent
-  networked AP-window branch. Left as-is.
 
 ## V2.6.21 — Standalone SD-logging: fix card-pull crash, local-time CSV, unified heap diagnostics
 
@@ -864,7 +920,7 @@ GPIO case, see Part 2 F6).
 
 ## V2.6.18 — Fix OTA upload stall on heavy-TX-target PSRAM nodes (recv-mailbox ceiling)
 
-- Repeated `/update` OTA failures on esp32-5965048 (feathers3_d): the 1.3+ MB
+- Repeated `/update` OTA failures on a deployed `feathers3_d` node: the 1.3+ MB
   upload stalled at an exact TCP-MSS-multiple byte offset (`8640` = 6×1440,
   or `11520` = 8×1440), then sat with zero received bytes through all
   5 × 30s `httpd_req_recv()` retries before aborting — reproduced both after
@@ -1089,14 +1145,13 @@ GPIO case, see Part 2 F6).
   the shared `Feathers3d_new_pcb` carrier alongside `feathers3_d` /
   `sparkfun_thing_plus_esp32s3` / `adafruit_esp32s3_tft_feather`. Full pin
   map and rationale in `main/hal.h` under
-  `BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM` and in
-  `docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md`.
+  `BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM`.
 - No onboard display — unlike the sibling TFT Feather (#5483), this variant
   has no screen; the sensor OLED is external, probe-detected on the STEMMA
   QT bus (`HAL_HAS_OLED=1`), same as `feathers3_d` / `sparkfun_thing_plus_esp32s3`.
 - Pin map cross-verified against three independent sources (arduino-esp32's
-  `pins_arduino.h`, CircuitPython's SKU-specific `pins.c`, and the user's
-  own visual read of Adafruit's pin-identical #5323 sibling-SKU picture —
+  `pins_arduino.h`, CircuitPython's SKU-specific `pins.c`, and a visual
+  read of Adafruit's pin-identical #5323 sibling-SKU picture —
   #5477 itself has no published picture) — all three agree.
 - No always-on I²C bus, like the TFT Feather: the single STEMMA QT bus
   (also the onboard MAX17048 fuel gauge's bus) is dead until
@@ -1118,7 +1173,7 @@ GPIO case, see Part 2 F6).
   V2.4.25, SparkFun Thing Plus ESP32-S3 in V2.6.8, TFT Feather in
   V2.6.11 — each shipped without a label and silently fell through to
   "(unknown board)" on the `/update` page until fixed retroactively).
-- Corrected a stale wiring-reference memory in the process: the D9/D10
+- Corrected a stale wiring reference in the process: the D9/D10
   speaker-pin GPIOs recorded for the #5323 sibling SKU were wrong
   (previously GPIO6/5); confirmed correct as GPIO9/10 by two independent
   sources during this port.
@@ -1158,11 +1213,10 @@ GPIO case, see Part 2 F6).
   physical Feather-format header positions, but this is the original ESP32
   LX6 dual-core (not S3), same module *class* as `adafruit_qtpy_esp32_pico`'s
   ESP32-PICO-V3-02. Full pin map and rationale in `main/hal.h` under
-  `BOARD_ADAFRUIT_ESP32_FEATHER_V2` and in
-  `docs/superpowers/specs/2026-07-10-adafruit-esp32-feather-v2-board-port-design.md`.
+  `BOARD_ADAFRUIT_ESP32_FEATHER_V2`.
 - First board on this shared carrier with no I²C fuel-gauge IC — only a raw
   ADC `BAT_VOLT_PIN`/GPIO35 battery-voltage divider. An ADC-based battery
-  driver is out of scope for this port (design spec §8) and is not
+  driver is out of scope for this port and is not
   implemented; `HAL_HAS_FUEL_GAUGE=0` on this board.
 - `NEOPIXEL_I2C_POWER` (GPIO2) gate scope confirmed directly against
   Adafruit's own Learn guide: it switches only the STEMMA QT connector's own
@@ -1194,8 +1248,7 @@ GPIO case, see Part 2 F6).
   with an onboard color TFT instead of an I²C OLED/SerLCD. Plugs into the
   same FeatherS3-D-format carrier PCB as `feathers3_d` /
   `sparkfun_thing_plus_esp32s3`. Full pin map and bring-up parameters in
-  `main/hal.h` under `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER` and in
-  `docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md`.
+  `main/hal.h` under `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER`.
 - New display backend: `main/display_tft.c` / `.h` drive the onboard
   240×135 ST7789 SPI panel via ESP-IDF's built-in `esp_lcd` component
   (`esp_lcd_panel_io_spi` + `esp_lcd_panel_st7789`) — no Component Registry
@@ -1214,13 +1267,12 @@ GPIO case, see Part 2 F6).
   every-branch-defines-every-flag convention.
 - Shared TFT/STEMMA-QT power gate on GPIO21 (`TFT_I2C_POWER`): powering the
   panel also powers the primary I²C rail, unlike the other Feather-format
-  boards' independently-gated STEMMA connectors. Driven from
+  boards' independently-gated STEMMA connectors. The gate is driven from
   `i2c_bus_get_primary()` (`main/i2c_bus.c`), before any I²C bus creation —
-  fixed post-implementation per a Fable 5 MAX code review, which caught it
-  being driven inside `display_tft_init()` instead, too late in `main.c`'s
-  boot sequence (after the fuel-gauge and every env/PM/noise/GNSS/VEML
-  probe, all of which NACK'd on the still-unpowered bus).
-- Review fixes (Fable 5 MAX): `display_tft_init()` now unwinds cleanly
+  driving it any later (e.g. from `display_tft_init()`) would come too late
+  in `main.c`'s boot sequence: the fuel-gauge and every env/PM/noise/GNSS/
+  VEML probe would NACK on the still-unpowered bus.
+- Robustness fixes: `display_tft_init()` now unwinds cleanly
   (`spi_bus_free()` / `esp_lcd_panel_io_del()` / `esp_lcd_panel_del()`) on
   every mid-init failure instead of leaking the SPI bus/panel-IO handle,
   and checks every `esp_lcd_panel_*` bring-up call instead of ignoring
@@ -1246,8 +1298,7 @@ GPIO case, see Part 2 F6).
   Plus/FeatherS3-D boards share): external I2C OLED via Qwiic, onboard
   MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail via
   pull-up, no power-gate GPIO). Full pin map and design rationale in
-  `main/hal.h` under `BOARD_SPARKFUN_THING_PLUS_ESP32C5` and in
-  `docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md`.
+  `main/hal.h` under `BOARD_SPARKFUN_THING_PLUS_ESP32C5`.
 - `http_server.c`'s OTA cross-family chip guard had no `CHIP_ESP32C5` case,
   so an upload to this board silently skipped the upfront chip-mismatch
   rejection every other board gets and fell through to the bootloader-only
@@ -1284,7 +1335,7 @@ GPIO case, see Part 2 F6).
   [200µs, 3000µs] of the START of the most recent HV charge pulse
   (`HV_COINCIDENT_MIN_US`/`MAX_US`, `tube.h`).
 - Built to test the leading hypothesis from an independent field-data review
-  (`docs/radiation_overcounting_independent_review.md`, 2026-07-09) that the
+  (2026-07-09) that the
   new small-form-factor PCB (both the FeatherS3-D and XIAO ESP32-S3 carriers)
   shows spurious counts electrically correlated with its own HV recharge
   activity (r=0.98-0.99 vs. the original Heltec board's r=-0.02), confirmed
@@ -1313,8 +1364,8 @@ GPIO case, see Part 2 F6).
 
 - **New board**: SparkFun Thing Plus ESP32-S3 (WRL-24408), ESP32-S3-MINI-1
   SiP with 2 MB in-package quad PSRAM and 4 MB flash. Second-source MCU for
-  the existing FeatherS3-D-format carrier PCB (`project_feathers3d_new_pcb`,
-  in fab since 2026-05-14) — same physical Feather footprint and wiring,
+  the existing FeatherS3-D-format carrier PCB (in fab since 2026-05-14) —
+  same physical Feather footprint and wiring,
   drop-in alternative to `feathers3_d` on the same board with a different
   GPIO-to-header-position mapping.
 - Reuses the FeatherS3-D peripheral set unmodified: external I²C OLED via
@@ -1352,7 +1403,7 @@ GPIO case, see Part 2 F6).
   `HAL_HAS_SPEAKER` is set. Verified no regression by rebuilding
   `adafruit_qtpy_esp32_pico` (NeoPixel-only path) and `feathers3_d`
   (`PIN_LED_BUILTIN` path) alongside this board.
-- Post-port MAX review (9 passes) fixed three further issues: `neopixel_notify_pulse()`
+- Three further fixes landed with the port: `neopixel_notify_pulse()`
   now carries its own `IRAM_ATTR` (previously only its callee did, despite the
   header doc promising ISR-safety); the `/config` page's `led_tick` checkbox
   label — hardcoded "LED flash on each GM pulse" — is genericized since it now
@@ -1367,11 +1418,10 @@ GPIO case, see Part 2 F6).
   checked against the other four PSRAM/S3 boards' measured binary sizes
   (largest is ~1.36 MB, ~72% of the slot); no partition-table change needed
   for this port.
-- Full pin-sourcing rationale, schematic verification (WS2812 power rail,
-  strapping-pin review, GPIO26-37 in-package-PSRAM exclusion), and the
-  binary-size headroom analysis are preserved in the design spec at
-  `docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32s3-board-port-design.md`
-  (local working notes, not tracked in git).
+- Pin sourcing was verified against the board schematic (WS2812 power
+  rail, strapping-pin review, GPIO26-37 in-package-PSRAM exclusion); the
+  full pin map lives in `main/hal.h` under
+  `BOARD_SPARKFUN_THING_PLUS_ESP32S3`.
 
 ## V2.6.7 — New `heltec_wifi_lora32_v4_r2` board target (6th build target)
 
@@ -1413,9 +1463,7 @@ GPIO case, see Part 2 F6).
   restriction applies for the mirror-image reason (in-package flash instead
   of in-package PSRAM), and V3/V4 share the same module footprint, so the
   mainboard's hardwired trace lands on the same physical GPIO26 either way.
-  Full writeup with all three source citations:
-  `docs/superpowers/reviews/2026-07-08-v2.6.7-max-review/GPIO26_Befund_Zusammenfassung_DE.txt`
-  (German). Hardware-team decision pending on a GPIO34/GPIO37 rework for a
+  Hardware-team decision pending on a GPIO34/GPIO37 rework for a
   future board revision; this release ships without speaker/tone output on
   this board.
 - Hardware-reservation only for future LoRaWAN/Meshtastic work: GPIO
@@ -1496,7 +1544,7 @@ GPIO case, see Part 2 F6).
   67-67.4% / +4.6-7.7%/hr, VBUS present; battery-only: 3.924V / 67.6% /
   +2.3%/hr, VBUS absent — validating the checkbox-gated design above
   against a real cell in both states.
-- **I²C driver consolidation (no functional change).** A code-simplifier
+- **I²C driver consolidation (no functional change).** A duplication
   survey of `main/` found the same low-level I²C boilerplate copy-pasted
   across every register-based driver. Two rounds of cleanup, both
   verified with a clean build across all 5 board targets and no change
@@ -1554,7 +1602,7 @@ GPIO case, see Part 2 F6).
 2. **`sync_tv_sec` in `ntp.c` demoted `volatile time_t` → `volatile uint32_t` EPOCH_2026 offset** — this variable carries the timestamp from the SNTP lwIP timer callback to `ntp_poll()` on the main task. `time_t` is 64-bit on IDF newlib (same torn-read hazard). Fixed using the same `(uint32_t)(tv_sec - EPOCH_2026)` offset pattern as `s_boot_epoch_off`. `ntp_poll()` reconstructs via `EPOCH_2026 + off`.
 3. **`t_last_got_ip_us` deleted** — declared as `static int64_t`, written in `on_ip_event`, but never read by any code path. Dead write removed along with the declaration.
 
-**Why now:** The V2.6.2 MAX review established the `uint32_t`-offset-for-atomic-stores pattern. A follow-up sweep confirmed the three WiFi counters and the SNTP timestamp variable had the same structural hazard. The V2.6.2 `n_disconnects` fix was the template; this release applies it to the remaining unprotected cross-task 64-bit stores.
+**Why now:** V2.6.2 established the `uint32_t`-offset-for-atomic-stores pattern with its `n_disconnects` and boot-epoch fixes. A follow-up sweep confirmed the three WiFi counters and the SNTP timestamp variable had the same structural hazard; this release applies the same fix to the remaining unprotected cross-task 64-bit stores.
 
 **No behaviour change** under normal operation. A torn read on `n_got_ip` or `n_connects` could briefly delay MQTT startup or roaming-app deference by one main-loop tick (~1 s); a torn read on `sync_tv_sec` could produce a garbled NTP sync log line (cosmetic). Neither manifests reliably.
 
@@ -1562,7 +1610,7 @@ GPIO case, see Part 2 F6).
 
 ## V2.6.2 — boot-epoch hardening: atomic storage, per-sync refresh, clamped uptime helper
 
-**What:** Seven correctness fixes and two cleanups to the `ntp_boot_epoch()` infrastructure introduced in V2.5.22 / V2.6.1, surfaced by a MAX independent code review. No user-visible behaviour change under normal conditions; the fixes only kick in under adverse NTP conditions or on a warm reboot.
+**What:** Seven correctness fixes and two cleanups to the `ntp_boot_epoch()` infrastructure introduced in V2.5.22 / V2.6.1. No user-visible behaviour change under normal conditions; the fixes only kick in under adverse NTP conditions or on a warm reboot.
 
 **Fixes:**
 
@@ -1602,7 +1650,7 @@ GPIO case, see Part 2 F6).
 
 **What:** Three small `/config` changes: (1) the FTP log-upload interval ceiling (`ftp_int`) is raised from **1440** (24 h) to **10090** minutes (~7 days); (2) its form label now reads "Upload interval (minutes) (Max 10090)"; (3) the `/config` POST result page now lists any field whose value was **out of range and therefore not saved** (prior value kept), and logs it via `ESP_LOGW`.
 
-**Why:** A value above a field's max was discarded silently — the X-macro dispatcher keeps the prior value and still returns "handled", so an entry like `ftp_int=1450` produced a "Saved." page with no change and **no log line**, looking like a broken save. Hit on two nodes (`.193` on V2.5.29, `.198` on V2.5.33) — and confirmed not version-specific (the apply path is unchanged across V2.5.29..V2.5.33). The ceiling bump covers realistic >24 h cadences; the result-page notice + warning log turn the silent no-save into explicit feedback.
+**Why:** A value above a field's max was discarded silently — the X-macro dispatcher keeps the prior value and still returns "handled", so an entry like `ftp_int=1450` produced a "Saved." page with no change and **no log line**, looking like a broken save. Hit in the field on two nodes, one running V2.5.29 and one V2.5.33 — and confirmed not version-specific (the apply path is unchanged across V2.5.29..V2.5.33). The ceiling bump covers realistic >24 h cadences; the result-page notice + warning log turn the silent no-save into explicit feedback.
 
 **How:** `ftp_interval_min`'s `hi` bound in `config_fields.def` → 10090 (struct / NVS / POST all auto-follow the X-macro; the field stays `type="text"` per the V2.3.x wheel-scroll fix, so the server-side range is the single enforcement point — now a visible one). `config_post_apply_field()` gained a `bool *out_rejected` out-param that the `X_U32` / `X_F32` / `X_U8` macros set when a key matched a field but the value failed its range test (X_STR / X_BOOL never reject). `config_post()` accumulates those keys — plus the OLED-brightness step special-case — and renders a red "out of range … NOT saved (previous value kept): …" banner built with the existing `append_safe()` clamped accumulator, plus an `ESP_LOGW`. Only fixed schema keys can reach the echoed list, so no escaping is needed.
 
@@ -1610,21 +1658,21 @@ GPIO case, see Part 2 F6).
 
 **What:** Enable the ESP-IDF Wi-Fi roaming app on the PSRAM boards (FeatherS3-D, QT Py PICO, XIAO S3; Heltec **excluded**) with low-RSSI + legacy roaming, and append the connected AP's `bssid`/`ch` to every `CYCLE` log line.
 
-**Why:** A node (`esp32-5965048`) lost its strong AP to a beacon timeout (`reason=200`), reconnected to a **−82 dBm** mesh BSSID, and **stuck there for ~75 minutes** (≈1 in 3 uploads failing — `HTTP_EAGAIN`, connect timeouts, TLS `Socket is not connected`) until a second beacon timeout *luckily* landed it on a −31 dBm AP. Connect-time selection was already optimal (`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL`), but nothing re-evaluated the link **while associated**, so a node that lands on a weak BSSID never recovers until a full disconnect. The per-cycle line logged `rssi` but not *which* AP, so the pattern was invisible in syslog.
+**Why:** A deployed node lost its strong AP to a beacon timeout (`reason=200`), reconnected to a **−82 dBm** mesh BSSID, and **stuck there for ~75 minutes** (≈1 in 3 uploads failing — `HTTP_EAGAIN`, connect timeouts, TLS `Socket is not connected`) until a second beacon timeout *luckily* landed it on a −31 dBm AP. Connect-time selection was already optimal (`WIFI_ALL_CHANNEL_SCAN` + `WIFI_CONNECT_AP_BY_SIGNAL`), but nothing re-evaluated the link **while associated**, so a node that lands on a weak BSSID never recovers until a full disconnect. The per-cycle line logged `rssi` but not *which* AP, so the pattern was invisible in syslog.
 
 **How:** Per-board `sdkconfig.defaults` (PSRAM only) set `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP=y` (with its `IDF_EXPERIMENTAL_FEATURES` gate): **low-RSSI trigger** (threshold −72 dBm; healthy APs here are −29..−31) + **legacy roam** (forcible disconnect→reconnect to a stronger BSSID — works without AP 802.11k/v, which this mesh lacks: `pmf:0`); **periodic-scan monitor OFF** (active scans every 30 s would punch holes in the 180 s TX cycle) and **802.11v/BTM OFF**. The app runs in the supplicant `eloop` (no new task) and auto-wires through the default `esp_netif_create_default_wifi_sta` handlers we already use. **Reconnect ownership:** the roaming app's disconnect hook calls `esp_wifi_connect()` itself, so under `CONFIG_ESP_WIFI_ENABLE_ROAMING_APP` `main.c` now **defers** its own `EV_DISCONNECTED → esp_wifi_connect()` (avoiding two lifecycle owners racing the supplicant); non-PSRAM Heltec keeps the hand-rolled reconnect via the `#else`. Both `CYCLE` log shapes now trail `bssid=… ch=…` so a roam (or a stuck weak link) is visible in syslog. **⚠️ Espressif marks the roaming app EXPERIMENTAL — bench-validate on one node before fleet OTA.**
 
-**Review hardening (pre-tag, local MAX code review):** (1) **reconnect-ownership gap fixed** — the deferral to the roaming app now triggers only *after the first association* (`n_connects > 0`); the app's `allow_reconnect` is false until then, so a failed first connect at boot (AP down/slow) was previously retried by *nobody* until the 10-min startup watchdog rebooted. Pre-association we keep our own 500 ms retry (can't race the idle app). (2) `mark_attempt()` on both reconnect paths so `n_attempts` no longer freezes under roaming. (3) the roaming kconfig block (was triplicated across the 3 PSRAM board overlays) moved to a shared **`sdkconfig.defaults.psram`** consumed via CMakeLists `SDKCONFIG_DEFAULTS` (one source of truth; Heltec still excluded). (4) the two `config_post` result-page branches collapsed to a single render path, dropping the separate `warn[]` stack buffer. (5) removed redundant `# CONFIG_LWIP_DHCP_DEBUG`/`NETWORK_ASSISTED_ROAM=n` lines that tripped kconfig "disabled symbol with user-set value" advisories (DHCP debug stays off via the lwIP master switch; BTM off via its unmet WNM dependency). **Round 2** added (6) a **reconnect safety-net** — since the roaming app is experimental, if it ever stalls and leaves the node disconnected (no IP) for >30 s post-association, the main loop forces one `esp_wifi_connect()` and re-arms (cleared on `GOT_IP`); the long window means it never races the app's normal ms–seconds reconnect; and (7) trimmed the roaming rationale that had been restated in three places down to one canonical home (CHANGELOG + the main.c comment), leaving `sdkconfig.defaults.psram` with a short pointer.
+**Pre-release hardening:** (1) **reconnect-ownership gap fixed** — the deferral to the roaming app now triggers only *after the first association* (`n_connects > 0`); the app's `allow_reconnect` is false until then, so a failed first connect at boot (AP down/slow) was previously retried by *nobody* until the 10-min startup watchdog rebooted. Pre-association we keep our own 500 ms retry (can't race the idle app). (2) `mark_attempt()` on both reconnect paths so `n_attempts` no longer freezes under roaming. (3) the roaming kconfig block (was triplicated across the 3 PSRAM board overlays) moved to a shared **`sdkconfig.defaults.psram`** consumed via CMakeLists `SDKCONFIG_DEFAULTS` (one source of truth; Heltec still excluded). (4) the two `config_post` result-page branches collapsed to a single render path, dropping the separate `warn[]` stack buffer. (5) removed redundant `# CONFIG_LWIP_DHCP_DEBUG`/`NETWORK_ASSISTED_ROAM=n` lines that tripped kconfig "disabled symbol with user-set value" advisories (DHCP debug stays off via the lwIP master switch; BTM off via its unmet WNM dependency). Also added: (6) a **reconnect safety-net** — since the roaming app is experimental, if it ever stalls and leaves the node disconnected (no IP) for >30 s post-association, the main loop forces one `esp_wifi_connect()` and re-arms (cleared on `GOT_IP`); the long window means it never races the app's normal ms–seconds reconnect; and (7) trimmed the roaming rationale that had been restated in three places down to one canonical home (CHANGELOG + the main.c comment), leaving `sdkconfig.defaults.psram` with a short pointer.
 
 ---
 
 ## V2.5.33 — heap-guard root-cause fix: PSRAM offload + configurable confirm window
 
-**What:** Two related changes to stop the heap-guard auto-reboot from firing prematurely on `.198` (and any PSRAM board):
+**What:** Two related changes to stop the heap-guard auto-reboot from firing prematurely on a deployed field node (and any PSRAM board):
 1. **Tier-1 PSRAM offload** (all PSRAM boards — feathers3_d, QT Py PICO, XIAO S3; Heltec excluded, no PSRAM): WiFi/lwIP pbufs+PCBs and mbedTLS record buffers now allocate from PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`, `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`), and the malloc internal-only threshold drops 16384 → 4096.
 2. **Configurable heap-guard confirm window** — new `/config` field "Heap-guard confirm cycles" (`hg_confirm`, default 10, range 2–240), replacing the hard-coded 5. The heap-guard log line now also reports node **uptime**. The explanatory blurb under the floor field was removed.
 
-**Why:** Field forensics on esp32-5965048 showed the guard was rebooting on a **transient, self-healing** fragmentation dip, not the slow month-scale creep it was designed for. The INTERNAL largest-free block sat steady at 68 KB for 37 h, then a single inbound `/config` (plus per-cycle outbound TLS churn) left a small long-lived buffer mid-arena that bisected it to 39 KB — below the 44 KB floor. The dip self-heals in 3–5 cycles (observed coalescing back to 68 KB), but the 5-cycle confirm window occasionally caught it and rebooted for nothing. Routing those network/TLS buffers to PSRAM removes the bisecting allocator at the source (the real fix); the confirm-window bump to 10 rides out any residual transient (the belt-and-braces); the uptime line lets the syslog reader tell a genuine slow creep from a same-day false-positive at a glance.
+**Why:** Field forensics on that node showed the guard was rebooting on a **transient, self-healing** fragmentation dip, not the slow month-scale creep it was designed for. The INTERNAL largest-free block sat steady at 68 KB for 37 h, then a single inbound `/config` (plus per-cycle outbound TLS churn) left a small long-lived buffer mid-arena that bisected it to 39 KB — below the 44 KB floor. The dip self-heals in 3–5 cycles (observed coalescing back to 68 KB), but the 5-cycle confirm window occasionally caught it and rebooted for nothing. Routing those network/TLS buffers to PSRAM removes the bisecting allocator at the source (the real fix); the confirm-window bump to 10 rides out any residual transient (the belt-and-braces); the uptime line lets the syslog reader tell a genuine slow creep from a same-day false-positive at a glance.
 
 **How:** `tx_heap_guard()` takes `confirm_cycles` from the new config field (wired through `config_fields.def` → `tx_context_t` → `main.c`) and appends `Uptime: Nd HHh MMm` (via `esp_timer_get_time()`) to the reboot log line. PSRAM knobs added to each `sdkconfig.defaults.<board>` for the three PSRAM boards only. The 4 MB `/log` ring was already PSRAM-resident (V2.3.18) and is unaffected. ESP32-PICO-V3-02 is rev-3 silicon so the rev<3 PSRAM cache workaround does not apply.
 
@@ -1644,7 +1692,7 @@ GPIO case, see Part 2 F6).
 
 **What:** A test/CI-only release that adds host coverage for previously-untested pure logic and removes long-standing duplication and flake sources from the GitHub Actions pipeline. The firmware is **behaviourally inert** vs V2.5.30 — the only `main/` change is a pure refactor that extracts existing decision logic into a testable header.
 
-**Why:** Two real gaps surfaced reviewing the pipeline: (1) `url_encode_query_value()` was shipped in V2.5.20 (R2, to fix raw-credential mangling in the Radmon URL) with **zero** tests, and the V2.5.30 dead-time-guard decision lived buried in the IRAM count ISR where it could not be unit-tested despite taking two MAX reviews to get right; (2) the `build.yml` and `release.yml` cppcheck steps had **already drifted** (only the release copy passed `--std=c11`) despite a "keep in sync" comment, the board matrix was duplicated across both files, and a transient component-registry outage had reddened a release build (V2.5.30).
+**Why:** Two real gaps surfaced reviewing the pipeline: (1) `url_encode_query_value()` was shipped in V2.5.20 (R2, to fix raw-credential mangling in the Radmon URL) with **zero** tests, and the V2.5.30 dead-time-guard decision lived buried in the IRAM count ISR where it could not be unit-tested, despite being subtle enough to need two rounds of pre-release fixes to get right; (2) the `build.yml` and `release.yml` cppcheck steps had **already drifted** (only the release copy passed `--std=c11`) despite a "keep in sync" comment, the board matrix was duplicated across both files, and a transient component-registry outage had reddened a release build (V2.5.30).
 
 **How:**
 - **New `main/tube_logic.h`** (pure, no IDF/FreeRTOS/HW) holds `clamp_u32()` (moved from `tube.c`), the new `gmc_classify()` — the count / guard-removed / reject decision extracted verbatim from `gmc_count_isr()` — and `guard_effective_us()`, the guard on/off policy `config_effective_guard_us()` now wraps. All `always_inline`, so they still fold into the IRAM ISR at zero cost and stay in IRAM. The ISR and `config.c` call into them; behaviour is byte-identical (verified by a real `heltec_v2` build).
@@ -1660,13 +1708,13 @@ GPIO case, see Part 2 F6).
 
 **What:** New opt-in dead-time guard — a `deadtime_guard` checkbox + a `deadtime_guard_us` window (µs), modelled on the `pcnt_filter` checkbox+width pair. A *retriggerable* refractory layered on top of the fixed 190 µs ISR dead-time gate: an edge can only start a new count after a quiet gap longer than the window; edges arriving inside it extend the dead zone and are dropped, collapsing an afterpulse / re-trigger **train** to a single count. The per-cycle count of suppressed edges is surfaced on the `DIAG:` line as `guard_removed=N`. **Mutually exclusive with `pcnt_filter`** (see below).
 
-**Why:** The 2026-06-14 overnight bench analysis decomposed the QT Py's +10 % over-count vs the Heltec into **~60 % spurious 1–5 ms re-triggers + ~40 % genuine over-sensitivity** (see `reference_radiation_data_analysis`). The existing 190 µs gate only catches the 50–190 µs afterpulse, and the V2.5.16 PCNT width filter is a *sub-pulse* (4 µs) glitch filter — 3 orders of magnitude too short in time to touch a re-trigger arriving 1–5 ms later. The dead-time guard is the tool that reaches that band. It is a **diagnostic / characterisation** feature, NOT a production fix: it introduces a board-dependent dead-time-loss term (would step the multi-year archive) and only removes the spurious ~60 %, so Heltec stays the dose baseline and the 44205 µSv constant is unchanged.
+**Why:** The 2026-06-14 overnight bench analysis decomposed the QT Py's +10 % over-count vs the Heltec into **~60 % spurious 1–5 ms re-triggers + ~40 % genuine over-sensitivity**. The existing 190 µs gate only catches the 50–190 µs afterpulse, and the V2.5.16 PCNT width filter is a *sub-pulse* (4 µs) glitch filter — 3 orders of magnitude too short in time to touch a re-trigger arriving 1–5 ms later. The dead-time guard is the tool that reaches that band. It is a **diagnostic / characterisation** feature, NOT a production fix: it introduces a board-dependent dead-time-loss term (would step the multi-year archive) and only removes the spurious ~60 %, so Heltec stays the dose baseline and the 44205 µSv constant is unchanged.
 
 **How:** The GMC count ISR keys the window on the *previous edge* (`isr_last_edge_us`, captured before its per-edge update), which makes it retriggerable — every edge in a burst, counted or not, keeps the channel dead, so the whole train collapses to the leading count. `guard_removed` rides the same locked snapshot+reset as the raw-edge profiler (`tube_get_diag` gained one out-param). The config field auto-generates through the existing X-macro schema (struct / NVS / POST), with a `/config` numeric input (greyed via `syncTube()` and force-cleared when the tube is off) and a boot config-dump line. **Live-applied** on `/config` Save (the ISR reads the volatile window each edge — no reboot, unlike the hardware-latched `pcnt_filter`) and also set at boot. `guard_removed` counts only **real** suppressed counts (edges that would have cleared the 190 µs gate — its true marginal effect, a *subset* of the DIAG `rejected`, not an orthogonal column). **Bench-validated on the QT Py** at guard = 5000 µs: the cycle count drops ~6 % (matching the predicted spurious fraction), `guard_removed` reports exactly those suppressed real counts, and the raw-edge histogram is unchanged — same pulse train, spurious 1–5 ms population no longer counted. Off by default on every board, so the release is behaviourally inert until a node opts in.
 
-**Review hardening (pre-tag, local MAX code review):** (1) `guard_removed` now tallies only the *marginal* edges (past the 190 µs gate) instead of every in-window edge, so it no longer double-credits the 50–190 µs afterpulses the gate already owned; (2) the edge-delta and inter-pulse-gap `uint32` casts are clamped to `UINT32_MAX`, closing a latent wrap (a >71.6 min quiet gap could otherwise mis-block a genuine pulse / mis-record min-max) — the clamp also covers the pre-existing count-path `dt`; (3) live-apply replaces the reboot-required handling (the guard is a software volatile, not a hardware latch); (4) the `edt` subtraction is computed once and reused by the guard; (5) the field became a checkbox+window pair (was a bare numeric, which mis-implied a dependency on PCNT) with the window range enforced at 200–20000. A **second MAX review over the whole `V2.5.29..HEAD` range** found **no correctness bugs** (the `/config` arg realignment, the ISR count semantics, and the 3-way mutual exclusion all verified clean); minor cleanup applied — the saturating µs-delta cast factored into a `clamp_u32()` helper, the first-edge guard term dropped (`edt` now defaults to `UINT32_MAX`), and the boot-dump "superseded" label derives from `config_effective_guard_us()` (the single-source policy) instead of re-deriving it.
+**Pre-release hardening:** (1) `guard_removed` now tallies only the *marginal* edges (past the 190 µs gate) instead of every in-window edge, so it no longer double-credits the 50–190 µs afterpulses the gate already owned; (2) the edge-delta and inter-pulse-gap `uint32` casts are clamped to `UINT32_MAX`, closing a latent wrap (a >71.6 min quiet gap could otherwise mis-block a genuine pulse / mis-record min-max) — the clamp also covers the pre-existing count-path `dt`; (3) live-apply replaces the reboot-required handling (the guard is a software volatile, not a hardware latch); (4) the `edt` subtraction is computed once and reused by the guard; (5) the field became a checkbox+window pair (was a bare numeric, which mis-implied a dependency on PCNT) with the window range enforced at 200–20000. Final minor cleanup on top: the saturating µs-delta cast factored into a `clamp_u32()` helper, the first-edge guard term dropped (`edt` now defaults to `UINT32_MAX`), and the boot-dump "superseded" label derives from `config_effective_guard_us()` (the single-source policy) instead of re-deriving it.
 
-**Mutual exclusion with `pcnt_filter` (the footgun the review surfaced as #6):** the guard runs in the GMC ISR, but `pcnt_filter` makes the separate PCNT *hardware* path authoritative for the uploaded count — which the ISR guard cannot reach. So with both on, the guard silently affects only the logged pre-filter value, not the real CPM (caught live on the QT Py: status showed *"raw CPM 90 → filtered 97"* — the guard pulled the ISR count to 90 while the uploaded value stayed 97 from the un-guarded PCNT path). The two are now **mutually exclusive, `pcnt_filter` wins**, enforced in three places: `config_post` force-clears `deadtime_guard` when `pcnt_filter` is set, the `/config` UI greys + unticks the guard box (`syncGuard()`) whenever PCNT is on, and `config_effective_guard_us()` (the single source of the on/off policy, used by both the boot and live-apply paths) returns 0. They target different physics regardless — `pcnt_filter` the ESP32-S3 narrow-*width* pulses, the guard the *time-domain* 1–5 ms re-triggers (so on the classic-ESP32 QT Py, `pcnt_filter` is pointless and the guard is the right tool).
+**Mutual exclusion with `pcnt_filter`:** the guard runs in the GMC ISR, but `pcnt_filter` makes the separate PCNT *hardware* path authoritative for the uploaded count — which the ISR guard cannot reach. So with both on, the guard silently affects only the logged pre-filter value, not the real CPM (caught live on the QT Py: status showed *"raw CPM 90 → filtered 97"* — the guard pulled the ISR count to 90 while the uploaded value stayed 97 from the un-guarded PCNT path). The two are now **mutually exclusive, `pcnt_filter` wins**, enforced in three places: `config_post` force-clears `deadtime_guard` when `pcnt_filter` is set, the `/config` UI greys + unticks the guard box (`syncGuard()`) whenever PCNT is on, and `config_effective_guard_us()` (the single source of the on/off policy, used by both the boot and live-apply paths) returns 0. They target different physics regardless — `pcnt_filter` the ESP32-S3 narrow-*width* pulses, the guard the *time-domain* 1–5 ms re-triggers (so on the classic-ESP32 QT Py, `pcnt_filter` is pointless and the guard is the right tool).
 
 **Also (`/config` page tidy):** added a **Network** `<h3>` above the WiFi fields; renamed **Other** → **Time** (it now holds only NTP + timezone); moved the **web-admin/AP password** under the AP SSID (Network), the **sensor-data upload interval** to the top of Transmission targets, and the **heap-guard floor** to the bottom of Hardware. Pure form-layout move (field `name=`s unchanged, so NVS/POST untouched); the format string and its `%`-arg list were relocated as matched pairs (verified by `-Wformat` under `-Werror`). Also corrected the syslog blurb's framing label **RFC 3164 → RFC 5424** (the code has emitted 5424 since V2.5.27 — `<PRI>1 … - - -` with the version field + NILVALUEs; the `/config` text, the `config_fields.def`/`syslog.h` headers, and a buffer-sizing comment were stale).
 
@@ -1676,7 +1724,7 @@ GPIO case, see Part 2 F6).
 
 **What:** Logical-line reassembly moved up into `applog_vprintf()`, so a complete log line is forwarded to **both** the `/log` ring and the UDP syslog at once. Fixes the cross-task splice where a second task logging between our fragments mixed its line into the middle of ours (the mangled `syslog: started` boot line).
 
-**Why:** ESP-IDF v6 splits one `ESP_LOG` into ~3 vprintf fragments, and `applog`'s mutex is taken/released *per fragment*. Pre-V2.5.29 each fragment was forwarded immediately: the `/log` ring concatenated fragments verbatim (so it spliced), and `syslog.c` re-joined them in its *own* accumulator — so the two surfaces could even disagree about the same boot. The interleaving was diagnosed via a separate design-review agent, which also showed the original "fix it in syslog only" idea was a trap (it would leave the ring — the primary forensics surface — still spliced).
+**Why:** ESP-IDF v6 splits one `ESP_LOG` into ~3 vprintf fragments, and `applog`'s mutex is taken/released *per fragment*. Pre-V2.5.29 each fragment was forwarded immediately: the `/log` ring concatenated fragments verbatim (so it spliced), and `syslog.c` re-joined them in its *own* accumulator — so the two surfaces could even disagree about the same boot. Fixing it in syslog only would have been a trap — it would leave the ring (the primary forensics surface) still spliced — hence the reassembly moved up into `applog_vprintf()`, upstream of both consumers.
 
 **How:** `applog_vprintf` accumulates fragments into a single BSS line buffer (reusing the existing `LOG_LINE_MAX` allocation — **~0 extra RAM**) and flushes to `ring_append` + `syslog_emit` only on end-of-line (or buffer-full). A `xTaskGetCurrentTaskHandle()` owner check flushes a *different* task's pending partial before appending, so fragments never mix. `syslog_emit()` collapses to a dumb framer — its `s_accum` accumulator is **deleted** (net code reduction). `strip_ansi`/`rewrite_boot_ts` now run once per whole line instead of per fragment. The interrupted line still splits into a stub + orphan tail (whole-line reassembly across an interruption would need per-task buffers — not worth the RAM on the tight-DRAM Heltec for a cosmetic, boot-mostly defect), but it is no longer *mixed* and both surfaces now agree.
 
@@ -1759,11 +1807,11 @@ The reset reason distinguishes a clean reboot from `BROWNOUT` / `TASK_WDT` / `PA
 
 **Why:** The u-blox MAX-M10S (and, less so, the PA1010D) **clock-stretches** — it holds SCL low while assembling NMEA. With the per-device timeout left at its short default, a sustained multi-GNSS fix (a real 12-satellite GPS+Galileo+BeiDou fix emits a heavy GSV burst every second) routinely stretches past that timeout, so `gnss_poll()` reads trip `I2C hardware timeout` — which IDF logs with the misleading `GPIO X is not usable, maybe conflict with others` wording — several times a second. The drain loop retries, so fixes keep flowing and `i2c_err` stays 0, but the log floods. Raising the SCL-low timeout to ~13 ms (≈ the classic-ESP32 I²C timeout-register ceiling) lets the stretch complete instead of erroring.
 
-**Scope:** per-device — does **not** change any other sensor's timeout, and the field is never built on boards without a GNSS (a no-op there). Covers both GNSS parts (M10S `0x42` and PA1010D `0x10`), which share the one `devcfg`. Bench-validated on a QT Py (esp32-15033992) with a live 12-sat fix: the timeout floods stopped, fixes unaffected.
+**Scope:** per-device — does **not** change any other sensor's timeout, and the field is never built on boards without a GNSS (a no-op there). Covers both GNSS parts (M10S `0x42` and PA1010D `0x10`), which share the one `devcfg`. Bench-validated on a QT Py with a live 12-sat fix: the timeout floods stopped, fixes unaffected.
 
 ## V2.5.20 — full-codebase review batch: 5 bug fixes + hygiene (no feature changes)
 
-Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16.6 KLOC in `main/`. Review IDs R1–R11 below match the review report.
+Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16.6 KLOC in `main/`. Findings are numbered R1–R11 below.
 
 **R1 — MQTT TLS Mode D could never connect.** "Mode D — skip server verification" (and the Mode B empty-CA fallback) set only `skip_cert_common_name_check`, which merely skips the CN match; with no CA attached, esp-tls aborts the handshake with "No server verification option set" unless `CONFIG_ESP_TLS_INSECURE` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY` are enabled — and they weren't, on any board. Both symbols now set in `sdkconfig.defaults` **and** in the five committed per-board `sdkconfig.<board>` caches (defaults only fill *missing* keys). Verified-mode connections (Mode A bundle / Mode B CA, all HTTPS uploads) still verify fully — the change only converts the deliberate no-CA case from hard-fail to encrypted-but-unverified, which is what the UI advertised.
 
@@ -1805,7 +1853,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
 
 **What:** The `heap_guard_floor_kb` INTERNAL-fragmentation auto-reboot (V2.5.14) moved from `periodic.c::periodic_heap_guard()` — called every main-loop tick (~1 Hz) — to `transmission.c::tx_heap_guard()`, evaluated **once per TX cycle** (~180 s) on the same resting heap snapshot the per-cycle `diag: per-cycle heap` line already reports. The predicate is now a fragmentation test, not a bare floor test: it counts a cycle only when `INTERNAL largest < floor` **AND** `INTERNAL free_total > 2×floor`; 5 consecutive qualifying cycles (~15 min) trigger the reboot.
 
-**Why:** The V2.5.14 guard sampled at 1 Hz on the main task, so it saw the **transient** largest-free dip that *any* inbound HTTP connection causes — the lwIP/TCP receive buffers are DMA-capable INTERNAL RAM, and a held-open `GET /log` (a chunked stream) drops INTERNAL `largest` for the duration. Root-caused 2026-06-09 from the .150 syslog: each `HEAP GUARD` line landed 2–3 s after a `GET /log from the monitor host` (the monitor host) — the monitoring's own log fetches were rebooting the Feather every ~4 h, while the per-cycle heap was flat-healthy (`largest=70k`) the rest of the time. The old gating (2 h arm-delay, 6 h rate-limit, `tx_is_idle()` sample, 3-sample debounce) couldn't catch it: `tx_is_idle()` only sees the TX worker, not the HTTP server task serving `/log`, and the 3-sample (~3 s) window sat right inside the stream.
+**Why:** The V2.5.14 guard sampled at 1 Hz on the main task, so it saw the **transient** largest-free dip that *any* inbound HTTP connection causes — the lwIP/TCP receive buffers are DMA-capable INTERNAL RAM, and a held-open `GET /log` (a chunked stream) drops INTERNAL `largest` for the duration. Root-caused 2026-06-09 from the syslog server's per-device log: each `HEAP GUARD` line landed 2–3 s after a `GET /log` from the monitor host — the monitoring's own log fetches were rebooting the Feather every ~4 h, while the per-cycle heap was flat-healthy (`largest=70k`) the rest of the time. The old gating (2 h arm-delay, 6 h rate-limit, `tx_is_idle()` sample, 3-sample debounce) couldn't catch it: `tx_is_idle()` only sees the TX worker, not the HTTP server task serving `/log`, and the 3-sample (~3 s) window sat right inside the stream.
 
 **How:** The `free_total > 2×floor` arm is the load-bearing transient filter — a connection that grabs net buffers drops **both** largest and free, so it fails the arm and never counts; only genuine fragmentation (largest low while free stays high — the OTA-stall / long-tail-OOM precursor) qualifies. The check rides the per-cycle snapshot via a new `tx_context_t.heap_guard_floor_kb` field (copied from `g_cfg` in `build_tx_context`), so it reads exactly the floor it logs, on the TX worker's quiescent pre-upload moment. Reboot still goes through `main_request_restart()` (the same path `/reboot` uses). **Deleted:** `periodic_heap_guard()`, the `tx_is_idle()` guard-gate, the arm-delay, the 6 h rate-limit, and `s_last_reboot_ms`; `periodic_loop()` loses its `heap_guard_floor_kb` parameter. The `heap_guard_floor_kb` config knob is unchanged (existing nodes' setting carries over). **No NVS persistence:** a production node (no PCNT comb) boots with a healthy largest block and cannot enter the state, so it can't boot-loop; the one residual loop risk is the experimental PCNT width-comb taking an unlucky INTERNAL boot-split, accepted on the bench (`pcnt_filter` off by default).
 
@@ -1834,7 +1882,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
 ## V2.5.15 — DNMS noise: fix sensor.community field naming (HTTP 400)
 
 ### Bug: every DNMS noise POST to sensor.community 400'd
-- **Symptom:** with a DNMS connected (first deployed on dust node `esp32-5965048`
+- **Symptom:** with a DNMS connected (first deployed on the dust field node
   2026-06-07), every cycle logged `sensor.community: ... noise rc=400` while BME (PIN 11)
   and PM (PIN 1) on the same node returned 201. Madavi / openSenseMap / aqi.eco all
   accepted the noise data fine.
@@ -1861,7 +1909,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
   *largest contiguous block* slowly shrinks across days of TLS-handshake churn) is the
   OTA-stall precursor and a long-tail OOM risk on month+ uptimes. The existing 24h PSA
   crypto refresh (`periodic.c`) *slows* it but doesn't fully prevent it — the dust node
-  `esp32-5965048` soaked `INTERNAL largest` from **71.7 K → 62.5 K over 4.8 days** despite
+  soaked `INTERNAL largest` from **71.7 K → 62.5 K over 4.8 days** despite
   the refresh, on a clear downward (not plateauing) trend.
 - **Fix:** new `periodic_heap_guard()` in `periodic.c`. When `heap_guard_floor_kb > 0`, it
   reboots the node (via the clean `main_request_restart()` path — persists state, flushes
@@ -1905,7 +1953,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
   TLS handshake + 16-entity HA-discovery burst with the first TX cycle's HTTPS upload
   handshakes — 2–3 concurrent TLS contexts at boot drove the DMA-capable heap to
   `min_free=280 B` and triggered an MQTT connect→disconnect→reconnect churn (observed on
-  esp32-12276328). Steady state was fine; the failure window was boot.
+  a bench Heltec V2). Steady state was fine; the failure window was boot.
 - **Fix:** gated `#ifdef BOARD_HELTEC_V2`, the MQTT-start poll requires
   `tx_cycles >= 1 && tx_is_idle()`. `tx_cycles >= 1` gates past boot; `tx_is_idle()` (the
   existing accessor: TX worker not busy + queue empty) ensures the CPU1 upload worker
@@ -1914,7 +1962,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
   `tx_cycles >= 1` alone still collided: `tx_cycles` flips at the cycle *log* line, but
   the HTTPS uploads run async on the worker *after* `do_tx_cycle`'s non-blocking
   `tx_transmit` — `tx_is_idle()` is what actually tracks completion. Confirmed on
-  esp32-12276328: MQTT started 1 s into cycle #1, mid-Madavi-handshake.) Race-free since
+  the same bench unit: MQTT started 1 s into cycle #1, mid-Madavi-handshake.) Race-free since
   `do_tx_cycle` bumps the counter and enqueues the worker in one pass on the same task as
   the gate. Also stops the FTPS/OTA/PSA re-inits (same poll) colliding with an in-flight
   upload. PSRAM boards unchanged (both terms inside the `#ifdef`; cppcheck byte-identical).
@@ -1945,7 +1993,7 @@ Outcome of a whole-tree review (bugs / security / memory / practices) of all ~16
 **GNSS is now display-only — it never sets the system clock. NTP is the sole time source.**
 
 ### Why
-Field logs (esp32-5965048) showed the GNSS clock-discipline re-firing every few seconds with ~2 s drift, repeatedly stepping the clock **backward** (non-monotonic — log timestamps jumped, lines went out of order), plus periodic ~26 s spikes where SNTP clawed the clock back. Root cause: GNSS-over-1 Hz-NMEA-over-I²C is inherently ~1–2 s laggy (no PPS pin is broken out on the Qwiic/STEMMA wiring), so comparing the parsed fix-time to "now" and hard-setting whenever they differ by ≥2 s is a latency-chasing oscillation — and SNTP, the other clock owner, fought it. On these **networked** nodes LAN NTP is ~100× more accurate than the GNSS path, and an **offline** node uploads nothing anyway, so GPS-as-time-fallback added zero value while churning `settimeofday()`.
+Field logs from a deployed node showed the GNSS clock-discipline re-firing every few seconds with ~2 s drift, repeatedly stepping the clock **backward** (non-monotonic — log timestamps jumped, lines went out of order), plus periodic ~26 s spikes where SNTP clawed the clock back. Root cause: GNSS-over-1 Hz-NMEA-over-I²C is inherently ~1–2 s laggy (no PPS pin is broken out on the Qwiic/STEMMA wiring), so comparing the parsed fix-time to "now" and hard-setting whenever they differ by ≥2 s is a latency-chasing oscillation — and SNTP, the other clock owner, fought it. On these **networked** nodes LAN NTP is ~100× more accurate than the GNSS path, and an **offline** node uploads nothing anyway, so GPS-as-time-fallback added zero value while churning `settimeofday()`.
 
 ### Change (`gnss.c`, `gnss.h`, `http_server.c`)
 - Removed `discipline_clock()`, `gnss_time_is_source()`, the `s_last_clock_set_ms` tracker, and the `DISCIPLINE_DRIFT_S` / `TIME_SOURCE_TTL_MS` constants. GNSS **never calls `settimeofday()`** now.
@@ -1969,7 +2017,7 @@ Deleting the loop (rather than rate-limiting/deadbanding it) removes the churn a
 - The `gnss_enable` config field, its `/config` checkbox, and form arg are **removed** — both supported modules now "just work" when plugged in, no setting required. The orphaned `gnss_en` NVS key on existing devices is ignored. (Bench-validated: PA1010D auto-detected + GPS fix on the dust node; VEML7700 correctly falls through on a QT Py.)
 
 ### MQTT/FTP timing — stop a redundant MQTT thrash (`main.c`, `log_ftp.c/.h`)
-- When the 24h PSA-crypto refresh (stops MQTT) and a scheduled FTPS upload (also stops MQTT) landed on **adjacent service-loop ticks**, the main loop's MQTT-restart fired in the gap — bringing MQTT up (full TLS connect + HA-discovery publish) only for the FTPS prep to tear it down ~180 ms later, then a third bring-up after the upload. New `log_ftp_imminent()` lets the MQTT (re)start gate skip when an FTPS upload is due, so MQTT comes back up exactly once, after the upload. Cosmetic on PSRAM boards; removes a transient TLS heap spike on tight-heap Heltec. (Diagnosed from a PSA+FTP schedule alignment on esp32-5963724.)
+- When the 24h PSA-crypto refresh (stops MQTT) and a scheduled FTPS upload (also stops MQTT) landed on **adjacent service-loop ticks**, the main loop's MQTT-restart fired in the gap — bringing MQTT up (full TLS connect + HA-discovery publish) only for the FTPS prep to tear it down ~180 ms later, then a third bring-up after the upload. New `log_ftp_imminent()` lets the MQTT (re)start gate skip when an FTPS upload is due, so MQTT comes back up exactly once, after the upload. Cosmetic on PSRAM boards; removes a transient TLS heap spike on tight-heap Heltec. (Diagnosed from a PSA+FTP schedule alignment on a bench node.)
 
 > Reviewed with cppcheck 2.20.0 (clean) + an independent code/security audit (no Critical/High; device-handle lifecycle, snprintf arg-balance, and boot-blocking all verified clean).
 
@@ -2147,7 +2195,7 @@ The MQTT/HA additions are entirely inside `#ifdef MQTT_RICH_STATE`, which the **
 
 ## V2.4.32
 
-**Diagnose long-uptime OTA-upload stalls + give the OTA prep enough time to wait out a TX retry storm.** Background: on 2026-05-30, esp32-5965048 (dust node, ~56 h uptime) failed every OTA — the 1.3 MB upload stalled after exactly one TCP window (`8640`/`11520` B) while all outbound HTTPS kept working and the heap looked healthy. **A reboot fixed it**, proving the cause is *accumulated runtime state in the net stack*, not config/RF/mesh. The "healthy heap" was misleading: `esp_get_free_heap_size()` is PSRAM-dominated, but WiFi + lwIP RX buffers live in **internal/DMA-capable RAM**, so a drain there is invisible in the numbers we log.
+**Diagnose long-uptime OTA-upload stalls + give the OTA prep enough time to wait out a TX retry storm.** Background: on 2026-05-30, the dust field node (~56 h uptime) failed every OTA — the 1.3 MB upload stalled after exactly one TCP window (`8640`/`11520` B) while all outbound HTTPS kept working and the heap looked healthy. **A reboot fixed it**, proving the cause is *accumulated runtime state in the net stack*, not config/RF/mesh. The "healthy heap" was misleading: `esp_get_free_heap_size()` is PSRAM-dominated, but WiFi + lwIP RX buffers live in **internal/DMA-capable RAM**, so a drain there is invisible in the numbers we log.
 
 ### Changes
 
@@ -2162,7 +2210,7 @@ Diagnostic + robustness only — no behaviour change to the data path. Workaroun
 
 ## V2.4.31
 
-**Fix: the 24h PSA crypto refresh broke the live MQTT connection.** Diagnosed 2026-05-30 from three serial logs (esp32-5963724 + esp32-5965048). Once per 24h `periodic_loop()` runs `mbedtls_psa_crypto_free()` + `psa_crypto_init()` to defragment the heap by emptying the PSA key-slot pool — but it did so **while the persistent MQTT client's TLS session was still live.** In mbedTLS 4.x / IDF 6 the MQTT session's AES-GCM record keys live in PSA slots, so freeing the pool invalidated them and the next MQTT TLS write failed.
+**Fix: the 24h PSA crypto refresh broke the live MQTT connection.** Diagnosed 2026-05-30 from three serial logs across two FeatherS3-D nodes. Once per 24h `periodic_loop()` runs `mbedtls_psa_crypto_free()` + `psa_crypto_init()` to defragment the heap by emptying the PSA key-slot pool — but it did so **while the persistent MQTT client's TLS session was still live.** In mbedTLS 4.x / IDF 6 the MQTT session's AES-GCM record keys live in PSA slots, so freeing the pool invalidated them and the next MQTT TLS write failed.
 
 ### Root cause
 
@@ -2181,7 +2229,7 @@ Affects every board running MQTT (all current targets). The break failed *safe* 
 
 ## V2.4.30
 
-**MQTT reconnect handling on WiFi recovery.** Prompted by a router-reboot trace (2026-05-29) on esp32-5965048: STA dropped at 00:16:54 and recovered at 00:18:40, but MQTT didn't reconnect until 00:19:10 — ~10 s after `GOT_IP` — and esp-mqtt fired 8 blind TCP+TLS connect attempts during the outage, each failing fast with `ENETUNREACH` but still building/tearing an esp-tls context.
+**MQTT reconnect handling on WiFi recovery.** Prompted by a router-reboot trace (2026-05-29) on a deployed node: STA dropped at 00:16:54 and recovered at 00:18:40, but MQTT didn't reconnect until 00:19:10 — ~10 s after `GOT_IP` — and esp-mqtt fired 8 blind TCP+TLS connect attempts during the outage, each failing fast with `ENETUNREACH` but still building/tearing an esp-tls context.
 
 ### Changes
 
@@ -2196,7 +2244,7 @@ Did **not** tear down the MQTT client on `STA_DISCONNECTED` — that's heavier (
 
 ## V2.4.29
 
-**Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from coredump on esp32-5965048 (prod field node, V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.
+**Fix abort() crash: `time()` called inside `portENTER_CRITICAL`.** Diagnosed from a coredump on the production field node (V2.4.24) — `tx` task panicked in `lock_acquire_generic` at `locks.c:150`.
 
 ### Root cause
 
@@ -2291,15 +2339,15 @@ Two related fixes, both single-line in effect:
 
 ### How it slipped in
 
-`Git_Repository_Geiger/multigeiger/multigeiger.ino:150` (V1.x): the delta computation lived in `publish()` / `transmit()`, called once per upload cycle. The V2.0 rewrite moved the cumulative ISR counter into a `tube_read()` accessor (`tube.h:39` — "cumulative HV charge pulses since boot") and the new `main.c::do_tx_cycle()` passed the cumulative value through to `transmission.c` without ever taking a difference. The field name `hv_pulses` was preserved, the unit silently changed. Lesson saved to memory as `[[feedback_check_field_semantics_across_firmware_versions]]`.
+In the V1.x firmware (`multigeiger/multigeiger.ino:150`) the delta computation lived in `publish()` / `transmit()`, called once per upload cycle. The V2.0 rewrite moved the cumulative ISR counter into a `tube_read()` accessor (`tube.h:39` — "cumulative HV charge pulses since boot") and the new `main.c::do_tx_cycle()` passed the cumulative value through to `transmission.c` without ever taking a difference. The field name `hv_pulses` was preserved, the unit silently changed. Lesson: when a field survives a rewrite with its name intact, verify its semantics (delta vs cumulative) against the previous firmware, not just its name.
 
 ### Diagnostic context (2026-05-24)
 
-Detected when comparing recent sensor.community CSV downloads (`hv_pulses` reaching 40,000 per row) against `radiation.txt` baselines (which documented monthly averages of 18-63 per cycle through March 2026 from V1.x firmware). The carbon→metal-film theory for the +30% CPM step on Rev B remains correct and unrelated to this fix. The 100 CPM spike on 23/05 is statistical Poisson noise (~1.8σ on the daily mean), not a hardware event.
+Detected when comparing recent sensor.community CSV downloads (`hv_pulses` reaching 40,000 per row) against V1.x baseline records (monthly averages of 18-63 per cycle through March 2026). The carbon→metal-film theory for the +30% CPM step on Rev B remains correct and unrelated to this fix. The 100 CPM spike on 23/05 is statistical Poisson noise (~1.8σ on the daily mean), not a hardware event.
 
 ### What changed (Madavi: drop the radiation POST)
 
-`send_madavi()` previously issued two POSTs per cycle: a dedicated "geiger" body with `Si22G_counts_per_minute` / `Si22G_hv_pulses` / `Si22G_counts` / `Si22G_sample_time_ms` / `signal`, then the environmental body. **Madavi's hardcoded `value_type` whitelist (`api-rrd.madavi.de/data.php`) recognises DHT / HTU21D / BME280 / BMP / BMP280 / DS18B20 / SDS011 / PMS / HPM / PPD42NS / GPS only** — every `Si22G_*` field has been silently dropped at the server for the entire lifetime of V2 (see `[[reference_madavi]]`). The "geiger" POST was therefore pure wasted bandwidth + TLS handshake overhead + RTT for zero stored data.
+`send_madavi()` previously issued two POSTs per cycle: a dedicated "geiger" body with `Si22G_counts_per_minute` / `Si22G_hv_pulses` / `Si22G_counts` / `Si22G_sample_time_ms` / `signal`, then the environmental body. **Madavi's hardcoded `value_type` whitelist (`api-rrd.madavi.de/data.php`) recognises DHT / HTU21D / BME280 / BMP / BMP280 / DS18B20 / SDS011 / PMS / HPM / PPD42NS / GPS only** — every `Si22G_*` field has been silently dropped at the server for the entire lifetime of V2. The "geiger" POST was therefore pure wasted bandwidth + TLS handshake overhead + RTT for zero stored data.
 
 V2.4.27 removes the geiger body entirely. The environmental body still goes (and still carries `samples` / `min_micro` / `max_micro` / `signal` when the tube is enabled — all whitelisted by Madavi), so tube-only Heltec V2 deployments keep uploading the information Madavi can actually graph.
 
@@ -2378,7 +2426,7 @@ JSON growth on a fully-loaded FeatherS3-D (PM + DNMS + light + 5 upload targets 
 
 3. **IDF v6.0 kconfig drift cleanup**:
    - `CONFIG_SPIRAM_MODE_OCTAL` (v5.x name) → `CONFIG_SPIRAM_MODE_OCT` (v6.0 name) in the XIAO overlay. The old name was silently ignored, so the XIAO was actually falling back to QUAD mode — would have crashed at bootloader-level PSRAM init on real hardware.
-   - Removed `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF/_BIN` and `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32/_SHA256` from the base `sdkconfig.defaults`. Honest history: these were added in **V2.4.18** (the coredump feature commit), not pre-v5→v6 leftovers — I copy-pasted them from v5.x reference docs without realising v6.0 had removed them. In v6.0 the four symbols have no `config` declaration anywhere in IDF (verified against `components/espcoredump/Kconfig`); they're only referenced via `select`/`if` inside `ESP_COREDUMP_ENABLE`, which unconditionally selects ELF + SHA256. The `core_dump_sha.c` source file is the only checksum implementation present in v6.0 — `core_dump_crc.c` and `core_dump_bin.c` were removed by Espressif. So V2.4.18–V2.4.24 were **always running on SHA256+ELF** despite the sdkconfig saying CRC32; the four lines have been generating "unknown kconfig symbol" warnings on every build for 7 releases. Pure noise cleanup, no functional change in V2.4.25.
+   - Removed `CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF/_BIN` and `CONFIG_ESP_COREDUMP_CHECKSUM_CRC32/_SHA256` from the base `sdkconfig.defaults`. Honest history: these were added in **V2.4.18** (the coredump feature commit), not pre-v5→v6 leftovers — they were copied from v5.x reference docs without realising v6.0 had removed them. In v6.0 the four symbols have no `config` declaration anywhere in IDF (verified against `components/espcoredump/Kconfig`); they're only referenced via `select`/`if` inside `ESP_COREDUMP_ENABLE`, which unconditionally selects ELF + SHA256. The `core_dump_sha.c` source file is the only checksum implementation present in v6.0 — `core_dump_crc.c` and `core_dump_bin.c` were removed by Espressif. So V2.4.18–V2.4.24 were **always running on SHA256+ELF** despite the sdkconfig saying CRC32; the four lines have been generating "unknown kconfig symbol" warnings on every build for 7 releases. Pure noise cleanup, no functional change in V2.4.25.
 
 ### Migration note for QT Py PICO users with existing hardware
 
@@ -2421,7 +2469,7 @@ Wired in:
 - `http_server.c::update_post` split into a thin wrapper + `update_post_inner`. The wrapper does auth + CSRF + `main_ota_begin()` + calls inner + `main_ota_end()` + returns. This avoids touching every one of update_post's ~17 internal return paths.
 - `main.c` main loop's TX-cycle scheduler now wraps `do_tx_cycle()` in `if (!main_ota_in_progress())`. Deliberately does NOT advance `next_tx` when skipped — the deferred cycle fires immediately on resume rather than waiting another `tx_interval`.
 
-### Why this was discussed but not bundled
+### Considered but not bundled
 
 - **Surface OTA progress on `/status`** — considered, REJECTED. `esp_http_server` is single-threaded, so a concurrent GET / from a monitoring client would sit in the accept queue unread until OTA completes. Worse: if we worked around the threading constraint, the polling itself would consume the airtime the OTA needs. Browser-side `<progress>` element (already wired in `/update` page) is the right monitoring story.
 - **Hard total OTA timeout** — defensive but adds another knob. Current per-recv 5×30s timeout already bounds individual stalls. Leaving the wall-clock total open lets a genuinely slow upload over a weak link still succeed if it makes steady progress.
@@ -2462,9 +2510,9 @@ Fix: new `s_state_mux` FreeRTOS mutex serialises `mqtt_init` / `mqtt_stop` / `mq
 
 `n_attempts`, `n_connects`, `n_got_ip`, `n_disconnects` were `uint32_t` which wraps at 4.3 B. At one reconnect per minute (worst-case marginal-WiFi node) wrap is ~34.5 days; at realistic rates (1/day) it's millions of years. Either way, wrap was harmless (display rolls to 0). Switched to `uint64_t` to eliminate the conceptual wrap entirely — 584 million years of headroom, zero perf cost on 32-bit Xtensa (just two-word stores instead of one). `main_status_t.reconnects` stays `uint32_t` with a truncating cast at assignment time (the status-page consumer doesn't care about post-2^32 precision). `<inttypes.h>` added; four `%lu` + `(unsigned long)` cast sites converted to `%" PRIu64 "`.
 
-### 5. Documented the `log_ftp_note_psa_refreshed()` cross-module coupling pattern (memory only — `reference_periodic_module.md`)
+### 5. `log_ftp_note_psa_refreshed()` cross-module coupling pattern — scaling limit noted
 
-V2.4.19's tiny export pattern works for one caller (periodic.c → log_ftp.c) but does not scale past one. The memory note records the scaling limit (refactor at N=3 callers, lift the OOM counter into a shared `psa_health.{c,h}` module) and the deliberate 2026-05-22 decision to keep the V2.4.19 form for now since there's only one consumer. No code change this release.
+V2.4.19's tiny export pattern works for one caller (periodic.c → log_ftp.c) but does not scale past one. The scaling limit: at N=3 callers, refactor by lifting the OOM counter into a shared `psa_health.{c,h}` module. Deliberate 2026-05-22 decision to keep the V2.4.19 form for now since there's only one consumer. No code change this release.
 
 ### Files touched
 
@@ -2520,11 +2568,11 @@ BSS cost ~7.4 KB once, replacing ~7.4 KB off every httpd handler invocation. No 
 
 ## V2.4.21
 
-**Hotfix for openSenseMap auth-token format.** OSM's ingest endpoint wants the raw token in the `Authorization` header — NOT `Bearer <token>` as V2.3.16 shipped speculatively. Confirmed 2026-05-21 by direct A/B curl against the user's real auth-enabled box: raw token → `HTTP 201 Created`, `Bearer <token>` → `HTTP 401 "Box access token not valid!"`.
+**Hotfix for openSenseMap auth-token format.** OSM's ingest endpoint wants the raw token in the `Authorization` header — NOT `Bearer <token>` as V2.3.16 shipped speculatively. Confirmed 2026-05-21 by direct A/B curl against a real auth-enabled box: raw token → `HTTP 201 Created`, `Bearer <token>` → `HTTP 401 "Box access token not valid!"`.
 
-### Symptom user reported
+### Symptom
 
-User enabled "access token required" on their `Dusty-Feather` box on openSenseMap.org and pasted the 64-char token into `/config` → Save (no restart). Every subsequent OSM upload then failed with:
+"Access token required" was enabled on a box on openSenseMap.org and the 64-char token pasted into `/config` → Save (no restart). Every subsequent OSM upload then failed with:
 
 ```
 W (...) HTTP_CLIENT: This request requires authentication, but does not provide header information for that
@@ -2541,7 +2589,7 @@ The `HTTP_CLIENT: This request requires authentication, but does not provide hea
 
 ### Diagnosis path
 
-Direct curl against `https://ingress.opensensemap.org/boxes/<BOX_ID>/data?luftdaten=1` with the user's real token, comparing auth header formats:
+Direct curl against `https://ingress.opensensemap.org/boxes/<BOX_ID>/data?luftdaten=1` with the box's real token, comparing auth header formats:
 
 | `Authorization:` value | Result |
 |---|---|
@@ -2648,11 +2696,11 @@ No partition change. No `sdkconfig` change. Drop-in OTA upgrade from V2.4.19, V2
 
 ### Motivation
 
-2026-05-21 incident on bench sensor esp32-5963724. WiFi dropped overnight at `19:32:11` with `reason=34`, sensor reconnected cleanly within 13 s with a fresh DHCP lease. Madavi HTTPS uploads continued to succeed every 150 s for the next ~14 h. But MQTT to the LAN broker at `192.0.2.10:8883` was stuck in an endless retry loop — `sock=N select() timeout` every 20-25 s, surviving the FTP-time MQTT teardown+restart at `09:14:14` unchanged.
+2026-05-21 incident on a bench sensor. WiFi dropped overnight at `19:32:11` with `reason=34`, sensor reconnected cleanly within 13 s with a fresh DHCP lease. Madavi HTTPS uploads continued to succeed every 150 s for the next ~14 h. But MQTT to the LAN broker at `192.0.2.10:8883` was stuck in an endless retry loop — `sock=N select() timeout` every 20-25 s, surviving the FTP-time MQTT teardown+restart at `09:14:14` unchanged.
 
 Diagnosis via `tcpdump` on the broker showed the sensor's SYNs arriving and the broker's SYN-ACKs leaving within 100 µs — but the sensor's repeated SYNs all carried the same TCP sequence number, proving the SYN-ACKs never reached the sensor's radio. `ping`, `curl`, all broker-initiated traffic to the sensor was 100 % loss while the broker's ARP cache showed the correct sensor MAC as REACHABLE.
 
-Broker and sensor were on different APs in the same mesh SSID (Pi on BSSID `46:78:95:83:d3:34` ch 10, sensor on BSSID `42:78:95:83:d2:80` ch 2). The mesh's per-AP bridge forwarding table for the sensor's MAC had aged out during the long idle gap before the WiFi drop and re-learned wrong after the roam — blackholing every frame the broker addressed to the sensor. Fix at the time was a soft reboot of the sensor (the resulting re-association burst retrained every bridge); the underlying mesh behaviour is upstream of firmware. Full post-mortem in `[[reference_mqtt_one_way_loss_after_wifi_roam]]`.
+Broker and sensor were on different APs in the same mesh SSID (broker's AP on channel 10, sensor's on channel 2). The mesh's per-AP bridge forwarding table for the sensor's MAC had aged out during the long idle gap before the WiFi drop and re-learned wrong after the roam — blackholing every frame the broker addressed to the sensor. Fix at the time was a soft reboot of the sensor (the resulting re-association burst retrained every bridge); the underlying mesh behaviour is upstream of firmware.
 
 ### What changed
 
@@ -2705,7 +2753,7 @@ The boot log line now shows the actual address the panel was bound at (`display 
 
 ### Motivation
 
-2026-05-20 morning: esp32-5963724 (bench FeatherS3-D) syslog showed a clean `mqtt: CONNECTED` at 10:14:04, then ~3.5 minutes of silence before the post-reboot resume. Status page reported `Reset reason: PANIC`. That's all we had — no backtrace, no exception cause, no task name. The panic handler had printed it to UART, but no serial logger was running.
+2026-05-20 morning: a bench FeatherS3-D's syslog showed a clean `mqtt: CONNECTED` at 10:14:04, then ~3.5 minutes of silence before the post-reboot resume. Status page reported `Reset reason: PANIC`. That's all we had — no backtrace, no exception cause, no task name. The panic handler had printed it to UART, but no serial logger was running.
 
 For deployed sensors (sealed enclosure, no USB), this is a permanent diagnostic blind spot. ESP-IDF's existing coredump-to-flash + `esp_core_dump_get_summary()` API fixes it cleanly — pay the one-time cable-reflash to add the partition, and every future panic is recoverable over the air, forever.
 
@@ -2755,7 +2803,7 @@ The "download .elf" link points at `/coredump.elf`. The "erase" button POSTs to 
 Once downloaded, decode with the ESP-IDF coredump tool:
 
 ```bash
-espcoredump.py info_corefile -t elf -c coredump_esp32-5963724.elf build_feathers3_d/geiger_v2.elf
+espcoredump.py info_corefile -t elf -c coredump.elf build_feathers3_d/geiger_v2.elf
 ```
 
 The same ELF used for the build is needed — keep a copy alongside the released binaries (GitHub release artefacts already include `geiger_v2.elf` per board). Output shows the panic exception, the full backtrace of the crashing task, and stack snapshots of every other task at the moment of the panic.
@@ -2798,7 +2846,7 @@ Heltec 4 MB min_free headroom impact: ~1.7 %.
 
 ### 1. OTA teardown was undone within ~1 s of completion
 
-Observed 2026-05-19 on esp32-176432 V2.4.16 → V2.4.16 OTA. The teardown in `update_post` correctly stopped MQTT + syslog + paused FTPS at `22:53:29.499`. But the main-loop poll re-armed both within seconds:
+Observed 2026-05-19 on the Heltec V2 4MB bench unit during a V2.4.16 → V2.4.16 OTA. The teardown in `update_post` correctly stopped MQTT + syslog + paused FTPS at `22:53:29.499`. But the main-loop poll re-armed both within seconds:
 
 ```
 22:53:29.523 mqtt: stop: client destroyed
@@ -2887,11 +2935,11 @@ Note: `build.yml`'s `host-test` (with valgrind) is **not** mirrored into `releas
 
 #### Symptom
 
-Reported 2026-05-19 on esp32-5963724 + esp32-5965048 (both FeatherS3-D): with syslog enabled, loading `/config` in a browser caused an immediate reset with reason `PANIC`. Other pages worked fine. Disabling syslog avoided the panic.
+Reported 2026-05-19 on two FeatherS3-D nodes: with syslog enabled, loading `/config` in a browser caused an immediate reset with reason `PANIC`. Other pages worked fine. Disabling syslog avoided the panic.
 
 #### Confirmed via serial backtrace
 
-Serial capture on the Heltec V2 4MB bench (esp32-176432, also running V2.4.15) reproduced the same panic on `/config`:
+Serial capture on the Heltec V2 4MB bench unit (also running V2.4.15) reproduced the same panic on `/config`:
 
 ```
 Guru Meditation Error: Core 1 panic'ed (LoadStoreError). Exception was unhandled.
@@ -2924,8 +2972,8 @@ static char s_emit_buf[600];                ← BSS, 0 stack pressure
 The rsyslog server saw each logical log line split across multiple rows:
 
 ```
-2026-05-19T22:03:54 MultiGeiger5965048 geiger: I (26-05-19 22:03:54.750) tx:
-2026-05-19T22:03:54 MultiGeiger5965048 geiger: sensor.community: ok (rc=201)
+2026-05-19T22:03:54 MultiGeigerXXXXXXX geiger: I (26-05-19 22:03:54.750) tx:
+2026-05-19T22:03:54 MultiGeigerXXXXXXX geiger: sensor.community: ok (rc=201)
 ```
 
 — annoying to grep, hard to scroll through.
@@ -2964,7 +3012,7 @@ Every ESP_LOG line emitted after STA connect is now optionally forwarded as a UD
 - **~50-100 µs CPU per line** — non-blocking `sendto()` with `MSG_DONTWAIT`
 - **No broker / no server software outside what's already installed on the Pi** — rsyslog ships with Raspberry Pi OS
 
-Pairs with [[reference_syslog_pi_setup]] (~10 lines of rsyslog config on the Pi: enable `imudp` module, route by `$hostname startswith "MultiGeiger"` to a dynaFile per-device).
+Pairs with ~10 lines of rsyslog config on the Pi: enable the `imudp` module, route by `$hostname startswith "MultiGeiger"` to a dynaFile per-device.
 
 ### What it ships
 
@@ -2994,10 +3042,10 @@ New `/config` section under "Syslog (UDP)" with the three fields. Schema-driven 
 ### How rsyslog differentiates clients
 
 - `$fromhost-ip` — every UDP packet has the sender's IP
-- `$hostname` — the firmware embeds the device's WiFi hostname (e.g., `MultiGeiger176432`) in the RFC 3164 header
+- `$hostname` — the firmware embeds the device's WiFi hostname (e.g., `MultiGeigerXXXXXX`) in the RFC 3164 header
 - `$programname` — always `"geiger"`
 
-The example rsyslog config in the new memory uses `$hostname startswith "MultiGeiger"` and a dynaFile template `/var/log/geiger/%HOSTNAME%.log` to give each device its own log file.
+The example rsyslog config uses `$hostname startswith "MultiGeiger"` and a dynaFile template `/var/log/geiger/%HOSTNAME%.log` to give each device its own log file.
 
 ### Teardown integration
 
@@ -3029,13 +3077,13 @@ The example rsyslog config in the new memory uses `$hostname startswith "MultiGe
 Production logs from both Heltec V2 boards on V2.4.13 (2026-05-19 evening soak) showed the FTPS upload was the dominant heap consumer:
 
 ```
-esp32-176432 (4MB) cycle #6:
+Heltec 4MB unit, cycle #6:
   Pre-upload:  free=68500 min_free=15572 largest=59392
   Post-upload: free=68288 min_free=1112  largest=59392   <-- 14 KB peak dip
 ```
 
 ```
-esp32-12276328 (8MB) cycle #30 (FTPS server-side stall):
+Heltec 8MB unit, cycle #30 (FTPS server-side stall):
   Pre-upload:  free=68340 min_free=17080
   → 32 s TLS stall, write got 4096/43186 bytes through
   → PSA preemptive reset
@@ -3096,7 +3144,7 @@ For users who find this objectionable on FeatherS3-D (where the teardown isn't l
 
 ### 1. OTA memory-freeing teardown
 
-The V2.4.11+ MQTT TLS client + WiFi stack + esp_crt_bundle leaves Heltec V2 (4MB) at min_free ≈ 13 KB at steady state. That's not enough headroom for `esp_ota_write`'s internal scratch buffers, causing OTA to OOM mid-flash. Observed 2026-05-19 on esp32-176432 trying to upgrade V2.4.11 → V2.4.12:
+The V2.4.11+ MQTT TLS client + WiFi stack + esp_crt_bundle leaves Heltec V2 (4MB) at min_free ≈ 13 KB at steady state. That's not enough headroom for `esp_ota_write`'s internal scratch buffers, causing OTA to OOM mid-flash. Observed 2026-05-19 on the Heltec V2 4MB bench unit trying to upgrade V2.4.11 → V2.4.12:
 
 ```
 W (08:54:03.914) httpd_txrx: httpd_resp_send_err: 500 Internal Server Error - oom
@@ -3182,7 +3230,7 @@ http: OTA: 1256352 bytes -> partition ota_0 @ 0x20000
 
 V2.4.11's `ntp_time_valid()`-only gate didn't actually defer MQTT on soft reboots, because ESP32's RTC retains wall-clock time across `esp_restart` / OTA / watchdog. After the first cold boot, the clock is already past 2025-01-01 every subsequent boot, so `ntp_time_valid()` returns true ~1 second after `app_main` starts — well before WiFi STA has come up, while still in the 2-min AP boot window. Net result: MQTT fires immediately, spams five `esp-tls: select() timeout` cycles per 25 s for the whole AP window (the LAN broker is unreachable from AP mode), then finally connects when the STA finally gets an IP.
 
-Observed in the V2.4.11 boot log on `esp32-176432` (Heltec V2, soft-reboot after OTA):
+Observed in the V2.4.11 boot log on a Heltec V2 (soft-reboot after OTA):
 
 ```
 21:48:37.686 v2_main: MQTT deferred until NTP sync (broker=192.0.2.150:8883)
@@ -3422,7 +3470,7 @@ QT Py reabsorbs the ~3.8 KB of multipage code that V2.4.8 gated out (now compile
 
 ## V2.4.8
 
-**QT Py ESP32-PICO: radiation-only single display page** (matches Heltec V2 OLED layout). User paired a QT Py with an Adafruit 326 OLED (Monochrome 0.96" 128×64 SSD1306 STEMMA QT) and wants the Heltec-style radiation page rather than the 5-page rotation that's been the QT Py default since V2.3.29.
+**QT Py ESP32-PICO: radiation-only single display page** (matches Heltec V2 OLED layout). Targets a QT Py paired with an Adafruit 326 OLED (Monochrome 0.96" 128×64 SSD1306 STEMMA QT), where the Heltec-style radiation page fits better than the 5-page rotation that's been the QT Py default since V2.3.29.
 
 ### Zero new driver code
 
@@ -3450,10 +3498,6 @@ Flip back to `HAL_MULTIPAGE_ROTATION 1` in `hal.h` and rebuild. The display_task
 
 Only the QT Py overlay changed. FeatherS3-D keeps its 5-page rotation. Heltec was already on the radiation-only page (and unchanged since V2.0).
 
-### Other
-
-- New reference memory captured for the Adafruit 326 panel — see `reference_adafruit_326_oled_stemma.md` in the auto-memory store. Documents the chip, pinout, plug-and-play story, and the V2.4.8 ship.
-
 ---
 
 ## V2.4.7
@@ -3480,7 +3524,7 @@ esp_tls-based clients (HTTPS uploads to Madavi / SC / Radmon / OSM / aqi.eco + M
 ### Resolution
 
 - Removed `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` from `sdkconfig.defaults.heltec_v2` + `.heltec_v2_4mb`, replaced with explanatory comment about the FTPS conflict
-- Cached per-board sdkconfigs deleted to force re-derivation (per `[[feedback_sdkconfig_defaults_only_fills_missing]]` — defaults only fill missing keys, can't override cached y → not-set)
+- Cached per-board sdkconfigs deleted to force re-derivation (defaults only fill missing keys — they can't override a cached y → not-set)
 - FeatherS3-D / QT Py unaffected (they never had this option enabled — V2.4.5 was Heltec-only)
 
 ### What stays from V2.4.5
@@ -3548,7 +3592,7 @@ New `<b>TLS:</b>` line in the existing MQTT block. Shows mode in plain language 
 
 ### Validation status
 
-Implementation complete + builds clean across all four boards. **End-to-end validation against a real broker is deferred** — user does not yet have Mosquitto/HA broker running; that landing will smoke-test all three modes. Code review confirms the esp-mqtt verification fields are the documented API for v6.0; the same `esp_crt_bundle_attach` pattern is in production use in `transmission.c` for HTTPS uploads since V2.3.x.
+Implementation complete + builds clean across all four boards. **End-to-end validation against a real broker is deferred** — no Mosquitto/HA broker was available at release time; the broker landing will smoke-test all three modes. Code review confirms the esp-mqtt verification fields are the documented API for v6.0; the same `esp_crt_bundle_attach` pattern is in production use in `transmission.c` for HTTPS uploads since V2.3.x.
 
 ### Files changed
 
@@ -3566,7 +3610,7 @@ Implementation complete + builds clean across all four boards. **End-to-end vali
 
 **Heap headroom on the Heltec V2.** Two independent tweaks targeting the constrained-DRAM build. Lifetime min-free-heap on the Heltec V2 was sitting at ~5.6 KB during TLS-handshake transients (against ~100 KB idle) — close to the edge for future feature growth. This release lifts that floor by ~30 KB without changing any externally-visible behaviour.
 
-Also rewords the MQTT LWT description on `/config` (carried over from the post-V2.4.4 commit `e7e467f`) — plain-language explanation of what the broker-published "offline" message means for HA.
+Also rewords the MQTT LWT description on `/config` (carried over from the post-V2.4.4 commit `35bcbad`) — plain-language explanation of what the broker-published "offline" message means for HA.
 
 ### `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` (Heltec V2 only)
 
@@ -3590,7 +3634,7 @@ The applog ring buffer is the largest single permanent heap allocation on the He
 
 ### Other
 
-- LWT description on `/config` reworded to a plain-language explanation (carried from post-V2.4.4 commit `e7e467f`).
+- LWT description on `/config` reworded to a plain-language explanation (carried from post-V2.4.4 commit `35bcbad`).
 
 ---
 
@@ -3880,7 +3924,7 @@ Three small UX changes — all in `http_server.c` + `display.c`:
 
 **Headline:** at the ESP-IDF default `CONFIG_FREERTOS_HZ=100` (10 ms tick), `vTaskDelay(pdMS_TO_TICKS(N))` for N ≤ 10 evaluates to `vTaskDelay(1)` — a 1-tick yield that actually sleeps **0..10 ms** depending on the call's phase relative to the next tick boundary. Several driver post-command waits assumed millisecond precision and were silently shorter than the chip's conversion / response time, causing intermittent failures that looked like flaky hardware.
 
-Most visible symptom: SHT45 returning H=0.00% with valid T (cycles 1358 + 1409 on esp32-5965048), or post-measure NACK `ESP_ERR_INVALID_RESPONSE`. SHT45 measures T first then H; if the read happens at 4-9 ms the T register is fresh but the H register is still 0x0000, with CRC byte 0x81 (CRC-8 of `00 00`) which **passes** the integrity check. Looked like a chip fault for V2.3.0..V2.3.30. The other SHT45 in the user's stock had the same behaviour, just less often → diagnostic clue that proved it wasn't a chip fault.
+Most visible symptom: SHT45 returning H=0.00% with valid T (cycles 1358 + 1409 on the deployed field node), or post-measure NACK `ESP_ERR_INVALID_RESPONSE`. SHT45 measures T first then H; if the read happens at 4-9 ms the T register is fresh but the H register is still 0x0000, with CRC byte 0x81 (CRC-8 of `00 00`) which **passes** the integrity check. Looked like a chip fault for V2.3.0..V2.3.30. A second SHT45 unit showed the same behaviour, just less often → diagnostic clue that proved it wasn't a chip fault.
 
 **Fix pattern:** for sub-20 ms timing-critical waits, replace `vTaskDelay(pdMS_TO_TICKS(N))` with `esp_rom_delay_us(N * 1000)` — a precise busy-wait via the system RTC.
 
@@ -3960,7 +4004,7 @@ OTA-safe from V2.3.26.
 
 Make a flaky SHT45 (or any silently-failing env sensor) visible in the logs.
 
-1. `sht45_read()`'s two silent I²C error paths now log `ESP_LOGW` mirroring the init path's verbosity. Triggered by esp32-176432: SHT45 ACK'd at init then on every cycle reported H=0.00 % silently → cascade quietly fell through to BMP390.
+1. `sht45_read()`'s two silent I²C error paths now log `ESP_LOGW` mirroring the init path's verbosity. Triggered on a bench unit whose SHT45 ACK'd at init then on every cycle reported H=0.00 % silently → cascade quietly fell through to BMP390.
 2. `env_sensor_read()` gained an optional `(char *raw_log, size_t cap)` tail so the caller sees per-sensor reads alongside the fused result. `main.c` cycle log line now reads e.g.: `SHT45: T=18.86°C  H=0.00%, BMP390: T=18.88°C P=1026.60hPa  SHT45+BMP390: T=18.86°C  H=0.00%  P=1026.60hPa`.
 
 No I²C transaction changes, same fallback cascade, OTA-safe from V2.3.25.
@@ -3969,7 +4013,7 @@ No I²C transaction changes, same fallback cascade, OTA-safe from V2.3.25.
 
 ## V2.3.25 — 2026-05-12 — aqi.eco compatibility fix + body trim
 
-**Headline fix:** aqi.eco's `devices.esp8266_id` column is `bigint`. We were emitting `"esp8266id": "esp32-5965048"` (string). MySQL string→bigint coerce failed, PHP unhandled exception, nginx 500. Fix: in `build_luftdaten_body`, when `prefix_aqi_id == true`, strip the leading `"esp32-"` before emitting the `esp8266id` field.
+**Headline fix:** aqi.eco's `devices.esp8266_id` column is `bigint`. We were emitting `"esp8266id": "esp32-<chipid>"` (string). MySQL string→bigint coerce failed, PHP unhandled exception, nginx 500. Fix: in `build_luftdaten_body`, when `prefix_aqi_id == true`, strip the leading `"esp32-"` before emitting the `esp8266id` field.
 
 **Other aqi.eco body trims:** drop `Si22G_*` radiation block (no destination column), drop `SPS30_TS`, drop `DNMS_noise_LA_min`/`_max` — only LAeq is mapped.
 

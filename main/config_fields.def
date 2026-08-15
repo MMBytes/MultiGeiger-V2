@@ -490,9 +490,14 @@ X_BOOL(standalone_ap_on,       "sd_ap_on",   false)
 // standalone_ap_on above). Only the V4 board renders them in /config and
 // acts on them. deveui/joineui/appkey hold the TTN-console hex strings
 // verbatim; parsing/endianness happens in lorawan.cpp at use time.
-// lorawan_fem_en and lorawan_high_power drive the GC1109 FEM control pins
-// (GPIO2/GPIO46) that are DOUBLE-BOOKED with mainboard circuits — reworked-
-// hardware boards only; see hal.h PIN_LORA_FEM_EN/PIN_LORA_FEM_PA.
+// lorawan_high_power drives the GC1109 FEM 28 dBm gain-stage select
+// (GPIO46) — a regulatory/power choice, kept opt-in (see hal.h
+// PIN_LORA_FEM_PA). The former lorawan_fem_en flag was removed in
+// V2.6.34: the GC1109 front end is required for LoRa RX, so lorawan.cpp
+// now always drives FEM_EN (GPIO2) when LoRaWAN is on — a config option
+// whose only non-default value is "broken RX" isn't a choice. Per-key NVS
+// storage makes the removal migration-free: the orphaned "lora_fem_en"
+// key is simply never read again.
 
 X_BOOL(lorawan_enabled,        "lora_en",      false)
 X_U8  (lorawan_region,         "lora_region",  2, 0, 7)   // 2 = AU915 (table in lorawan.cpp)
@@ -500,5 +505,4 @@ X_U8  (lorawan_subband,        "lora_subband", 2, 0, 8)   // 0 = all channels; T
 X_STR (lorawan_deveui,         CFG_LORA_EUI_MAX + 1, "lora_deveui",  "")
 X_STR (lorawan_joineui,        CFG_LORA_EUI_MAX + 1, "lora_joineui", "")
 X_STR (lorawan_appkey,         CFG_LORA_KEY_MAX + 1, "lora_appkey",  "")
-X_BOOL(lorawan_fem_en,         "lora_fem_en",  false)
 X_BOOL(lorawan_high_power,     "lora_hp",      false)

@@ -1804,15 +1804,15 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<label>AppKey (32 hex chars) <span class=\"r\">*</span>"
                      "<input type=\"password\" name=\"lora_appkey\" value=\"%s\" maxlength=\"32\" "
                      "pattern=\"[0-9a-fA-F]{32}\"></label>"
-                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_fem_en\" %s> "
-                     "Drive FEM enable (GPIO2) <span class=\"r\">*</span> "
-                     "<small style=\"color:#c00\">Hardware-reworked boards ONLY &mdash; on "
-                     "standard boards this pin is the HV comparator input and driving it "
-                     "can damage the board.</small></label></div>"
+                     // V2.6.34: the "Drive FEM enable (GPIO2)" checkbox is gone —
+                     // the GC1109 front end is required for LoRa RX, so lorawan.cpp
+                     // now always enables it. High power stays a choice: 28 dBm is
+                     // a regulatory/EIRP decision, not a hardware gate (GPIO46 is
+                     // free on the V1.10 mainboard).
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
                      "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
-                     "<small style=\"color:#c00\">Hardware-reworked boards ONLY.</small>"
-                     "</label></div>"
+                     "<small>Check your region's EIRP / duty-cycle limits before "
+                     "enabling.</small></label></div>"
                      "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
                      "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
                      "(TTN Fair Use Policy).</p>"
@@ -2144,19 +2144,19 @@ static esp_err_t config_get(httpd_req_t *req) {
                      s_cfg->standalone_sd ? "checked" : "",   // V2.6.19: standalone SD-logging
 #endif
 #if HAL_HAS_LORAWAN
-                     // V2.6.23 (T8): LoRaWAN section args — 8 in order: enable, region
+                     // V2.6.23 (T8): LoRaWAN section args — 7 in order: enable, region
                      // <option> list (table-driven, see lora_region_opts above — collapses
                      // what would otherwise be 8 per-option "selected" args into one %s,
                      // same convention as tube_opts/br_opts), sub-band, DevEUI, JoinEUI,
-                     // AppKey, FEM enable, high-power enable. Must match the 8 "%s"/"%u"
-                     // slots in the "LoRaWAN (TTN)" HTML block above 1:1.
+                     // AppKey, high-power enable. Must match the 7 "%s"/"%u" slots in the
+                     // "LoRaWAN (TTN)" HTML block above 1:1 (V2.6.34: FEM-enable arg
+                     // removed with its checkbox).
                      s_cfg->lorawan_enabled ? "checked" : "",
                      lora_region_opts,
                      (unsigned)s_cfg->lorawan_subband,
                      e->lora_deveui,
                      e->lora_joineui,
                      e->lora_appkey,
-                     s_cfg->lorawan_fem_en ? "checked" : "",
                      s_cfg->lorawan_high_power ? "checked" : "",
 #endif
                      (unsigned long)s_cfg->tx_interval_ms,   // V2.5.30: top of Transmission targets
@@ -2687,40 +2687,67 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
 // fires first. Literal-string concatenation resolves at compile time, zero
 // runtime cost. Bold red styling inline so we don't add a CSS rule for one
 // element.
+// V2.6.34: UPLOAD_PROMPT_HW names the hardware revision this build's pin
+// map requires (Rev B/C V2 carrier update, V1.10 mainboard rework — see
+// hal.h's cutover note). The OTA page is the last human checkpoint before
+// firmware lands on a device, and there is no runtime hardware-revision
+// detect, so the warning paragraph built from this macro below is the
+// only guard against flashing a swapped-pin build onto original hardware.
+// heltec_v2 (both flash variants) had no hardware change — no macro, no
+// warning paragraph.
 #if BOARD_HELTEC_V2_4MB
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (4MB)</b>"
 #elif BOARD_HELTEC_V2
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (8MB)</b>"
 #elif BOARD_FEATHERS3_D
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #elif BOARD_ADAFRUIT_QTPY_ESP32_PICO
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit QT Py ESP32-PICO</b>"
+    #define UPLOAD_PROMPT_HW    "Rev C V2 carrier"
 #elif BOARD_SEEED_XIAO_ESP32S3
     // V2.5.19: the XIAO target shipped in V2.4.25 but was never given a label
     // branch here, so it fell through to "(unknown board)" on the OTA page —
     // which, by elimination, was the only way to identify a XIAO build.
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
+    #define UPLOAD_PROMPT_HW    "Rev C V2 carrier"
 #elif BOARD_HELTEC_WIFI_LORA32_V4_R2
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi LoRa 32 V4 (R2)</b>"
+    #define UPLOAD_PROMPT_HW    "V1.10 mainboard"
 #elif BOARD_SPARKFUN_THING_PLUS_ESP32S3
     // V2.6.10: same miss as the XIAO note above — shipped in V2.6.8 without
     // a label branch here, so it fell through to "(unknown board)" too.
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">SparkFun Thing Plus ESP32-S3</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #elif BOARD_SPARKFUN_THING_PLUS_ESP32C5
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">SparkFun Thing Plus ESP32-C5</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #elif BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER
     // V2.6.12: same miss as the XIAO/SparkFun-S3 notes above — shipped in
     // V2.6.11 without a label branch here, so it fell through to
     // "(unknown board)" too.
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 TFT Feather</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #elif BOARD_ADAFRUIT_ESP32_FEATHER_V2
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32 Feather V2</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #elif BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM
     // Added at port time (unlike the 3 boards above) — see the OTA-label
     // checklist item in the board-port process.
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 Feather (4MB/2MB PSRAM)</b>"
+    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
 #else
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
+#endif
+
+// Hardware-cutover warning paragraph, empty on boards without one.
+#ifdef UPLOAD_PROMPT_HW
+    #define UPLOAD_PROMPT_HW_NOTE \
+        "<p><b style=\"color:red\">Hardware check:</b> V2.6.34+ builds for " \
+        "this board use the <b>" UPLOAD_PROMPT_HW "</b> pinout. " \
+        "Original-revision hardware must stay on firmware &le; V2.6.33.</p>"
+#else
+    #define UPLOAD_PROMPT_HW_NOTE ""
 #endif
 
 static esp_err_t update_get(httpd_req_t *req) {
@@ -2749,6 +2776,7 @@ static esp_err_t update_get(httpd_req_t *req) {
     static const char page_tail[] =
         "</code></p>"
         "<p>Select a firmware .bin for " UPLOAD_PROMPT_BOARD ".</p>"
+        UPLOAD_PROMPT_HW_NOTE
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"
         "<progress id=\"p\" value=\"0\" max=\"1\"></progress>"

@@ -82,8 +82,8 @@ typedef struct {
  *  (tx_context_t) — none of them needed a true extern. `lorawan_setup()` /
  *  the Task 6 worker task are the first callers whose public signature
  *  (lorawan.h) is deliberately parameter-free, so this extern is the minimal
- *  way for lorawan.cpp to reach `lorawan_enabled`/`lorawan_fem_en`/
- *  `lorawan_high_power`/EUI+key fields without changing that signature.
+ *  way for lorawan.cpp to reach `lorawan_enabled`/`lorawan_high_power`/
+ *  EUI+key fields without changing that signature.
  *  Same struct, same lifetime, same single-writer-at-boot-then-httpd
  *  discipline the pointer-based consumers already rely on — just also
  *  reachable by name.

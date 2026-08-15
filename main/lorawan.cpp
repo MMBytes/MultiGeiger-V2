@@ -195,15 +195,20 @@ static bool radio_init(void) {
     gpio_set_level((gpio_num_t)PIN_LORA_VFEM, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Opt-in FEM lines — reworked-hardware boards ONLY (see hal.h):
-    if (g_cfg.lorawan_fem_en) {
-        gpio_config_t fe = {};
-        fe.pin_bit_mask = 1ULL << PIN_LORA_FEM_EN;
-        fe.mode = GPIO_MODE_OUTPUT;
-        ESP_ERROR_CHECK(gpio_config(&fe));
-        gpio_set_level((gpio_num_t)PIN_LORA_FEM_EN, 1);   // GC1109 CSD enable
-        ESP_LOGW(TAG, "FEM_EN (GPIO2) driven HIGH — reworked-hardware mode");
-    }
+    // FEM_EN: always driven — the GC1109 must be enabled for RX (RadioLib
+    // discussion #1665), so with LoRaWAN on there is no valid "FEM off"
+    // configuration. Unconditional since V2.6.34: this build's pin map
+    // targets the V1.10 mainboard, where GPIO2 belongs to FEM_EN alone
+    // (see hal.h — the old opt-in existed only for the V1.9 double-booking).
+    gpio_config_t fe = {};
+    fe.pin_bit_mask = 1ULL << PIN_LORA_FEM_EN;
+    fe.mode = GPIO_MODE_OUTPUT;
+    ESP_ERROR_CHECK(gpio_config(&fe));
+    gpio_set_level((gpio_num_t)PIN_LORA_FEM_EN, 1);   // GC1109 CSD enable
+    ESP_LOGI(TAG, "FEM_EN (GPIO2) driven HIGH (GC1109 RX/TX enable)");
+
+    // FEM_PA stays opt-in: 28 dBm is a regulatory/power choice, not a
+    // hardware gate (GPIO46 is free on the V1.10 mainboard, see hal.h).
     if (g_cfg.lorawan_high_power) {
         gpio_config_t pa = {};
         pa.pin_bit_mask = 1ULL << PIN_LORA_FEM_PA;

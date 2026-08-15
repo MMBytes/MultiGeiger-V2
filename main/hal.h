@@ -18,6 +18,17 @@
  *  sets the same `PIN_*` and `HAL_HAS_*` symbols, and extend the CMake board
  *  selector in `CMakeLists.txt`.
  *
+ *  ⚠️ V2.6.34 HARDWARE CUTOVER (breaking, deliberate): the eight
+ *  socket-carrier boards' Geiger pin maps target the Rev B V2 / Rev C V2
+ *  carrier update (GMZ_COUNT and HV_FET_OUT traded socket pads to remove
+ *  the HV→counter crosstalk convicted in the phantom-count investigation),
+ *  and the heltec_wifi_lora32_v4_r2 map targets the V1.10 mainboard rework
+ *  (HV_CAP_FULL moved GPIO2→6, piezo revived on GPIO4/5). Units built on
+ *  the ORIGINAL carriers/mainboards must stay on firmware ≤ V2.6.33:
+ *  flashing ≥ V2.6.34 there drives the HV FET PWM into the tube's pulse
+ *  pickup and reads "counts" off the FET gate trace. There is no runtime
+ *  hardware-revision detect — the firmware version IS the cutover line.
+ *
  *  Feature flags every branch must define (no implicit defaults — explicit is
  *  better than surprising):
  *    HAL_HAS_OLED            display.c stubs out when 0
@@ -203,9 +214,14 @@
     // A5          GPIO  5        GPIO  8
     // D9          GPIO  1        GPIO  6
     // D10         GPIO  3        GPIO  5
+    //
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET_OUT traded socket pads so the sensitive count input inherits A5,
+    // physically clear of the HV aggressor pair which now sits together on
+    // A0/A1 next to the HV corner. Original-carrier boards: stay ≤ V2.6.33.
     #define PIN_HV_CAP_FULL_INPUT   17   // A0   — comparator interrupt (digital)
-    #define PIN_GMC_COUNT_INPUT     18   // A1   — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT        5   // A5   — HV MOSFET gate (LEDC PWM via gptimer)
+    #define PIN_GMC_COUNT_INPUT      5   // A5   — Geiger pulse interrupt (≤V2.6.33: IO18/A1)
+    #define PIN_HV_FET_OUTPUT       18   // A1   — HV MOSFET gate (LEDC PWM via gptimer; ≤V2.6.33: IO5/A5)
 
     // Piezo pins
     #define PIN_SPEAKER_P            3   // D10  — LEDC PWM. IO3 is a boot strap (see note above)
@@ -317,21 +333,25 @@
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
     // Geiger / HV pins — wired to QT Py A0 / A1 / SCK castellated pads.
-    // V2.4.25 moved HV_FET from A2 to SCK so this PCB design ALSO drops
-    // onto the Seeed XIAO ESP32-S3 (same form factor; A0/A1/SCK are the
-    // only three pads strap-free on BOTH boards). HV_FET on SCK lives on
-    // the opposite long edge of the board from the sensitive GMC_COUNT
-    // input — physical separation reduces switching-noise coupling into
-    // the pulse pickup. A2 + A3 are now free for future analog use.
+    // V2.4.25 chose this trio so the PCB design ALSO drops onto the Seeed
+    // XIAO ESP32-S3 (same form factor; A0/A1/SCK are the only three pads
+    // strap-free on BOTH boards).
+    //
+    // V2.6.34 — Rev C V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded pads. It is now the sensitive GMC_COUNT input that owns
+    // the isolated SCK pad on the opposite long edge, while both HV
+    // aggressors (CAP_FULL comparator + FET gate PWM) pair up on A0/A1 —
+    // the separation argument that used to justify FET-on-SCK protects the
+    // victim, not the aggressor. Original-carrier boards: stay ≤ V2.6.33.
     //
     // Position    QT Py ESP32-PICO    Notes
     // --------    ----------------    ------------------------------------
     // A0          GPIO 26             RTC, DAC2, ADC2 — interrupt-capable
     // A1          GPIO 25             RTC, DAC1, ADC2 — interrupt-capable
-    // SCK         GPIO 14             ADC2, touch — LEDC PWM capable, non-strap
+    // SCK         GPIO 14             ADC2, touch — interrupt-capable, non-strap
     #define PIN_HV_CAP_FULL_INPUT   26   // A0  — comparator interrupt (digital)
-    #define PIN_GMC_COUNT_INPUT     25   // A1  — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT       14   // SCK — HV MOSFET gate (LEDC PWM via gptimer)
+    #define PIN_GMC_COUNT_INPUT     14   // SCK — Geiger pulse interrupt (≤V2.6.33: IO25/A1)
+    #define PIN_HV_FET_OUTPUT       25   // A1  — HV MOSFET gate (LEDC PWM via gptimer; ≤V2.6.33: IO14/SCK)
 
     // No piezo — HAL_HAS_SPEAKER=0 above stubs the entire speaker path.
     // PIN_SPEAKER_P / PIN_SPEAKER_N intentionally undefined.
@@ -418,17 +438,22 @@
     //   * D0 (GPIO 1) and D1 (GPIO 2) are strap-free on the S3 (avoids the
     //     GPIO 3 USB-Serial-JTAG selector that lurks under D2)
     //   * D8 (GPIO 7) is also strap-free AND lives on the opposite long
-    //     edge from D0/D1 — physical separation from the switching HV_FET
-    //     output keeps GMC pulse pickup quieter
+    //     edge from D0/D1 — physical separation between the pulse pickup
+    //     and the switching HV electronics
+    //
+    // V2.6.34 — Rev C V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded pads. The isolated far-edge D8 pad now belongs to the
+    // sensitive GMC_COUNT input; both HV aggressors (CAP_FULL + FET PWM)
+    // pair up on D0/D1. Original-carrier boards: stay ≤ V2.6.33.
     //
     // Position    XIAO pad    GPIO    Notes
     // --------    --------    ----    -----------------------------------
     // A0          D0          1       ADC1_CH0, TOUCH1, interrupt-capable
     // A1          D1          2       ADC1_CH1, TOUCH2, interrupt-capable
-    // SCK         D8          7       ADC1_CH6, TOUCH7, LEDC PWM-capable
+    // SCK         D8          7       ADC1_CH6, TOUCH7, interrupt-capable
     #define PIN_HV_CAP_FULL_INPUT    1   // D0  ≡ A0 — comparator interrupt
-    #define PIN_GMC_COUNT_INPUT      2   // D1  ≡ A1 — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT        7   // D8  ≡ SCK — HV MOSFET gate (LEDC PWM)
+    #define PIN_GMC_COUNT_INPUT      7   // D8  ≡ SCK — Geiger pulse interrupt (≤V2.6.33: IO2/D1)
+    #define PIN_HV_FET_OUTPUT        2   // D1  ≡ A1 — HV MOSFET gate (LEDC PWM; ≤V2.6.33: IO7/D8)
 
     // No piezo, no NeoPixel — those stubs above. But the XIAO ESP32-S3 DOES
     // have a single onboard user LED on GPIO21, and it is ACTIVE-LOW (drive the
@@ -534,7 +559,15 @@
     // GPIO is known for the speaker — see
     // [[project_heltec_wifi_lora32_v4_r2_board_port]] memory for the
     // hardware-side next step (Pin-Matrix header audit + continuity check).
-    #define HAL_HAS_SPEAKER           0   // Piezo present but GPIO26 (P) collides with PSRAM SPICS1 — disabled
+    //
+    // V2.6.34 — V1.10 mainboard cutover (see @file header): the mainboard
+    // rework reroutes the piezo's P leg from GPIO26 (J2 pin15) to GPIO4
+    // (J3 pin15, the pad the Pin-Matrix marked "RESERVE"/unwired), keeping
+    // the N leg on GPIO5 (J3 pin16). GPIO26 is left floating on V1.10, so
+    // the PSRAM SPICS1 collision documented above is a wiring-history note
+    // now — the chip-level restriction itself is permanent, which is why
+    // the reroute had to happen in copper. V1.9-mainboard units: ≤ V2.6.33.
+    #define HAL_HAS_SPEAKER           1   // Piezo on GPIO4/5 (V1.10 rework; ≤V2.6.33/V1.9: disabled — GPIO26 collided with PSRAM SPICS1)
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     #define HAL_HAS_LORAWAN           1   // Onboard SX1262 LoRa radio — see PIN_LORA_* below
@@ -546,29 +579,25 @@
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
     // Geiger / HV / speaker pins — from the Multigeiger mainboard's J2/J3
-    // wiring intent (Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf), cross-validated
-    // against the V4 datasheet.
+    // wiring intent (Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf, as amended by
+    // the V1.10 rework), cross-validated against the V4 datasheet.
     #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
-    #define PIN_HV_CAP_FULL_INPUT    2   // J3 pin13 — ADC1_CH1/TOUCH2, plain
-    // GPIO on base V4 (spec §5 confirmed no conflict with LoRa's FEM_PA on
-    // this SKU — but that check predates a later finding: GPIO2 is ALSO
-    // Heltec's FEM_EN, per Table 2.2.2 row 13, a second/distinct LoRa
-    // front-end-enable signal from GPIO7's VFEM_Control). Same double-booked
-    // shape as GPIO46/DIP1 vs FEM_PA below — see PIN_LORA_FEM_EN's comment:
-    // V2.6.23's HAL_HAS_LORAWAN=1 makes this pin live on reworked-hardware
-    // boards only (g_cfg.lorawan_fem_en); on unmodified boards this
-    // comparator input stays the sole driver and PIN_LORA_FEM_EN is never
-    // asserted.
+    // V2.6.34 — V1.10 mainboard cutover (see @file header): the cap-full
+    // comparator input moved GPIO2 → GPIO6 (J3 pin13 → J3 pin17, the pad
+    // that used to feed the now-removed "DIP3" switch). GPIO6 has no
+    // Heltec-side claim (Table 2.2.2 row 17: generic ADC1_CH5/TOUCH6 only)
+    // and, unlike GPIO45, is NOT one of the ESP32-S3's four strapping pins
+    // (GPIO0/3/45/46 only), so it carries no boot-strap risk either.
     //
-    // FUTURE HARDWARE REWORK (not yet built, no PCB revision exists yet):
-    // hardware team has been asked to move this input to GPIO6 (J3 pin17,
-    // currently wired only to the dead "DIP3" switch, see reserved-pin list
-    // below) once that switch is disconnected — GPIO6 has no Heltec-side
-    // claim and, unlike GPIO45, is NOT one of the ESP32-S3's four strapping
-    // pins (GPIO0/3/45/46 only), so it carries no boot-strap risk either.
-    // Same rule as the speaker rework: this is a copper change, existing
-    // boards keep GPIO2 wired as-is, and firmware needs a way to tell old-
-    // wiring boards from new-wiring boards before this #define can change.
+    // Why the move: GPIO2 (the ≤V2.6.33 / V1.9 wiring) is ALSO Heltec's
+    // FEM_EN, per Table 2.2.2 row 13 — a second/distinct LoRa front-end
+    // enable from GPIO7's VFEM_Control — so comparator input and radio
+    // control contended for one pin (see PIN_LORA_FEM_EN below). On V1.10
+    // the mainboard leaves GPIO2 unwired, dissolving the contention:
+    // FEM_EN gets the pin to itself (always driven by lorawan_setup()).
+    // V1.9-mainboard units must stay ≤ V2.6.33 — this firmware would read
+    // "cap full" off a floating pin and drive FEM_EN into their comparator.
+    #define PIN_HV_CAP_FULL_INPUT    6   // J3 pin17 — comparator interrupt (≤V2.6.33/V1.9: GPIO2/J3 pin13)
     // IO3 is an ESP32-S3 strapping pin, same strap BOARD_FEATHERS3_D reuses
     // for PIN_SPEAKER_P below — but that reuse is safe ONLY because the
     // speaker driver stays hi-Z until code drives it post-boot. This pin is
@@ -591,28 +620,16 @@
     // documented strap (not a real risk) rather than a bench-verify item.
     #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
 
-    // Piezo pins. The pin-matrix marks BOTH GPIO26 (J2 pin15) and GPIO5 (J3
-    // pin16) as "SPK" without distinguishing P/N. PIN_SPEAKER_P/N are
-    // intentionally left undefined — HAL_HAS_SPEAKER=0 above stubs the
-    // entire speaker path, since GPIO26 (J2 pin15) collides with this
-    // chip's internal PSRAM chip-select (see the HAL_HAS_SPEAKER comment).
-    //
-    // FUTURE HARDWARE REWORK (not yet built, no PCB revision exists yet):
-    // GPIO4 (J3 pin15) is the first fully-verified-free GPIO found on this
-    // board — no Heltec-named "Connected" function (datasheet Table 2.2.2
-    // row 15 lists only ADC1_CH3/TOUCH4) AND the Multigeiger Pin-Matrix
-    // itself marks this same header pin "RESERVE" (unwired on the
-    // mainboard). Hardware team has been asked to reroute the speaker's P
-    // leg from GPIO26 to GPIO4 on a future PCB revision, keeping the N leg
-    // on GPIO5 (J3 pin16) unchanged — GPIO5 has no conflict and is already
-    // connected. This is a copper change, not a firmware one: existing
-    // fabricated boards still have the P leg hard-traced to GPIO26 and
-    // cannot be fixed by flipping HAL_HAS_SPEAKER. When the reworked PCB
-    // exists, firmware will need a way to distinguish old-wiring boards
-    // from new-wiring boards (new BOARD variant, or a build-time/runtime
-    // hardware-revision flag) before PIN_SPEAKER_P can safely become 4 —
-    // do not just flip HAL_HAS_SPEAKER=1 with GPIO4 for this board target
-    // as it stands, or every board already in the field breaks.
+    // Piezo pins — live as of V2.6.34 on the V1.10 mainboard (see the
+    // HAL_HAS_SPEAKER comment above for the full history). GPIO4 (J3 pin15)
+    // was the first fully-verified-free GPIO found on this board — no
+    // Heltec-named "Connected" function (datasheet Table 2.2.2 row 15 lists
+    // only ADC1_CH3/TOUCH4) AND the V1.9 Pin-Matrix marked this header pin
+    // "RESERVE" (unwired) — so the V1.10 rework routed the piezo's P leg
+    // there. The N leg stays on GPIO5 (J3 pin16), which the pin-matrix
+    // always marked "SPK" and which has no competing claim.
+    #define PIN_SPEAKER_P            4   // J3 pin15 — LEDC PWM tone output (V1.10; ≤V2.6.33/V1.9: hard-traced to GPIO26, unusable)
+    #define PIN_SPEAKER_N            5   // J3 pin16 — digital low
 
     // Onboard LED. GPIO35, ACTIVE-HIGH — confirmed via the independent
     // DN9KGB/rMesh project's hal_HELTEC_WiFi_LoRa_32_V4.c (whose other pin
@@ -620,10 +637,11 @@
     // on. Not Heltec's own datasheet text, so bench-verify polarity on
     // first flash (same standard applied to the XIAO ESP32-S3's LED).
     // HAL_LED_ACTIVE_LOW omitted (led.c defaults to active-high, matching
-    // this pin's confirmed polarity). V2.6.7: HAL_HAS_SPEAKER=0 means
-    // speaker.c no longer owns this pin — led.c's own driver compiles IN
-    // (per led.c's `!HAL_HAS_SPEAKER && !HAL_HAS_NEOPIXEL` gate) and drives
-    // the pulse-tick LED directly.
+    // this pin's confirmed polarity). V2.6.34: HAL_HAS_SPEAKER=1 hands the
+    // pulse-tick LED back to speaker.c (led.c's own driver compiles OUT
+    // per its `!HAL_HAS_SPEAKER && !HAL_HAS_NEOPIXEL` gate; speaker.c's
+    // `#elif defined(PIN_LED_BUILTIN)` path drives this pin instead —
+    // the same handover pattern as BOARD_HELTEC_V2).
     #define PIN_LED_BUILTIN         35   // J2 pin10
 
     // I2C bus (env sensor — the bus every sensor driver targets by default).
@@ -664,25 +682,28 @@
     // VFEM_Control (J3 pin18): switches power to the LoRa RF front end.
     // Driven HIGH by lorawan_setup() before radio init (V1.9 precedent).
     #define PIN_LORA_VFEM            7
-    // FEM_EN = GC1109 FEM enable/CSD (J3 pin13). DOUBLE-BOOKED with this
-    // board's HV cap-full comparator input (PIN_HV_CAP_FULL_INPUT above).
-    // NEVER driven unless g_cfg.lorawan_fem_en is set (reworked-hardware
-    // boards only — driving it on current wiring contends with the live
-    // comparator output). Per RadioLib discussion #1665 the GC1109 must be
-    // enabled for RX; on current wiring the comparator wiggles this line,
-    // so LoRaWAN RX reliability on unmodified boards is a bench question.
+    // FEM_EN = GC1109 FEM enable/CSD. V2.6.34: on the V1.10 mainboard the
+    // old double-booking with the HV cap-full comparator is GONE — the
+    // comparator moved to GPIO6 (see PIN_HV_CAP_FULL_INPUT above) and the
+    // mainboard leaves GPIO2 unwired, so FEM_EN finally owns this pin.
+    // Always driven HIGH by lorawan_setup() (the former g_cfg.lorawan_fem_en
+    // opt-in was removed with the V1.9 hazard that justified it): per
+    // RadioLib discussion #1665 the GC1109 must be enabled for RX, so with
+    // LoRaWAN on there is no valid "FEM off" configuration.
     #define PIN_LORA_FEM_EN          2
     // FEM_PA (Heltec pin-map name; GC1109 gain-stage select for the 28 dBm
-    // path). DOUBLE-BOOKED with the mainboard's DIP1 switch. NEVER driven
-    // unless g_cfg.lorawan_high_power is set (reworked boards only).
+    // path). V1.10 removed the DIP switch bank that double-booked this pin
+    // (S2 + pull-ups + parallel jumpers, "DIP1"), so GPIO46 is free — but
+    // it stays gated on g_cfg.lorawan_high_power as a regulatory/EIRP
+    // opt-in, not a hardware-safety gate.
     #define PIN_LORA_FEM_PA         46
 
     // FORMERLY "reserved for future LoRaWAN/Meshtastic work" (hardware-
     // reservation only, spec §6) — as of V2.6.23 the SX1262 SPI bus and
     // VFEM_Control are LIVE via the PIN_LORA_* defines above
     // (HAL_HAS_LORAWAN=1, lorawan.cpp). Left below for the per-pin
-    // rationale; GPIO2/GPIO46 still need the double-booked-conflict read
-    // since lorawan.cpp only drives them conditionally:
+    // rationale — the GPIO2/GPIO46 double-bookings are HISTORY as of the
+    // V1.10 mainboard (S2 DIP bank, pull-ups and jumpers removed):
     //   GPIO8/9/10/11/12/13/14  SX1262 LoRa radio's dedicated internal SPI
     //                 bus: GPIO8=LoRa_NSS, GPIO9=LoRa_SCK, GPIO10=LoRa_MOSI,
     //                 GPIO11=LoRa_MISO, GPIO12=LoRa_RST, GPIO13=LoRa_BUSY,
@@ -696,20 +717,19 @@
     //   GPIO2         FEM_EN (LoRa front-end enable, J3 pin13 per Table
     //                 2.2.2 — a second, distinct front-end control signal
     //                 from GPIO7/VFEM_Control). See PIN_LORA_FEM_EN above:
-    //                 double-booked with PIN_HV_CAP_FULL_INPUT, only driven
-    //                 on reworked-hardware boards (g_cfg.lorawan_fem_en).
+    //                 formerly double-booked with PIN_HV_CAP_FULL_INPUT;
+    //                 V1.10 leaves the header pad unwired so FEM_EN owns
+    //                 the pin (always driven by lorawan_setup()).
     //   GPIO46        FEM_PA (LoRa PA control) per Heltec's own pin-mapping
     //                 diagram — dropped from the datasheet PDF's own summary
     //                 table (same class of gap as GPIO34/VGNSS_Ctrl below),
     //                 but confirmed via direct visual cross-check of the
-    //                 diagram against the PDF. Multigeiger's own board also
-    //                 calls this pin "DIP1" (unused input). See
-    //                 PIN_LORA_FEM_PA above: double-booked with the DIP1
-    //                 switch, only driven on reworked-hardware boards
-    //                 (g_cfg.lorawan_high_power).
-    //                 Hardware team has been asked to remove/disconnect the
-    //                 DIP1 switch on the next PCB revision rather than leave
-    //                 this landmine for whoever eventually does LoRa work.
+    //                 diagram against the PDF. The V1.9 mainboard also
+    //                 called this pin "DIP1" (unused input); the V1.10
+    //                 rework removed that DIP switch/pull-up/jumper, so
+    //                 the pin is free. See PIN_LORA_FEM_PA above: driven
+    //                 only when g_cfg.lorawan_high_power is set (28 dBm
+    //                 regulatory opt-in).
     //
     // RESERVED / never repurpose (out of scope or module-internal — see
     // spec §2 and §9, and WiFi_LoRa_32_V4.3.1_Datasheet.pdf Table 2.2.1/2.2.2
@@ -743,18 +763,19 @@
     //                 actively-driven external signal without hardware
     //                 verifying it against the strap requirement first —
     //                 left as DIP0/unused, no repurposing planned.
-    //   GPIO6         "DIP3" in the Multigeiger matrix — no Heltec-side
+    //   GPIO6         "DIP3" in the V1.9 Multigeiger matrix — no Heltec-side
     //                 claim (Table 2.2.2 row 17: generic ADC1_CH5/TOUCH6
     //                 only) and NOT a strapping pin (unlike GPIO45 above).
-    //                 FUTURE HARDWARE REWORK: earmarked as the new home for
-    //                 PIN_HV_CAP_FULL_INPUT (currently GPIO2, see that
-    //                 #define's comment) once the hardware team disconnects
-    //                 the DIP3 switch — no known conflicts either way.
+    //                 V2.6.34: CLAIMED — the V1.10 rework removed the DIP3
+    //                 switch and this is now PIN_HV_CAP_FULL_INPUT (see
+    //                 that #define's comment). No longer spare.
     //   GPIO15/16     XTAL_32K_P / XTAL_32K_N — external 32kHz RTC crystal
     //                 pins (Table 2.2.3). Not currently used by this board
     //                 (no crystal populated), but not free GPIO either.
     //   GPIO26-32     internal flash/PSRAM SPI0/1 (never usable, any PSRAM
-    //                 mode) — see PIN_SPEAKER_P above, currently GPIO26
+    //                 mode). The V1.9 mainboard hard-traced the piezo P leg
+    //                 to GPIO26 (why the speaker was disabled ≤V2.6.33);
+    //                 V1.10 leaves GPIO26 floating — see HAL_HAS_SPEAKER
     //   GPIO34        VGNSS_Ctrl — Heltec module-level named control signal
     //                 (confirmed via Heltec's own V4 pin-mapping diagram AND
     //                 independently via the Multigeiger Pin-Matrix; was in
@@ -854,9 +875,12 @@
     // R8          GPIO  1        GPIO  4
     // R11         GPIO  9        GPIO  9  (exact match)
     // R12         GPIO  8        GPIO  8  (exact match)
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded socket pads — count input on L10, aggressor pair on
+    // L5/L6. Original-carrier boards: stay ≤ V2.6.33.
     #define PIN_HV_CAP_FULL_INPUT   10   // L5 — comparator interrupt (digital)
-    #define PIN_GMC_COUNT_INPUT     14   // L6 — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT       18   // L10 — HV MOSFET gate (LEDC PWM via gptimer)
+    #define PIN_GMC_COUNT_INPUT     18   // L10 — Geiger pulse interrupt (≤V2.6.33: IO14/L6)
+    #define PIN_HV_FET_OUTPUT       14   // L6 — HV MOSFET gate (LEDC PWM via gptimer; ≤V2.6.33: IO18/L10)
 
     // Piezo pins
     #define PIN_SPEAKER_P            5   // R7
@@ -999,9 +1023,21 @@
 
     // Geiger / HV pins — ThingPlus header positions L5/L6/L10 (silkscreen
     // A0/A1/A5). None of these three GPIOs are strapping pins on this chip.
+    //
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded socket pads — count input on L10, aggressor pair on
+    // L5/L6. Original-carrier boards: stay ≤ V2.6.33.
+    //
+    // ⚠️ IO6 ALSO carries this board's default-open "ST" solder jumper (a
+    // battery/USB power-source status tap). While IO6 was the FET *output*
+    // that jumper was harmless; now that IO6 is the GMC pulse *input*, a
+    // closed ST jumper pins the count node to the power-status net and
+    // kills counting entirely. Failure signature: CPM ≈ 0 with perfectly
+    // healthy HV telemetry (hv_err=0, normal hv_pulses). ST must stay
+    // factory-open on any Rev B V2 deployment of this board.
     #define PIN_HV_CAP_FULL_INPUT    1   // L5 (silkscreen A0) — comparator interrupt (digital)
-    #define PIN_GMC_COUNT_INPUT      2   // L6 (silkscreen A1) — Geiger pulse interrupt
-    #define PIN_HV_FET_OUTPUT        6   // L10 (silkscreen A5) — HV MOSFET gate (LEDC PWM via gptimer). Also carries an optional, default-open "battery/USB power-source status" jumper tap — harmless unless someone later solders that jumper.
+    #define PIN_GMC_COUNT_INPUT      6   // L10 (silkscreen A5) — Geiger pulse interrupt (≤V2.6.33: IO2/L6). ST jumper must stay open — see above.
+    #define PIN_HV_FET_OUTPUT        2   // L6 (silkscreen A1) — HV MOSFET gate (LEDC PWM via gptimer; ≤V2.6.33: IO6/L10)
 
     // No "user" LED separate from the NeoPixel — no PIN_LED_BUILTIN.
     // led_tick flashes the NeoPixel via neopixel_notify_pulse(), same as
@@ -1101,10 +1137,16 @@
     #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
-    // Geiger / HV pins — header positions L5/L6/L9 (silkscreen A0/A1/A5).
+    // Geiger / HV pins — header positions L5/L6/L9 (silkscreen A0/A1/A5;
+    // this board's A5 sits at L9, one hole short of the full-length
+    // Feathers' L10).
+    //
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded socket pads — count input on A5, aggressor pair on
+    // A0/A1. Original-carrier boards: stay ≤ V2.6.33.
     #define PIN_HV_CAP_FULL_INPUT    18  // L5 (silkscreen A0)
-    #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
-    #define PIN_HV_FET_OUTPUT         8  // L9 (silkscreen A5)
+    #define PIN_GMC_COUNT_INPUT       8  // L9 (silkscreen A5) — Geiger pulse interrupt (≤V2.6.33: IO17/A1)
+    #define PIN_HV_FET_OUTPUT        17  // L6 (silkscreen A1) — HV MOSFET gate (≤V2.6.33: IO8/A5)
 
     #define PIN_LED_BUILTIN          13  // onboard LED — since V2.6.24 unused for led_tick (NeoPixel preferred); held OFF
 
@@ -1200,9 +1242,13 @@
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
     // Geiger / HV pins — header positions L5/L6/L10 (silkscreen A0/A1/A5).
+    //
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded socket pads — count input on A5, aggressor pair on
+    // A0/A1. Original-carrier boards: stay ≤ V2.6.33.
     #define PIN_HV_CAP_FULL_INPUT   26   // A0 (L5)
-    #define PIN_GMC_COUNT_INPUT     25   // A1 (L6)
-    #define PIN_HV_FET_OUTPUT        4   // A5 (L10)
+    #define PIN_GMC_COUNT_INPUT      4   // A5 (L10) — Geiger pulse interrupt (≤V2.6.33: IO25/A1)
+    #define PIN_HV_FET_OUTPUT       25   // A1 (L6) — HV MOSFET gate (≤V2.6.33: IO4/A5)
 
     // Speaker — D9/D10 header pads (top-row silkscreen prints raw GPIO
     // numbers on this board, not "D9"/"D10" — see block comment above for
@@ -1300,9 +1346,13 @@
     #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)
 
     // Geiger / HV pins — header positions L5/L6/L10 (silkscreen A0/A1/A5).
+    //
+    // V2.6.34 — Rev B V2 carrier cutover (see @file header): GMZ_COUNT and
+    // HV_FET traded socket pads — count input on A5, aggressor pair on
+    // A0/A1. Original-carrier boards: stay ≤ V2.6.33.
     #define PIN_HV_CAP_FULL_INPUT    18  // L5 (silkscreen A0)
-    #define PIN_GMC_COUNT_INPUT      17  // L6 (silkscreen A1)
-    #define PIN_HV_FET_OUTPUT         8  // L10 (silkscreen A5)
+    #define PIN_GMC_COUNT_INPUT       8  // L10 (silkscreen A5) — Geiger pulse interrupt (≤V2.6.33: IO17/A1)
+    #define PIN_HV_FET_OUTPUT        17  // L6 (silkscreen A1) — HV MOSFET gate (≤V2.6.33: IO8/A5)
 
     #define PIN_LED_BUILTIN          13  // R4 (silkscreen D13) — onboard red "#13" LED; since V2.6.24 unused for led_tick (NeoPixel preferred, see dual-LED note above); held OFF
 

@@ -256,6 +256,21 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  thingspeak.pm:    enabled=%d https=%d key=%s",
              cfg->send_thingspeak_pm, cfg->thingspeak_pm_https,
              MASK(cfg->thingspeak_pm_api_key));
+    // V2.6.34: the LoRaWAN group had been missing from this dump since its
+    // V2.6.23 debut. Gated like the i2c line above so only the LoRaWAN board
+    // prints it. The EUIs are public-ish device identifiers (the TTN console
+    // displays them), shown in clear like radmon_user; the AppKey is the OTAA
+    // root secret → MASK()ed. No FEM-enable field: FEM_EN is always driven
+    // when LoRaWAN is on (see lorawan.cpp), so there is nothing to configure.
+#if HAL_HAS_LORAWAN
+    LOG_PACED("  lorawan:          enabled=%d region=%u subband=%u high_power=%d",
+             cfg->lorawan_enabled, (unsigned)cfg->lorawan_region,
+             (unsigned)cfg->lorawan_subband, cfg->lorawan_high_power);
+    LOG_PACED("  lorawan:          deveui=%s joineui=%s appkey=%s",
+             cfg->lorawan_deveui[0]  ? cfg->lorawan_deveui  : "<empty>",
+             cfg->lorawan_joineui[0] ? cfg->lorawan_joineui : "<empty>",
+             MASK(cfg->lorawan_appkey));
+#endif
     LOG_PACED("  mqtt:             enabled=%d broker=%s:%lu user=%s pw=%s",
              cfg->mqtt_enable,
              cfg->mqtt_broker[0] ? cfg->mqtt_broker : "<empty>",

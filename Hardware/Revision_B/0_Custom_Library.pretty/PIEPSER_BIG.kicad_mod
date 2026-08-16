@@ -11,7 +11,7 @@
 		(effects
 			(font
 				(size 1.1684 1.1684)
-				(thickness 0.1016)
+				(thickness 0.15)
 			)
 			(justify left bottom)
 		)
@@ -55,7 +55,7 @@
 		(center 0 0)
 		(end 1.27 0)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(fill no)
@@ -66,7 +66,7 @@
 		(center 0 0)
 		(end 11 0)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(fill no)

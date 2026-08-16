@@ -11,7 +11,7 @@
 		(effects
 			(font
 				(size 1.1684 1.1684)
-				(thickness 0.1016)
+				(thickness 0.15)
 			)
 			(justify left bottom)
 		)
@@ -57,7 +57,7 @@
 		(start 0 -3.57)
 		(end 7.5 -3.57)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")
@@ -67,7 +67,7 @@
 		(start 0 -0.07)
 		(end 0 -3.57)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")
@@ -77,7 +77,7 @@
 		(start 0 0)
 		(end 0 2.6)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")
@@ -87,7 +87,7 @@
 		(start 0 2.6)
 		(end 7.5 2.6)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")
@@ -97,7 +97,7 @@
 		(start 7.5 -3.57)
 		(end 7.5 -0.07)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")
@@ -107,7 +107,7 @@
 		(start 7.5 2.6)
 		(end 7.5 0)
 		(stroke
-			(width 0.127)
+			(width 0.15)
 			(type solid)
 		)
 		(layer "F.SilkS")

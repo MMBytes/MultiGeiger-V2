@@ -100,7 +100,7 @@
 			(effects
 				(font
 					(size 1.1684 1.1684)
-					(thickness 0.1016)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -156,7 +156,7 @@
 			(center 0 0)
 			(end 6 0)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(fill no)
@@ -221,7 +221,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -551,7 +551,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -881,7 +881,7 @@
 			(effects
 				(font
 					(size 1.1684 1.1684)
-					(thickness 0.1016)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -948,7 +948,7 @@
 			(start -3.81 -3.81)
 			(end 3.81 -3.81)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -958,7 +958,7 @@
 			(start -3.81 -2.54)
 			(end 3.81 -2.54)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -968,7 +968,7 @@
 			(start -3.81 1.27)
 			(end -3.81 -2.54)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -978,7 +978,7 @@
 			(start -3.81 1.27)
 			(end 3.81 1.27)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -988,7 +988,7 @@
 			(start -3.81 2.54)
 			(end -3.81 -3.81)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -998,7 +998,7 @@
 			(start 3.81 -3.81)
 			(end 3.81 2.54)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -1008,7 +1008,7 @@
 			(start 3.81 2.54)
 			(end -3.81 2.54)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -1066,7 +1066,7 @@
 			(effects
 				(font
 					(size 1 1)
-					(thickness 0.1)
+					(thickness 0.15)
 				)
 			)
 		)
@@ -1524,7 +1524,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -1778,7 +1778,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -2108,7 +2108,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -2425,7 +2425,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -2736,7 +2736,7 @@
 			(effects
 				(font
 					(size 1.1684 1.1684)
-					(thickness 0.1016)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -3063,7 +3063,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -3481,7 +3481,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -3812,7 +3812,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -4288,7 +4288,7 @@
 			(start -1.94 2.685)
 			(end 1.94 2.685)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4298,7 +4298,7 @@
 			(start -3.11 0.715)
 			(end -3.11 -1.785)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4308,7 +4308,7 @@
 			(start 3.11 0.715)
 			(end 3.11 -1.785)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4318,7 +4318,7 @@
 			(start -3.11 -1.785)
 			(end -2.06 -1.785)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4328,7 +4328,7 @@
 			(start -2.06 -1.785)
 			(end -2.06 -2.775)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4338,7 +4338,7 @@
 			(start 3.11 -1.785)
 			(end 2.06 -1.785)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -4541,7 +4541,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -4795,7 +4795,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -5106,7 +5106,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -5416,7 +5416,7 @@
 			(effects
 				(font
 					(size 1.1684 1.1684)
-					(thickness 0.1016)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -5483,7 +5483,7 @@
 			(center 0 0)
 			(end 1.27 0)
 			(stroke
-				(width 0.127)
+				(width 0.15)
 				(type solid)
 			)
 			(fill no)
@@ -5542,7 +5542,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -5872,7 +5872,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -6261,7 +6261,7 @@
 			(start -4.34 4.51)
 			(end 4.34 4.51)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6271,7 +6271,7 @@
 			(start -6.06 0.94)
 			(end -6.06 -3.31)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6281,7 +6281,7 @@
 			(start 6.06 0.94)
 			(end 6.06 -3.31)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6291,7 +6291,7 @@
 			(start -5.04 -1.71)
 			(end -3.76 -1.71)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6301,7 +6301,7 @@
 			(start -3.76 -1.71)
 			(end -3.76 -4.6)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6311,7 +6311,7 @@
 			(start 5.04 -1.71)
 			(end 3.76 -1.71)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6321,7 +6321,7 @@
 			(start -6.06 -3.31)
 			(end -5.04 -3.31)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6331,7 +6331,7 @@
 			(start -5.04 -3.31)
 			(end -5.04 -1.71)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6341,7 +6341,7 @@
 			(start 5.04 -3.31)
 			(end 5.04 -1.71)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6351,7 +6351,7 @@
 			(start 6.06 -3.31)
 			(end 5.04 -3.31)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(layer "F.SilkS")
@@ -6652,7 +6652,7 @@
 			(center 0 0)
 			(end 1.5 0)
 			(stroke
-				(width 0.12)
+				(width 0.15)
 				(type solid)
 			)
 			(fill no)
@@ -6747,7 +6747,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify right top)
 			)
@@ -6979,7 +6979,7 @@
 			(effects
 				(font
 					(size 1.1557 1.1557)
-					(thickness 0.1143)
+					(thickness 0.15)
 				)
 				(justify left bottom)
 			)
@@ -7238,6 +7238,7 @@
 		(effects
 			(font
 				(size 0.8 0.8)
+				(thickness 0.15)
 				(italic yes)
 			)
 		)

@@ -55,7 +55,7 @@
 			(xy -0.95 -0.9) (xy -0.55 -0.9) (xy -0.55 -0.6) (xy -0.95 -0.6)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)
@@ -67,7 +67,7 @@
 			(xy -0.95 -0.15) (xy -0.55 -0.15) (xy -0.55 0.15) (xy -0.95 0.15)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)
@@ -79,7 +79,7 @@
 			(xy -0.95 0.6) (xy -0.55 0.6) (xy -0.55 0.9) (xy -0.95 0.9)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)
@@ -91,7 +91,7 @@
 			(xy 0.55 -0.9) (xy 0.95 -0.9) (xy 0.95 -0.6) (xy 0.55 -0.6)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)
@@ -103,7 +103,7 @@
 			(xy 0.55 -0.15) (xy 0.95 -0.15) (xy 0.95 0.15) (xy 0.55 0.15)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)
@@ -115,7 +115,7 @@
 			(xy 0.55 0.6) (xy 0.95 0.6) (xy 0.95 0.9) (xy 0.55 0.9)
 		)
 		(stroke
-			(width 0.01)
+			(width 0.15)
 			(type solid)
 		)
 		(fill yes)

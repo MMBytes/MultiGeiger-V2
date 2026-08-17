@@ -29,6 +29,16 @@
  *  pickup and reads "counts" off the FET gate trace. There is no runtime
  *  hardware-revision detect — the firmware version IS the cutover line.
  *
+ *  ⚠️ V2.7.1 AMENDS THAT LINE, for heltec_wifi_lora32_v4_r2 ONLY: the V1.10
+ *  board as actually fabricated swaps module pads 14_ and 17_ relative to
+ *  the design V2.6.34 was written against, so HV_CAP_FULL and GMC_COUNT
+ *  trade GPIO3/GPIO6 (that branch carries the why). The pre-swap layout was
+ *  never manufactured, so for this one target V2.6.34 matches no physical
+ *  board at all: V1.9 mainboards stay ≤ V2.6.33, V1.10 mainboards need
+ *  ≥ V2.7.1. The eight carrier boards' V2.6.34 cutover is unaffected.
+ *  Numbering jumped to V2.7.x here so the hard cutover is legible in the
+ *  release list — V2.6.34 should itself have been V2.7.0.
+ *
  *  Feature flags every branch must define (no implicit defaults — explicit is
  *  better than surprising):
  *    HAL_HAS_OLED            display.c stubs out when 0
@@ -582,43 +592,64 @@
     // wiring intent (Pin-Matrix_Heltec_MG_neu-V1.9.ods/.pdf, as amended by
     // the V1.10 rework), cross-validated against the V4 datasheet.
     #define PIN_HV_FET_OUTPUT       33   // J2 pin12 — HV MOSFET gate
-    // V2.6.34 — V1.10 mainboard cutover (see @file header): the cap-full
-    // comparator input moved GPIO2 → GPIO6 (J3 pin13 → J3 pin17, the pad
-    // that used to feed the now-removed "DIP3" switch). GPIO6 has no
-    // Heltec-side claim (Table 2.2.2 row 17: generic ADC1_CH5/TOUCH6 only)
-    // and, unlike GPIO45, is NOT one of the ESP32-S3's four strapping pins
-    // (GPIO0/3/45/46 only), so it carries no boot-strap risk either.
+    // V2.7.1 — V1.10 mainboard AS FABRICATED (see @file header). The board
+    // the designer actually built swaps module pads 14_ and 17_ against the
+    // V1.10 design V2.6.34 targeted, so these two inputs trade GPIO3/GPIO6.
     //
-    // Why the move: GPIO2 (the ≤V2.6.33 / V1.9 wiring) is ALSO Heltec's
-    // FEM_EN, per Table 2.2.2 row 13 — a second/distinct LoRa front-end
-    // enable from GPIO7's VFEM_Control — so comparator input and radio
-    // control contended for one pin (see PIN_LORA_FEM_EN below). On V1.10
-    // the mainboard leaves GPIO2 unwired, dissolving the contention:
-    // FEM_EN gets the pin to itself (always driven by lorawan_setup()).
-    // V1.9-mainboard units must stay ≤ V2.6.33 — this firmware would read
-    // "cap full" off a floating pin and drive FEM_EN into their comparator.
-    #define PIN_HV_CAP_FULL_INPUT    6   // J3 pin17 — comparator interrupt (≤V2.6.33/V1.9: GPIO2/J3 pin13)
-    // IO3 is an ESP32-S3 strapping pin, same strap BOARD_FEATHERS3_D reuses
-    // for PIN_SPEAKER_P below — but that reuse is safe ONLY because the
-    // speaker driver stays hi-Z until code drives it post-boot. This pin is
-    // different: it's an always-connected external input from the tube
-    // pulse-conditioning circuit, whose level during the ROM bootloader's
-    // strap-sampling window is NOT under firmware control.
+    // The swap is a PCB-routing fix, not an electrical preference: it aligns
+    // the module's pad order with JP1's pin order, which opened the west
+    // escape between the piezo-N aggressor and the cap-full input from
+    // 1.65 mm to 3.72 mm and squared both of the layout's 45° crossings to
+    // 90°. Those are exactly the clearance rules the V1.10 change request
+    // exists to enforce, so the copper wins and the firmware follows. Pin
+    // roles on JP1 are unchanged (pin 3 GMZ_COUNT, pin 4 HV_CAP_FUL), so
+    // no tube or cable wiring changes with this.
+    //
+    // Unchanged since V2.6.34 — why GPIO2 is out of the picture entirely:
+    // GPIO2 is ALSO Heltec's FEM_EN, per datasheet Table 2.2.2 row 13 (a
+    // second, distinct LoRa front-end enable from GPIO7's VFEM_Control), so
+    // on V1.9 the comparator input and the radio control contended for one
+    // pin (see PIN_LORA_FEM_EN below). V1.10 leaves GPIO2 unwired, which
+    // dissolves the contention: FEM_EN gets the pin to itself, always driven
+    // by lorawan_setup(). V1.9-mainboard units must stay ≤ V2.6.33 — this
+    // firmware would read "cap full" off a floating pin and drive FEM_EN
+    // into their comparator.
+    //
+    // IO3 is an ESP32-S3 strapping pin (GPIO0/3/45/46 are the four), the
+    // same strap BOARD_FEATHERS3_D reuses for PIN_SPEAKER_P below — but
+    // that reuse is safe ONLY because the speaker driver stays hi-Z until
+    // code drives it post-boot. This pin is different: it's an always-
+    // connected external input, driven here by the HV cap-full comparator,
+    // whose level during the ROM bootloader's strap-sampling window is NOT
+    // under firmware control. A warm reset with the HV reservoir still
+    // charged presents a HIGH, so that case has to be shown harmless — the
+    // same reasoning that BANS this signal from GPIO45, whose strap chooses
+    // the flash/PSRAM regulator voltage and is not eFuse-gated off (see the
+    // GPIO45/DIP0 reserved-pin note below). GPIO3's strap is a different
+    // animal:
     //
     // V2.6.7: narrowed after re-reading the Espressif ESP32-S3 datasheet
-    // v2.2 ch.3 "Boot Configurations" directly. GPIO3 controls ONLY "JTAG
-    // signal source" (which physical path a hardware JTAG debugger would
-    // use) — it has no role in the SPI-boot-vs-download-mode decision
-    // (that's GPIO0 + GPIO46, per Table 3-3) and no effect on this board's
-    // console/flashing path, which runs over a separate USB-UART bridge
-    // chip on GPIO43/44, not native USB-Serial-JTAG (see
-    // HAL_HAS_NATIVE_USB=0 above). The datasheet also states the eFuse bits
-    // that make the chip act on this strap at all (EFUSE_DIS_PAD_JTAG,
-    // EFUSE_DIS_USB_JTAG, EFUSE_STRAP_JTAG_SEL) default to 0/not-burnt on
-    // every stock chip, so in practice GPIO3's boot-time level here is
-    // inert unless someone has deliberately burnt those fuses. Left as a
-    // documented strap (not a real risk) rather than a bench-verify item.
-    #define PIN_GMC_COUNT_INPUT      3   // J3 pin14 — Geiger tube pulse
+    // v2.2 ch.3 "Boot Configurations" directly — written then about
+    // GMC_COUNT, and it transfers unchanged to whichever signal sits here.
+    // GPIO3 controls ONLY "JTAG signal source" (which physical path a
+    // hardware JTAG debugger would use) — it has no role in the
+    // SPI-boot-vs-download-mode decision (that's GPIO0 + GPIO46, per
+    // Table 3-3) and no effect on this board's console/flashing path, which
+    // runs over a separate USB-UART bridge chip on GPIO43/44, not native
+    // USB-Serial-JTAG (see HAL_HAS_NATIVE_USB=0 above). The datasheet also
+    // states the eFuse bits that make the chip act on this strap at all
+    // (EFUSE_DIS_PAD_JTAG, EFUSE_DIS_USB_JTAG, EFUSE_STRAP_JTAG_SEL)
+    // default to 0/not-burnt on every stock chip, so in practice GPIO3's
+    // boot-time level here is inert unless someone has deliberately burnt
+    // those fuses. Left as a documented strap (not a real risk) rather than
+    // a bench-verify item.
+    #define PIN_HV_CAP_FULL_INPUT    3   // J3 pin14 — comparator interrupt (V2.6.34: GPIO6/J3 pin17; ≤V2.6.33/V1.9: GPIO2/J3 pin13)
+    // GPIO6 is J3 pin17 — the pad that used to feed the now-removed "DIP3"
+    // switch. It has no Heltec-side claim (Table 2.2.2 row 17: generic
+    // ADC1_CH5/TOUCH6 only) and is NOT one of the four strapping pins, so it
+    // carries no boot-strap risk at all: the least encumbered pad the header
+    // offers, which is the right home for the count input.
+    #define PIN_GMC_COUNT_INPUT      6   // J3 pin17 — Geiger tube pulse (V2.6.34: GPIO3/J3 pin14)
 
     // Piezo pins — live as of V2.6.34 on the V1.10 mainboard (see the
     // HAL_HAS_SPEAKER comment above for the full history). GPIO4 (J3 pin15)
@@ -684,8 +715,9 @@
     #define PIN_LORA_VFEM            7
     // FEM_EN = GC1109 FEM enable/CSD. V2.6.34: on the V1.10 mainboard the
     // old double-booking with the HV cap-full comparator is GONE — the
-    // comparator moved to GPIO6 (see PIN_HV_CAP_FULL_INPUT above) and the
-    // mainboard leaves GPIO2 unwired, so FEM_EN finally owns this pin.
+    // comparator moved off this pin (to GPIO3 as built; see
+    // PIN_HV_CAP_FULL_INPUT above) and the mainboard leaves GPIO2 unwired,
+    // so FEM_EN finally owns this pin.
     // Always driven HIGH by lorawan_setup() (the former g_cfg.lorawan_fem_en
     // opt-in was removed with the V1.9 hazard that justified it): per
     // RadioLib discussion #1665 the GC1109 must be enabled for RX, so with
@@ -767,8 +799,10 @@
     //                 claim (Table 2.2.2 row 17: generic ADC1_CH5/TOUCH6
     //                 only) and NOT a strapping pin (unlike GPIO45 above).
     //                 V2.6.34: CLAIMED — the V1.10 rework removed the DIP3
-    //                 switch and this is now PIN_HV_CAP_FULL_INPUT (see
-    //                 that #define's comment). No longer spare.
+    //                 switch and freed the pad. V2.7.1: on the V1.10 board
+    //                 as fabricated it carries PIN_GMC_COUNT_INPUT, not the
+    //                 cap-full comparator (see that #define's comment for
+    //                 the pad swap). Either way: no longer spare.
     //   GPIO15/16     XTAL_32K_P / XTAL_32K_N — external 32kHz RTC crystal
     //                 pins (Table 2.2.3). Not currently used by this board
     //                 (no crystal populated), but not free GPIO either.

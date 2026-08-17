@@ -9,6 +9,54 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.1 — BREAKING (`heltec_wifi_lora32_v4_r2` only): V1.10 mainboard as fabricated swaps the count and cap-full pins
+
+The V1.10 mainboard was still in layout when V2.6.34 shipped. The board as
+actually fabricated swaps module pads `14_` and `17_` against the layout
+that release was written against, so on `heltec_wifi_lora32_v4_r2` the two
+Geiger inputs trade pins:
+
+| Signal | ≤ V2.6.33 (V1.9) | V2.6.34 | **V2.7.1 (V1.10 as built)** |
+|---|---|---|---|
+| `HV_CAP_FULL` | GPIO2 — J3 pin 13 | GPIO6 — J3 pin 17 | **GPIO3 — J3 pin 14** |
+| `GMC_COUNT` | GPIO3 — J3 pin 14 | GPIO3 — J3 pin 14 | **GPIO6 — J3 pin 17** |
+
+The swap came out of the PCB review, not out of a firmware preference: it
+aligns the module's pad order with JP1's pin order, which widened the west
+escape between the piezo-N aggressor and the cap-full input from 1.65 mm
+to 3.72 mm and squared both of the layout's remaining 45° crossings to
+90°. Those are the clearance rules the V1.10 change request exists to
+enforce, so the copper won and the firmware follows.
+
+JP1's pin roles are unchanged (pin 3 `GMZ_COUNT`, pin 4 `HV_CAP_FUL`), so
+no tube or cable wiring changes with this.
+
+**Which firmware belongs on which board, for this target:**
+
+- **V1.9 mainboards: stay on ≤ V2.6.33**, as before.
+- **V1.10 mainboards: require ≥ V2.7.1.**
+- **V2.6.34 matches no physical board on this target at all** — the layout
+  it encoded was never manufactured.
+
+The eight socket-carrier boards are untouched: their V2.6.34 cutover to the
+Rev B V2 / Rev C V2 carriers stands exactly as released, and `heltec_v2`
+remains on its original wiring.
+
+### Version numbering
+
+The jump to V2.7.x is deliberate, and retroactive in spirit: V2.6.34 was
+itself a breaking hardware cutover and should have been V2.7.0. Numbering
+this one V2.6.35 would have buried a second no-runtime-detect pin change in
+a patch-level bump. There is no V2.7.0 release — the number is left unused
+as the marker for where the cutover actually began.
+
+Firmware-side changes are limited to the two `#define`s in `main/hal.h`,
+the pin commentary around them, the two cross-references elsewhere in the
+same board branch that named the old pin owner, and this note. No logic
+changed.
+
+---
+
 ## V2.6.34 — BREAKING: pin maps cut over to the Rev B/C V2 carriers and the V1.10 mainboard; per-board ELF debug symbols
 
 ### Hardware pin cutover (breaking)

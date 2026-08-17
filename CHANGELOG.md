@@ -42,6 +42,11 @@ The eight socket-carrier boards are untouched: their V2.6.34 cutover to the
 Rev B V2 / Rev C V2 carriers stands exactly as released, and `heltec_v2`
 remains on its original wiring.
 
+Firmware-side changes are limited to the two `#define`s in `main/hal.h`,
+the pin commentary around them, the two cross-references elsewhere in the
+same board branch that named the old pin owner, and this note. No logic
+changed.
+
 ### Version numbering
 
 The jump to V2.7.x is deliberate, and retroactive in spirit: V2.6.34 was
@@ -49,11 +54,6 @@ itself a breaking hardware cutover and should have been V2.7.0. Numbering
 this one V2.6.35 would have buried a second no-runtime-detect pin change in
 a patch-level bump. There is no V2.7.0 release — the number is left unused
 as the marker for where the cutover actually began.
-
-Firmware-side changes are limited to the two `#define`s in `main/hal.h`,
-the pin commentary around them, the two cross-references elsewhere in the
-same board branch that named the old pin owner, and this note. No logic
-changed.
 
 ---
 

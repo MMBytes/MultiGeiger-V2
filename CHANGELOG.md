@@ -9,6 +9,47 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.2 — Sub-b1 reject profiler, compiled out by default
+
+No behaviour change in a default build. This release lands the
+instrumentation used to characterise the Rev B/C carrier's narrow-edge
+reject population, with the facility switched off.
+
+The population is now accounted for: a Schmitt buffer on the count node
+took it from 8.34 % of edges to 0 in 4803, with the count rate unchanged
+(0.35 σ). The profiler is kept rather than deleted because the question can
+recur on a different carrier, and because its header comment holds the
+derivation the measurements were read against.
+
+**To use it**, build with `TUBE_REJLOG_ENABLE=1`. `tube.c` then keeps a
+128-entry ring of rejected edges and `do_tx_cycle()` emits one `REJ:` line
+per record:
+
+| Field | Meaning |
+|---|---|
+| `edt` | µs to the previous edge — position on the count-node recovery ramp |
+| `dt` | µs to the last **counted** pulse — `edt != dt` flags a multi-edge burst |
+| `tph` | µs since the last recharge-tick ISR entry, 0..~100 µs — uniform acquits the 10 kHz timer, clustered convicts it |
+| `hvg` | µs since the last HV FET turn-off |
+
+The existing `DIAG` histogram bins every reject below 190 µs into one
+bucket, and that bucket is where this population lives, so the number that
+identifies the mechanism is the one the histogram destroys.
+
+At `0` the ring, the drain, the per-record log lines and the timestamp store
+in the 10 kHz `recharge_tick` ISR all compile out; the record type and the
+accessor prototype stay outside the guard so callers need no conditional
+code.
+
+`tube.h` records the RC derivation: the count node's time constant is
+(R5 + R2‖(R3+R4))·C4 = 190.4 µs, **not** R5·C4, and the switching point sits
+near mid-rail rather than at the datasheet V_IL. Those two corrections
+predict a recross at 148.5 µs against 148.08 µs measured, with no fitted
+parameters. 190.4 µs and `GMC_DEAD_TIME_US = 190` are unrelated quantities
+that happen to collide.
+
+---
+
 ## V2.7.1 — BREAKING (`heltec_wifi_lora32_v4_r2` only): V1.10 mainboard as fabricated swaps the count and cap-full pins
 
 The V1.10 mainboard was still in layout when V2.6.34 shipped. The board as

@@ -26,6 +26,68 @@
 // apart from count-node ringing/noise.
 #define TUBE_DIAG_NBUCKETS 8
 
+// --- V2.7.2: sub-b1 reject profiler (bench diagnostic, compile-time opt-in) ---
+// The b1 bucket (<190µs) of the tube_get_diag histogram carries a persistent
+// ~4 rejected-edge/cycle excess over Poisson on Rev B/C carriers that the
+// existing diagnostics CANNOT speak to: hv_blanked/hv_coincident are tallied
+// inside `case GMC_COUNT:` in gmc_count_isr, and every b1 edge takes
+// `case GMC_REJECT:` instead, so those counters are structurally blind to it.
+// The width comb (tube_pcnt.h) has shown every one of these edges is <250ns
+// wide, which rules out charge deposition (afterpulses) and leaves only a fast
+// electrical disturbance coupling into the count node.
+//
+// Bucketing to "<190µs" throws away the one number that identifies it. The
+// count node recovers with
+//     τ = (R5 + R2‖(R3+R4))·C4 = (1.000 + 0.904)MΩ · 100pF = 190.4µs
+// NOT R5·C4 (= 100µs). C4 returns through the divider tap, so that tap's
+// Thévenin resistance is IN SERIES with R5; omitting it is a 40% error and is
+// the available mistake here. A NEGEDGE pad is therefore BLIND until the ramp
+// recrosses the input's switching point, and then has a noise margin that
+// grows with the ramp. That switching point is near mid-rail — NOT the
+// datasheet V_IL, which is a guaranteed level rather than a switching point
+// and predicts 71µs, missing by 2x. Measured recross 148.08µs against 148.5µs
+// predicted from BOM values with zero fitted parameters.
+//
+// The exact µs gap therefore locates the edge on the recovery ramp, and the
+// population's upper cutoff measures the disturbance amplitude
+// (A = V(t_cutoff) − V_th) without a scope. Note the 190µs bucket edge is NOT
+// that cutoff — it is the dead-time gate; edges past it are silently COUNTED.
+// ⚠ τ ≈ 190.4µs and GMC_DEAD_TIME_US = 190 are UNRELATED quantities that
+// happen to collide: the gate is the Si22G tube's own dead time (see above),
+// the τ is carrier RC. Do not read either as derived from the other.
+//
+// Off by default: the question this was built to answer is closed (the
+// Schmitt buffer took b1 from 8.34% to 0/4803 with the count rate
+// unchanged), so production pays nothing for it. Set to 1 to build the
+// facility back in -- the ring, the drain, and the timestamp store in the
+// 10kHz recharge_tick ISR all come back with it.
+#ifndef TUBE_REJLOG_ENABLE
+#define TUBE_REJLOG_ENABLE 0
+#endif
+
+// Ring depth. Observed population is ~5 rejects/cycle at background; 128 leaves
+// >20x headroom so a burst cannot silently truncate the sample (and if it does,
+// tube_get_rejlog reports the overflow count rather than hiding it).
+#define TUBE_REJLOG_N 128
+
+/** @brief One rejected-edge record (see TUBE_REJLOG_ENABLE). */
+typedef struct {
+    uint32_t ts_us;         /**< Absolute esp_timer µs (low 32 bits) of the edge.
+                                  Needed because tick_phase_us ALONE cannot separate the 10kHz
+                                  recharge_tick from the 1kHz audio-dispatch chain: 1000µs is an exact
+                                  multiple of 100µs and both derive from the same crystal with zero
+                                  relative drift, so a 1kHz aggressor aliases to ONE fixed phase mod
+                                  100µs and mimics a 10kHz one. Folding ts_us at 1000µs splits them —
+                                  10kHz gives ten evenly populated sub-clusters, 1kHz gives one. Also
+                                  lets the population be re-folded post-hoc against periods not
+                                  anticipated here (10ms, the 102.4ms beacon interval). */
+    uint32_t edt_us;        /**< Gap to the PREVIOUS edge (counted or not) — position on the recovery ramp. */
+    uint32_t dt_us;         /**< Gap to the last COUNTED pulse. Differs from edt_us only inside a multi-edge burst. */
+    uint32_t tick_phase_us; /**< Gap since the last recharge_tick ISR entry (0..~100µs). Uniform = the 10kHz
+                                  timer ISR is NOT the aggressor; clustered = it is. UINT32_MAX if unstamped. */
+    uint32_t hv_gap_us;     /**< Gap since the last HV FET turn-off. UINT32_MAX if no HV pulse since boot. */
+} tube_rejlog_rec_t;
+
 // V2.6.9: coincidence window (µs after the START of an HV charge pulse,
 // see tube.c's recharge_tick S_PULSE_H) used to tag a counted edge as
 // HV-correlated rather than a genuine tube pulse. Lower bound clears the
@@ -187,6 +249,22 @@ uint32_t tube_get_blanked_wide_total(void);
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
                    uint32_t *hv_coincident, uint32_t *hv_blanked,
                    uint32_t hist[TUBE_DIAG_NBUCKETS]);
+
+/** @brief Drain the sub-b1 reject profiler ring (snapshot + reset).
+ *
+ *  Snapshots under the same mux_gmc lock as the ISR writer, mirroring
+ *  tube_get_diag()'s discipline so the window tiles cycle-to-cycle.
+ *
+ *  @param out      Out: caller's array, filled with up to @p max records.
+ *  @param max      Capacity of @p out in records.
+ *  @param dropped  Out: records the ring had to discard because it filled
+ *                  before this drain. Non-zero means the sample is truncated
+ *                  and rates computed from it are floors, not measurements.
+ *  @return Number of records written to @p out.
+ *
+ *  Returns 0 with *dropped = 0 when TUBE_REJLOG_ENABLE is 0.
+ */
+uint32_t tube_get_rejlog(tube_rejlog_rec_t *out, uint32_t max, uint32_t *dropped);
 
 /** @brief Callback fired from the GMC pulse ISR when a valid pulse is counted.
  *

@@ -104,6 +104,27 @@ static volatile uint32_t isr_hv_blanked_total = 0;
 static volatile uint64_t isr_last_hv_pulse_us = 0;
 static volatile uint32_t isr_hv_coincident    = 0;
 
+#if TUBE_REJLOG_ENABLE
+// --- V2.7.2: sub-b1 reject profiler state (see tube.h TUBE_REJLOG_ENABLE) ---
+// isr_last_rtick_us is stamped on EVERY recharge_tick entry — including the
+// early-out ones — because the hypothesis under test is that the interrupt
+// ENTRY itself (its supply-current step), not the HV switching it sometimes
+// goes on to do, is what couples into the count node. The stamp is a bare
+// 32-bit store with NO critical section, deliberately: recharge_tick runs at
+// 10kHz and taking a lock there would cost more than the measurement is worth.
+// That is safe because an aligned 32-bit store is atomic on this core, so the
+// reader (gmc_count_isr, a different interrupt source) can never see a torn
+// value — only a stale one, and staleness is bounded by one 100µs period,
+// which shows up as a phase reading beyond 100µs rather than as bad data.
+// Truncated to 32 bits: the reader subtracts in uint32 so the wrap at ~71.6min
+// cancels, exactly like the edt/dt deltas below.
+static volatile uint32_t isr_last_rtick_us = 0;
+
+static tube_rejlog_rec_t isr_rejlog[TUBE_REJLOG_N];
+static volatile uint32_t isr_rejlog_n    = 0;
+static volatile uint32_t isr_rejlog_drop = 0;
+#endif
+
 // Last read timestamp for dt_ms window.
 static int64_t last_read_us = 0;
 
@@ -139,6 +160,11 @@ static gptimer_handle_t recharge_timer = NULL;
 static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
                                     const gptimer_alarm_event_data_t *edata,
                                     void *user_ctx) {
+#if TUBE_REJLOG_ENABLE
+    // Stamp BEFORE the early-out below, so the phase reference is the interrupt
+    // entry (fixed 100µs cadence) rather than the rare cycles that do HV work.
+    isr_last_rtick_us = (uint32_t)esp_timer_get_time();
+#endif
     static uint32_t current = 0;
     static uint32_t next_state = 0;
     static uint32_t next_charge = PERIODS(1000000);  // initial 1 s between recharges
@@ -327,6 +353,28 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
             }
             break;
         case GMC_REJECT:
+#if TUBE_REJLOG_ENABLE
+            // V2.7.2: the b1 phantom population lands HERE and nowhere else, so
+            // this is the only place the per-edge detail can be taken. Already
+            // inside portENTER_CRITICAL_ISR(&mux_gmc), so the ring needs no
+            // lock of its own — tube_get_rejlog() drains under the same mux.
+            // Overflow is counted, never overwritten: a truncated sample that
+            // announces itself beats a silently rotated one.
+            if (isr_rejlog_n < TUBE_REJLOG_N) {
+                tube_rejlog_rec_t *r = &isr_rejlog[isr_rejlog_n];
+                r->ts_us             = (uint32_t)now;
+                r->edt_us            = edt;
+                r->dt_us             = dt;
+                r->tick_phase_us     = (isr_last_rtick_us != 0)
+                                           ? ((uint32_t)now - isr_last_rtick_us)
+                                           : UINT32_MAX;
+                r->hv_gap_us         = (hv_off != 0) ? clamp_u32(now - hv_off)
+                                                     : UINT32_MAX;
+                isr_rejlog_n++;
+            } else {
+                isr_rejlog_drop++;
+            }
+#endif
             break;
     }
     portEXIT_CRITICAL_ISR(&mux_gmc);
@@ -516,6 +564,29 @@ void tube_set_blank_us(uint32_t blank_us) {
     portENTER_CRITICAL(&mux_gmc);
     isr_blank_us = blank_us;
     portEXIT_CRITICAL(&mux_gmc);
+}
+
+uint32_t tube_get_rejlog(tube_rejlog_rec_t *out, uint32_t max, uint32_t *dropped) {
+#if TUBE_REJLOG_ENABLE
+    uint32_t n;
+    portENTER_CRITICAL(&mux_gmc);
+    n = isr_rejlog_n;
+    if (n > max) n = max;
+    for (uint32_t i = 0; i < n; i++) out[i] = isr_rejlog[i];
+    // Anything the caller could not take is folded into `dropped` alongside the
+    // ring's own overflow, so the two ways a record can be lost report as one
+    // number and a short read can never masquerade as a complete window.
+    *dropped        = isr_rejlog_drop + (isr_rejlog_n - n);
+    isr_rejlog_n    = 0;
+    isr_rejlog_drop = 0;
+    portEXIT_CRITICAL(&mux_gmc);
+    return n;
+#else
+    (void)out;
+    (void)max;
+    *dropped = 0;
+    return 0;
+#endif
 }
 
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,

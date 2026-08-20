@@ -864,6 +864,43 @@ static void do_tx_cycle(void) {
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
                  (unsigned long)diag_hist[6], (unsigned long)diag_hist[7]);
 
+#if TUBE_REJLOG_ENABLE
+        // V2.7.2: sub-b1 reject profiler dump. The DIAG histogram above bins
+        // every rejected edge into "<190µs" and that bin is where the Rev B/C
+        // phantom population lives — so the one number that identifies the
+        // mechanism is exactly the one bucketing destroys. One line per record
+        // rather than an accumulated buffer: the population is ~5/cycle, and a
+        // per-record line needs no length arithmetic to be correct.
+        //   edt = µs to the previous edge  -> position on the count-node
+        //         recovery ramp (τ = 190.4µs, and it is NOT R5·C4 — see
+        //         tube.h for why the divider tap adds in series); the
+        //         population's UPPER cutoff gives the disturbance amplitude
+        //         (the 190µs bucket edge is the dead-time gate, not the
+        //         cutoff, and its matching 190 is a coincidence — see tube.h).
+        //   dt  = µs to the last COUNTED pulse (differs from edt only inside a
+        //         multi-edge burst, so edt!=dt flags a burst rather than a
+        //         single phantom).
+        //   tph = µs since the last recharge_tick ISR entry, 0..~100µs. UNIFORM
+        //         acquits the 10kHz timer ISR; CLUSTERED convicts it.
+        //   hvg = µs since the last HV FET turn-off.
+        {
+            static tube_rejlog_rec_t rej[TUBE_REJLOG_N];
+            uint32_t                 rej_drop = 0;
+            uint32_t                 rej_n    = tube_get_rejlog(rej, TUBE_REJLOG_N, &rej_drop);
+            ESP_LOGI(TAG, "REJLOG: n=%lu dropped=%lu",
+                     (unsigned long)rej_n, (unsigned long)rej_drop);
+            for (uint32_t i = 0; i < rej_n; i++) {
+                ESP_LOGI(TAG, "REJ: i=%lu ts=%lu edt=%lu dt=%lu tph=%lu hvg=%lu",
+                         (unsigned long)i,
+                         (unsigned long)rej[i].ts_us,
+                         (unsigned long)rej[i].edt_us,
+                         (unsigned long)rej[i].dt_us,
+                         (unsigned long)rej[i].tick_phase_us,
+                         (unsigned long)rej[i].hv_gap_us);
+            }
+        }
+#endif
+
         // V2.5.16: PCNT width-comb dump (reuses the snapshot taken up top — do
         // NOT re-read, that would advance the delta base and zero this dump).
         // pc[0] is unfiltered

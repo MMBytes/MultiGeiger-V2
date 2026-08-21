@@ -980,6 +980,251 @@ static int test_env_api_format_rejects_bad_id(void) {
 }
 
 // ----------------------------------------------------------------------------
+// env_api_parse
+// ----------------------------------------------------------------------------
+
+#define TYPICAL_JSON                                                     \
+    "{\"id\":\"esp32-1234567\",\"t\":18.42,\"h\":63.10,\"p\":101325.00," \
+    "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"                         \
+    "\"age_ms\":41230,\"ts\":1755500000}"
+
+static int test_env_api_parse_typical(void) {
+    env_api_t e;
+    if (!env_api_parse(TYPICAL_JSON, &e)) return 0;
+    EXPECT_STREQ(e.id, "esp32-1234567");
+    EXPECT_FLOAT_NEAR(e.t, 18.42, 0.001);
+    EXPECT_FLOAT_NEAR(e.h, 63.10, 0.001);
+    EXPECT_FLOAT_NEAR(e.p, 101325.00, 0.001);
+    EXPECT_INT(e.t_ok, 1);
+    EXPECT_INT(e.h_ok, 1);
+    EXPECT_INT(e.p_ok, 1);
+    EXPECT_INT(e.age_ms, 41230);
+    EXPECT_INT(e.ts, 1755500000);
+    return 1;
+}
+
+static int test_env_api_parse_null_clears_flag(void) {
+    // A hostile or buggy peer sends null alongside a true flag. The value is
+    // absent, so the flag must lose -- never the other way round.
+    env_api_t e;
+    if (!env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":null,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    EXPECT_INT(e.h_ok, 0);
+    EXPECT_FLOAT_NEAR(e.h, 0.0, 0.0001);
+    EXPECT_INT(e.t_ok, 1);
+    return 1;
+}
+
+static int test_env_api_parse_false_flag_zeroes_value(void) {
+    // The mirror image: a real number alongside a false flag. Same rule.
+    env_api_t e;
+    if (!env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":false,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    EXPECT_INT(e.h_ok, 0);
+    EXPECT_FLOAT_NEAR(e.h, 0.0, 0.0001);
+    return 1;
+}
+
+static int test_env_api_parse_missing_key_fails(void) {
+    env_api_t e;
+    // "p" absent entirely -- must be detectably missing, never a misread
+    // neighbour (design section 3.5).
+    if (env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    // "age_ms" absent
+    if (env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,\"ts\":0}",
+            &e)) return 0;
+    return 1;
+}
+
+static int test_env_api_parse_truncated_fails(void) {
+    env_api_t e;
+    char      trunc[sizeof(TYPICAL_JSON)];
+    // Every truncation point must be rejected, not partially accepted.
+    for (size_t cut = 1; cut < strlen(TYPICAL_JSON); cut++) {
+        memcpy(trunc, TYPICAL_JSON, cut);
+        trunc[cut] = 0;
+        if (env_api_parse(trunc, &e)) return 0;
+    }
+    return 1;
+}
+
+static int test_env_api_parse_garbage_fails(void) {
+    env_api_t e;
+    if (env_api_parse("", &e)) return 0;
+    if (env_api_parse("not json at all", &e)) return 0;
+    if (env_api_parse("<html><body>404</body></html>", &e)) return 0;
+    if (env_api_parse("{}", &e)) return 0;
+    return 1;
+}
+
+// The whole reason the parser is keyed by name: key order is not a contract,
+// and "t" must not be confused with its neighbours "t_ok" or "ts".
+static int test_env_api_parse_reordered_keys(void) {
+    env_api_t e;
+    if (!env_api_parse(
+            "{\"ts\":1755500000,\"t_ok\":true,\"age_ms\":41230,\"t\":18.42,"
+            "\"p_ok\":true,\"h\":63.10,\"h_ok\":true,\"p\":101325.00,"
+            "\"id\":\"esp32-1234567\"}",
+            &e)) return 0;
+    EXPECT_FLOAT_NEAR(e.t, 18.42, 0.001);
+    EXPECT_INT(e.ts, 1755500000);
+    EXPECT_INT(e.age_ms, 41230);
+    EXPECT_STREQ(e.id, "esp32-1234567");
+    return 1;
+}
+
+// Adding fields to the endpoint later must not break an older consumer
+// (design section 3.5). "ts" is documented optional; unknown keys are ignored.
+static int test_env_api_parse_tolerates_extra_and_missing_ts(void) {
+    env_api_t e;
+    if (!env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"lux\":123.4,\"cpm\":17}",
+            &e)) return 0;
+    EXPECT_INT(e.ts, 0);   // absent ts defaults, does not fail
+    EXPECT_FLOAT_NEAR(e.t, 18.42, 0.001);
+    return 1;
+}
+
+static int test_env_api_parse_never_sampled_sentinel(void) {
+    env_api_t e;
+    if (!env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":null,\"h\":null,\"p\":null,"
+            "\"t_ok\":false,\"h_ok\":false,\"p_ok\":false,"
+            "\"age_ms\":4294967295,\"ts\":0}",
+            &e)) return 0;
+    EXPECT_INT(e.age_ms == ENV_API_AGE_NEVER, 1);
+    EXPECT_INT(e.t_ok, 0);
+    EXPECT_INT(e.h_ok, 0);
+    EXPECT_INT(e.p_ok, 0);
+    return 1;
+}
+
+static int test_env_api_parse_rejects_oversize_id(void) {
+    env_api_t e;
+    // 40 chars -- longer than ENV_API_ID_MAX. Reject rather than silently
+    // truncate: a truncated identity is a different node.
+    if (env_api_parse(
+            "{\"id\":\"esp32-0000000000000000000000000000000000\","
+            "\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    return 1;
+}
+
+static int test_env_api_parse_rejects_over_width_cap_number(void) {
+    env_api_t e;
+    // env_api_sane() is the SAME predicate on both sides: it rejects NaN/inf
+    // and anything wider than the buffer derivation allows. 99999.0 is legal
+    // here -- the cap is |v| < 1.0e6, and pressure in Pa lives at ~101325, so
+    // a tight "plausible" bound would reject real readings. Judging whether a
+    // number is believable belongs to the consumer (vent_logic, Phase 3).
+    if (env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":2000000.0,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    // ... and the far side of the same boundary must still be accepted.
+    if (!env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,\"p\":108500.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":100,\"ts\":0}",
+            &e)) return 0;
+    return 1;
+}
+
+static int test_env_api_parse_rejects_negative_age(void) {
+    env_api_t e;
+    // strtoul would happily wrap "-1" to 4294967295 -- the never-sampled
+    // sentinel. Reject the sign explicitly.
+    if (env_api_parse(
+            "{\"id\":\"esp32-1\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+            "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+            "\"age_ms\":-1,\"ts\":0}",
+            &e)) return 0;
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// env_api round-trip -- the reason format and parse share a file
+// ----------------------------------------------------------------------------
+
+static int env_api_same(const env_api_t *a, const env_api_t *b) {
+    if (strcmp(a->id, b->id) != 0) return 0;
+    if (a->t_ok != b->t_ok) return 0;
+    if (a->h_ok != b->h_ok) return 0;
+    if (a->p_ok != b->p_ok) return 0;
+    if (a->age_ms != b->age_ms) return 0;
+    if (a->ts != b->ts) return 0;
+    // 2-dp on the wire, so a float survives to within half a centi-unit.
+    if (fabs((double)a->t - (double)b->t) > 0.005) return 0;
+    if (fabs((double)a->h - (double)b->h) > 0.005) return 0;
+    if (fabs((double)a->p - (double)b->p) > 0.005) return 0;
+    return 1;
+}
+
+static int test_env_api_roundtrip_typical(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t in = sample_typical(), out;
+    if (env_api_format(buf, sizeof(buf), &in) < 0) return 0;
+    if (!env_api_parse(buf, &out)) return 0;
+    EXPECT_INT(env_api_same(&in, &out), 1);
+    return 1;
+}
+
+static int test_env_api_roundtrip_mixed_validity(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t in = sample_typical(), out;
+    in.h_ok      = false;
+    in.h         = 0.0f;   // formatter zeroes it via null; match that
+    in.p_ok      = false;
+    in.p         = 0.0f;
+    if (env_api_format(buf, sizeof(buf), &in) < 0) return 0;
+    if (!env_api_parse(buf, &out)) return 0;
+    EXPECT_INT(env_api_same(&in, &out), 1);
+    return 1;
+}
+
+static int test_env_api_roundtrip_never_sampled(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t in, out;
+    memset(&in, 0, sizeof(in));
+    strcpy(in.id, "esp32-1");
+    in.age_ms = ENV_API_AGE_NEVER;
+    if (env_api_format(buf, sizeof(buf), &in) < 0) return 0;
+    if (!env_api_parse(buf, &out)) return 0;
+    EXPECT_INT(env_api_same(&in, &out), 1);
+    return 1;
+}
+
+// A NaN reading must survive the round trip as "no reading", not as a NaN.
+static int test_env_api_roundtrip_nan_becomes_invalid(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t in = sample_typical(), out;
+    in.t         = NAN;
+    if (env_api_format(buf, sizeof(buf), &in) < 0) return 0;
+    if (!env_api_parse(buf, &out)) return 0;
+    EXPECT_INT(out.t_ok, 0);
+    EXPECT_FLOAT_NEAR(out.t, 0.0, 0.0001);
+    EXPECT_INT(out.h_ok, 1);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
 
@@ -1102,6 +1347,26 @@ int main(void) {
     RUN(test_env_api_format_rejects_small_buffer);
     RUN(test_env_api_format_worst_case_fits);
     RUN(test_env_api_format_rejects_bad_id);
+
+    printf("== env_api_parse ==\n");
+    RUN(test_env_api_parse_typical);
+    RUN(test_env_api_parse_null_clears_flag);
+    RUN(test_env_api_parse_false_flag_zeroes_value);
+    RUN(test_env_api_parse_missing_key_fails);
+    RUN(test_env_api_parse_truncated_fails);
+    RUN(test_env_api_parse_garbage_fails);
+    RUN(test_env_api_parse_reordered_keys);
+    RUN(test_env_api_parse_tolerates_extra_and_missing_ts);
+    RUN(test_env_api_parse_never_sampled_sentinel);
+    RUN(test_env_api_parse_rejects_oversize_id);
+    RUN(test_env_api_parse_rejects_over_width_cap_number);
+    RUN(test_env_api_parse_rejects_negative_age);
+
+    printf("== env_api round-trip ==\n");
+    RUN(test_env_api_roundtrip_typical);
+    RUN(test_env_api_roundtrip_mixed_validity);
+    RUN(test_env_api_roundtrip_never_sampled);
+    RUN(test_env_api_roundtrip_nan_becomes_invalid);
 
     printf("\n");
     if (g_failures == 0) {

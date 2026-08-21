@@ -206,3 +206,187 @@ static inline int env_api_format(char *out, size_t outsz, const env_api_t *in) {
     if (n < 0 || (size_t)n >= outsz) return -1;
     return n;
 }
+
+// --- Parser ------------------------------------------------------------------
+//
+// Deliberately NOT a JSON parser — a reader for THIS payload, keyed by name.
+// That is sound only because of three properties env_api_format() and
+// env_api_id_ok() enforce: (1) every key name is unique and none is a suffix
+// that could hide inside a longer quoted key, because matching includes the
+// leading `"` and trailing `":`; (2) the one string value (id) can contain
+// neither `"` nor `\`, so a key pattern can never occur inside a value; and
+// (3) the payload is flat — no nested objects for a key to hide in. Change
+// any of those and this parser must become a real one.
+
+/** @brief Locate the value position of @p key, or NULL if the key is absent. */
+static inline const char *env_api_find(const char *json, const char *key) {
+    char pat[16];
+    int  n = snprintf(pat, sizeof(pat), "\"%s\":", key);
+    if (n < 0 || (size_t)n >= sizeof(pat)) return NULL;
+    const char *hit = strstr(json, pat);
+    return hit ? hit + n : NULL;
+}
+
+/** @brief Skip JSON insignificant whitespace. */
+static inline const char *env_api_skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    return p;
+}
+
+/** @brief Read @p key as a float, honouring `null`.
+ *
+ *  `null` is a SUCCESSFUL read of an absent value: *ok=false, *v=0. A number
+ *  that fails env_api_sane() — the same predicate the formatter applies — is
+ *  a wire fault, not an absent value, and fails the parse: our own formatter
+ *  can never emit one, so its presence means this is not our peer's payload.
+ */
+static inline bool env_api_get_num(const char *json, const char *key,
+                                   float *v, bool *ok) {
+    const char *p = env_api_find(json, key);
+    if (!p) return false;
+    p = env_api_skip_ws(p);
+    if (strncmp(p, "null", 4) == 0) {
+        *v  = 0.0f;
+        *ok = false;
+        return true;
+    }
+    char *end = NULL;
+    float f   = strtof(p, &end);
+    if (end == p) return false;           // no digits at all
+    if (!env_api_sane(f)) return false;   // NaN/inf/over-cap: wire fault
+    *v  = f;
+    *ok = true;
+    return true;
+}
+
+/** @brief Read @p key as `true` / `false`. */
+static inline bool env_api_get_bool(const char *json, const char *key,
+                                    bool *v) {
+    const char *p = env_api_find(json, key);
+    if (!p) return false;
+    p = env_api_skip_ws(p);
+    if (strncmp(p, "true", 4) == 0) {
+        *v = true;
+        return true;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *v = false;
+        return true;
+    }
+    return false;
+}
+
+/** @brief Read @p key as an unsigned 32-bit integer.
+ *
+ *  The leading-digit check is load-bearing: strtoul-family functions accept a
+ *  leading `-` and wrap it, so "-1" would otherwise arrive as 4294967295 —
+ *  which is ENV_API_AGE_NEVER, silently converting a corrupt field into "this
+ *  node never sampled". strtoull (not strtoul) so the > UINT32_MAX range check
+ *  is not always-false on a platform where unsigned long is 32-bit.
+ */
+static inline bool env_api_get_u32(const char *json, const char *key,
+                                   uint32_t *v) {
+    const char *p = env_api_find(json, key);
+    if (!p) return false;
+    p = env_api_skip_ws(p);
+    if (*p < '0' || *p > '9') return false;   // rejects '-' before it can wrap
+    char              *end = NULL;
+    unsigned long long u   = strtoull(p, &end, 10);
+    if (end == p || u > 0xFFFFFFFFull) return false;
+    *v = (uint32_t)u;
+    return true;
+}
+
+/** @brief Read @p key as a signed 64-bit integer. */
+static inline bool env_api_get_i64(const char *json, const char *key,
+                                   int64_t *v) {
+    const char *p = env_api_find(json, key);
+    if (!p) return false;
+    p             = env_api_skip_ws(p);
+    char     *end = NULL;
+    long long ll  = strtoll(p, &end, 10);
+    if (end == p) return false;
+    *v = (int64_t)ll;
+    return true;
+}
+
+/** @brief Read @p key as a quoted string into @p out (capacity @p cap).
+ *
+ *  Rejects — does not truncate — a value longer than cap-1: a truncated
+ *  identity would be a DIFFERENT node's name, the silent-wrongness failure
+ *  again. Also rejects an empty string, matching env_api_id_ok().
+ */
+static inline bool env_api_get_str(const char *json, const char *key,
+                                   char *out, size_t cap) {
+    const char *p = env_api_find(json, key);
+    if (!p) return false;
+    p = env_api_skip_ws(p);
+    if (*p != '"') return false;
+    p++;
+    size_t o = 0;
+    while (*p && *p != '"') {
+        if (o + 1 >= cap) return false;   // longer than fits: reject
+        out[o++] = *p++;
+    }
+    if (*p != '"') return false;   // ran off the end: unterminated
+    out[o] = 0;
+    return o > 0;   // empty id is not a node identity
+}
+
+/** @brief Parse an `/api/env` payload into @p out.
+ *
+ *  All keys except `ts` are required — a payload missing one is malformed,
+ *  not partially valid (design §3.5's "detectably missing" rule). `ts` is
+ *  optional and defaults to 0 so a field added late never strands an old
+ *  producer. Unknown keys are ignored for the same reason, mirrored.
+ *
+ *  The envelope check — first non-space byte `{`, last non-space byte `}` —
+ *  is what makes TRUNCATION detectable: every prefix of a valid payload
+ *  loses the closing brace, so a cut anywhere fails here rather than
+ *  succeeding on whichever keys happened to survive.
+ *
+ *  Flag/value pairs are normalised on the way in with "stricter wins": the
+ *  value survives only if the number was real AND the flag said true. A peer
+ *  (or attacker) cannot hand us a reading our own formatter could not have
+ *  produced.
+ *
+ *  @return true and fills @p out on success; false otherwise, in which case
+ *          @p out is untouched.
+ */
+static inline bool env_api_parse(const char *json, env_api_t *out) {
+    if (!json || !out) return false;
+
+    const char *s = env_api_skip_ws(json);
+    if (*s != '{') return false;
+    const char *last = s + strlen(s);
+    while (last > s && (last[-1] == ' ' || last[-1] == '\t' ||
+                        last[-1] == '\r' || last[-1] == '\n')) last--;
+    if (last == s || last[-1] != '}') return false;
+
+    env_api_t e;
+    memset(&e, 0, sizeof(e));
+
+    if (!env_api_get_str(s, "id", e.id, sizeof(e.id))) return false;
+    if (!env_api_get_num(s, "t", &e.t, &e.t_ok)) return false;
+    if (!env_api_get_num(s, "h", &e.h, &e.h_ok)) return false;
+    if (!env_api_get_num(s, "p", &e.p, &e.p_ok)) return false;
+
+    bool t_flag, h_flag, p_flag;
+    if (!env_api_get_bool(s, "t_ok", &t_flag)) return false;
+    if (!env_api_get_bool(s, "h_ok", &h_flag)) return false;
+    if (!env_api_get_bool(s, "p_ok", &p_flag)) return false;
+    if (!env_api_get_u32(s, "age_ms", &e.age_ms)) return false;
+
+    if (!env_api_get_i64(s, "ts", &e.ts)) e.ts = 0;   // optional, default 0
+
+    // Stricter wins: value AND flag must both vouch for the reading.
+    e.t_ok = e.t_ok && t_flag;
+    if (!e.t_ok) e.t = 0.0f;
+    e.h_ok = e.h_ok && h_flag;
+    if (!e.h_ok) e.h = 0.0f;
+    e.p_ok = e.p_ok && p_flag;
+    if (!e.p_ok) e.p = 0.0f;
+
+    *out = e;
+    return true;
+}

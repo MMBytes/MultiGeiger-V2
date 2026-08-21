@@ -51,6 +51,7 @@
 #include "sysinfo.h"           // V2.4.26: reset_reason_str / chip_model_str (also used by mqtt.c)
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
+#include "env_api.h"           // V2.7.3: /api/env wire contract (format + parse)
 #include "lorawan.h"           // V2.6.23 (T8): lorawan_get_status()/_state_name()/_region_name()
                                // for /status; no-op stubs on the ten non-V4-R2 boards (see
                                // lorawan.h) so this include is unconditional like gnss.h/sgp41.h.
@@ -3215,6 +3216,84 @@ static esp_err_t log_get(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// --- /api/env ----------------------------------------------------------------
+
+// V2.7.3: machine-readable environment snapshot for peer nodes. The roof-vent
+// controller compares this node's cavity air against another node's outside
+// air, and needs a payload whose failure mode is an error rather than a
+// plausible float -- `/` is hand-rendered HTML, and a scraper that loses its
+// place returns a number, not a fault (design section 3.1).
+//
+// Unauthenticated, matching status_get and log_get. This is a strict subset of
+// what `/` already serves publicly, so it adds no exposure; everything that
+// changes state stays authenticated.
+static esp_err_t api_env_get(httpd_req_t *req) {
+    log_access(req, "GET /api/env");
+
+    main_status_t st;
+    main_status_snapshot(&st);
+
+    env_api_t e;
+    memset(&e, 0, sizeof(e));
+    safe_strcpy(e.id, s_chip_id, sizeof(e.id));
+    e.t  = st.env_t;
+    e.h  = st.env_h;
+    // Pascals, straight through, NO conversion. This is a machine interface,
+    // and every other machine interface here publishes Pa -- mqtt.c:505
+    // ("env_p":101325.0) and lw_build_port2. Only the HTML status page divides
+    // by 100 (format_environment above), because hPa is a human display
+    // convention. Converting here would put a unit change on the one boundary
+    // that has no reason to have one, which is where a silent "p":null bug
+    // lives.
+    e.p  = st.env_p;
+    e.ts = st.last_cycle_at;   // 0 only until the FIRST cycle completes.
+                               // main.c stamps this with time(NULL)
+                               // unconditionally, so a node that cycled
+                               // before NTP sync publishes a 1970-era
+                               // epoch, not 0. Humans and logs only.
+
+    if (st.last_cycle_ms == 0) {
+        // Never sampled since boot. main_status_t is zero-initialised, so
+        // env_t/h/p are a valid-looking 0.0 that a consumer checking only age
+        // would read as a fresh, perfect sample -- both silent and maximally
+        // wrong. Emit the sentinel and clear every flag (design section 3.2).
+        e.t_ok = e.h_ok = e.p_ok = false;
+        e.age_ms                 = ENV_API_AGE_NEVER;
+    } else {
+        e.t_ok          = st.have_env_t;
+        e.h_ok          = st.have_env_h;
+        e.p_ok          = st.have_env_p;
+        // Monotonic difference, not a wall-clock one: correct across NTP steps
+        // and before the clock is set at all. Both terms come from esp_timer,
+        // the same base last_cycle_ms is stamped in, so unsigned wrap at
+        // 49.7 days subtracts correctly.
+        // Two sentinel edges exist and both are harmless, because the spec
+        // requires a consumer to check *_ok AND age, never age alone: a cycle
+        // landing exactly on the u32-ms wrap stamps last_cycle_ms = 0 and reads
+        // as never-sampled for one cycle (inherited from main.c's "0 = never"
+        // convention, same exposure as the uptime row above), and a node
+        // serving HTTP but not cycling for exactly 49.7 days could compute an
+        // age numerically equal to the sentinel. Both are ~1-in-2^32 events.
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000LL);
+        e.age_ms        = now_ms - st.last_cycle_ms;
+    }
+
+    // 192 bytes on the httpd task's 8 KB stack -- no need for the BSS scratch
+    // buffer status_get uses for its 1.6 KB of HTML.
+    char buf[ENV_API_BUF_MIN];
+    int  n = env_api_format(buf, sizeof(buf), &e);
+    if (n < 0) {
+        // Only reachable with a malformed chip id, which is hardware-derived.
+        // Fail loudly rather than serving half a payload.
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "env payload format failed");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, buf, n);
+}
+
 // --- Server bring-up ---------------------------------------------------------
 
 void http_server_start(config_t *cfg, const char *chip_id) {
@@ -3232,7 +3311,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers = 12;            // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase (+/lorawan_reset on HAL_HAS_LORAWAN boards — 11 of 12 used there, 10 elsewhere)
+    hc.max_uri_handlers  = 13;                 // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards — 12 of 13 used there, 11 elsewhere)
     hc.lru_purge_enable = true;
     // CRITICAL — DO NOT change esp_http_server's threading model without
     // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
@@ -3286,6 +3365,11 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     static const httpd_uri_t uri_log_get = {
         .uri = "/log", .method = HTTP_GET, .handler = log_get,
     };
+    static const httpd_uri_t uri_api_env = {
+        .uri     = "/api/env",
+        .method  = HTTP_GET,
+        .handler = api_env_get,
+    };
     static const httpd_uri_t uri_coredump_get = {
         .uri = "/coredump.elf", .method = HTTP_GET, .handler = coredump_get,
     };
@@ -3306,13 +3390,14 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_update_post);
     httpd_register_uri_handler(s_server, &uri_reboot_post);
     httpd_register_uri_handler(s_server, &uri_log_get);
+    httpd_register_uri_handler(s_server, &uri_api_env);
     httpd_register_uri_handler(s_server, &uri_coredump_get);
     httpd_register_uri_handler(s_server, &uri_coredump_erase);
-    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /coredump.elf /coredump_erase"
+    ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /api/env /coredump.elf /coredump_erase"
 #if HAL_HAS_LORAWAN
-             " /lorawan_reset"
+                  " /lorawan_reset"
 #endif
-             ")");
+                  ")");
 }
 
 httpd_handle_t http_server_get_handle(void) {

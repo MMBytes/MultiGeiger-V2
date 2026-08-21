@@ -10,7 +10,8 @@
  *    - `POST /reboot`  — flag restart without saving (basic auth)
  *    - `GET  /update`  — OTA upload form with XHR progress (basic auth)
  *    - `POST /update`  — raw firmware.bin body → esp_ota_write, flag restart (basic auth)
- *    - `GET  /log`     — rolling log buffer snapshot (basic auth)
+ *    - `GET  /log`     — rolling log buffer snapshot (no auth — since V2.3.33)
+ *    - `GET  /api/env` — environment JSON for peer nodes (no auth)
  *
  *  Basic-auth password is the AP password from config; username is "admin".
  */

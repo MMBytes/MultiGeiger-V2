@@ -12,6 +12,10 @@
  *    - `POST /update`  — raw firmware.bin body → esp_ota_write, flag restart (basic auth)
  *    - `GET  /log`     — rolling log buffer snapshot (no auth — since V2.3.33)
  *    - `GET  /api/env` — environment JSON for peer nodes (no auth)
+ *    - `GET  /favicon.ico`    — inline icon (no auth)
+ *    - `GET  /coredump.elf`   — stored crash dump, if any (basic auth)
+ *    - `POST /coredump_erase` — clear the stored crash dump (basic auth)
+ *    - `POST /lorawan_reset`  — wipe LoRaWAN session/nonces (basic auth; LoRaWAN boards only)
  *
  *  Basic-auth password is the AP password from config; username is "admin".
  */

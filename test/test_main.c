@@ -12,10 +12,10 @@
 // main/lorawan_codec.h and (V2.7.3+) main/env_api.h. Anything that depends
 // on IDF / FreeRTOS / hardware (NVS, HTTP handlers, sensor drivers,
 // transmission orchestrator) is out of scope — would need on-target Unity
-// or QEMU. Note the boundary this draws for env_api.h: it will cover the wire
-// format on both sides once the parser lands, but NEVER the handler that fills
-// the struct from main_status_t, so a unit mix-up there is bench-caught, not
-// test-caught. At this point only the formatter exists and is covered.
+// or QEMU. Note the boundary this draws for env_api.h: it covers the wire
+// format on both sides (format, parse, round-trip), but NEVER the handler
+// that fills the struct from main_status_t, so a unit mix-up there is
+// bench-caught, not test-caught.
 //
 // Convention: each test_xxx() returns 1 on pass, 0 on fail. The runner
 // prints PASS/FAIL with the test name and tallies the failures. Non-
@@ -818,12 +818,14 @@ static env_api_t sample_typical(void) {
 static int test_env_api_format_typical(void) {
     char      buf[ENV_API_BUF_MIN];
     env_api_t e = sample_typical();
-    int       n = env_api_format(buf, sizeof(buf), &e);
+    EXPECT_FORMAT_OK(buf, e);
     EXPECT_STREQ(buf,
                  "{\"id\":\"esp32-1234567\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
                  "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
                  "\"age_ms\":41230,\"ts\":1755500000}");
-    EXPECT_INT(n, (int)strlen(buf));
+    // The formatter is pure, so a second call is free: assert its return
+    // value is the rendered length (the contract the handler relies on).
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), (int)strlen(buf));
     return 1;
 }
 

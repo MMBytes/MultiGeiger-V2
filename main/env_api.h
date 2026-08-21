@@ -4,18 +4,13 @@
  *  @brief Wire contract for `GET /api/env` — the peer-environment JSON API.
  *
  *  One module owns BOTH directions of this payload. env_api_format() renders
- *  it; env_api_parse() will read it back (added next, alongside the round-trip
- *  tests), and from build phase 3 `env_peer.c` will consume it. They are
- *  co-located deliberately: this endpoint exists because scraping the
- *  hand-rendered `/` page fails SILENTLY with a plausible float (design §3.1),
- *  and a producer and a consumer that drift apart in separate files
- *  reintroduce exactly that failure mode. Keeping both here will let
+ *  it (the `GET /api/env` handler in `http_server.c` is its firmware caller);
+ *  env_api_parse() reads it back, and from build phase 3 `env_peer.c` will
+ *  consume it. They are co-located deliberately: this endpoint exists because
+ *  scraping the hand-rendered `/` page fails SILENTLY with a plausible float
+ *  (design §3.1), and a producer and a consumer that drift apart in separate
+ *  files reintroduce exactly that failure mode. Keeping both here lets
  *  `test/test_main.c` assert parse(format(x)) == x.
- *
- *  V2.7.3 lands this in slices: the contract and the formatter first, then the
- *  parser, then the `GET /api/env` handler in `http_server.c`. Until that last
- *  slice nothing calls env_api_format() from firmware — the host tests are its
- *  only caller.
  *
  *  Header-only and pure — no ESP-IDF, no FreeRTOS, no clock, no allocation —
  *  so the host test runner under `test/` includes it directly with no
@@ -210,13 +205,16 @@ static inline int env_api_format(char *out, size_t outsz, const env_api_t *in) {
 // --- Parser ------------------------------------------------------------------
 //
 // Deliberately NOT a JSON parser — a reader for THIS payload, keyed by name.
-// That is sound only because of three properties env_api_format() and
+// That is sound only because of four properties env_api_format() and
 // env_api_id_ok() enforce: (1) every key name is unique and none is a suffix
 // that could hide inside a longer quoted key, because matching includes the
 // leading `"` and trailing `":`; (2) the one string value (id) can contain
-// neither `"` nor `\`, so a key pattern can never occur inside a value; and
-// (3) the payload is flat — no nested objects for a key to hide in. Change
-// any of those and this parser must become a real one.
+// neither `"` nor `\`, so a key pattern can never occur inside a value;
+// (3) the payload is flat — no nested objects for a key to hide in; and
+// (4) no whitespace sits between a key's closing quote and its colon —
+// legal JSON like `"t" : 1.5` would NOT match, but env_api_format() never
+// emits that form. Change any of those and this parser must become a real
+// one.
 
 /** @brief Locate the value position of @p key, or NULL if the key is absent. */
 static inline const char *env_api_find(const char *json, const char *key) {
@@ -343,7 +341,10 @@ static inline bool env_api_get_str(const char *json, const char *key,
  *  The envelope check — first non-space byte `{`, last non-space byte `}` —
  *  is what makes TRUNCATION detectable: every prefix of a valid payload
  *  loses the closing brace, so a cut anywhere fails here rather than
- *  succeeding on whichever keys happened to survive.
+ *  succeeding on whichever keys happened to survive. (It pins only those two
+ *  bytes: a hand-crafted input can satisfy keys from text after the first
+ *  `}`. That admits some non-JSON, but no value the per-key checks would
+ *  have rejected between the braces.)
  *
  *  Flag/value pairs are normalised on the way in with "stricter wins": the
  *  value survives only if the number was real AND the flag said true. A peer

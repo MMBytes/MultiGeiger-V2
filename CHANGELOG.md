@@ -9,6 +9,62 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.3 — `/api/env`, a machine-readable environment endpoint
+
+New on every board: `GET /api/env` returns this node's temperature, humidity
+and pressure as JSON, so another node can consume them as a control input.
+No new config, no behaviour change elsewhere, and the endpoint is inert until
+something asks for it.
+
+```json
+{"id":"esp32-1234567","t":21.19,"h":63.55,"p":101325.79,
+ "t_ok":true,"h_ok":true,"p_ok":true,
+ "age_ms":917,"ts":1787293045}
+```
+
+Units are °C, %RH and **Pascals** — the raw sensor units, the same ones the
+MQTT `env_p` field and the LoRaWAN port-2 payload already carry. Only the HTML
+status page converts to hPa, because that page is for people.
+
+Unauthenticated, matching `/` and `/log`: it is a strict subset of what the
+status page already serves publicly, and everything that changes state stays
+behind basic auth.
+
+The design is shaped entirely around one failure mode. The status page is
+hand-rendered HTML, so a consumer that scraped it and lost its place would
+return a plausible float rather than an error — silent wrongness, which is the
+one intolerable outcome for a value something else acts on. Three properties
+follow from that:
+
+| Property | Why |
+|---|---|
+| `age_ms` is a **monotonic** difference, not a wall-clock one | Correct across NTP steps and before the clock is ever set |
+| A never-sampled node reports `age_ms` as `4294967295` with every `*_ok` false | A freshly booted node's zero-initialised readings would otherwise look like a zero-age, perfectly valid sample |
+| An invalid or non-finite reading is `null`, never `0.0` | A consumer that forgets the `*_ok` flag gets a parse error instead of a believable zero |
+
+Both directions of the format live in one new header, `main/env_api.h` —
+`env_api_format()` and `env_api_parse()` side by side — so a producer and a
+consumer cannot drift apart. It is pure and header-only, following
+`tube_logic.h` and `lorawan_codec.h`, which means the host test suite asserts
+`parse(format(x)) == x` directly, along with truncated, malformed, reordered
+and missing-key payloads. 26 new host tests.
+
+`max_uri_handlers` rises 12 → 13.
+
+Also in this release, groundwork with no firmware behaviour change:
+
+- `safe_strcpy()` no longer calls `strncpy` — GCC 16 flags the
+  `strncpy(dst, src, n-1)` idiom as `-Wstringop-truncation` under `-Werror`.
+  The replacement is byte-for-byte equivalent including strncpy's tail
+  zero-fill, and a new host test pins that property.
+- `.gitattributes` now pins `*.cmd` to CRLF; `_test.cmd` was rewritten after
+  checking out with LF endings, which cmd.exe misparses when invoked from
+  PowerShell.
+- The `/log` line in `http_server.h`'s endpoint list wrongly claimed basic
+  auth — false since V2.3.33 — and now says so. The list also silently
+  omitted four routes (`/favicon.ico`, `/coredump.elf`, `/coredump_erase`,
+  `/lorawan_reset`); it is complete now.
+
 ## V2.7.2 — Sub-b1 reject profiler, compiled out by default
 
 No behaviour change in a default build. This release lands the

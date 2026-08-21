@@ -3251,6 +3251,12 @@ static esp_err_t api_env_get(httpd_req_t *req) {
                                // unconditionally, so a node that cycled
                                // before NTP sync publishes a 1970-era
                                // epoch, not 0. Humans and logs only.
+                               // Stamped separately from last_cycle_ms in
+                               // main.c, so a snapshot can land between the
+                               // two stamps and mix adjacent cycles (worst
+                               // case: a nonzero ts beside the never-sampled
+                               // sentinel, once, at the first cycle). ts is
+                               // display-only, so nothing decides on it.
 
     if (st.last_cycle_ms == 0) {
         // Never sampled since boot. main_status_t is zero-initialised, so

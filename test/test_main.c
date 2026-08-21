@@ -88,6 +88,31 @@ static int test_safe_strcpy_dstsz_1(void) {
     return 1;
 }
 
+// V2.7.3: the implementation stopped using strncpy (GCC 16 raises
+// -Wstringop-truncation on it). strncpy zero-PADS the whole remainder of the
+// destination, and callers such as main.c's wifi_config_t copies hand the
+// buffer straight to an IDF driver, so that padding is behaviour, not an
+// accident. Pin it rather than trusting the rewrite to have preserved it.
+static int test_safe_strcpy_zero_fills_tail(void) {
+    char dst[16];
+    memset(dst, 'Z', sizeof(dst));   // poison every byte
+    safe_strcpy(dst, "abc", sizeof(dst));
+    EXPECT_STREQ(dst, "abc");
+    for (size_t i = 3; i < sizeof(dst); i++) {
+        if (dst[i] != 0) {
+            printf("    dst[%u] = 0x%02X, expected 0x00\n",
+                   (unsigned)i, (unsigned char)dst[i]);
+            return 0;
+        }
+    }
+    // Exact-fit truncation: 15 chars + the forced NUL, no byte left poisoned.
+    memset(dst, 'Z', sizeof(dst));
+    safe_strcpy(dst, "0123456789abcdefghij", sizeof(dst));
+    EXPECT_STREQ(dst, "0123456789abcde");
+    EXPECT_INT(dst[15], 0);
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // ct_memcmp
 // ----------------------------------------------------------------------------
@@ -752,6 +777,7 @@ int main(void) {
     RUN(test_safe_strcpy_empty_src);
     RUN(test_safe_strcpy_zero_dstsz);
     RUN(test_safe_strcpy_dstsz_1);
+    RUN(test_safe_strcpy_zero_fills_tail);
 
     printf("== ct_memcmp ==\n");
     RUN(test_ct_memcmp_equal);

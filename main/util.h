@@ -27,11 +27,25 @@
  *
  *  V2.4.1 (C1): consolidated from the inline pattern; not using BSD's
  *  strlcpy directly because ESP-IDF's newlib doesn't ship it.
+ *
+ *  V2.7.3: dropped the strncpy call. GCC 16 raises -Wstringop-truncation on
+ *  `strncpy(dst, src, dstsz - 1)` even though the very next line terminated
+ *  the buffer, which under the host tests' -Werror is a hard failure waiting
+ *  for CI's toolchain to catch up to the local one. The scan-then-copy below
+ *  is byte-for-byte equivalent, including the tail zero-fill strncpy gave:
+ *  dst[n .. dstsz-1] all end up zero, so a caller that relies on the unused
+ *  remainder being blank (a struct handed to an IDF driver, a buffer about to
+ *  be persisted) sees no change. Not strnlen(): it is POSIX-2008, glibc hides
+ *  it behind __USE_XOPEN2K8, and the host tests compile with -std=c11 rather
+ *  than gnu11, so it would not be declared. Not memchr() either — that is
+ *  permitted to read all dstsz bytes, past the end of a short src.
  */
 static inline void safe_strcpy(char *dst, const char *src, size_t dstsz) {
     if (dstsz == 0) return;
-    strncpy(dst, src, dstsz - 1);
-    dst[dstsz - 1] = 0;
+    size_t n = 0;
+    while (n < dstsz - 1 && src[n] != '\0') n++;   // reads no further than the NUL
+    memcpy(dst, src, n);
+    memset(dst + n, 0, dstsz - n);
 }
 
 /** @brief Constant-time byte compare for credential material.

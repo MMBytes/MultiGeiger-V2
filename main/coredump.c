@@ -5,6 +5,7 @@
 #include "esp_core_dump.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "util.h"   // V2.7.3: safe_strcpy
 
 static const char *TAG = "coredump";
 
@@ -63,11 +64,11 @@ void coredump_init(void) {
     }
     err = esp_core_dump_get_summary(summary);
     if (err == ESP_OK) {
-        // strncpy is fine here — IDF guarantees exc_task is
-        // NUL-terminated within its 16 bytes, and we sized
-        // s_task_name to match.
-        strncpy(s_task_name, summary->exc_task, sizeof(s_task_name) - 1);
-        s_task_name[sizeof(s_task_name) - 1] = '\0';
+        // V2.7.3: was a raw `strncpy(..., n - 1)` + manual terminator. Same
+        // copy, but through the shared helper — that idiom is what GCC 16
+        // flags as -Wstringop-truncation, and leaving one hand-rolled copy
+        // behind just waits for the next toolchain bump to find it.
+        safe_strcpy(s_task_name, summary->exc_task, sizeof(s_task_name));
         s_exc_pc = summary->exc_pc;
         s_have_summary = true;
         ESP_LOGW(TAG, "panicked in task '%s' at PC=0x%08x",

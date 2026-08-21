@@ -1,0 +1,15 @@
+# Line endings for Windows batch files.
+#
+# A .cmd file MUST reach the working tree with CRLF. cmd.exe reads an
+# LF-terminated REM line as a command to execute rather than as a comment, so
+# an LF checkout turns every comment in the script into a failed command - and
+# a comment that happens to contain a redirect silently creates a junk file in
+# the repo root instead.
+#
+# core.autocrlf cannot be relied on for this. It is a per-clone setting, and
+# with it enabled the index holds LF either way, so any tool that rewrites a
+# .cmd file with LF leaves the working tree wrong while `git status` still
+# reports the file clean. That is how _test.cmd - the only tracked .cmd in this
+# repo, the rest being local-only helpers - carried LF endings until V2.7.3.
+# An eol= rule is per-repository and settles it for every clone.
+*.cmd text eol=crlf

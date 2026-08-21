@@ -1,4 +1,4 @@
-// Host-side unit tests for the pure helpers in main/util.h.
+// Host-side unit tests for the pure, header-only helpers under main/.
 //
 // Run on a regular host C compiler (gcc on Linux/CI, MSYS2/MinGW or
 // WSL on Windows) — no ESP-IDF, no FreeRTOS, no hardware needed.
@@ -8,16 +8,21 @@
 // ./test/run` (Linux/macOS). CI runs it in `.github/workflows/build.yml`
 // via the `host-test` job.
 //
-// Scope (V2.4.1+ T1 first foothold): the 5 pure functions that live
-// in main/util.h. Anything that depends on IDF / FreeRTOS / hardware
-// (NVS, HTTP handlers, sensor drivers, transmission orchestrator) is
-// out of scope for this first round — would need on-target Unity or
-// QEMU.
+// Scope: the pure, header-only modules — main/util.h, main/tube_logic.h,
+// main/lorawan_codec.h and (V2.7.3+) main/env_api.h. Anything that depends
+// on IDF / FreeRTOS / hardware (NVS, HTTP handlers, sensor drivers,
+// transmission orchestrator) is out of scope — would need on-target Unity
+// or QEMU. Note the boundary this draws for env_api.h: it will cover the wire
+// format on both sides once the parser lands, but NEVER the handler that fills
+// the struct from main_status_t, so a unit mix-up there is bench-caught, not
+// test-caught. At this point only the formatter exists and is covered.
 //
 // Convention: each test_xxx() returns 1 on pass, 0 on fail. The runner
 // prints PASS/FAIL with the test name and tallies the failures. Non-
 // zero exit code if any test failed (so CI marks the job red).
 
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +30,7 @@
 #include "util.h"
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
+#include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 
 static int g_failures = 0;
 
@@ -42,6 +48,39 @@ static int g_failures = 0;
         long _e = (long)(expected);                                          \
         if (_a != _e) {                                                      \
             printf("    expected %ld, got %ld\n", _e, _a);                   \
+            return 0;                                                        \
+        }                                                                    \
+    } while (0)
+
+// V2.7.3: float compare for the env_api wire values. Absolute tolerance, not
+// relative — the payload carries 2-dp fixed-point, so the error budget is a
+// constant half-centi-unit regardless of magnitude.
+#define EXPECT_FLOAT_NEAR(actual, expected, tol)             \
+    do {                                                     \
+        double _a = (double)(actual);                        \
+        double _e = (double)(expected);                      \
+        double _d = _a - _e;                                 \
+        if (_d < 0) _d = -_d;                                \
+        if (_d > (double)(tol)) {                            \
+            printf("    expected %.4f +/- %.4f, got %.4f\n", \
+                   _e, (double)(tol), _a);                   \
+            return 0;                                        \
+        }                                                    \
+    } while (0)
+
+// V2.7.3: format into `buf` and fail the calling test if the formatter
+// rejected the input. The cases below probe the rendered payload with
+// strstr(), and env_api_format()'s reject paths return before writing a single
+// byte — so a regression that made one of these inputs invalid would leave the
+// test reading an uninitialised stack buffer. That surfaces in CI as a
+// valgrind uninitialised-read (the host-test job runs
+// --errors-for-leak-kinds=all) plus a garbage-dependent strstr result, exactly
+// when a clean named FAIL is most useful. Check the return instead.
+#define EXPECT_FORMAT_OK(buf, e)                                             \
+    do {                                                                     \
+        int _n = env_api_format((buf), sizeof(buf), &(e));                   \
+        if (_n < 0) {                                                        \
+            printf("    env_api_format rejected the input (returned -1)\n"); \
             return 0;                                                        \
         }                                                                    \
     } while (0)
@@ -757,6 +796,190 @@ static int test_lw_build_port2(void) {
 }
 
 // ----------------------------------------------------------------------------
+// env_api_format
+// ----------------------------------------------------------------------------
+
+// A fully valid sample, reused by several cases below.
+static env_api_t sample_typical(void) {
+    env_api_t e;
+    memset(&e, 0, sizeof(e));
+    strcpy(e.id, "esp32-1234567");
+    e.t      = 18.42f;
+    e.t_ok   = true;
+    e.h      = 63.1f;
+    e.h_ok   = true;
+    e.p      = 101325.0f;
+    e.p_ok   = true;   // Pa, as main_status_t holds it
+    e.age_ms = 41230u;
+    e.ts     = 1755500000LL;
+    return e;
+}
+
+static int test_env_api_format_typical(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    int       n = env_api_format(buf, sizeof(buf), &e);
+    EXPECT_STREQ(buf,
+                 "{\"id\":\"esp32-1234567\",\"t\":18.42,\"h\":63.10,\"p\":101325.00,"
+                 "\"t_ok\":true,\"h_ok\":true,\"p_ok\":true,"
+                 "\"age_ms\":41230,\"ts\":1755500000}");
+    EXPECT_INT(n, (int)strlen(buf));
+    return 1;
+}
+
+static int test_env_api_format_invalid_field_is_null(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    e.h_ok      = false;   // no humidity sensor fitted
+    EXPECT_FORMAT_OK(buf, e);
+    // null, not 0.0: a consumer that forgets h_ok gets a parse error, not a
+    // plausible reading. Design section 3.1's whole argument.
+    if (strstr(buf, "\"h\":null,") == NULL) return 0;
+    if (strstr(buf, "\"h_ok\":false") == NULL) return 0;
+    if (strstr(buf, "\"t\":18.42,") == NULL) return 0;   // neighbours intact
+    return 1;
+}
+
+static int test_env_api_format_nan_is_null_and_clears_flag(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    e.t         = NAN;   // flag still says true -- the formatter must not believe it
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "nan") != NULL) return 0;   // never valid JSON
+    if (strstr(buf, "\"t\":null,") == NULL) return 0;
+    if (strstr(buf, "\"t_ok\":false") == NULL) return 0;
+    return 1;
+}
+
+static int test_env_api_format_inf_is_null(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    e.p         = INFINITY;
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "inf") != NULL) return 0;
+    if (strstr(buf, "\"p\":null,") == NULL) return 0;
+    if (strstr(buf, "\"p_ok\":false") == NULL) return 0;
+    return 1;
+}
+
+// The magnitude cap is a WIDTH guard, not a plausibility guard -- it exists so
+// ENV_API_BUF_MIN's arithmetic holds, and deciding whether a reading is
+// believable is the consumer's job, not the wire format's.
+static int test_env_api_format_over_width_cap_is_null(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    e.t         = 2.0e6f;   // finite, but wider than the derivation allows
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "\"t\":null,") == NULL) return 0;
+    if (strstr(buf, "\"t_ok\":false") == NULL) return 0;
+    return 1;
+}
+
+// Pressure is carried in PASCALS, unconverted, exactly as main_status_t holds
+// it (env_sensor.h:70) and exactly as mqtt.c:505 and lw_build_port2 publish it.
+// Only the HTML status page converts to hPa (http_server.c:691), because that
+// is a human interface. Pinning this here is what stops someone "helpfully"
+// adding a /100 to match the status page and silently changing the contract.
+static int test_env_api_format_pressure_is_pascals(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    e.p         = 101325.0f;   // standard sea level
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "\"p\":101325.00,") == NULL) return 0;
+    if (strstr(buf, "\"p_ok\":true") == NULL) return 0;
+    // The realistic atmospheric extremes must both survive the width cap.
+    e.p = 87000.0f;
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "\"p\":87000.00,") == NULL) return 0;
+    e.p = 108500.0f;
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "\"p\":108500.00,") == NULL) return 0;
+    return 1;
+}
+
+static int test_env_api_format_never_sampled_sentinel(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e;
+    memset(&e, 0, sizeof(e));
+    strcpy(e.id, "esp32-1");
+    e.age_ms = ENV_API_AGE_NEVER;   // all *_ok false, all values zero
+    EXPECT_FORMAT_OK(buf, e);
+    if (strstr(buf, "\"age_ms\":4294967295") == NULL) return 0;
+    if (strstr(buf, "\"t\":null,") == NULL) return 0;
+    if (strstr(buf, "\"h\":null,") == NULL) return 0;
+    if (strstr(buf, "\"p\":null,") == NULL) return 0;
+    return 1;
+}
+
+static int test_env_api_format_rejects_small_buffer(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+    EXPECT_INT(env_api_format(buf, ENV_API_BUF_MIN - 1, &e), -1);
+    EXPECT_INT(env_api_format(NULL, sizeof(buf), &e), -1);
+    EXPECT_INT(env_api_format(buf, sizeof(buf), NULL), -1);
+    return 1;
+}
+
+// The buffer floor is a derivation, not a guess. Prove it with the widest
+// payload the type system permits.
+static int test_env_api_format_worst_case_fits(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e;
+    memset(&e, 0, sizeof(e));
+    memset(e.id, 'X', ENV_API_ID_MAX - 1);   // longest id the field can hold
+    // Widest float the magnitude cap admits. NOT -999999.99f: in this binade a
+    // float's ULP is 0.0625, so that literal snaps UP to exactly -1000000.0f,
+    // which env_api_sane() rejects (the bound is strict) -- every field would
+    // come out "null" and the case would measure 144, not the ceiling.
+    // -999999.9375 is 15999999/16, exactly representable, and prints as
+    // "-999999.94" -- the 10 characters the derivation assumes.
+    e.t      = -999999.9375f;
+    e.t_ok   = true;
+    e.h      = -999999.9375f;
+    e.h_ok   = true;
+    e.p      = -999999.9375f;
+    e.p_ok   = true;
+    e.age_ms = 0xFFFFFFFFu;   // widest u32: 10 digits
+    e.ts     = INT64_MIN;     // widest i64: 20 chars
+    int n    = env_api_format(buf, sizeof(buf), &e);
+    if (n < 0) return 0;
+    EXPECT_INT(n, 159);
+    if ((size_t)n + 1 > ENV_API_BUF_MIN) return 0;
+    return 1;
+}
+
+static int test_env_api_format_rejects_bad_id(void) {
+    char      buf[ENV_API_BUF_MIN];
+    env_api_t e = sample_typical();
+
+    strcpy(e.id, "bad\"id");   // a quote would break the JSON string
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+
+    strcpy(e.id, "bad\\id");   // so would a backslash
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+
+    strcpy(e.id, "bad\nid");   // a raw control character is not legal in JSON
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+
+    // Non-ASCII. Written as an explicit byte rather than a UTF-8 literal so the
+    // case does not depend on this file's encoding. This is also the one place
+    // `char` signedness could matter: on the host char is signed, so 0xC3 reads
+    // as negative and trips the `< 0x20` bound, while on Xtensa char is
+    // unsigned and it trips `> 0x7E`. Rejected either way -- pin that, because
+    // a rewrite using an int without a cast could reject only on one of them.
+    strcpy(e.id, "bad?id");
+    e.id[3] = (char)0xC3;
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+
+    e.id[0] = 0;   // empty id is not a node identity
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+
+    memset(e.id, 'X', ENV_API_ID_MAX);   // unterminated
+    EXPECT_INT(env_api_format(buf, sizeof(buf), &e), -1);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
 
@@ -867,6 +1090,18 @@ int main(void) {
     RUN(test_lw_pack_version);
     RUN(test_lw_build_port1);
     RUN(test_lw_build_port2);
+
+    printf("== env_api_format ==\n");
+    RUN(test_env_api_format_typical);
+    RUN(test_env_api_format_invalid_field_is_null);
+    RUN(test_env_api_format_nan_is_null_and_clears_flag);
+    RUN(test_env_api_format_inf_is_null);
+    RUN(test_env_api_format_over_width_cap_is_null);
+    RUN(test_env_api_format_pressure_is_pascals);
+    RUN(test_env_api_format_never_sampled_sentinel);
+    RUN(test_env_api_format_rejects_small_buffer);
+    RUN(test_env_api_format_worst_case_fits);
+    RUN(test_env_api_format_rejects_bad_id);
 
     printf("\n");
     if (g_failures == 0) {

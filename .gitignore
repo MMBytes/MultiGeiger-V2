@@ -55,7 +55,3 @@ release_stage_*/
 # anchored so it never touches build_*/ outputs (already ignored) or anything
 # intentional in a subdir.
 /*.bin
-
-# Local Claude Code planning/review scratch (plans, specs, MAX-review output).
-# Working notes for this dev repo, not intended for the public GitHub repo.
-docs/superpowers/

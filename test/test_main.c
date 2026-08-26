@@ -31,6 +31,7 @@
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
+#include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
 
 static int g_failures = 0;
 
@@ -1227,6 +1228,128 @@ static int test_env_api_roundtrip_nan_becomes_invalid(void) {
 }
 
 // ----------------------------------------------------------------------------
+// speaker_logic  (V2.7.4 tick defer)
+// ----------------------------------------------------------------------------
+
+static int test_tick_defer_zero_periods_fires_next_poll(void) {
+    // periods == 0 must reproduce the pre-V2.7.4 shipped behaviour exactly:
+    // the tick fires on the very next audio period after the request.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);
+    return 1;
+}
+
+static int test_tick_defer_one_period_holds_then_fires(void) {
+    // periods == 1 (the shipped setting) holds for exactly one poll, then fires
+    // on the second -- so the tick lands 1-2 ms after the count, not 0-1 ms.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 1);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);
+    return 1;
+}
+
+static int test_tick_defer_does_not_refire_without_request(void) {
+    // The seed-in-poll regression. The bench prototype used "left == 0" as its
+    // needs-seeding test INSIDE the poll, so the poll that zeroed the counter
+    // re-seeded it and the tick NEVER fired -- a failure invisible downstream,
+    // because a silent tick and a working defer produce the SAME phantom count.
+    // (test_..._one_period_holds_then_fires also fails against that design; the
+    // UNIQUE value here is the three trailing quiet polls, which additionally
+    // pin the opposite failure -- a fire that does not clear pending and so
+    // auto-refires every period. No other test covers that.)
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 1);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);   // fires once
+    EXPECT_INT(tick_defer_poll(&s), 0);   // and then stays quiet
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    return 1;
+}
+
+static int test_tick_defer_idle_state_never_fires(void) {
+    // A poll with no request outstanding must be a no-op, not a fire.
+    tick_defer_state_t s = {0};
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    return 1;
+}
+
+static int test_tick_defer_n_periods_fires_on_n_plus_one(void) {
+    // General case: N periods held, fires on poll N+1. Guards an off-by-one if
+    // TICK_DEFER_PERIODS is ever raised.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 3);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);
+    return 1;
+}
+
+static int test_tick_defer_request_restarts_countdown(void) {
+    // Each request RESTARTS the countdown -- deliberate, because the invariant
+    // being protected is "no tick within the recovery window of the most recent
+    // count", not "of the first count". Consequence, derived in speaker_logic.h:
+    // closely spaced counts MERGE to one tick at the burst's first quiet audio
+    // period. Nothing is dropped -- pending persists until it fires. Harmless at
+    // ambient rates (~1.5 counts/s -> 99.85% fire at once); see the rate table.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 1);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    tick_defer_request(&s, 1);            // second count arrives mid-defer
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);
+    // ONE tick for the burst, not one per count -- pin the "not a queue" half.
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    return 1;
+}
+
+static int test_tick_defer_reusable_after_clear(void) {
+    // tick_defer_clear() must leave the block USABLE, not just quiet: the melody
+    // path clears mid-playback and real ticks must work again afterwards. Pins
+    // the "a stale counter would delay the NEXT tick" claim in the clear doc.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 1);
+    tick_defer_clear(&s);
+    tick_defer_request(&s, 1);            // the first count after the melody
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 1);   // normal timing, no stale carry-over
+    return 1;
+}
+
+static int test_tick_defer_sustained_requests_starve_the_tick(void) {
+    // Pins the worst case explicitly so it is a known property rather than a
+    // surprise: a request before EVERY poll means the tick never fires. Needs
+    // deterministic sub-period spacing, which Poisson arrivals never sustain.
+    tick_defer_state_t s = {0};
+    for (int i = 0; i < 20; i++) {
+        tick_defer_request(&s, 1);
+        EXPECT_INT(tick_defer_poll(&s), 0);
+    }
+    // One quiet period is all it takes to recover.
+    EXPECT_INT(tick_defer_poll(&s), 1);
+    return 1;
+}
+
+static int test_tick_defer_clear_cancels_pending(void) {
+    // speaker_set_modes() and the melody end-of-sequence path both drop any
+    // queued tick. The defer countdown must go with it, or a stale counter
+    // survives into the next request.
+    tick_defer_state_t s = {0};
+    tick_defer_request(&s, 1);
+    tick_defer_clear(&s);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(tick_defer_poll(&s), 0);
+    EXPECT_INT(s.defer_left, 0);
+    EXPECT_INT(s.pending, 0);
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
 
@@ -1369,6 +1492,17 @@ int main(void) {
     RUN(test_env_api_roundtrip_mixed_validity);
     RUN(test_env_api_roundtrip_never_sampled);
     RUN(test_env_api_roundtrip_nan_becomes_invalid);
+
+    printf("== speaker_logic (tick defer) ==\n");
+    RUN(test_tick_defer_zero_periods_fires_next_poll);
+    RUN(test_tick_defer_one_period_holds_then_fires);
+    RUN(test_tick_defer_does_not_refire_without_request);
+    RUN(test_tick_defer_idle_state_never_fires);
+    RUN(test_tick_defer_n_periods_fires_on_n_plus_one);
+    RUN(test_tick_defer_request_restarts_countdown);
+    RUN(test_tick_defer_sustained_requests_starve_the_tick);
+    RUN(test_tick_defer_clear_cancels_pending);
+    RUN(test_tick_defer_reusable_after_clear);
 
     printf("\n");
     if (g_failures == 0) {

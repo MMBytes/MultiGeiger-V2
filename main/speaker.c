@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 
 #include "tube.h"
+#include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4)
 #if HAL_HAS_NEOPIXEL
 #include "neopixel.h"   // neopixel_notify_pulse — led_tick flash, preferred over the plain LED
 #endif
@@ -45,11 +46,24 @@ static const char *TAG = "speaker";
 #define TICK_LEN_MS     4
 #define AUDIO_TICK_US   1000             // 1 ms audio timer period
 
+// V2.7.4: hold each pulse tick this many audio periods before starting it, so
+// the piezo's switching transient lands clear of the count node's recovery
+// instead of inside it. 1 period = the tick starts 1000-2000 us after the
+// count rather than 0-1000 us — past the 190 us dead-time gate by more than
+// 5x, and inaudible as a delay. See speaker_logic.h for the mechanism and the
+// rate table. Deliberately a constant and not a config field — there is no
+// setting in which a user wants the tick to perturb the count node.
+#define TICK_DEFER_PERIODS 1
+
 static volatile bool s_speaker_tick = false;
 static volatile bool s_led_tick     = false;
 
-// Shared between GM ISR and audio timer callback. ISR writes, timer reads.
-static volatile uint32_t s_pending_ticks = 0;
+// Shared between GM ISR and audio timer callback. ISR requests, timer polls.
+// V2.7.4: replaces the bare s_pending_ticks flag with the flag PLUS its defer
+// countdown, so both are written in one place and cleared together. The
+// volatile qualifiers live on the struct MEMBERS (see speaker_logic.h), so this
+// instance needs none here and no call site needs a cast.
+static tick_defer_state_t s_tick = { 0, 0 };
 static uint32_t s_tick_remaining_ms = 0;   // audio-timer private
 
 // Melody playback state (V2.3.21+). Single writer (speaker_play_melody from
@@ -63,10 +77,14 @@ static uint32_t s_melody_step_remaining_ms = 0;
 
 static esp_timer_handle_t s_audio_timer = NULL;
 
-// Called from tube.c GM ISR. Keep it trivial — just latch a pending tick.
+// Called from tube.c GM ISR (only for edges that already passed the dead-time
+// gate, the guard and HV blanking — see the `if (counted)` site in tube.c).
+// Keep it trivial: seed the defer countdown and latch the request. Seeding
+// HERE rather than in audio_timer_cb is the design, not a detail — see the
+// @file block in speaker_logic.h.
 static void IRAM_ATTR on_gm_pulse(void) {
     if (s_speaker_tick || s_led_tick) {
-        s_pending_ticks = 1;
+        tick_defer_request(&s_tick, TICK_DEFER_PERIODS);
     }
 }
 
@@ -130,7 +148,10 @@ static void audio_timer_cb(void *arg) {
                 gpio_set_level(PIN_SPEAKER_N, 0);
                 s_melody_seq = NULL;
                 s_melody_idx = 0;
-                s_pending_ticks = 0;   // discard any tick queued during melody
+                // Discard any tick queued during the melody — countdown too,
+                // or a stale counter survives and delays the first real tick
+                // after playback ends.
+                tick_defer_clear(&s_tick);
                 return;
             }
             melody_apply_step(step);
@@ -148,8 +169,12 @@ static void audio_timer_cb(void *arg) {
         }
         return;
     }
-    if (s_pending_ticks) {
-        s_pending_ticks = 0;
+    // V2.7.4: one poll per audio period. Fires on the (TICK_DEFER_PERIODS+1)th
+    // poll after the last request. Note the s_tick_remaining_ms branch above
+    // returns early, so the countdown is frozen for the 4 ms a tick is sounding
+    // — a tick requested during another tick is delayed further, consistent
+    // with pending being a flag rather than a queue.
+    if (tick_defer_poll(&s_tick)) {
         tick_start();
         s_tick_remaining_ms = TICK_LEN_MS;
     }
@@ -196,7 +221,7 @@ void speaker_set_modes(bool led_tick, bool speaker_tick) {
     s_led_tick     = led_tick;
     s_speaker_tick = speaker_tick;
     if (!led_tick && !speaker_tick) {
-        s_pending_ticks = 0;
+        tick_defer_clear(&s_tick);
         s_tick_remaining_ms = 0;
         tick_end();
     }

@@ -9,6 +9,130 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.4 — the pulse tick stops manufacturing its own phantom counts
+
+**In short:**
+
+1. **Piezo/LED tick delayed by 1 ms** so it no longer disturbs the count input. Cuts phantom edges ~3×. Tick sounds the same; published counts unaffected.
+2. **PCNT width-comb telemetry now logged on every tube-enabled node**, not only when a filter is switched on. New `PCNT:` line for log parsers.
+3. **PCNT width filter now applies on Save** — no restart. The filter *width* still needs one.
+4. **/config wording corrected** for the three count-path settings, with guidance on how to tell whether you need them. **No defaults changed.**
+
+The detail, for anyone who wants it:
+
+Every counted pulse schedules a piezo tick, and the 1 kHz audio timer dispatched
+it 0–1000 µs later. For roughly a fifth of counts (190/1000) that put the tick's
+switching transient inside the count node's own RC recovery, where the input sits
+marginally below its switching point and a small disturbance is enough to
+manufacture a spurious edge. Self-inflicted: each count scheduled its own
+interference.
+
+Holding the tick one whole audio period moves its start to 1000–2000 µs — clear
+of the 190 µs dead-time gate by more than 5×, and about five time constants into
+a 190.4 µs recovery, where the margin is no longer marginal.
+
+Measured on the bench board over a **7.1 h** treated arm against an 8.5 h
+control: the affected edge population fell from **0.844 % to 0.253 %** of raw
+edges. Every hourly bin of the treated arm sits below every hourly bin of the
+control — 8 treated bins against 9 control bins, no overlap — so it does not rest on the
+two arms being drift-matched, which matters because this node's baseline is
+known to wander by up to 2.8× on its own.
+
+The count rate read **92.2 against 90.7 CPM**, a 1.7 % difference against the
+**1.4 %** this run could resolve, so it is *not* dismissible as counting noise.
+It is also not the fix. The two arms ran at different times of day; the treated
+arm falls by a comparable ~2 % from morning to afternoon within itself; and the
+change can only affect edges the 190 µs dead-time gate already rejects, which
+bounds its possible effect on the published count at ~0.014 % — a hundred times
+smaller than the difference observed. The residual is the ordinary diurnal
+background cycle, aliased into a sequential comparison.
+
+**No published measurement was ever wrong because of this.** On the default count
+path the rejection holds *by construction*: the disturbance can only happen while
+the input is recovering — 50–190 µs after a counted pulse on the boards
+characterised so far — and that window sits entirely inside the 190 µs dead-time
+gate the path already applies, and no configuration alters that path's gate.
+
+On a node running the PCNT width filter instead, the protection is the configured
+tooth rather than the gate, and *that* is empirical — the width filter is not a
+second layer but a replacement, and the recovery-ramp phantom's width has been
+measured sliding with temperature on one carrier. The soak settles it by
+measurement rather than by argument: the escape-accounting identity held exactly
+in **every cycle of both arms**, meaning no rejected edge was ever wide enough to
+reach the width-filtered count, and no sub-microsecond edge was ever counted. See
+`config_fields.def` for the width-versus-temperature caveat in full.
+
+This is margin, not a correctness fix. The tick stays audible; after the one
+held period, 99.85 % of ticks fire at the first opportunity at ambient rates, for
+a mean added delay of 1.5 µs beyond the hold.
+
+The decision logic lives in a new pure header, `main/speaker_logic.h`, following
+`tube_logic.h` and `env_api.h`, with 9 host tests. One of them exists because a
+prototype seeded its countdown inside the poll rather than at request time, so
+the poll that counted down to zero re-seeded it and the tick never fired at all —
+a bug invisible downstream, since a silent tick and a working defer produce the
+same phantom count.
+
+### The PCNT width comb now runs on every tube-enabled node
+
+The comb — four hardware counters tapping the count pin in parallel with the ISR,
+each with a different glitch-filter width — used to come up only if you enabled
+the PCNT width filter or HV blanking. That made the only source of pulse-*width*
+telemetry reachable solely by switching on a mitigation it exists to justify: a
+node on clean defaults could not see its own phantom widths, so the diagnostic
+that answers *"do I need the width filter?"* sat behind the width filter.
+
+It is now gated on the tube alone. **This changes no published number.** The
+count substitution is still strictly `pcnt_filter`-gated, as are the rolling
+averages and the HV-blank subtraction. With the filters off, the only new output
+is telemetry.
+
+⚠️ **Log-parser note:** the per-cycle `PCNT:` line now appears on every
+tube-enabled node, plus a `comb up` line at boot and a `comb stopped` line on the
+OTA teardown path. Same class of change as V2.6.31, which first made that line
+appear in blanking-only mode.
+
+Cost was measured rather than assumed — a field board, fresh boot in both arms,
+same binary: internal free heap 162227 B with the comb up against 162191 B with
+it down. That is a 36-byte delta in the *wrong* direction, i.e. comfortably below
+the ~520-byte cycle-to-cycle noise, and the largest free block was byte-identical
+at 77824 B, so the comb does not fragment the contiguous-allocation pool that the
+OTA teardown and the heap guard both care about.
+
+**The PCNT width filter is now live-applied** — tick it and it takes effect on
+Save, no restart. Its reboot-required marker is gone from /config, and so is the
+V2.6.31 asymmetry where the same tick applied live on an HV-blanking node but
+needed a restart elsewhere. The filter *width* still requires a restart, because
+the glitch filter is latched when the counters are created. One corner case
+remains: if the comb is down — after a failed OTA, or a boot-time counter
+allocation failure — there is nothing to elect, so the tick is inert until the
+next restart.
+
+### /config now tells you how to decide, not just what the setting does
+
+The three count-path settings carried explanations that had drifted from what is
+now measured. All three defaults are unchanged and remain off.
+
+| Setting | What the page now says |
+|---|---|
+| PCNT width filter | It **replaces** the always-on 190 µs dead-time gate on the published count rather than adding to it — the gate rejects an edge for arriving too soon, the filter for being too narrow. Watch `removed` on the `FILTER:` line to see whether it is removing anything the gate had not. |
+| Dead-time guard | It **cannot reach anything under 190 µs**: its window floor is 200 µs, and edges inside the gate are already rejected before the guard sees them. If you are chasing the 50–190 µs band, this is not the control. |
+| HV blanking | Scoped to the carrier revisions that actually have the coupling defect. **Check `hv_coincident` against `hv_pulses` before enabling** — once blanking is on, blanked edges skip the coincidence tally and that counter falls to the same chance-level floor a clean board reads, so an affected node becomes indistinguishable from a clean one. |
+
+That last one is a trap worth stating plainly: enabling the treatment destroys
+the diagnostic that would have justified it. Diagnose first.
+
+Two corrections while in there. The archive-step argument for keeping HV blanking
+opt-in was overstated — a compile-time default only applies when the NVS key is
+missing, and every saved config writes all of them, so changing a default cannot
+step an existing node's archive. The reasons that do hold are that it is a no-op
+on boards without the defect and that the firmware cannot detect the carrier
+revision. And the phantom share should be quoted as a fraction of raw edges,
+which reproduces across measurement windows; the blanked-to-pulses ratio does
+not, having read anywhere from 0.78 to 0.9998 on one node.
+
+---
+
 ## V2.7.3 — `/api/env`, a machine-readable environment endpoint
 
 New on every board: `GET /api/env` returns this node's temperature, humidity

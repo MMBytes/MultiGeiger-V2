@@ -52,7 +52,7 @@
 #include "transmission.h"
 #include "tube.h"
 #include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
-#include "tube_pcnt.h"   // V2.5.16: optional PCNT pulse-width comb diagnostic
+#include "tube_pcnt.h"   // V2.5.16: PCNT pulse-width comb (V2.7.4: always on)
 #include "util.h"
 #include "version.h"
 
@@ -1591,7 +1591,38 @@ void app_main(void) {
     // pcnt_filter-gated) — but the PCNT w_ns log line keeps flowing, which is
     // the phantom-width-vs-temperature telemetry the 2026-08-01 field analysis
     // ran on.
-    if (g_cfg.tube_enabled && (g_cfg.pcnt_filter || g_cfg.hv_blank)) {
+    //
+    // V2.7.4: brought up whenever the TUBE is on, with no config gate at all.
+    // The old (pcnt_filter || hv_blank) condition made the comb — the only
+    // source of pulse-WIDTH telemetry — reachable solely by enabling one of the
+    // two mitigations it exists to justify. An operator on clean defaults could
+    // not see their own phantom widths, so the diagnostic that answers "do I
+    // need the width filter?" was gated behind the width filter. Same shape as
+    // the hv_coincident self-blinding trap (config_fields.def hv_blank).
+    //
+    // Safe because the count path cannot see it: `filtering` is
+    // `pcnt_filter && pcnt_on`, so with pcnt_filter off the comb's existence
+    // changes no published number — likewise history.c's rolling averages and
+    // the blanked_wide subtraction, which ride the same flag. The comb is
+    // passive parallel hardware ON THE PAD: tube_pcnt.c calls no gpio_*
+    // function, and IDF's pcnt_new_channel only does gpio_func_sel (already
+    // GPIO), gpio_input_enable (already enabled) and an ADDITIVE GPIO-matrix
+    // fan-out — no gpio_config, no pull change, no reconfiguration of the pad's
+    // own interrupt. "Passive" is about the PIN, not the peripheral: accum_count
+    // makes IDF install a shared PCNT overflow ISR (tube_pcnt.c), firing roughly
+    // once per unit per 32767 edges — ~6 h apart at field rates.
+    //
+    // MEASURED COST (field FeatherS3-D, fresh boot both arms, same binary):
+    // INTERNAL free 162 227 B comb-up vs 162 191 B comb-down — 36 B in the
+    // WRONG direction, i.e. below the ~520 B cycle-to-cycle noise — and
+    // `largest` byte-identical at 77 824 B, so it does not fragment the
+    // contiguous-alloc pool the OTA teardown and tx_heap_guard both care about.
+    // One board class; the heap-tight 4 MB Heltec is covered by survival
+    // evidence (it has run the comb at 130 kB internal free), not by a delta.
+    // tube_pcnt_init() self-disables cleanly on any failure and leaves the ISR
+    // count path untouched, so a board that genuinely cannot afford the 4 units
+    // degrades to no comb rather than to bad counts.
+    if (g_cfg.tube_enabled) {
         tube_pcnt_init(g_cfg.pcnt_filter_width_ns);
     }
 

@@ -1696,8 +1696,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "close-spaced the gate already caught them and this changes nothing. "
                      "Check <code>removed</code> on the <code>FILTER:</code> line to tell which "
                      "you have &mdash; a steady 0 means it removed nothing the gate had not "
-                     "already rejected. "
-                     "<span class=\"r\">*</span></label></div>"
+                     "already rejected. Applies on Save (no restart needed).</label></div>"
                      "<label>Filter width (ns, 250&ndash;12000; ~4000 = 4&micro;s) "
                      "<input type=\"text\" inputmode=\"numeric\" name=\"pcnt_filt_w\" "
                      "id=\"pcnt_filt_w\" value=\"%lu\"> <span class=\"r\">*</span></label>"
@@ -1727,11 +1726,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // only syncTube() gates these controls. Phantom-pulse suppression for the
                      // Rev B/C PCB coupling defect: one phantom count per HV charge pulse, ~10µs
                      // after FET turn-off — see config_fields.def for the full story + the
-                     // archive-step warning. V2.6.31 side effect: with hv_blank saved, the comb
-                     // comes up at next boot even with pcnt_filter off — so on such a node a
-                     // later pcnt_filter tick takes effect LIVE on Save (the comb is pre-armed;
-                     // history re-primes on the source switch), not at the next restart as the
-                     // `*` marker suggests for the cold-start case.
+                     // archive-step warning. V2.7.4: the V2.6.31 "hv_blank pre-arms the comb"
+                     // side effect is GONE, and with it the cold-start/pre-armed asymmetry —
+                     // the comb is up on every tube-enabled node, so a pcnt_filter tick is
+                     // ALWAYS live on Save and that box no longer carries a `*` marker. This
+                     // box has never needed one (ISR volatile).
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"hv_blank\" "
                      "id=\"hv_blank\" %s> "
                      "HV blanking window &mdash; ignores count edges for the window below after "
@@ -1751,9 +1750,10 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<code>hv_blanked</code>. Safe to combine with the PCNT width filter on any "
                      "board: only the phantoms still inside the filtered count are subtracted "
                      "(width-aware since V2.6.31 &mdash; phantom width varies with tube "
-                     "temperature). Enabling blanking alone also keeps the PCNT width-comb "
-                     "diagnostic logging (comb active from the next restart). Also composes "
-                     "with the dead-time guard.</label></div>"
+                     "temperature). Also composes with the dead-time guard. The PCNT "
+                     "width-comb diagnostic no longer depends on this box &mdash; since "
+                     "V2.7.4 the <code>PCNT</code> width line is logged on every "
+                     "tube-enabled node regardless of these settings.</label></div>"
                      "<label>Blanking window (&micro;s, 5&ndash;1000; ~30 typical &mdash; covers "
                      "the 3-16&micro;s observed phantom delay with margin) "
                      "<input type=\"text\" inputmode=\"numeric\" name=\"hv_blank_us\" "
@@ -2912,9 +2912,12 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // bytes, so keeping it open is negligible and lets the entire OTA trace
     // (progress / verify / SUCCESS / FAILED) reach the syslog server —
     // including failures, which used to be invisible server-side.
-    tube_pcnt_stop(); // V2.5.16: release the opt-in PCNT comb's internal DRAM
-                      // (no-op when the comb never came up; V2.6.31: it also
-                      // runs with hv_blank alone, not just pcnt_filter)
+    tube_pcnt_stop(); // V2.5.16: release the PCNT comb's internal DRAM (no-op
+                      // when the comb never came up). V2.7.4: the comb is no
+                      // longer config-gated, so on a tube-enabled node this
+                      // ALWAYS has something to release — measured below the
+                      // heap noise floor and it does not move `largest`, so
+                      // this call is kept for hygiene rather than necessity.
     // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
     // this the poll re-armed both within ~1 s of the stops above, undoing
     // the V2.4.13 heap-freeing intent during the bulk of the OTA write.

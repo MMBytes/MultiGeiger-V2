@@ -28,10 +28,15 @@
  *  *alongside* the ISR on the IDF v6 driver/pulse_cnt.h API, keeping all the
  *  per-pulse timing/HV diagnostics the ISR provides.
  *
- *  Ships dark on every board — gated by the `pcnt_filter` config flag (default
- *  off). The module itself is a pure counter (observer); when `pcnt_filter` is
- *  on, do_tx_cycle (main.c) elects pc[NWIDTHS-1] as the authoritative count, so
- *  the same comb both filters CPM and logs the full width diagnostic.
+ *  V2.7.4: comes up on EVERY tube-enabled node, with no config gate (main.c).
+ *  It previously shipped dark, gated on `pcnt_filter` (and from V2.6.31 also on
+ *  `hv_blank`) — which meant the only source of pulse-WIDTH telemetry was
+ *  reachable solely by enabling a mitigation it exists to justify. The module
+ *  itself is a pure counter (observer) and the count path cannot see it:
+ *  `filtering` in do_tx_cycle is `pcnt_filter && pcnt_on`, so with the filter
+ *  off the comb only ADDS the per-cycle w_ns log line. When `pcnt_filter` IS
+ *  on, do_tx_cycle elects pc[NWIDTHS-1] as the authoritative count, so the same
+ *  comb both filters CPM and logs the full width diagnostic.
  */
 
 #include <stdbool.h>
@@ -80,7 +85,13 @@ bool tube_pcnt_active(void);
  *  teardown path so the comb doesn't pin internal DRAM during the OTA's
  *  contiguous-alloc window (matters most on the heap-tight Heltec). Not
  *  re-armed afterwards — a successful OTA reboots; a failed one leaves the comb
- *  down until the next boot, acceptable for an opt-in diagnostic. */
+ *  down until the next boot. V2.7.4 retires the old "acceptable for an OPT-IN
+ *  diagnostic" justification (the comb is no longer opt-in): the loss is
+ *  telemetry-only, and a pcnt_filter node in that state also reverts to the raw
+ *  ISR count until reboot, which is pre-existing behaviour. ⚠️ It is also the
+ *  one state where /config's "Applies on Save" is optimistic for pcnt_filter —
+ *  with the comb down there is nothing to elect, so the tick is inert until the
+ *  next restart. */
 void tube_pcnt_stop(void);
 
 /** @brief Per-cycle deltas of all teeth (no clear).

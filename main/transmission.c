@@ -1371,10 +1371,21 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
 // confirm occasionally caught that benign transient and rebooted for nothing.
 // Default 10 rides it out while still catching a genuine sustained collapse.
 //
-// No persistence is needed: a production node (no PCNT comb) boots with a
-// healthy largest block and cannot reach this state, so it can't boot-loop. The
-// ONE residual loop risk is the experimental PCNT width-comb taking an unlucky
-// INTERNAL boot-split — acceptable on the bench (pcnt_filter is off by default).
+// No persistence is needed, but note the premise CHANGED in V2.7.4 and the
+// argument has to be made differently now. This used to read "a production node
+// has no PCNT comb, so it boots with a healthy largest block and cannot reach
+// this state" — the comb is no longer config-gated (main.c), so EVERY
+// tube-enabled node now carries it and that population argument is void.
+//
+// What replaces it is measurement rather than absence: the comb does not move
+// the largest free block. Field FeatherS3-D, fresh boot with and without,
+// INTERNAL largest byte-identical at 77 824 B (total free differing by 36 B,
+// below the ~520 B cycle-to-cycle noise). Since this guard triggers on LARGEST
+// against the floor, a term that leaves largest unchanged cannot push a node
+// under it. The residual loop risk is therefore what it always was — an unlucky
+// INTERNAL boot-split landing below floor — no longer bench-only, but still
+// gated behind an OPT-IN feature (heap_guard_floor_kb defaults to 0 = off,
+// config_fields.def) rather than behind pcnt_filter's default.
 static void tx_heap_guard(uint32_t floor_kb, uint32_t confirm_cycles) {
     if (floor_kb == 0) { return; }            // feature off (default)
     // Enforce the documented >=2 floor so the guard never reboots on a SINGLE

@@ -369,7 +369,11 @@ X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     2,       240)
 // this is on, so cpm5/cpm15 stay consistent with the per-cycle filtered CPM.
 // Off by default on every board (opt-in per node) — see the SWAPS-a-gate note
 // above for why that default is deliberate; tube must be enabled.
-// Reboot-required (PCNT units are brought up at tube setup).
+// V2.7.4: LIVE-APPLIED, no longer reboot-required. The comb now comes up on
+// every tube-enabled boot (main.c), so `filtering` — re-read from this flag
+// every cycle — flips on the next cycle after /config Save, and history.c
+// re-primes on the source switch. Only pcnt_filter_width_ns still needs a
+// restart, because the glitch filter is latched at unit init.
 //
 // MEASURED REDUNDANCY, bench Rev A V1.10 + Heltec V4-R2, 272 cycles / ~13.6 h:
 // counts_raw (gate only) and pc[widest] (width filter) were the SAME integer in
@@ -387,9 +391,10 @@ X_BOOL(pcnt_filter,           "pcnt_filt",   false)
 // experiment found ~4µs but the optimum is temperature-sensitive (the Heltec's
 // narrow-pulse fraction climbs as it warms), so it's tunable per node. Bounded
 // to stay under the APB glitch-filter ceiling (~12.8µs). Reboot-required (the
-// glitch filter is set at unit init). Meaningful when pcnt_filter is on (sets
-// the authoritative filter tooth) — and since V2.6.31 also with hv_blank
-// alone, where it sets the passive diagnostic comb's widest tooth.
+// glitch filter is set at unit init). V2.7.4: sets the comb's widest tooth on
+// EVERY tube-enabled node, since the comb no longer needs a config gate — so
+// this always shapes the w_ns diagnostic. When pcnt_filter is additionally on,
+// that same tooth is the authoritative count.
 //
 // An OPERATOR setting, not a constant — worth stating because the surrounding
 // prose (here and elsewhere) is full of "the 4us filter". Any argument of the
@@ -535,14 +540,12 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // Both count paths still clamp defensively (per-cycle clamp to 0 in
 // do_tx_cycle; top-bit delta guard in history_tick).
 //
-// V2.6.31: enabling hv_blank ALONE (pcnt_filter off) now also brings up the
-// PCNT width comb as a passive diagnostic — counts stay ISR-based, but the
-// per-cycle PCNT w_ns log line keeps flowing (phantom-width telemetry).
-// Comb init happens at BOOT: a live /config Save of hv_blank starts blanking
-// immediately (ISR volatile) but the comb only appears from the next restart.
-// Flip side on a node already booted with hv_blank: the pre-armed comb makes
-// a later pcnt_filter tick take effect LIVE on Save (history re-primes on
-// the source switch) instead of at the next restart.
+// V2.6.31 brought the PCNT width comb up in blanking-only mode as a passive
+// diagnostic. SUPERSEDED by V2.7.4, which brings the comb up on every
+// tube-enabled node with no config gate at all (main.c) — so this field no
+// longer has any effect on whether the w_ns telemetry flows, and the old
+// "comb only appears from the next restart" caveat is retired. Blanking is
+// still live-applied on Save (ISR volatile); the comb is simply always there.
 //
 // Also composes with the dead-time guard (no exclusion between the two ISR
 // features): gmc_classify runs FIRST, so an edge inside both windows tallies

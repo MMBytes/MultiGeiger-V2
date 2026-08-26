@@ -709,10 +709,17 @@ static void do_tx_cycle(void) {
     // population behind the Feather/Heltec gap (see reference_radiation_data_
     // analysis). counts_raw (the ISR dead-time-gated count) is kept as the
     // pre-filter reference and logged on the FILTER line. NOTE the PCNT path
-    // applies a WIDTH gate only — it has no dead-time/spacing gate. On THIS
-    // hardware the sub-190 µs ringing the ISR rejects is <250 ns wide (measured,
-    // 2026-06-08), so the 4 µs width filter is EXPECTED to drop it too — but
-    // that's the thing under test, not a guarantee: a genuine >4 µs-wide pulse
+    // applies a WIDTH gate only — it has no dead-time/spacing gate, so this
+    // substitution SWAPS the protection rather than adding to it (see
+    // config_fields.def pcnt_filter). The sub-190 µs edges the ISR rejects have
+    // since been resolved into TWO populations by the per-cycle comb: P1 <250 ns
+    // (L1 flyback ring-down, flat in temperature) and P2 1-4 µs, which carries
+    // the whole temperature dependence — the narrow fraction sweeps ~0.4% at
+    // 9-11 °C to ~94% at 18-20 °C on the Rev B field carrier. So the CONFIGURED
+    // width filter (default 4 µs, floor 250 ns) is EXPECTED to drop them, but
+    // that's the thing under test, not a guarantee, and the margin it provides
+    // is a WIDTH margin, which has been measured to drift with temperature
+    // where the spacing margin does not. A genuine pulse wider than the filter
     // arriving inside the 190 µs window would be counted by PCNT and not by the
     // ISR (so the filtered count can occasionally exceed counts_raw — the
     // `removed`/`drop` guards handle that without underflow). Everything

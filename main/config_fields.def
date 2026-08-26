@@ -339,11 +339,25 @@ X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     2,       240)
 //
 // When ON, the authoritative per-cycle count switches from the ISR (dead-time
 // gated) count to the PCNT widest-width count (tube_pcnt.c): the hardware
-// glitch filter drops count-line pulses narrower than TUBE_PCNT_WIDTHS_NS's top
-// tooth (4 us), removing the 1-4 us marginal-pulse population that makes the
+// glitch filter drops count-line pulses narrower than pcnt_filter_width_ns
+// (default 4 us), removing the 1-4 us marginal-pulse population that makes the
 // Feather (ESP32-S3) read ~+14 % over the Heltec (ESP32) — see
 // reference_radiation_data_analysis. This filtered count drives CPM, dose,
 // /status, MQTT and all uploads.
+//
+// SWAPS a gate, does NOT add one — the most important property of this flag.
+// main.c: `counts = filtering ? pc[widest] : counts_raw`, and the PCNT path
+// applies a WIDTH gate only; it has no dead-time/spacing gate. So enabling this
+// hands phantom rejection from "arrived too soon" over to "too narrow", and the
+// ISR's gated count survives only as the logged pre-filter reference. The two
+// are alternatives, not layers: a phantom that is close-behind but WIDE (>= the
+// filter width) is rejected by the gate and PUBLISHED by the filter.
+//
+// That asymmetry is why this stays off by default, and the reason is physical
+// rather than merely conservative: the recovery-ramp phantom sits at a FIXED
+// ~150 us spacing, pinned by an RC time constant (tube.h), while its WIDTH has
+// been measured sliding with temperature on the Rev B population (>=4 us cool,
+// <4 us warm). A spacing margin is structural; a width margin drifts.
 //
 // The full diagnostic is ALWAYS logged while this is on: the DIAG line (raw
 // edges + spacing histogram) and the PCNT line (the 4-width comb) are emitted
@@ -353,8 +367,19 @@ X_U32 (heap_guard_confirm_cycles, "hg_confirm", 10,     2,       240)
 // The rolling 5-/15-min averages (history.c, GMC ACPM + ThingSpeak f3/f4) are
 // filtered too: history.c samples the PCNT width-filtered monotonic total when
 // this is on, so cpm5/cpm15 stay consistent with the per-cycle filtered CPM.
-// Off by default on every board (opt-in per node); tube must be enabled.
+// Off by default on every board (opt-in per node) — see the SWAPS-a-gate note
+// above for why that default is deliberate; tube must be enabled.
 // Reboot-required (PCNT units are brought up at tube setup).
+//
+// MEASURED REDUNDANCY, bench Rev A V1.10 + Heltec V4-R2, 272 cycles / ~13.6 h:
+// counts_raw (gate only) and pc[widest] (width filter) were the SAME integer in
+// EVERY cycle — 74874 vs 74874, zero cycles differing, with 475 edges rejected
+// by the gate and hv_blanked 0 throughout. On a board whose phantoms are both
+// narrow AND close-behind (the recovery-ramp recross signature) the gate gets
+// there first and this filter has nothing left to remove. Enabling it on such
+// a board changes no published number; it only changes WHICH gate is
+// load-bearing. Do not assume that redundancy holds on a board with a
+// different phantom population — measure before claiming it.
 X_BOOL(pcnt_filter,           "pcnt_filt",   false)
 
 // Filter width (ns): pulses narrower than this are dropped. Sets the WIDEST
@@ -365,6 +390,12 @@ X_BOOL(pcnt_filter,           "pcnt_filt",   false)
 // glitch filter is set at unit init). Meaningful when pcnt_filter is on (sets
 // the authoritative filter tooth) — and since V2.6.31 also with hv_blank
 // alone, where it sets the passive diagnostic comb's widest tooth.
+//
+// An OPERATOR setting, not a constant — worth stating because the surrounding
+// prose (here and elsewhere) is full of "the 4us filter". Any argument of the
+// form "the phantom is far too narrow to pass the 4us filter" silently assumes
+// the default. At a 250-999 ns setting the rejection is a boundary call rather
+// than a decisive one, and the floor is 250 ns.
 X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 
 // --- Dead-time guard / burst-collapse (V2.5.30) -----------------------------
@@ -386,6 +417,19 @@ X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 // removes the spurious ~60% of the gap. Keep Heltec as the dose baseline; do not
 // rescale the 44205 µSv constant. Use on a NEW node with no archive, or to prove
 // (with a check source) that the 1-5ms population is artifact.
+//
+// CANNOT reach the 50-190us population, structurally — stated explicitly
+// because that population is now well characterised and this looks like the
+// tool for it. Two independent reasons: the window floor is 200us, and more
+// decisively gmc_classify() returns GMC_REJECT (never GMC_GUARD_REMOVED) for
+// any edge inside the 190us gate, so those edges are already owned by the gate
+// and the guard has no marginal effect on them whatever the window is set to.
+// That population is a recovery-ramp threshold RECROSS — an RC property of the
+// count node (tube.h), position predicted at 148.5us from BOM values with
+// nothing fitted and measured at 148-154us on four separate boards — and NOT
+// afterpulsing, which was excluded three ways (width, position-tracks-R5, and
+// phase-lock to the audio dispatch) and then refuted again by a tube swap.
+// This guard's target remains the 1-5ms re-trigger train and nothing else.
 //
 // Enable via the `deadtime_guard` checkbox; `deadtime_guard_us` is the window
 // (200-20000µs, ~3000 typical). The GMC ISR reads the window each edge, so both
@@ -419,18 +463,57 @@ X_U32 (deadtime_guard_us,      "dt_guard_us", 3000,     200,     20000)
 // deployed FeatherS3-D field node (hv_coincident==hv_pulses every cycle, ~6-9% of
 // counts). See reference_radiation_data_analysis 2026-07-09..26.
 //
+// REVISION-SCOPED — a defect of the Rev B/C carrier LAYOUT, not a property of
+// the tube, the MCU or the firmware. Rev A boards do not exhibit it: hv_blanked
+// reads 0 on every Rev A board measured, with hv_coincident sitting at its
+// 0.28-0.31% chance-coincidence floor instead of tracking hv_pulses. The Rev B
+// V2 layout rework zeroes it in copper (thousands of HV pulses, zero coupled
+// edges) and a field carrier swap took hv_blanked 8.46% -> 0.000%. So on a
+// clean board this window is not a safety margin, it is a NO-OP: there is
+// nothing for it to catch, which also makes its width unfalsifiable — no
+// setting is better or worse than any other when the tally is always 0.
+//
+// ⚠️ hv_coincident is a valid DETECTOR only while blanking is OFF. A blanked
+// edge breaks out of gmc_count_isr BEFORE the coincidence tally, so switching
+// this on collapses hv_coincident by construction — and note WHERE it lands:
+// the 0.28-0.31% chance-coincidence floor, which is exactly what a board with
+// no coupling at all reads. An affected node with blanking on is therefore
+// INDISTINGUISHABLE from a clean one on this channel. Diagnose first, then
+// enable; never read a floor-level hv_coincident on a blanking node as
+// evidence the board is clean.
+//
+// ⚠️ Quote the share of RAW EDGES (8.46% on the Rev B field carrier), never
+// hv_blanked/hv_pulses: that ratio has read anywhere from 0.78 to 0.9998 across
+// different analysis windows on the SAME node, so it does not reproduce and is
+// not a coupling constant. (hv_blanked itself IS a raw ISR tally in every mode
+// — isr_hv_blanked, incremented in gmc_count_isr. The computed, temperature-
+// dependent quantity is the SEPARATE "wide subtracted" figure on the FILTER
+// line, from pcnt_blank_wide(); the two are easy to conflate and are not the
+// same number.) Only the raw-edge share reproduces across windows.
+//
 // Keyed on the recharge state machine's OWN turn-off stamp (the cause), not on
 // pulse width (the symptom) — the coupled pulse's width varies with MCU input
 // stage and hardware mods (C3 value, drain-track damping), which is exactly
 // why the 4µs PCNT width filter is NOT a fleet-safe fix for this. Dead-time
 // cost is ppm-level (hv_pulses × window per cycle).
 //
-// DELIBERATELY OPT-IN (same archive discipline as the dead-time guard): the
-// phantoms are IN the multi-year archive, so enabling this steps a node's CPM
-// DOWN by its artifact share (~6-9%). Hardware-first remains the plan (mod C /
-// Rev D layout); this is the fallback + diagnostic. Per-cycle suppressed
-// count is logged on the DIAG line as hv_blanked (expect ~= hv_pulses, with
-// hv_coincident collapsing to ~0).
+// DELIBERATELY OPT-IN — but note WHICH argument actually carries that, because
+// the archive one does NOT. config_load() applies a compile-time default only
+// when the NVS key is MISSING, and config_save() writes every field in the
+// schema, so a node that has ever saved its config keeps its stored value: a
+// default flip cannot step an existing archive, it can only reach fresh-NVS
+// nodes, which have no archive to step. (Enabling it BY HAND on an established
+// node does step that node's CPM down by its artifact share, ~6-9% — that is
+// an argument about the operator action, not about the default.)
+//
+// The reasons that do carry: it is a no-op on boards without the defect, and
+// on those boards enabling it blinds hv_coincident (both above); the firmware
+// cannot detect the carrier revision, so a fleet-wide default would be aimed
+// at a condition it cannot observe; and hardware-first remains the plan (Rev B
+// V2 / Rev D layout), so the direction of travel is away from needing this at
+// all. It is the fallback + diagnostic, not the destination. Per-cycle
+// suppressed count is logged on the DIAG line as hv_blanked (on an AFFECTED
+// board expect ~= hv_pulses, with hv_coincident collapsing to ~0).
 //
 // Enable via the `hv_blank` checkbox; `hv_blank_us` is the window (5-1000µs,
 // ~30 typical: covers the 3-16µs observed delay band with margin). Both

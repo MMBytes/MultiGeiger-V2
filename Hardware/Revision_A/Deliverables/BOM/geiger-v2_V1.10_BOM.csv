@@ -1,23 +1,23 @@
 Reference,Qty,Value,Package,Part Number
-C1,1,100uF/16V,"Through Hole,D5mm,P=2mm",
+C1,1,100uF/16V,"Through Hole,D6.3xL9mm,P=2.5mm on 2.03mm land",16SEPC100MW
 C2,1,10nF/100V,"Through Hole,P=5mm",MKP2D021001B00KSSD
-C3,1,100nF/630V,"Through Hole,P=15mm",R75PI3100AA30J
+C3,1,100nF/630V,"Through Hole,P=15mm",R76PI31005050J
 C4,1,100pF/1000V,"Through Hole,P=5mm",FKP2O101001D00JSSD
 "D1,D2",2,ZY200,DO-41,ZY200
-D3,1,BZX55C3V3,DO-35,BZX55C3V3-TR
+D3,1,BZX79-B3V3 (board value: BZX55),DO-35,"BZX79-B3V3,133"
 D4,1,BYV26E (Glas),DO-41,BYV26E
 D6,1,GP10Y,DO-41,GP10Y
 I2C,1,I2C 3V3 - JST ZR or direct wire (optional),"JST ZR,1.5mm,4-pin,side entry,THT",
 IC1,1,Heltec WiFi LoRa 32 V4 (R2),"2x18 THT socket strip,P=2.54mm",
-JMP1,1,0R,"SMD solder jumper,3-pad",
+JMP1,1,0R - DO NOT FIT (links 3V3 to 5V rail),"SMD solder jumper,3-pad",
 JP1,1,Header 1x5 - MCU breakout (optional),"Through Hole,P=2.54mm",
 L1,1,150mH,"Through Hole,P=5mm",11P-154J-50
 PIEZO_GR,1,PIEPSER_BIG (fit ONE piezo only; body covers JP1),"Through Hole,P=10mm",
 PIEZO_KL,1,PIEPSER_small (fit ONE piezo only),"Through Hole,P=7.62mm",CPT-1495CI-300
-R1,1,10k,"Axial 0207,P=10.16mm",UXB02070F1002AR100
-"R2,R5",2,1M,"Axial 0207,P=10.16mm",MFR-25FBF52-1M
-"R3,R4",2,4M7,"Axial 0207,P=10.16mm",MFR-25FBF52-4M7
-R6,1,100k,"Axial 0207,P=10.16mm",
-U$1,1,Tube holder SBM-19/20,"Fuse clip,2x THT,P=7.62mm",
+R1,1,10k (pulse - keep UXB),"Axial 0207,P=10.16mm",UXB02070F1002AR100
+"R2,R5",2,1M,"Axial 0207,P=10.16mm",RNV14FAL1M00
+"R3,R4",2,4M7 (Si22G; 2M7 for SBM-19/20),"Axial 0207,P=10.16mm",RNV14FAL4M70
+R6,1,100k HV_FET_OUT gate pulldown (optional),"Axial 0207,P=10.16mm",RNV14FAL100K
+U$1,1,Tube holder clip - order 2 (1 on PCB + 1 flying to U$5),"Fuse clip,2x THT,P=7.62mm",8040.0003
 U$5,1,GND wire pad,"Single THT pad,D1.6mm",
 U4,1,BSP125,SOT223,BSP125H6327

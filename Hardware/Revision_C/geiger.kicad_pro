@@ -627,9 +627,9 @@
         },
         {
           "group_by": false,
-          "label": "Untitled Field",
-          "name": "Untitled Field",
-          "show": false
+          "label": "Part Number",
+          "name": "Part Number",
+          "show": true
         },
         {
           "group_by": false,

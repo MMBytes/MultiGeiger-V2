@@ -105,7 +105,7 @@
 				(justify left bottom)
 			)
 		)
-		(property "Value" "L-11P"
+		(property "Value" "150mH"
 			(at 0 0 30)
 			(layer "F.Fab")
 			(uuid "e765cd5a-8335-41a0-88ce-98a9fad0fd98")
@@ -136,6 +136,19 @@
 			(effects
 				(font
 					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "11P-154J-50"
+			(at 0 0 210)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "f1e1212f-2672-4084-866b-6e66de214f94")
+			(effects
+				(font
+					(size 1 1)
 					(thickness 0.15)
 				)
 			)
@@ -269,6 +282,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "81583fd9-f4ee-42a7-985c-a6e479c176ef")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "UXB02070F1002AR100"
+			(at 0 0 0)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "da3a644c-57e2-4c6a-a960-d051d2d4d11f")
 			(effects
 				(font
 					(size 1 1)
@@ -606,6 +632,19 @@
 				)
 			)
 		)
+		(property "Part Number" "UXB02070F1002AR100"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "8451ef0c-0b66-4169-af82-9916aceaef8b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "R_*")
 		(path "/8d15a536-fecb-40f2-b365-259c65741081")
 		(sheetname "/")
@@ -934,6 +973,19 @@
 				)
 			)
 		)
+		(property "Part Number" "8040.0003"
+			(at 0 0 0)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "17b6222b-cf55-440f-b602-63dba23c6a93")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(path "/0fb0f874-4f90-44d5-b924-55207bdb6366")
 		(sheetname "/")
 		(sheetfile "geiger.kicad_sch")
@@ -1020,7 +1072,7 @@
 			(drill 1.6)
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
-			(net "Net-(SBM-19/1-1)")
+			(net "Net-(SBM-19/20-1)")
 			(pinfunction "1_P1")
 			(pintype "bidirectional")
 			(solder_mask_margin 0.1016)
@@ -1033,7 +1085,7 @@
 			(drill 1.6)
 			(layers "*.Cu" "*.Mask")
 			(remove_unused_layers no)
-			(net "unconnected-(SBM-19/1-2-PadP2)")
+			(net "unconnected-(SBM-19/20-2-PadP2)")
 			(pinfunction "2_P2")
 			(pintype "bidirectional")
 			(solder_mask_margin 0.1016)
@@ -1105,6 +1157,19 @@
 			(effects
 				(font
 					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "MKP2D021001B00KSSD"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "bc1b2803-3da8-4c91-853f-ebc6eb45c618")
+			(effects
+				(font
+					(size 1 1)
 					(thickness 0.15)
 				)
 			)
@@ -1370,6 +1435,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "e6d95b95-0b9f-4bd1-a397-33825b3fcab1")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "UXB02070F1002AR100"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "2ce4c124-e351-40c1-a03b-f4502e8f2e0b")
 			(effects
 				(font
 					(size 1 1)
@@ -1694,6 +1772,19 @@
 				)
 			)
 		)
+		(property "Part Number" "RNV14FAL1M00"
+			(at 0 0 0)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "22899360-0a37-4ad6-b0ba-8ee934a38d4c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "R_*")
 		(path "/d0dc11df-e748-425d-b9e9-34c1df2bfb7f")
 		(sheetname "/")
@@ -1974,7 +2065,7 @@
 				(justify left bottom)
 			)
 		)
-		(property "Value" "BZX55"
+		(property "Value" "BZX79-B3V3"
 			(at -2.032 2.794 270)
 			(unlocked yes)
 			(layer "F.Fab")
@@ -2043,6 +2134,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "220d4eba-578f-4ccd-a993-3812457c788e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "BZX79-B3V3,133"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "668837e3-e016-4454-8815-1159c28f8aa6")
 			(effects
 				(font
 					(size 1 1)
@@ -2328,6 +2432,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "a1a22d4a-1680-461a-aee0-38de7840e96f")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "BSP125H6327"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "74ac1148-dd36-4a38-8e11-9e5a64cc29a7")
 			(effects
 				(font
 					(size 1 1)
@@ -2688,6 +2805,19 @@
 				)
 			)
 		)
+		(property "Part Number" "ZY200"
+			(at 0 0 90)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "9fe2c1ab-fe7e-4581-9ed5-94b2d29a822e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "TO-???* *_Diode_* *SingleDiode* D_*")
 		(path "/af4526f4-d6d7-4148-969d-28e04a0c3f47")
 		(sheetname "/")
@@ -2966,6 +3096,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "b2e7c6f0-fe22-4f06-b1e6-0474afef22d1")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "RNV14FAL4M70"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "bc0707cc-3d6e-43e7-8b15-2cd7ea70b56f")
 			(effects
 				(font
 					(size 1 1)
@@ -3323,6 +3466,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "cc88ffa4-f226-4e0e-b72b-c5adf84d1218")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "GP10Y"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "fe871797-8f0a-4b75-8d52-b14f33775133")
 			(effects
 				(font
 					(size 1 1)
@@ -4332,6 +4488,19 @@
 				)
 			)
 		)
+		(property "Part Number" "SM04B-SRSS-TB(LF)(SN)"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "8299db9f-7de7-4c70-bfdc-298f5ced4298")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "Connector*:*_1x??-1MP*")
 		(path "/ad7a3087-2a98-49cc-b335-a6cd864d73ae")
 		(sheetname "/")
@@ -4643,6 +4812,19 @@
 				)
 			)
 		)
+		(property "Part Number" "FKP2O101001D00JSSD"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "5d593924-f3e9-46fb-b68a-0d686699a20a")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "C_*")
 		(path "/5ac0891b-5a7f-4f82-8d1d-8e34a826de04")
 		(sheetname "/")
@@ -4929,6 +5111,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "d3e5d06e-36ba-4b80-a1c5-75f8add5dc0b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "ZY200"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "a715aacb-028f-47dd-84d9-bdba795b58f6")
 			(effects
 				(font
 					(size 1 1)
@@ -5247,6 +5442,19 @@
 				)
 			)
 		)
+		(property "Part Number" "BYV26E"
+			(at 0 0 90)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "93ae392e-e2cb-42c8-b3f3-59ae11839903")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "TO-???* *_Diode_* *SingleDiode* D_*")
 		(path "/846caed9-9a7c-4b5b-a37f-3f320a6fb37e")
 		(sheetname "/")
@@ -5532,6 +5740,19 @@
 				)
 			)
 		)
+		(property "Part Number" "RNV14FAL4M70"
+			(at 0 0 0)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "152e83b9-4615-4b3f-91ab-1599403d125d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "R_*")
 		(path "/78aa8390-bbf2-463c-8979-57fc07ec5962")
 		(sheetname "/")
@@ -5760,7 +5981,7 @@
 			(roundrect_rratio 0.25)
 			(chamfer_ratio 0.2928932188)
 			(chamfer top_left top_right bottom_left bottom_right)
-			(net "Net-(SBM-19/1-1)")
+			(net "Net-(SBM-19/20-1)")
 			(pintype "passive")
 			(solder_mask_margin 0.1016)
 			(thermal_bridge_angle 0)
@@ -5855,6 +6076,19 @@
 			(layer "F.Fab")
 			(hide yes)
 			(uuid "59e8c5c3-f8b0-4626-8165-9b40e95d2253")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "RNV14FAL1M00"
+			(at 0 0 90)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "49b06d4e-456c-4838-baa1-ddd461d1536e")
 			(effects
 				(font
 					(size 1 1)
@@ -6176,6 +6410,19 @@
 			(effects
 				(font
 					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "PH-4P"
+			(at 0 0 270)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "a6dfd3d4-a1aa-4af4-b056-9270d9d1d6e7")
+			(effects
+				(font
+					(size 1 1)
 					(thickness 0.15)
 				)
 			)
@@ -6844,6 +7091,19 @@
 				)
 			)
 		)
+		(property "Part Number" "16SEPC100MW"
+			(at 0 0 90)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "bc41aa72-1134-4564-81db-ed2d666c432c")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
 		(property ki_fp_filters "CP_*")
 		(path "/1de9c228-3bea-4477-844e-aa7dc7273bbe")
 		(sheetname "/")
@@ -7059,6 +7319,19 @@
 			(effects
 				(font
 					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Part Number" "R76PI31005050J"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "74f90dc8-6bae-4eeb-be9e-af8ae9047610")
+			(effects
+				(font
+					(size 1 1)
 					(thickness 0.15)
 				)
 			)
@@ -16254,22 +16527,6 @@
 		(uuid "ffe9958a-c4d5-4138-82fa-10f148c0f20d")
 	)
 	(segment
-		(start 218.606196 143.73757)
-		(end 218.606196 141.10757)
-		(width 0.2)
-		(layer "F.Cu")
-		(net "Net-(SBM-19/1-1)")
-		(uuid "e028ba52-2021-4df1-b85b-4d5053fbb1d7")
-	)
-	(segment
-		(start 218.606196 141.10757)
-		(end 215.436196 137.93757)
-		(width 0.2)
-		(layer "F.Cu")
-		(net "Net-(SBM-19/1-1)")
-		(uuid "f5271510-a350-4a74-9af9-8899c0c100fb")
-	)
-	(segment
 		(start 145.386196 138.61757)
 		(end 147.246196 138.61757)
 		(width 0.2)
@@ -16716,6 +16973,22 @@
 		(layer "F.Cu")
 		(net "Net-(C3-Pad1)")
 		(uuid "c12b077b-9da0-49a4-8f1b-7f4957041cbc")
+	)
+	(segment
+		(start 218.606196 143.73757)
+		(end 218.606196 141.10757)
+		(width 0.2)
+		(layer "F.Cu")
+		(net "Net-(SBM-19/20-1)")
+		(uuid "e028ba52-2021-4df1-b85b-4d5053fbb1d7")
+	)
+	(segment
+		(start 218.606196 141.10757)
+		(end 215.436196 137.93757)
+		(width 0.2)
+		(layer "F.Cu")
+		(net "Net-(SBM-19/20-1)")
+		(uuid "f5271510-a350-4a74-9af9-8899c0c100fb")
 	)
 	(zone
 		(net "GND")

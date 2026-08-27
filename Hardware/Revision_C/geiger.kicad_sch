@@ -4704,7 +4704,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "0fb0f874-4f90-44d5-b924-55207bdb6366")
-		(property "Reference" "SBM-19/1"
+		(property "Reference" "SBM-19/20"
 			(at 382.27 95.2499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4759,7 +4759,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "8040.0003"
 			(at 383.8474 105.41 0)
 			(hide yes)
 			(show_name no)
@@ -4779,7 +4779,7 @@
 		(instances
 			(project "geiger"
 				(path "/29f38b98-cdf0-4588-b893-03ee7a6e5052"
-					(reference "SBM-19/1")
+					(reference "SBM-19/20")
 					(unit 1)
 				)
 			)
@@ -4852,7 +4852,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "RNV14FAL4M70"
 			(at 325.12 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -4945,7 +4945,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "16SEPC100MW"
 			(at 240.03 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -5228,7 +5228,7 @@
 				)
 			)
 		)
-		(property "Value" "L-11P"
+		(property "Value" "150mH"
 			(at 259.08 64.77 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5262,6 +5262,17 @@
 		)
 		(property "Description" "Inductor"
 			(at 259.08 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Part Number" "11P-154J-50"
+			(at 259.08 67.31 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5431,7 +5442,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "RNV14FAL1M00"
 			(at 325.12 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -5522,6 +5533,17 @@
 				)
 			)
 		)
+		(property "Part Number" "FKP2O101001D00JSSD"
+			(at 335.28 80.01 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "07fb08bb-18be-45f2-938c-3f1ce9fc0781")
 		)
@@ -5560,7 +5582,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "BZX55"
+		(property "Value" "BZX79-B3V3"
 			(at 285.75 107.9499 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5626,8 +5648,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 288.29 106.68 0)
+		(property "Part Number" "BZX79-B3V3,133"
+			(at 288.29 106.68 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5875,17 +5897,6 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 97.79 138.43 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
 		(pin "4"
 			(uuid "3e14fddd-6574-48ef-b7db-32f51da72b9c")
 		)
@@ -6081,8 +6092,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 330.2 92.71 0)
+		(property "Part Number" "RNV14FAL4M70"
+			(at 330.2 92.71 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6195,7 +6206,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "BYV26E"
 			(at 294.64 67.31 0)
 			(hide yes)
 			(show_name no)
@@ -6445,7 +6456,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "UXB02070F1002AR100"
 			(at 297.18 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -6770,6 +6781,17 @@
 				)
 			)
 		)
+		(property "Part Number" "SM04B-SRSS-TB(LF)(SN)"
+			(at 218.44 187.96 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "3"
 			(uuid "75b4a316-8113-4f5e-a687-1462714f874e")
 		)
@@ -6859,8 +6881,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 55.88 153.67 0)
+		(property "Part Number" "UXB02070F1002AR100"
+			(at 55.88 153.67 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6975,8 +6997,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 288.29 92.71 0)
+		(property "Part Number" "ZY200"
+			(at 288.29 92.71 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7091,8 +7113,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 288.29 77.47 0)
+		(property "Part Number" "ZY200"
+			(at 288.29 77.47 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7283,7 +7305,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "GP10Y"
 			(at 309.88 67.31 0)
 			(hide yes)
 			(show_name no)
@@ -7376,6 +7398,17 @@
 				)
 			)
 		)
+		(property "Part Number" "MKP2D021001B00KSSD"
+			(at 311.15 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "01ce3a7a-6ba2-4304-a476-9c92a0b806d1")
 		)
@@ -7448,6 +7481,17 @@
 			)
 		)
 		(property "Description" "Resistor"
+			(at 342.9 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Part Number" "RNV14FAL1M00"
 			(at 342.9 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -7609,6 +7653,17 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
+			(at 316.23 77.47 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Part Number" "R76PI31005050J"
 			(at 316.23 77.47 0)
 			(hide yes)
 			(show_name no)
@@ -7858,7 +7913,7 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
+		(property "Part Number" "BSP125H6327"
 			(at 267.97 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -7944,6 +7999,17 @@
 			)
 		)
 		(property "Description" "Generic connectable mounting pin connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 288.29 200.66 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Part Number" "PH-4P"
 			(at 288.29 200.66 0)
 			(hide yes)
 			(show_name no)
@@ -8042,8 +8108,8 @@
 				)
 			)
 		)
-		(property "Untitled Field" ""
-			(at 55.88 157.48 0)
+		(property "Part Number" "UXB02070F1002AR100"
+			(at 55.88 157.48 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

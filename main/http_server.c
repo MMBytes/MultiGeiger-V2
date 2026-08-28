@@ -42,6 +42,7 @@
 #include "sd_logger.h"         // V2.6.19: standalone-mode CSV logger status (/status card)
 #include "tube.h"
 #include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
+#include "speaker.h"           // V2.7.5: silence the pulse tick in OTA teardown
 #include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
 #include "log_ftp.h"
@@ -2912,6 +2913,15 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // bytes, so keeping it open is negligible and lets the entire OTA trace
     // (progress / verify / SUCCESS / FAILED) reach the syslog server —
     // including failures, which used to be invisible server-side.
+    // V2.7.5: stop the pulse tick for the rest of the flash. Unlike the calls
+    // around it this is not a heap measure — it is the same "quiesce the noisy
+    // subsystems before flashing" move, for the one subsystem the user can
+    // hear. The piezo tone is latched in LEDC and only the 1 ms audio timer
+    // ever ends it, so a tick caught by the OTA write holds its tone instead
+    // of clicking. Takes the per-pulse LED/NeoPixel flash with it on boards
+    // that have a speaker — see speaker_suspend()'s doc. No-op where
+    // HAL_HAS_SPEAKER==0 (led.c owns the tick there and keeps blinking).
+    speaker_suspend();
     tube_pcnt_stop(); // V2.5.16: release the PCNT comb's internal DRAM (no-op
                       // when the comb never came up). V2.7.4: the comb is no
                       // longer config-gated, so on a tube-enabled node this

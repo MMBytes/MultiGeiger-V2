@@ -44,6 +44,32 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick);
 /** @brief Toggle the tick effects at runtime (e.g. after a config save). */
 void speaker_set_modes(bool led_tick, bool speaker_tick);
 
+/** @brief Stop the pulse tick for the rest of this boot — OTA teardown (V2.7.5).
+ *
+ *  Clears the tick modes and any melody, stops the 1 ms audio timer and forces
+ *  the LEDC duty and the N pin low. Called from the /update POST teardown
+ *  alongside mqtt_stop() / log_ftp_pause() / tube_pcnt_stop(), because an OTA
+ *  flash write starves the audio timer and a tick caught mid-flight holds its
+ *  tone instead of ending after 4 ms.
+ *
+ *  STOPS THE VISUAL TICK TOO, not just the piezo. tick_start() drives the
+ *  NeoPixel / PIN_LED_BUILTIN flash from the same call site as the tone, so on
+ *  a board with a speaker the per-pulse blink stops with it. Boards without a
+ *  speaker are unaffected: led.c owns the tick there (its
+ *  `!HAL_HAS_SPEAKER && !HAL_HAS_NEOPIXEL` gate) and keeps blinking through
+ *  the update.
+ *
+ *  One-way, like the rest of the OTA teardown — the device reboots on OTA
+ *  success; after a FAILED OTA the tick stays off until a manual /reboot,
+ *  exactly as MQTT and the FTPS schedule do. There is deliberately no
+ *  speaker_resume(): nothing in the firmware needs one, and adding it would
+ *  mean re-establishing state this function is free to leave inconsistent.
+ *
+ *  Counting is untouched: the tube ISR keeps running and keeps latching tick
+ *  requests, they just go unread. No-op when HAL_HAS_SPEAKER == 0.
+ */
+void speaker_suspend(void);
+
 /** @brief Start playing a melody sequence.
  *
  *  @p seq must be a pointer to a `melody_step_t` array terminated by an

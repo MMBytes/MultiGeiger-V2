@@ -228,6 +228,39 @@ void speaker_set_modes(bool led_tick, bool speaker_tick) {
     ESP_LOGI(TAG, "modes: led=%d speaker=%d", led_tick, speaker_tick);
 }
 
+// V2.7.5: OTA teardown. The piezo tone is LATCHED IN HARDWARE — tick_start()
+// hands LEDC a duty cycle and only this file's 1 ms audio timer ever takes it
+// away again. An OTA flash write starves that timer for far longer than the
+// 4 ms a tick is meant to sound, so a tick caught mid-flight holds its tone.
+//
+// ORDER IS THE WHOLE DESIGN, and it is the mode flags that do the work. Every
+// path in audio_timer_cb that can drive LEDC is gated on state cleared here:
+// tick_start() on s_speaker_tick/s_led_tick, melody_apply_step() on
+// s_melody_seq. Clear those FIRST and a callback already dispatched onto the
+// esp_timer task can no longer make a sound whatever it does next — so
+// stopping the timer and calling tick_end() afterwards need no interlock of
+// their own. Reverse the order and the gap between stopping the timer and
+// silencing LEDC is exactly where a straggler callback re-latches a tone that
+// nothing is left running to end: a held 5 kHz tone for the whole upload,
+// worse than the symptom this fixes.
+//
+// An earlier draft kept the mode flags and added a separate suspend flag plus
+// a settle delay to cover that gap. Both were redundant with the gate
+// tick_start() already applies, and the reason for preserving the flags was
+// wrong: /config renders its tick checkboxes from the config struct
+// (`s_cfg->speaker_tick`), never from this file, which exposes no getter.
+//
+// Stopping the timer is not needed for silence — it drops 1000 wakeups/s of
+// the esp_timer task for the duration of the flash write, which is the point.
+void speaker_suspend(void) {
+    s_speaker_tick = false;
+    s_led_tick     = false;
+    s_melody_seq   = NULL;   // melody drives LEDC regardless of the tick modes
+    if (s_audio_timer) esp_timer_stop(s_audio_timer);
+    tick_end();
+    ESP_LOGI(TAG, "suspended for OTA — tick silent until reboot");
+}
+
 void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
     // LED (if this board has one) + speaker N pin as GPIO outputs.
     gpio_config_t out_cfg = {
@@ -320,6 +353,8 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
 }
 void speaker_set_modes(bool led_tick, bool speaker_tick) {
     (void)led_tick; (void)speaker_tick;
+}
+void speaker_suspend(void) {
 }
 void speaker_play_melody(const melody_step_t *seq) {
     (void)seq;

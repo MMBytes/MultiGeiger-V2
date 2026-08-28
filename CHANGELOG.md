@@ -9,6 +9,53 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.5 — the pulse tick goes quiet for a firmware update
+
+**In short:**
+
+1. **The pulse tick is now silenced when an OTA update starts**, alongside the
+   MQTT / FTPS / PCNT teardown that already runs there. Ticking during an
+   upload sounded wrong; now there is simply nothing to hear.
+2. **The matching per-pulse LED / NeoPixel flash pauses with it** on boards
+   that have a piezo fitted, because one piece of code drives both. On boards
+   without a piezo the blink is unaffected and continues through the update.
+3. Counting is unaffected — the tube keeps counting throughout, and your saved
+   settings on `/config` are not changed.
+
+The detail, for anyone who wants it:
+
+The click is not generated in software. A counted pulse hands the LEDC hardware
+a 5 kHz tone, and the *only* thing that takes it away again is a 1 ms timer
+callback counting down four milliseconds. Writing the new firmware image blocks
+that timer for far longer than 4 ms at a stretch, so a click caught by a flash
+write holds its tone until the timer next gets a turn — a 4 ms tick stretched
+into a ragged beep, repeatedly, for the length of the upload.
+
+Rather than fix the timing, the update path now stops the tick and forces the
+output low before the first byte is written, in the same place the firmware
+already drains the upload worker, stops MQTT and pauses the FTPS schedule. It is
+the same "quiesce the noisy subsystems before flashing" step, applied to the one
+subsystem that is audible.
+
+The same code drives the audible click and the per-pulse LED / NeoPixel flash,
+so on a board with a piezo the blink stops too. If you are used to watching that
+LED to tell the counter is alive, it will look idle for the length of the
+update. It is not — the tube keeps counting the whole time. Note that this is
+about the *indicator*, not the data: a successful update reboots the device, and
+a reboot has always cleared the CPM history and the measurement cycle in
+progress. That is unchanged here.
+
+Like the rest of that teardown it is one-way: the device reboots into the new
+firmware on success, and after a *failed* update the tick stays off until a
+manual reboot — exactly as MQTT and the FTPS schedule already do. Your saved
+`/config` settings are untouched either way; this stops the output for the rest
+of the boot, it does not change what you configured.
+
+No effect on boards with no piezo fitted — there the pulse LED is driven
+elsewhere and keeps blinking — and no effect on the boot melody.
+
+---
+
 ## V2.7.4 — the pulse tick stops manufacturing its own phantom counts
 
 **In short:**

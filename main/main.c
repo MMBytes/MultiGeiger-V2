@@ -860,16 +860,26 @@ static void do_tx_cycle(void) {
         // counts_without_blank = counts + hv_blanked). With blanking active on
         // an affected board, expect hv_blanked ~= hv_pulses while
         // hv_coincident collapses toward 0.
+        // V2.7.6: 10 buckets (was 8) — the label list and the %lu count must both
+        // match TUBE_DIAG_NBUCKETS. The static assert makes a mismatch a build
+        // failure: a hand-edited format string is the one place this change can
+        // silently desync, and a log line that mislabels its own columns is
+        // worse than one that fails to compile.
+        _Static_assert(TUBE_DIAG_NBUCKETS == 10,
+                       "DIAG edt_us[] label list and argument count below are "
+                       "hand-written for 10 buckets - update both.");
         ESP_LOGI(TAG, "DIAG: raw_edges=%lu rejected=%lu guard_removed=%lu hv_coincident=%lu "
                       "hv_blanked=%lu "
-                      "edt_us[<50|<190|<500|<1k|<5k|<50k|<500k|>=]=%lu %lu %lu %lu %lu %lu %lu %lu",
+                      "edt_us[<50|<190|<250|<380|<500|<1k|<5k|<50k|<500k|>=]="
+                      "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
                  (unsigned long)diag_raw_edges, (unsigned long)diag_rejected,
                  (unsigned long)diag_guard_removed, (unsigned long)diag_hv_coincident,
                  (unsigned long)diag_hv_blanked,
                  (unsigned long)diag_hist[0], (unsigned long)diag_hist[1],
                  (unsigned long)diag_hist[2], (unsigned long)diag_hist[3],
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
-                 (unsigned long)diag_hist[6], (unsigned long)diag_hist[7]);
+                 (unsigned long)diag_hist[6], (unsigned long)diag_hist[7],
+                 (unsigned long)diag_hist[8], (unsigned long)diag_hist[9]);
 
 #if TUBE_REJLOG_ENABLE
         // V2.7.2: sub-b1 reject profiler dump. The DIAG histogram above bins

@@ -7,7 +7,13 @@
  *    - A 100 µs gptimer drives the HV charge-pump state machine (pulse the
  *      FET until the cap-full comparator fires, then idle until next charge).
  *    - A GPIO edge ISR on PIN_GMC_COUNT_INPUT tallies tube pulses, rejecting
- *      double-counts inside GMC_DEAD_TIME_US (no Schmitt on the input pin).
+ *      double-counts inside GMC_DEAD_TIME_US. Whether the pin sees a Schmitt
+ *      input is BOARD-DEPENDENT: most carriers drive a bare CMOS pad, where the
+ *      count node's RC recovery ramp re-crosses the switching threshold and
+ *      produces the "b1" phantom population; a Schmitt buffer on the count path
+ *      removes it entirely (measured 2026-08-29 on the retrofitted field node:
+ *      b1 exactly 0.000 % over 277 k counts, and the accepted-pair floor moved
+ *      191 -> 280 µs). Do not assume either front end when reading this driver.
  *
  *  Consumers poll tube_read() to snapshot and reset the window accumulators.
  *  An optional per-pulse callback fires from ISR context for speaker/LED tick.
@@ -18,13 +24,47 @@
 
 #include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT
 
-// Si22G dead time (µs). Rejects rising-edge noise on the count input.
+// Fixed dead-time gate (µs): an edge becomes a count only if it follows the
+// last COUNTED pulse by more than this. Rejects contact/threshold noise and
+// double-counts on the count input, which is FALLING-edge triggered (see
+// count_cfg in tube_setup).
+//
+// ⚠ This is NOT the Si22G's dead time, despite what this comment claimed until
+// 2026-08-29. 190 µs is the SBM-20's documented figure, inherited from upstream
+// MultiGeiger when SBM-20 was the default tube and never revisited when the
+// default changed to Si22G.
+//
+// MEASURED 2026-08-29 per-edge under a ~3000 CPM source, one tube moved between
+// TWO boards on two different carriers: the Si22G count path's effective dead
+// time is 261-266 µs with a 10-90 % recovery ramp only 25-29 µs wide, and
+// detection efficiency is ~ZERO below ~253 µs. A third board was measured only
+// by the cruder single-bucket fit (247-264 µs, which assumes a hard cutoff and
+// so reads low), and a Schmitt-buffered field node independently floors at
+// 280 µs at background rate.
+//
+// It stays at 190 DELIBERATELY. The gate is a LOWER BOUND, not an estimate of
+// any tube's floor: it must sit above electrical ringing and below the recovery
+// floor of EVERY tube tube_types.c serves. 190 µs is close to the SBM-20's own
+// figure, so raising it to suit the Si22G would discard genuine SBM-20 counts at
+// elevated rates. Sitting under the measured floor is the safety margin, not an
+// error — and the gain would be negligible anyway: the afterpulse population
+// sits at 280-360 µs, ABOVE any gate value that could be proposed.
+//
+// ⚠ The dead time is also NOT a tube property alone. It is tube + carrier RC +
+// INPUT THRESHOLD: 261-266 µs on a bare CMOS input, >= 280 µs on the
+// Schmitt-buffered field node. The firmware cannot observe which front end it
+// has, so no single dead-time constant can be correct fleet-wide.
 #define GMC_DEAD_TIME_US 190
 
 // V2.5.12: number of edge-to-edge spacing buckets for the raw-edge count
 // profiler (see tube_get_diag) — lets a clean Poisson count path be told
 // apart from count-node ringing/noise.
-#define TUBE_DIAG_NBUCKETS 8
+// V2.7.6: 8 -> 10. The two extra buckets subdivide the old 190-500µs bucket at
+// 250 and 380µs, which is where the recovery ramp, the gate-escape population
+// and the afterpulse peak all sit; see the bin ladder in tube.c for the edges
+// and what each band means. The buckets above 500µs keep their original edges,
+// so their historical meaning is unchanged.
+#define TUBE_DIAG_NBUCKETS 10
 
 // --- V2.7.2: sub-b1 reject profiler (bench diagnostic, compile-time opt-in) ---
 // The b1 bucket (<190µs) of the tube_get_diag histogram carries a persistent
@@ -53,14 +93,23 @@
 // (A = V(t_cutoff) − V_th) without a scope. Note the 190µs bucket edge is NOT
 // that cutoff — it is the dead-time gate; edges past it are silently COUNTED.
 // ⚠ τ ≈ 190.4µs and GMC_DEAD_TIME_US = 190 are UNRELATED quantities that
-// happen to collide: the gate is the Si22G tube's own dead time (see above),
-// the τ is carrier RC. Do not read either as derived from the other.
+// happen to collide: the τ is carrier RC, while the gate is a borrowed SBM-20
+// noise-rejection figure (see GMC_DEAD_TIME_US above — the Si22G's own measured
+// floor is 261-266 µs, so the gate is not that tube's dead time either).
+// Do not read either as derived from the other, or from the tube.
 //
 // Off by default: the question this was built to answer is closed (the
 // Schmitt buffer took b1 from 8.34% to 0/4803 with the count rate
 // unchanged), so production pays nothing for it. Set to 1 to build the
 // facility back in -- the ring, the drain, and the timestamp store in the
 // 10kHz recharge_tick ISR all come back with it.
+//
+// ⚠ SCOPE, before you re-enable it to chase something: this records ONLY
+// `GMC_REJECT` edges, i.e. sub-190µs. The populations characterised on
+// 2026-08-29 -- gate escapes (190-250µs) and afterpulses (280-360µs) -- are
+// COUNTED, take a different arm of the switch, and are therefore structurally
+// invisible here. Use the DIAG edt_us[] histogram for those; its 190-250,
+// 250-380 and 380-500 buckets exist for exactly that purpose.
 #ifndef TUBE_REJLOG_ENABLE
 #define TUBE_REJLOG_ENABLE 0
 #endif
@@ -242,9 +291,12 @@ uint32_t tube_get_blanked_wide_total(void);
  *                       hv_coincident collapses toward 0 (the phantoms stop
  *                       being counted). 0 when off.
  *  @param hist          Out: edge-to-edge spacing histogram, TUBE_DIAG_NBUCKETS bins
- *                       (<50, <190, <500, <1k, <5k, <50k, <500k, >=500k µs). Real
- *                       ~1.2 cps pulses land in the top two bins; a fat low-bin
- *                       population is count-node ringing/noise.
+ *                       (<50, <190, <250, <380, <500, <1k, <5k, <50k, <500k,
+ *                       >=500k µs). Real background pulses land in the top two
+ *                       bins; a fat low-bin population is count-node
+ *                       ringing/noise. The three bins spanning 190-500µs are the
+ *                       diagnostic ones — escapes, recovery ramp, afterpulses —
+ *                       see the bin ladder in tube.c for what each contains.
  */
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
                    uint32_t *hv_coincident, uint32_t *hv_blanked,

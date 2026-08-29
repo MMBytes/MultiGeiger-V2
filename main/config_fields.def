@@ -410,12 +410,40 @@ X_U32 (pcnt_filter_width_ns,   "pcnt_filt_w", 4000,     250,     12000)
 // a quiet gap longer than this window; edges arriving inside the window (each
 // within `guard` of the PRIOR edge) extend the dead zone and are dropped — so
 // an afterpulse / re-trigger TRAIN collapses to a single count regardless of how
-// long the train is. The histogram-based dead-time gate (190µs) only catches the
-// 50-190µs afterpulse; this reaches the 1-5ms re-trigger population that the 4µs
+// long the train is. It reaches the 1-5ms re-trigger population that the 4µs
 // PCNT width filter cannot (a width filter is 3 orders of magnitude too short in
 // time). See reference_radiation_data_analysis (2026-06-14 overnight: ~60% of the
 // QT Py over-count is exactly this 1-5ms burst, the other ~40% is genuine and
 // unfilterable).
+//
+// ⚠ CORRECTION 2026-08-29: this block used to say the 190µs gate "only catches
+// the 50-190µs afterpulse". The sub-190µs population is NOT afterpulsing — it is
+// the count node's RC recovery ramp re-crossing the input threshold (a fast
+// electrical re-trigger, <250ns wide, no charge deposition), exactly as the
+// paragraph further down already explains. Real afterpulses were measured at
+// 280-360µs, ABOVE the gate, which therefore does not catch them at all.
+//
+// ⚠ THE GATE AND THE GUARD KEY ON DIFFERENT VARIABLES. The gate tests `dt`
+// (gap to the last COUNTED pulse); the guard tests `edt` (gap to the PREVIOUS
+// EDGE, counted or not). On a board with a large b1 population that difference
+// is most of the guard's effect, because a genuine count arriving shortly after
+// a phantom has a short `edt` while its `dt` is perfectly healthy.
+//
+// MEASURED COST, 2026-08-29 (b1 ~21% module on a Rev C V2 carrier, ~3100 CPM,
+// guard window 250µs): the guard's own counter gave 2.90 per 1000 counts and
+// per-edge classification of the same board gave 2.68 per 1000 — and of those,
+// **96% were GENUINE counts that merely trailed a b1 phantom by ~148µs**. Only
+// 0.075 per 1000 were real phantoms that had cleared the gate. Note that 96% is
+// the split at a 250µs window; it only worsens at the wider default. At the
+// DEFAULT 3000µs window on a ~90 CPM node, Poisson coincidence alone discards
+// ~4.5 genuine counts per 1000 before any such collateral, and proportionally
+// more as the count rate rises.
+//
+// ⚠ AND ITS TARGET POPULATION COULD NOT BE FOUND. Under a source on both boards
+// tested that day, the 1-5ms band sat at obs/exp 0.990 — no re-trigger train to
+// collapse. The 2026-06-14 QT Py overnight above remains its only evidence and
+// has not been reproduced since the Rev C carrier fix. Re-validate on a QT Py
+// before claiming any benefit from this knob.
 //
 // DIAGNOSTIC / characterisation tool, NOT a production "fix": it introduces a
 // board-dependent dead-time-loss term (steps the multi-year archive) and only

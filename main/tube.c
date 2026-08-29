@@ -273,15 +273,53 @@ static void IRAM_ATTR gmc_count_isr(void *arg) {
     uint32_t edt = UINT32_MAX;
     if (le != 0) {
         edt = clamp_u32(now - le);
+        // V2.7.6: bucket edges re-placed onto the MEASURED populations. The old
+        // ladder put one 310µs-wide bucket across 190-500µs, which is where the
+        // entire recovery ramp, the gate-escape population AND the afterpulse
+        // peak live — so any estimate drawn from it had to assume the shape it
+        // was trying to measure. Everything above 500µs is featureless Poisson
+        // and keeps its original edges, so those buckets stay comparable with
+        // the historical archive.
+        //   <190     b1: sub-gate edges (RC recovery-ramp re-crossings)
+        //   190-250  below the tube's recovery floor (efficiency ~0 under
+        //            ~253µs), so no genuine PAIR can land here.
+        //   250-380  the recovery ramp (10-90% = 250-279µs) plus the afterpulse
+        //            peak measured at 280-360µs.
+        //   380-500  clean tail, full detection efficiency.
+        //
+        // ⚠ These bins key on `edt` (gap to the previous EDGE), NOT on `dt` (gap
+        // to the previous COUNT), so 190-250 is a clean escape counter ONLY on a
+        // board with no b1 population. Where b1 is large the bin is DOMINATED by
+        // genuine counts whose previous edge happened to be a phantom: measured
+        // 2026-08-29 on a b1 ~21% board, 308 of 320 such edges (96%) were
+        // genuine, carrying the ~148µs recross signature in dt-edt, against just
+        // 9 true escapes. Reading this bin as "escapes" on such a board
+        // over-reports them by more than an order of magnitude. The 250-380 bin
+        // inherits a weaker form of the same contamination.
+        //
+        // The 190 literal below is deliberately NOT GMC_DEAD_TIME_US: this
+        // histogram is a TELEMETRY SCHEMA whose bucket meanings must stay fixed
+        // across firmware versions, while the gate is a tuning constant. They
+        // coincide today, and the assert makes any future divergence a build
+        // failure rather than a silent one. (`rejected` and bucket 1 were never
+        // exactly equal in any case — `rejected` keys on dt, the buckets on edt,
+        // so they agree only in the absence of burst structure — but moving the
+        // edge would decouple even that correspondence without warning.)
+        _Static_assert(GMC_DEAD_TIME_US == 190,
+                       "b1 bucket edge (190) and GMC_DEAD_TIME_US have diverged: "
+                       "decide deliberately whether the telemetry schema moves "
+                       "with the gate, then update this assert.");
         uint32_t b;
         if      (edt <     50) b = 0;
         else if (edt <    190) b = 1;
-        else if (edt <    500) b = 2;
-        else if (edt <   1000) b = 3;
-        else if (edt <   5000) b = 4;
-        else if (edt <  50000) b = 5;
-        else if (edt < 500000) b = 6;
-        else                   b = 7;
+        else if (edt <    250) b = 2;
+        else if (edt <    380) b = 3;
+        else if (edt <    500) b = 4;
+        else if (edt <   1000) b = 5;
+        else if (edt <   5000) b = 6;
+        else if (edt <  50000) b = 7;
+        else if (edt < 500000) b = 8;
+        else                   b = 9;
         isr_dt_hist[b]++;
     }
     isr_last_edge_us = now;

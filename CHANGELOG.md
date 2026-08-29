@@ -9,6 +9,86 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.6 — finer count-path telemetry, and an honest dead-time constant
+
+**In short:**
+
+1. **The `DIAG` log line has changed** — the edge-spacing histogram now has ten
+   buckets instead of eight, splitting the old 190–500 µs bucket at 250 µs and
+   380 µs. **Log parsers need updating.** Buckets above 500 µs are untouched.
+2. **The dead-time constant is now documented honestly.** `GMC_DEAD_TIME_US`
+   (190 µs) was described in the code as the Si22G's dead time. It is not — it
+   is the SBM-20's figure, inherited from upstream. The Si22G count path
+   actually recovers in 261–266 µs. **The value is unchanged and counting is
+   unaffected.**
+3. **The dead-time guard now states what it costs** — on `/config` and in its
+   field documentation. At its default window and typical background rates,
+   chance coincidence alone discards roughly 4.5 genuine counts per 1000, and
+   the population it was built to remove could not be found on either board
+   tested. **Default unchanged; it stays off.**
+4. **Two compile-time assertions** so that a future change to the gate value or
+   the bucket count fails the build rather than silently mislabelling telemetry.
+5. **Nothing about counting, dose, uploads or your saved settings changes.**
+
+The detail, for anyone who wants it:
+
+A Geiger-Müller tube is blind for a short interval after each pulse while the
+gas de-ionises, and the firmware has always rejected edges arriving inside
+190 µs of the last count. That 190 µs was never measured for the tube this
+project defaults to. It came from the SBM-20 — the original default tube — and
+stayed put when the default changed to the Si22G.
+
+Measuring it needed a radioactive source rather than patience: genuine close
+pairs scale as the square of the count rate while spurious edges scale linearly,
+so raising the rate roughly thirty-fold separates two populations that are
+hopelessly mixed at background. Logging every edge's spacing individually across
+a window straddling the gate then gives the tube's recovery directly, instead of
+inferring it. Two boards on different carrier designs, sharing one tube, agreed
+to within 5 µs: **detection efficiency is zero below about 253 µs, rises over a
+ramp only 25–29 µs wide, and reaches full sensitivity by 280 µs.** A field node
+fitted with a Schmitt buffer on its count input, running at ordinary background
+levels on a third carrier, independently shows its closest pair in 23 hours at
+280 µs — which is what that curve predicts.
+
+So the gate sits about 25 % below the tube's real floor — and that is correct.
+The gate is a lower bound, not an estimate: it has to clear electrical ringing
+while staying under the recovery floor of *every* tube the firmware supports,
+and 190 µs is close to the SBM-20's own figure. Raising it to suit one tube
+would start discarding genuine counts from another at high rates. It also would
+have bought almost nothing: the afterpulse population measured at 280–360 µs,
+above any gate value that could sensibly be proposed.
+
+That measurement is also what motivated the new buckets. Everything interesting
+in this histogram happens between 190 µs and 500 µs — the recovery ramp, the
+occasional spurious edge that clears the gate, and the afterpulse peak — and all
+of it was previously collapsed into a single 310 µs-wide bin, which is why the
+question needed a special-purpose firmware build to answer at all. Split at 250
+and 380 µs, each band now holds one population — on a board whose count input is
+otherwise quiet. Where a board produces many spurious narrow edges the bands
+blur, because the histogram measures the gap to the previous *edge* rather than
+to the previous *count*, so a genuine pulse arriving shortly after a spurious one
+lands lower than it belongs. On a clean board, the question that previously
+needed a custom firmware build is now answerable from ordinary logs.
+
+Two smaller corrections ride along. The count input is falling-edge triggered,
+not rising, as one comment claimed. And the sub-190 µs population is not
+afterpulsing but the count node's own RC recovery ramp re-crossing the input
+threshold — which the surrounding comment block already explained correctly a
+few paragraphs further down, contradicting itself.
+
+Finally, the dead-time guard. It is an optional, off-by-default filter meant to
+collapse re-trigger bursts. It turns out to be far blunter than its description
+suggested, for a structural reason: the guard tests the gap to the previous
+*edge*, while the counting gate tests the gap to the previous *count*. On a
+board with a large spurious-edge population those are very different questions,
+and 96 % of what the guard removed was genuine counts whose only fault was
+arriving shortly after a spurious edge. Its own target population, meanwhile,
+was not detectable on any board tested. Nothing about its behaviour or default
+changes here — but the numbers are now written where someone deciding whether to
+switch it on will see them.
+
+---
+
 ## V2.7.5 — the pulse tick goes quiet for a firmware update
 
 **In short:**

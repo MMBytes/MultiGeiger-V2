@@ -89,7 +89,13 @@ static inline bool https_redirect_location(const char *host, const char *uri,
 // user setting (ntp.c setenv("TZ")), which makes mktime()/localtime() local
 // time, and X.509 validity must be UTC.
 
-/** @brief Days since 1970-01-01 for a civil UTC date (month 1..12, day 1..31). */
+/** @brief Days since 1970-01-01 for a civil UTC date (month 1..12, day 1..31).
+ *
+ *  @param y  Proleptic-Gregorian year (e.g. 2026).
+ *  @param m  Month 1..12.
+ *  @param d  Day of month 1..31.
+ *  @return Days since 1970-01-01 (negative before the epoch).
+ */
 static inline int64_t civil_to_epoch_days(int y, unsigned m, unsigned d) {
     y -= (m <= 2);
     const int      era = (y >= 0 ? y : y - 399) / 400;
@@ -100,7 +106,16 @@ static inline int64_t civil_to_epoch_days(int y, unsigned m, unsigned d) {
 }
 
 /** @brief UTC epoch seconds for a civil date-time. No range checks — callers
- *         pass either constants or fields already validated by mbedTLS. */
+ *         pass either constants or fields already validated by mbedTLS.
+ *
+ *  @param y   Proleptic-Gregorian year (e.g. 2026).
+ *  @param m   Month 1..12.
+ *  @param d   Day of month 1..31.
+ *  @param hh  Hour 0..23.
+ *  @param mm  Minute 0..59.
+ *  @param ss  Second 0..60.
+ *  @return UTC seconds since 1970-01-01T00:00:00Z.
+ */
 static inline int64_t civil_to_epoch(int y, unsigned m, unsigned d,
                                      unsigned hh, unsigned mm, unsigned ss) {
     return civil_to_epoch_days(y, m, d) * 86400 + (int64_t)hh * 3600 + (int64_t)mm * 60 + ss;

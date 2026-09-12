@@ -1423,3 +1423,19 @@
 #else
     #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
 #endif
+
+// --- Derived feature gates ----------------------------------------------------
+// Cross-board switches computed from the per-board block above. Keep them here
+// rather than repeating a line in every board block.
+
+/** @brief HTTPS web server (port 443 + a :80 redirector) — V2.8.0.
+ *
+ *  Tied to PSRAM because mbedTLS's server-side I/O buffers (16 KB in +
+ *  4 KB out per connection with the asymmetric setting, plus handshake
+ *  state) come out of PSRAM via CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC. The
+ *  Heltec V2's ~13 KB min-free internal heap cannot host a TLS server.
+ *  Flip per board only together with the X.509-writer Kconfig in
+ *  sdkconfig.defaults.psram: with HAL_HAS_HTTPS=1 and
+ *  CONFIG_MBEDTLS_X509_CREATE_C off, tls_cert.c fails to link.
+ */
+#define HAL_HAS_HTTPS   HAL_HAS_PSRAM

@@ -72,6 +72,7 @@ idf_component_register(
         esp_lcd                # V2.6.11: built-in ST7789 panel driver (display_tft.c) — no idf_component.yml entry, ships in-tree
         esp_http_client
         esp_http_server
+        esp_https_server       # V2.8.0: TLS wrapper around esp_http_server (PSRAM boards; garbage-collected elsewhere)
         esp-tls
         mbedtls
         lwip

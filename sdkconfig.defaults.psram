@@ -48,3 +48,31 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=24
 # S3/C5 (already 800 on the ESP32-PICO boards). Pin it so CI (fresh
 # sdkconfig) and the local caches agree on the panic threshold.
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+
+# V2.8.0: HTTPS web server on PSRAM boards (design spec
+# docs/superpowers/specs/2026-09-12-https-web-server-design.md, D10/D11).
+# The TLS server session buffers land in PSRAM via the shared
+# CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y, which is why this is gated on PSRAM
+# and NOT enabled for the Heltec V2 (~13 KB min-free heap, see memory
+# reference_heltec_v2_heap_oom_and_ota_teardown).
+#
+# ESP_HTTPS_SERVER_ENABLE is documentation plus the dependency for the
+# events knob below: the component's source compiles unconditionally in
+# IDF 6.0.x, so a stale cache would still build. The symbol that DOES break
+# the build when missing is MBEDTLS_X509_CREATE_C (mbedtls_x509write_*).
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+# No listener for ESP_HTTPS_SERVER_EVENT either (see HTTPD_ENABLE_EVENTS in
+# sdkconfig.defaults). Saves one esp_event_post malloc per TLS session.
+CONFIG_ESP_HTTPS_SERVER_EVENTS=n
+# X.509 certificate WRITING (self-signed per-device cert on first boot).
+# Reading/verifying was always on; the writer defaults to n in IDF. The CSR
+# writer defaults to y once CREATE_C is on; we never issue a CSR.
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+# CONFIG_MBEDTLS_X509_CSR_WRITE_C is not set
+# Two httpd instances (443 + the :80 instance). esp_http_server only checks
+# max_open_sockets + 3 PER INSTANCE against this limit (5+3 and 3+3 both
+# pass at the old default of 10); the real risk is a runtime accept()
+# failure with MQTT, FTPS (2), the HTTPS upload client, syslog UDP and SNTP
+# already holding descriptors. 20 leaves room.
+CONFIG_LWIP_MAX_SOCKETS=20

@@ -245,3 +245,13 @@ CONFIG_ESP_COREDUMP_LOGS=y
 # every build; removing them is the right cleanup.
 CONFIG_ESP_COREDUMP_CHECK_BOOT=y
 CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
+
+# V2.8.0 / IDF 6.0.3: esp_http_server posts ESP_HTTP_SERVER_EVENT on every
+# session and request via esp_event_post (a malloc each). Nothing in this
+# firmware registers for it, so it is pure heap churn. Off on every board.
+CONFIG_HTTPD_ENABLE_EVENTS=n
+# NOTE: the 6.0.3 release notes also mention a HTTPD_MAX_REQ_BODY_LEN_KB
+# Kconfig for the request-smuggling fix. No such symbol exists in the v6.0.3
+# tag (checked 2026-09-12: components/esp_http_server/Kconfig has only the
+# header-length limit; httpd_parse.c rejects Content-Length > UINT32_MAX and
+# casts correctly). Do not add it — an unknown symbol here is silently ignored.

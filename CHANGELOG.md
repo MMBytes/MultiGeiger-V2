@@ -9,6 +9,45 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.7.7 — toolchain: ESP-IDF v6.0.3
+
+**In short:**
+
+1. **ESP-IDF v6.0.3** (from v6.0.2). No firmware code changes. Rebuilt on
+   the new toolchain, which fixes a Content-Length truncation in the
+   on-device HTTP server (a header above 32 bits was cast down, which allowed
+   request smuggling on a keep-alive connection; it is now rejected), several
+   lwIP fixes (DHCP client and server hardening, DNS multi-record overflow,
+   TCP out-of-sequence handling), WiFi fixes for the PSRAM boards, and an
+   SD-card re-initialisation fix.
+2. **Three defaults the new IDF moved are now pinned** so every board builds
+   the same way locally and in CI: the HTTP server's esp_events are off
+   (nothing in the firmware listens for them, and each one cost a malloc per
+   request); the interrupt watchdog is 800 ms on PSRAM boards (the new IDF
+   default for S3/C5, matching the ESP32 boards); cross-signed CA-bundle
+   verification stays **off on the Heltec V2** to protect its heap, and is on
+   elsewhere as the new default.
+3. **Binary sizes** grew by roughly 2–7 KB per board; deployed behaviour is
+   unchanged. `/` may report a slightly different "Min free heap" after the
+   update: the IDF corrected how that minimum is calculated. It is not a
+   regression.
+
+| Board | V2.7.7 `geiger_v2.bin` | App slot free |
+|---|---|---|
+| heltec_v2 | 1 321 712 B | 37 % |
+| heltec_v2_4mb | 1 321 728 B | 33 % |
+| feathers3_d | 1 355 024 B | 35 % |
+| adafruit_qtpy_esp32_pico | 1 344 080 B | 36 % |
+| seeed_xiao_esp32s3 | 1 336 752 B | 36 % |
+| heltec_wifi_lora32_v4_r2 | 1 426 128 B | 32 % |
+| sparkfun_thing_plus_esp32s3 | 1 427 920 B | 27 % |
+| sparkfun_thing_plus_esp32c5 | 1 629 200 B | 22 % |
+| adafruit_esp32s3_tft_feather | 1 388 928 B | 29 % |
+| adafruit_esp32_feather_v2 | 1 408 432 B | 33 % |
+| adafruit_esp32s3_feather_4mb_2mbpsram | 1 360 032 B | 31 % |
+
+---
+
 ## V2.7.6 — finer count-path telemetry, and an honest dead-time constant
 
 **In short:**

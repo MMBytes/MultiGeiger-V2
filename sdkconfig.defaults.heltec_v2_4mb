@@ -31,3 +31,9 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
 # CONFIG_MBEDTLS_DYNAMIC_BUFFER is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA is not set
 # CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT is not set
+
+# IDF 6.0.3 turns cross-signed CA-bundle verification on by default (~700 B
+# extra heap per TLS client handshake). This board sits at ~13 KB min-free
+# (memory reference_heltec_v2_heap_oom_and_ota_teardown); keep the 6.0.2
+# behaviour until a bench heap check says otherwise.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=n

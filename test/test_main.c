@@ -9,9 +9,9 @@
 // via the `host-test` job.
 //
 // Scope: the pure, header-only modules — main/util.h, main/tube_logic.h,
-// main/lorawan_codec.h and (V2.7.3+) main/env_api.h. Anything that depends
-// on IDF / FreeRTOS / hardware (NVS, HTTP handlers, sensor drivers,
-// transmission orchestrator) is out of scope — would need on-target Unity
+// main/lorawan_codec.h, (V2.7.3+) main/env_api.h and (V2.8.0+) main/tls_logic.h.
+// Anything that depends on IDF / FreeRTOS / hardware (NVS, HTTP handlers, sensor
+// drivers, transmission orchestrator) is out of scope — would need on-target Unity
 // or QEMU. Note the boundary this draws for env_api.h: it covers the wire
 // format on both sides (format, parse, round-trip), but NEVER the handler
 // that fills the struct from main_status_t, so a unit mix-up there is
@@ -32,6 +32,7 @@
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
+#include "tls_logic.h"       // fingerprint_hex, https_redirect_location, civil_to_epoch (V2.8.0 HTTPS)
 
 static int g_failures = 0;
 
@@ -1349,6 +1350,189 @@ static int test_tick_defer_clear_cancels_pending(void) {
     return 1;
 }
 
+// --- tls_logic.h: fingerprint_hex ------------------------------------------
+// V2.8.0: the /status "Certificate" line and the boot log both print the
+// SHA-256 fingerprint of the self-signed cert. 32 bytes -> 95 chars + NUL.
+
+static int test_fingerprint_hex_32_bytes(void) {
+    uint8_t d[32];
+    for (int i = 0; i < 32; i++) d[i] = (uint8_t)(i * 8 + 1);   // 01 09 11 ... F9
+    char out[96];
+    EXPECT_INT(fingerprint_hex(d, sizeof(d), out, sizeof(out)), 1);
+    EXPECT_INT((int)strlen(out), 95);
+    EXPECT_INT(strncmp(out, "01:09:11:19:", 12), 0);
+    EXPECT_STREQ(out + 93, "F9");
+    return 1;
+}
+
+static int test_fingerprint_hex_uppercase_and_colons(void) {
+    uint8_t d[3] = { 0xAB, 0x00, 0xFF };
+    char out[16];
+    EXPECT_INT(fingerprint_hex(d, 3, out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "AB:00:FF");
+    return 1;
+}
+
+static int test_fingerprint_hex_exact_fit(void) {
+    uint8_t d[2] = { 0x12, 0x34 };
+    char out[6];   // "12:34" + NUL = 6 = n*3 exactly
+    EXPECT_INT(fingerprint_hex(d, 2, out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "12:34");
+    return 1;
+}
+
+static int test_fingerprint_hex_too_small_fails_and_empties(void) {
+    uint8_t d[2] = { 0x12, 0x34 };
+    char out[5] = "junk";
+    EXPECT_INT(fingerprint_hex(d, 2, out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_fingerprint_hex_zero_len_fails(void) {
+    uint8_t d[1] = { 0 };
+    char out[4] = "x";
+    EXPECT_INT(fingerprint_hex(d, 0, out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+// --- tls_logic.h: https_redirect_location ----------------------------------
+// V2.8.0: the :80 instance answers every non-plain request with
+// "301 Location: https://<Host without :port><uri>". Host is attacker-
+// controlled text from the request, so the builder must fail closed on
+// anything odd rather than emit a half-formed URL.
+
+static int test_redirect_basic(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("10.0.0.7", "/config", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://10.0.0.7/config");
+    return 1;
+}
+
+static int test_redirect_strips_port(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("10.0.0.7:80", "/", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://10.0.0.7/");
+    return 1;
+}
+
+static int test_redirect_keeps_query(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("geiger.lan", "/log?tail=1", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://geiger.lan/log?tail=1");
+    return 1;
+}
+
+static int test_redirect_rejects_empty_host(void) {
+    char out[128] = "junk";
+    EXPECT_INT(https_redirect_location("", "/", out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_redirect_rejects_port_only_host(void) {
+    char out[128] = "junk";
+    EXPECT_INT(https_redirect_location(":80", "/", out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_redirect_rejects_ipv6_literal(void) {
+    char out[128] = "junk";
+    EXPECT_INT(https_redirect_location("[fe80::1]:80", "/", out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_redirect_rejects_uri_without_slash(void) {
+    char out[128] = "junk";
+    EXPECT_INT(https_redirect_location("10.0.0.7", "config", out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_redirect_truncation_fails_and_empties(void) {
+    char out[20] = "junk";   // "https://10.0.0.7/config" is 23 chars
+    EXPECT_INT(https_redirect_location("10.0.0.7", "/config", out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_redirect_exact_fit(void) {
+    char out[24];   // 23 chars + NUL
+    EXPECT_INT(https_redirect_location("10.0.0.7", "/config", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://10.0.0.7/config");
+    return 1;
+}
+
+static int test_redirect_null_args_fail(void) {
+    char out[8] = "junk";
+    EXPECT_INT(https_redirect_location(NULL, "/", out, sizeof(out)), 0);
+    EXPECT_INT(https_redirect_location("h", NULL, out, sizeof(out)), 0);
+    EXPECT_INT(https_redirect_location("h", "/", NULL, 8), 0);
+    EXPECT_INT(https_redirect_location("h", "/", out, 0), 0);
+    return 1;
+}
+
+// --- tls_logic.h: civil_to_epoch / epoch_to_generalized_time -----------------
+// V2.8.0: certificate validity is written as X.509 GeneralizedTime in UTC and
+// read back from mbedtls_x509_time fields. The device's TZ is user-set (ntp.c
+// calls setenv("TZ")), so mktime()/localtime() are unusable here; these two
+// are TZ-free by construction. Reference values from `date -u -d @N`.
+
+static int test_civil_epoch_origin(void) {
+    EXPECT_INT(civil_to_epoch(1970, 1, 1, 0, 0, 0), 0);
+    return 1;
+}
+
+static int test_civil_epoch_2026_01_01(void) {
+    EXPECT_INT((long)civil_to_epoch(2026, 1, 1, 0, 0, 0), 1767225600L);
+    return 1;
+}
+
+static int test_civil_epoch_leap_day(void) {
+    // 2000-03-01 00:00Z = 951868800; the day before is 2000-02-29.
+    EXPECT_INT((long)civil_to_epoch(2000, 2, 29, 0, 0, 0), 951868800L - 86400L);
+    return 1;
+}
+
+static int test_civil_epoch_time_of_day(void) {
+    EXPECT_INT((long)civil_to_epoch(2026, 1, 1, 12, 34, 56), 1767225600L + 12L * 3600 + 34L * 60 + 56);
+    return 1;
+}
+
+static int test_generalized_time_format(void) {
+    char out[15];
+    EXPECT_INT(epoch_to_generalized_time(1767225600LL, out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "20260101000000");
+    return 1;
+}
+
+static int test_generalized_time_800_days_later(void) {
+    // 2026-01-01 + 800 d = 2028-03-11 (2026: 365, 2027: 365, 2028 is leap:
+    // Jan 31 + Feb 29 + Mar 10 = 70 -> day 800 lands on Mar 11).
+    char out[15];
+    EXPECT_INT(epoch_to_generalized_time(1767225600LL + 800LL * 86400, out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "20280311000000");
+    return 1;
+}
+
+static int test_generalized_time_roundtrip(void) {
+    const int64_t t = civil_to_epoch(2031, 12, 31, 23, 59, 59);
+    char out[15];
+    EXPECT_INT(epoch_to_generalized_time(t, out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "20311231235959");
+    return 1;
+}
+
+static int test_generalized_time_buffer_too_small(void) {
+    char out[14] = "junk";
+    EXPECT_INT(epoch_to_generalized_time(0, out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -1503,6 +1687,35 @@ int main(void) {
     RUN(test_tick_defer_sustained_requests_starve_the_tick);
     RUN(test_tick_defer_clear_cancels_pending);
     RUN(test_tick_defer_reusable_after_clear);
+
+    printf("== tls_logic: fingerprint_hex ==\n");
+    RUN(test_fingerprint_hex_32_bytes);
+    RUN(test_fingerprint_hex_uppercase_and_colons);
+    RUN(test_fingerprint_hex_exact_fit);
+    RUN(test_fingerprint_hex_too_small_fails_and_empties);
+    RUN(test_fingerprint_hex_zero_len_fails);
+
+    printf("== tls_logic: https_redirect_location ==\n");
+    RUN(test_redirect_basic);
+    RUN(test_redirect_strips_port);
+    RUN(test_redirect_keeps_query);
+    RUN(test_redirect_rejects_empty_host);
+    RUN(test_redirect_rejects_port_only_host);
+    RUN(test_redirect_rejects_ipv6_literal);
+    RUN(test_redirect_rejects_uri_without_slash);
+    RUN(test_redirect_truncation_fails_and_empties);
+    RUN(test_redirect_exact_fit);
+    RUN(test_redirect_null_args_fail);
+
+    printf("== tls_logic: civil_to_epoch / generalized time ==\n");
+    RUN(test_civil_epoch_origin);
+    RUN(test_civil_epoch_2026_01_01);
+    RUN(test_civil_epoch_leap_day);
+    RUN(test_civil_epoch_time_of_day);
+    RUN(test_generalized_time_format);
+    RUN(test_generalized_time_800_days_later);
+    RUN(test_generalized_time_roundtrip);
+    RUN(test_generalized_time_buffer_too_small);
 
     printf("\n");
     if (g_failures == 0) {

@@ -12,6 +12,7 @@ idf_component_register(
         "main.c"
         "config.c"
         "http_server.c"
+        "tls_cert.c"
         "tube.c"
         "tube_pcnt.c"
         "tube_types.c"

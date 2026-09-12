@@ -49,6 +49,7 @@
 #include "speaker.h"
 #include "syslog.h"
 #include "telemetry.h"          // V2.6.19: standalone mode — neutral column registry
+#include "tls_cert.h"          // V2.8.0: per-device HTTPS credential (PSRAM boards)
 #include "transmission.h"
 #include "tube.h"
 #include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
@@ -1557,7 +1558,7 @@ void app_main(void) {
     const bool have_sta_creds = g_have_sta_creds;
 
     // Boot AP: always up for AP_WINDOW_US so a fresh device is configurable
-    // at http://192.168.4.1/config even before STA is set. SSID comes from
+    // at http(s)://192.168.4.1/config even before STA is set. SSID comes from
     // cfg.ap_name (defaulted to g_chip_id above when empty).
     wifi_config_t apc = { 0 };
     // V2.5.20 (review R5): ssid_len must be the bytes actually IN the buffer.
@@ -1688,6 +1689,12 @@ void app_main(void) {
     }
     tx_setup();
     lorawan_setup();
+    // V2.8.0: provision (or load) the per-device TLS credential BEFORE the
+    // web server starts — http_server_start() reads the PEM pointers. On
+    // non-HTTPS boards this is an inline stub returning ESP_ERR_NOT_SUPPORTED
+    // and http_server_start() ignores it. A failure here is logged inside
+    // tls_cert and http_server_start() falls back to plain HTTP (design D9).
+    tls_cert_ensure(g_chip_id);
     http_server_start(&g_cfg, g_chip_id);
     log_ftp_init(g_chip_id, &g_cfg);
     // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.
@@ -1723,8 +1730,8 @@ void app_main(void) {
              (char *)apc.ap.ssid, apc.ap.authmode);
     if (!have_sta_creds) {
         ESP_LOGW(TAG, "no WiFi SSID configured — AP-only. "
-                 "Join %s and browse to http://192.168.4.1/config",
-                 (char *)apc.ap.ssid);
+                 "Join %s and browse to %s://192.168.4.1/config",
+                 (char *)apc.ap.ssid, HAL_HAS_HTTPS ? "https" : "http");
     }
     ESP_LOGI(TAG, "esp_wifi_start()");
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -1827,6 +1834,28 @@ void app_main(void) {
 
         ntp_poll();
         gnss_poll();   // V2.5.8: drain GNSS I²C + GPS-primary clock discipline (no-op if absent)
+
+#if HAL_HAS_HTTPS
+        // V2.8.0: once per boot, after STA has an IP and the clock is sane
+        // (the same two gates MQTT waits for below), make sure the TLS
+        // certificate names the address people actually browse to and is not
+        // about to expire. A re-issue takes effect on the reboot requested
+        // here; the running TLS server holds its own copy of the old PEM.
+        // Skipped while an OTA is in progress — the reboot would kill it.
+        static bool tls_reconciled = false;
+        if (!tls_reconciled && n_got_ip > 0 && ntp_time_valid() && !main_ota_in_progress()) {
+            tls_reconciled = true;
+            esp_netif_t *sta_if = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            esp_netif_ip_info_t ipi = { 0 };
+            if (sta_if && esp_netif_get_ip_info(sta_if, &ipi) == ESP_OK && ipi.ip.addr != 0) {
+                bool reissued = false;
+                if (tls_cert_reconcile(g_chip_id, ipi.ip.addr, &reissued) == ESP_OK && reissued) {
+                    ESP_LOGW(TAG, "TLS certificate re-issued for the current address — rebooting to load it");
+                    main_request_restart();
+                }
+            }
+        }
+#endif
 
         // V2.4.12: start MQTT only once both preconditions hold (see boot
         // section comment above). n_got_ip>0 means STA has reached the LAN

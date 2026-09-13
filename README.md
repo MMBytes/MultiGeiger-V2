@@ -18,7 +18,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 - **Remote syslog** (UDP 514, RFC 5424) for centralised log aggregation.
 - **Hourly FTP/FTPS** upload of the on-device log ring buffer.
 - **CPM history graph** on `/status` — 60-minute and 24-hour inline SVG with gridlines and a `HH:MM` time axis; rolling **cpm5 / cpm15** 5- and 15-minute averages fed to GMCMap and ThingSpeak.
-- **Web UI** at `http://<device>/` — `/config` (settings), `/status` (live metrics + per-target TX stats + per-sensor presence + CPM graph), `/update` (OTA), `/log` (in-memory log ring).
+- **Web UI** at `http://<device>/` — `/config` (settings), `/status` (live metrics + per-target TX stats + per-sensor presence + CPM graph), `/update` (OTA), `/log` (in-memory log ring). On PSRAM boards, ticking **Serve the web UI over HTTPS** on `/config` (off by default; applies after "Save and restart") moves the UI to `https://<device>/` with a per-device self-signed certificate (`/cert.pem` to import, SHA-256 fingerprint on `/`); port 80 then keeps `/log`, `/api/env` and `/cert.pem` plain and redirects everything else.
 - **Crash recovery**: ESP-IDF panic handler writes a coredump to a dedicated flash partition; downloadable post-reboot via `GET /coredump.elf` (no USB required).
 - **OLED status display** (SSD1306 128×64, also supports SparkFun SerLCD I²C and NeoPixel tick on supported boards).
 - **NTP** with up to three configurable servers and POSIX TZ string.

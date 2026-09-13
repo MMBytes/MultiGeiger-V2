@@ -9,6 +9,74 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.0 — HTTPS for the node web UI (opt-in, PSRAM boards)
+
+**In short:**
+
+1. **The web UI can now be served over TLS on port 443** on every PSRAM board
+   (all boards except the two Heltec V2 variants). It is **off by default**:
+   nothing changes after this update until you tick *Serve the web UI over
+   HTTPS* on `/config` and use *Save and restart*. Nodes that never leave
+   their own access point, or that run LoRaWAN only, are best left off.
+2. **What enabling does.** On the next boot the node generates its own ECDSA
+   P-256 key and a self-signed CA certificate (only after the radio is up, so
+   the key has real entropy), starts serving on 443, and — once it has its
+   LAN address and the time — re-issues the certificate to include that
+   address and **reboots once more**. After that the certificate is kept in
+   NVS and survives reboots and OTAs; it is renewed automatically within its
+   last 30 days (800-day life) — on a node that has a valid clock; one that
+   never reaches NTP keeps a fixed window ending 2028-03-11 and will show an
+   expired-certificate warning after that. Give the node a DHCP reservation:
+   an address change means one more re-issue and reboot.
+3. **The browser warns once per device.** Compare the SHA-256 fingerprint on
+   `/` with the one in the warning, then either accept it or import
+   `/cert.pem` into your OS or browser trust store to end the warning. ⚠️ A
+   certificate imported into an OS **Root** store is a certificate
+   authority for that browser: whoever holds this device's private key
+   (plaintext in NVS, present in `/coredump.elf`) could then sign
+   certificates for any site that browser trusts. Prefer per-site or
+   per-browser trust where your platform offers it, and never post a
+   coredump from an HTTPS-enabled node to a public forum.
+4. **Port 80 stays up for machines.** `/log`, `/api/env` and `/cert.pem` are
+   still served plain, so scripts and peer nodes keep working unchanged.
+   Every other `http://<device>/…` request, any method, answers `301` to
+   the same path on `https://`.
+5. **Why.** `/config`, `/update` and the other protected routes use HTTP Basic
+   auth, which sends `admin:<AP password>` base64-encoded in the clear on every
+   request; the AP password is also the WPA2 key of the provisioning AP. After
+   your first HTTPS login, **change the AP password** if the node was ever
+   used over plain HTTP from that browser: browsers cache Basic credentials and
+   send them to port 80 before they see the redirect.
+6. **OTA over TLS.** `/update` works over HTTPS and rides through WiFi gaps of
+   up to 15 × 10 s. Scripted uploads with curl must add `-H "Expect:"`
+   (the server does not implement `100 Continue`; without it curl stalls).
+7. **Also in this release:** two concurrent `/log` readers can no longer
+   corrupt each other's output (the second gets `503` with `Retry-After: 2`,
+   also protects the FTPS uploader); `/` gains an `httpd stack headroom`
+   line on every board; HEAD requests to the redirector get no body.
+8. **Build:** the HTTPS server, the mbedTLS X.509 writer and
+   `CONFIG_LWIP_MAX_SOCKETS=20` are enabled in `sdkconfig.defaults.psram`
+   only. New `HAL_HAS_HTTPS` gate in `hal.h`; new config field `https_enable`
+   (NVS `https_en`); new modules `tls_cert.c/.h` and header-only
+   `tls_logic.h` (host-tested). Heltec V2 builds are unchanged apart from the
+   shared log-guard code and the new config field.
+
+| Board | V2.8.0 `geiger_v2.bin` | App slot free | vs V2.7.7 |
+|---|---|---|---|
+| heltec_v2 | 1 322 512 B | 37 % | +800 B |
+| heltec_v2_4mb | 1 322 528 B | 33 % | +800 B |
+| feathers3_d | 1 378 560 B | 34 % | +23 536 B |
+| adafruit_qtpy_esp32_pico | 1 367 392 B | 35 % | +23 312 B |
+| seeed_xiao_esp32s3 | 1 360 304 B | 35 % | +23 552 B |
+| heltec_wifi_lora32_v4_r2 | 1 449 456 B | 31 % | +23 328 B |
+| sparkfun_thing_plus_esp32s3 | 1 451 360 B | 26 % | +23 440 B |
+| sparkfun_thing_plus_esp32c5 | 1 656 096 B | 21 % | +26 896 B |
+| adafruit_esp32s3_tft_feather | 1 412 400 B | 28 % | +23 472 B |
+| adafruit_esp32_feather_v2 | 1 432 800 B | 32 % | +24 368 B |
+| adafruit_esp32s3_feather_4mb_2mbpsram | 1 383 600 B | 30 % | +23 568 B |
+
+---
+
 ## V2.7.7 — toolchain: ESP-IDF v6.0.3
 
 **In short:**

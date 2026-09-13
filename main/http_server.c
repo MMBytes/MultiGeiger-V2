@@ -24,8 +24,8 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "mbedtls/base64.h"
-#include "mbedtls/net_sockets.h"   // V2.8.0: MBEDTLS_ERR_NET_RECV_FAILED — how a
-                                   // TLS recv timeout reaches update_post
+#include "esp_tls_errors.h"   // V2.8.0: ESP_TLS_ERR_SSL_WANT_READ/_WRITE — how
+                              // a TLS recv timeout reaches update_post
 
 #include "version.h"
 #include "applog.h"
@@ -3103,29 +3103,23 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         if (want > OTA_CHUNK) want = OTA_CHUNK;
         int r = httpd_req_recv(req, buf, want);
         // V2.8.0: a stalled read looks different per transport. Plain HTTP
-        // gives HTTPD_SOCK_ERR_TIMEOUT (-3); over TLS the socket is blocking
-        // with SO_RCVTIMEO, so mbedtls_net_recv never returns WANT_READ and
-        // the timeout surfaces as MBEDTLS_ERR_NET_RECV_FAILED (-0x004C) via
-        // esp-tls and httpd_ssl_recv. `received > 0` gates that code because
-        // httpd_recv_with_opt drains the session's pending buffer (body bytes
-        // that arrived with the headers) into `buf` BEFORE recv and preserves
-        // them only for a TIMEOUT — retrying the FIRST body read would drop
-        // them, so a first-read stall still aborts. remaining_len is untouched
-        // on a negative return, so each retry asks for exactly the same bytes.
-        // Retrying a -0x004C is an IMPLEMENTATION dependency, not a contract:
-        // ssl.h:4994-5002 calls every non-positive mbedtls_ssl_read outside
-        // WANT_READ/WANT_WRITE/ASYNC/CRYPTO_IN_PROGRESS/CLIENT_RECONNECT/
-        // EARLY_DATA terminal for the SSL context. It works only because for
-        // stream transport ssl_msg.c:2034 hands the BIO error back unchanged
-        // and keeps in_left, so the next call resumes the same partially read
-        // record. RE-CHECK THIS ON EVERY mbedTLS UPGRADE. A genuinely dead
-        // socket still aborts on the first error rather than burning the
-        // budget: a peer reset is ECONNRESET/EPIPE -> MBEDTLS_ERR_NET_CONN_RESET
-        // (-0x0050, net_sockets.c:552), and the ENOTCONN/EHOSTUNREACH class
-        // that does map to -0x004C (:560) returns at once instead of blocking
-        // out the recv timeout.
+        // gives HTTPD_SOCK_ERR_TIMEOUT (-3); over TLS a recv_wait_timeout
+        // expiry arrives as WANT_READ (-0x6900), because IDF ships its OWN
+        // mbedTLS port (components/mbedtls/port/net_sockets.c:196-210, NOT
+        // upstream library/net_sockets.c) whose net_would_block maps EAGAIN/
+        // EWOULDBLOCK to WANT_READ with no check of the socket's blocking mode
+        // (:354) — bench 2026-09-13, "recv at 48/1351 KB (r=-26880)". Genuine
+        // socket errors arrive as MBEDTLS_ERR_NET_RECV_FAILED/_CONN_RESET
+        // (:358-366) and are NOT retried, so a dead socket fails fast.
+        // `received > 0` is the pending-buffer rule: httpd_recv_with_opt drains
+        // body bytes that arrived with the headers into `buf` before recv and
+        // preserves them only for a TIMEOUT, so a first-read stall must abort.
+        // remaining_len is untouched on a negative return, and retrying
+        // mbedtls_ssl_read after WANT_READ is contract-supported (ssl.h).
         if (r == HTTPD_SOCK_ERR_TIMEOUT ||
-            (r == MBEDTLS_ERR_NET_RECV_FAILED && received > 0)) {
+            ((r == ESP_TLS_ERR_SSL_WANT_READ ||
+              r == ESP_TLS_ERR_SSL_WANT_WRITE) &&
+             received > 0)) {
             if (recv_retries < RECV_MAX_RETRIES) {
                 recv_retries++;
                 ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d (r=%d)",

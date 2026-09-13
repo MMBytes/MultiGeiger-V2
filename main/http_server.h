@@ -37,7 +37,8 @@
 #include "esp_http_server.h"
 #include "config.h"
 
-/** @brief Start the web server (:443 TLS on HAL_HAS_HTTPS boards, else :80 plain).
+/** @brief Start the web server (:443 TLS when `https_enable` is set on a
+ *         HAL_HAS_HTTPS board, else :80 plain).
  *
  *  @p cfg is captured by pointer: GET reads it, POST updates in place and
  *  calls config_save() + main_request_restart() (V2.4.1 A9 — was a polled

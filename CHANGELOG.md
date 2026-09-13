@@ -48,32 +48,36 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
    used over plain HTTP from that browser: browsers cache Basic credentials and
    send them to port 80 before they see the redirect.
 6. **OTA over TLS.** `/update` works over HTTPS and rides through WiFi gaps of
-   up to 15 × 10 s. Scripted uploads with curl must add `-H "Expect:"`
+   up to 15 × 10 s per chunk. Scripted uploads with curl must add `-H "Expect:"`
    (the server does not implement `100 Continue`; without it curl stalls).
 7. **Also in this release:** two concurrent `/log` readers can no longer
    corrupt each other's output (the second gets `503` with `Retry-After: 2`,
    also protects the FTPS uploader); `/` gains an `httpd stack headroom`
-   line on every board; HEAD requests to the redirector get no body.
+   line on every board; HEAD requests to the redirector get no body; the CSRF
+   check on protected POSTs now binds the Origin scheme as well as the host
+   (scripts on HTTPS nodes send `-H "Origin: https://<device>"`).
 8. **Build:** the HTTPS server, the mbedTLS X.509 writer and
    `CONFIG_LWIP_MAX_SOCKETS=20` are enabled in `sdkconfig.defaults.psram`
    only. New `HAL_HAS_HTTPS` gate in `hal.h`; new config field `https_enable`
    (NVS `https_en`); new modules `tls_cert.c/.h` and header-only
-   `tls_logic.h` (host-tested). Heltec V2 builds are unchanged apart from the
-   shared log-guard code and the new config field.
+   `tls_logic.h` (host-tested). Heltec V2 builds change only by shared code:
+   the `/log` snapshot guard, the new config field, the `httpd stack headroom`
+   line, and the boot-order move (the web server, FTPS and MQTT bring-up now
+   run after `esp_wifi_start()` on every board).
 
 | Board | V2.8.0 `geiger_v2.bin` | App slot free | vs V2.7.7 |
 |---|---|---|---|
 | heltec_v2 | 1 322 512 B | 37 % | +800 B |
 | heltec_v2_4mb | 1 322 528 B | 33 % | +800 B |
-| feathers3_d | 1 378 560 B | 34 % | +23 536 B |
-| adafruit_qtpy_esp32_pico | 1 367 392 B | 35 % | +23 312 B |
-| seeed_xiao_esp32s3 | 1 360 304 B | 35 % | +23 552 B |
-| heltec_wifi_lora32_v4_r2 | 1 449 456 B | 31 % | +23 328 B |
-| sparkfun_thing_plus_esp32s3 | 1 451 360 B | 26 % | +23 440 B |
-| sparkfun_thing_plus_esp32c5 | 1 656 096 B | 21 % | +26 896 B |
-| adafruit_esp32s3_tft_feather | 1 412 400 B | 28 % | +23 472 B |
-| adafruit_esp32_feather_v2 | 1 432 800 B | 32 % | +24 368 B |
-| adafruit_esp32s3_feather_4mb_2mbpsram | 1 383 600 B | 30 % | +23 568 B |
+| feathers3_d | 1 378 688 B | 34 % | +23 664 B |
+| adafruit_qtpy_esp32_pico | 1 367 536 B | 35 % | +23 456 B |
+| seeed_xiao_esp32s3 | 1 360 448 B | 35 % | +23 696 B |
+| heltec_wifi_lora32_v4_r2 | 1 449 600 B | 31 % | +23 472 B |
+| sparkfun_thing_plus_esp32s3 | 1 451 472 B | 26 % | +23 552 B |
+| sparkfun_thing_plus_esp32c5 | 1 656 208 B | 21 % | +27 008 B |
+| adafruit_esp32s3_tft_feather | 1 412 512 B | 28 % | +23 584 B |
+| adafruit_esp32_feather_v2 | 1 432 960 B | 32 % | +24 528 B |
+| adafruit_esp32s3_feather_4mb_2mbpsram | 1 383 728 B | 30 % | +23 696 B |
 
 ---
 

@@ -190,11 +190,20 @@ unauth:
 // the browser attaches the cached Authorization header, and the request
 // succeeds silently.
 //
-// Defence: require the request's Origin header to match Host (preferred —
-// all modern browsers set Origin on cross-origin POST and on most
-// same-origin POSTs); fall back to Referer match on host prefix. If
-// neither header is present, deny — programmatic clients (curl, scripts)
-// can pass `-H "Origin: http://<device>:<port>"` to satisfy the check.
+// Defence: require the request's Origin header to match this server's scheme
+// AND Host (preferred — all modern browsers set Origin on cross-origin POST
+// and on most same-origin POSTs); fall back to Referer, matched the same way
+// on its host prefix. If neither header is present, deny — programmatic
+// clients (curl, scripts) can pass `-H "Origin: http://<device>:<port>"`, or
+// `-H "Origin: https://<device>"` on an HTTPS node, to satisfy the check.
+//
+// V2.8.0 (fix wave 7): the scheme is part of the comparison, not stripped and
+// ignored. An origin is scheme+host+port, and with :80 still open (redirector,
+// no HSTS) an attacker who answers port 80 — or spoofs it on the LAN — can
+// serve a page from `http://<device>` whose form POSTs to `https://<device>`;
+// a host-only check would call that same-origin, and the browser attaches the
+// Basic credential it cached for :443. Binding the scheme the main server
+// actually runs on closes that path.
 //
 // Caller must `return ESP_OK` immediately when this returns false.
 static bool check_same_origin(httpd_req_t *req) {
@@ -203,26 +212,33 @@ static bool check_same_origin(httpd_req_t *req) {
         goto deny;
     }
     size_t host_len = strlen(host);
+    // The transport this handler is reachable on. Protected POSTs only ever
+    // land on the main instance: the :80 instance serves only /cert.pem, /log
+    // and /api/env (none protected) plus the 301 wildcard, so there is no
+    // mixed case to consider here.
+#if HAL_HAS_HTTPS
+    const char *scheme = s_https_up ? "https://" : "http://";
+#else
+    const char *scheme = "http://";
+#endif
+    size_t scheme_len = strlen(scheme);
 
     char origin[128];
     if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
-        // Origin format: "scheme://host[:port]" with no path. After stripping
-        // the scheme prefix, what remains must equal Host exactly.
-        const char *p = strstr(origin, "://");
-        if (!p) goto deny;
-        p += 3;
-        if (strcmp(p, host) == 0) return true;
+        // Origin format: "scheme://host[:port]" with no path. The scheme must
+        // be ours, and what follows it must equal Host exactly.
+        if (strncmp(origin, scheme, scheme_len) != 0) goto deny;
+        if (strcmp(origin + scheme_len, host) == 0) return true;
         goto deny;
     }
 
     char referer[160];
     if (httpd_req_get_hdr_value_str(req, "Referer", referer, sizeof(referer)) == ESP_OK) {
-        // Referer format: "scheme://host[:port]/path?query#frag". After
-        // stripping the scheme, the host portion (up to the first '/', '?',
-        // '#' or NUL terminator) must equal Host.
-        const char *p = strstr(referer, "://");
-        if (!p) goto deny;
-        p += 3;
+        // Referer format: "scheme://host[:port]/path?query#frag". Same scheme
+        // rule, then the host portion (up to the first '/', '?', '#' or NUL
+        // terminator) must equal Host.
+        if (strncmp(referer, scheme, scheme_len) != 0) goto deny;
+        const char *p = referer + scheme_len;
         if (strncmp(p, host, host_len) == 0) {
             char next = p[host_len];
             if (next == '/' || next == 0 || next == '?' || next == '#') {
@@ -3087,14 +3103,20 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // The retry counter resets on every successful recv so a long upload over
     // a generally-OK link with occasional hiccups doesn't drain the budget.
     int recv_retries = 0;
-    // V2.8.0: the budget is transport-aware because the per-recv timeout is. An
-    // HTTPS board sets recv_wait_timeout = 10 s (http_server_start: the TLS
-    // handshake runs on the httpd task, so a half-open connection must not be
-    // able to stall every other session for 30 s), and 15 × 10 s restores exactly
-    // the same 150 s weak-WiFi budget that 5 × 30 s bought on plain HTTP. On an
-    // HTTPS board that fell back to plain HTTP (design D9) the socket keeps 30 s
-    // and this over-allows to 450 s — harmless; by then the peer is long gone.
-    static const int RECV_MAX_RETRIES = HAL_HAS_HTTPS ? 15 : 5;
+    // V2.8.0: the budget follows the transport this boot actually runs on,
+    // because the per-recv timeout does. A live TLS server sets
+    // recv_wait_timeout = 10 s (http_server_start: the TLS handshake runs on
+    // the httpd task, so a half-open connection must not be able to stall every
+    // other session for 30 s), and 15 × 10 s = 150 s. Plain HTTP keeps the 30 s
+    // socket and 5 × 30 s = the same 150 s — that includes an HTTPS-capable
+    // board with https_enable off (the fleet default, design D13) and one in the
+    // D9 fallback, which is why this is a runtime read of s_https_up and not the
+    // compile-time HAL_HAS_HTTPS: keyed on the macro those nodes would wait 450 s.
+#if HAL_HAS_HTTPS
+    const int recv_max_retries = s_https_up ? 15 : 5;
+#else
+    const int recv_max_retries = 5;
+#endif
     // V2.5.28: per-flash telemetry — wall-clock start + a 128 KB progress gate.
     const int64_t t_start  = esp_timer_get_time();
     size_t        next_log = 128 * 1024;
@@ -3120,15 +3142,15 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             ((r == ESP_TLS_ERR_SSL_WANT_READ ||
               r == ESP_TLS_ERR_SSL_WANT_WRITE) &&
              received > 0)) {
-            if (recv_retries < RECV_MAX_RETRIES) {
+            if (recv_retries < recv_max_retries) {
                 recv_retries++;
                 ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d (r=%d)",
                          (unsigned)received, (unsigned)total,
-                         recv_retries, RECV_MAX_RETRIES, r);
+                         recv_retries, recv_max_retries, r);
                 continue;
             }
             ESP_LOGE(TAG, "OTA FAILED: recv timed out %d× at %u/%u KB",
-                     RECV_MAX_RETRIES, (unsigned)(received / 1024), (unsigned)(total / 1024));
+                     recv_max_retries, (unsigned)(received / 1024), (unsigned)(total / 1024));
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv timeout");
@@ -3624,11 +3646,15 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         // A client that connects to :443 and then sends nothing therefore
         // freezes EVERY other HTTPS session for one whole recv timeout,
         // before any handler runs. 10 s bounds that; the OTA keeps its
-        // weak-WiFi budget via the transport-aware RECV_MAX_RETRIES above.
+        // weak-WiFi budget via the transport-aware recv_max_retries above.
         // The plain :80 path (hc) is untouched and stays at 30 s.
         sc.httpd.recv_wait_timeout = 10;
-        // Bounds the handshake loop itself, not just one recv inside it.
-        sc.tls_handshake_timeout_ms = 10000;
+        // Bounds the handshake loop itself, not just one recv inside it. Must
+        // be BELOW the recv timeout above: esp-tls only tests its handshake
+        // deadline after a WANT_READ returns, and with a strict `>`, so a
+        // budget equal to the recv timeout still lets a second 10 s recv start
+        // (20 s measured on the bench). 9 s makes the true bound one recv.
+        sc.tls_handshake_timeout_ms = 9000;
         sc.servercert     = (const uint8_t *)tls_cert_pem();
         sc.servercert_len = tls_cert_pem_len();      // counted NUL => PEM
         sc.prvtkey_pem    = (const uint8_t *)tls_key_pem();

@@ -6,7 +6,9 @@
  *
  *  Design: docs/superpowers/specs/2026-09-12-https-web-server-design.md,
  *  decisions D2-D6. Nothing here is compiled unless HAL_HAS_HTTPS; the
- *  Heltec V2 builds see empty inline stubs so main.c needs no #if.
+ *  Heltec V2 builds see the inline stubs below, so a plain call site needs no
+ *  #if. main.c's reconcile block is guarded anyway — it reaches past this API
+ *  into esp_netif for the STA address, which has no stub.
  *
  *  Lifecycle: main.c calls tls_cert_ensure() once, after nvs_flash_init()
  *  and before http_server_start(). Later, once STA has an address and the

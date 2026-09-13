@@ -31,6 +31,7 @@
 #include "mbedtls/asn1.h"      // mbedtls_asn1_sequence for the EKU extension, MBEDTLS_OID_SIZE
 #include "mbedtls/oid.h"       // MBEDTLS_OID_SERVER_AUTH
 #include "mbedtls/pk.h"
+#include "mbedtls/platform_util.h"  // mbedtls_platform_zeroize — scrub the staged key
 #include "mbedtls/x509.h"      // mbedtls_x509_parse_subject_alt_name, KU bits
 #include "mbedtls/x509_crt.h"
 #include "psa/crypto.h"
@@ -495,6 +496,11 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
     char *key_stage = malloc(KEY_PEM_MAX);
     char  fp_stage[FP_STR_LEN];
     if (!crt_stage || !key_stage) {
+        // One of the two may have succeeded; scrub it before it goes back to
+        // the heap. Nothing was generated into it yet, but the rule is the
+        // same on every path and the compiler cannot optimise this call away.
+        if (crt_stage) mbedtls_platform_zeroize(crt_stage, CRT_PEM_MAX);
+        if (key_stage) mbedtls_platform_zeroize(key_stage, KEY_PEM_MAX);
         free(crt_stage);
         free(key_stage);
         ESP_LOGE(TAG, "no heap for the re-issue staging buffers — keeping the current certificate");
@@ -506,6 +512,10 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
         ESP_LOGI(TAG, "certificate SHA-256 %s (effective after reboot)", fp_stage);
         if (reissued) *reissued = true;
     }
+    // key_stage held the new PRIVATE key in cleartext; free() alone leaves it
+    // readable in the heap block until something else reuses it.
+    mbedtls_platform_zeroize(crt_stage, CRT_PEM_MAX);
+    mbedtls_platform_zeroize(key_stage, KEY_PEM_MAX);
     free(crt_stage);
     free(key_stage);
     return err;

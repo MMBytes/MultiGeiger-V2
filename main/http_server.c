@@ -78,6 +78,11 @@ static httpd_handle_t s_server   = NULL;
 // instance bring-up (Task 5) and the /status Device card; false means we
 // fell back to plain HTTP on :80 and there is nothing to redirect to.
 static bool s_https_up = false;
+// V2.8.0 (fix wave 5): https_enable as read at http_server_start(), before a
+// /config POST can overwrite *s_cfg in place. The transport cannot change
+// live, so the /status Device card must describe what THIS boot is doing,
+// not a pending edit — read this instead of s_cfg->https_enable there.
+static bool s_https_cfg_at_boot = false;
 static httpd_handle_t s_redirect = NULL;   // :80 instance, NULL if not running
 #endif
 static config_t      *s_cfg      = NULL;
@@ -449,6 +454,28 @@ static void format_device(char *out, size_t sz) {
     snprintf(cert_line, sizeof(cert_line),
              "SHA-256 %s &middot; <a href=\"/cert.pem\">cert.pem</a>",
              tls_cert_fingerprint());
+    // Fix wave 5 (five states, not three — a /config POST writes *s_cfg in
+    // place before the reboot that would act on it, so the live
+    // s_cfg->https_enable can disagree with what THIS boot is actually
+    // doing). s_https_cfg_at_boot is the value latched at http_server_start,
+    // before any POST could touch it. An if/else chain reads clearer here
+    // than a nested ternary.
+    const char *cert_status;
+    if (s_https_up && s_cfg->https_enable) {
+        cert_status = cert_line;
+    } else if (s_https_up && !s_cfg->https_enable) {
+        cert_status = "HTTPS on this boot; disabled in /config"
+                      " &mdash; plain HTTP after the next reboot";
+    } else if (!s_https_up && s_cfg->https_enable && !s_https_cfg_at_boot) {
+        cert_status = "HTTPS enabled in /config"
+                      " &mdash; takes effect after the next reboot";
+    } else if (!s_https_up && !s_https_cfg_at_boot) {
+        cert_status = "plain HTTP (HTTPS off in /config)";
+    } else {
+        // Wanted at boot (s_https_cfg_at_boot) but httpd_ssl_start failed —
+        // the one genuine failure case, kept red.
+        cert_status = "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>";
+    }
 #endif
 
     snprintf(out, sz,
@@ -477,11 +504,9 @@ static void format_device(char *out, size_t sz) {
         VERSION_STR, fw_date, fw_time,
         antenna,
 #if HAL_HAS_HTTPS
-        // Three states, not two (V2.8.0 design D13): TLS up, TLS deliberately
-        // off, or TLS wanted and failed. Only the last one is red.
-        s_https_up            ? cert_line
-        : !s_cfg->https_enable ? "plain HTTP (HTTPS off in /config)"
-        : "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>"
+        // Fix wave 5: cert_status picked above, five states (V2.8.0 design
+        // D13 extended) — see the if/else chain for which one applies.
+        cert_status
 #else
         "plain HTTP (board has no PSRAM for a TLS server)"
 #endif
@@ -3581,6 +3606,10 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // threading model is unchanged too: ONE task, select() over sessions,
     // so the static-buffer pattern warned about above still holds.
     esp_err_t err = ESP_FAIL;
+    // Fix wave 5: latch before the TLS attempt so a /config POST later in
+    // this boot's life (which writes *s_cfg in place) cannot change what
+    // /status reports for THIS boot's transport.
+    s_https_cfg_at_boot = s_cfg->https_enable;
     // Design D13: TLS is per-node opt-in. With https_enable off main.c never
     // called tls_cert_ensure(), so there is no PEM to serve and this is the
     // deliberate plain-HTTP path, not a failure.

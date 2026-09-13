@@ -6,6 +6,8 @@
 #include <stdarg.h>
 #include <time.h>
 #include "esp_http_server.h"
+#include "esp_tls_errors.h"    // V2.8.0: ESP_TLS_ERR_SSL_WANT_READ/_WRITE — how the
+                               // TLS transport reports "recv timed out" (update_post)
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -3033,15 +3035,21 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
 
     size_t received = 0;
     // V2.4.13: weak-WiFi resilience — retry transient recv timeouts instead
-    // of aborting the whole OTA. Combined with the 30 s recv_wait_timeout
-    // bump in http_server_start, this gives up to 5 × 30 s = 150 s of TCP
-    // outage tolerance per chunk before we give up. Only retries on
-    // HTTPD_SOCK_ERR_TIMEOUT (-3); HTTPD_SOCK_ERR_FAIL (-1) and peer-close
-    // (0) are still fatal — there's no recovering from those. The retry
-    // counter resets on every successful recv so a long upload over a
-    // generally-OK link with occasional hiccups doesn't drain the budget.
+    // of aborting the whole OTA. Combined with the recv_wait_timeout set in
+    // http_server_start, this gives ~150 s of TCP outage tolerance per chunk
+    // before we give up. Only timeouts are retried; HTTPD_SOCK_ERR_FAIL (-1)
+    // and peer-close (0) are still fatal — there's no recovering from those.
+    // The retry counter resets on every successful recv so a long upload over
+    // a generally-OK link with occasional hiccups doesn't drain the budget.
     int recv_retries = 0;
-    const int RECV_MAX_RETRIES = 5;
+// V2.8.0: the budget is transport-aware because the per-recv timeout is. An
+// HTTPS board sets recv_wait_timeout = 10 s (http_server_start: the TLS
+// handshake runs on the httpd task, so a half-open connection must not be
+// able to stall every other session for 30 s), and 15 × 10 s restores exactly
+// the same 150 s weak-WiFi budget that 5 × 30 s bought on plain HTTP. On an
+// HTTPS board that fell back to plain HTTP (design D9) the socket keeps 30 s
+// and this over-allows to 450 s — harmless; by then the peer is long gone.
+#define RECV_MAX_RETRIES (HAL_HAS_HTTPS ? 15 : 5)
     // V2.5.28: per-flash telemetry — wall-clock start + a 128 KB progress gate.
     const int64_t t_start  = esp_timer_get_time();
     size_t        next_log = 128 * 1024;
@@ -3049,12 +3057,23 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         size_t want = total - received;
         if (want > OTA_CHUNK) want = OTA_CHUNK;
         int r = httpd_req_recv(req, buf, want);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+        // V2.8.0: a recv timeout looks different on each transport. Plain HTTP
+        // goes through httpd_default_recv, which turns EAGAIN into
+        // HTTPD_SOCK_ERR_TIMEOUT (-3). Over TLS the override is
+        // httpd_ssl_recv -> esp_tls_conn_read -> mbedtls_ssl_read, whose BIO
+        // maps the same EAGAIN to MBEDTLS_ERR_SSL_WANT_READ (-0x6900) and
+        // passes it straight through — so before this arm existed the FIRST
+        // stalled read aborted an HTTPS OTA outright instead of retrying.
+        // Retrying is valid on either transport: httpd_req_recv leaves the
+        // request's remaining_len untouched on a negative return, so the next
+        // call asks for exactly the same bytes.
+        if (r == HTTPD_SOCK_ERR_TIMEOUT ||
+            r == ESP_TLS_ERR_SSL_WANT_READ || r == ESP_TLS_ERR_SSL_WANT_WRITE) {
             if (recv_retries < RECV_MAX_RETRIES) {
                 recv_retries++;
-                ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d",
+                ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d (r=%d)",
                          (unsigned)received, (unsigned)total,
-                         recv_retries, RECV_MAX_RETRIES);
+                         recv_retries, RECV_MAX_RETRIES, r);
                 continue;
             }
             ESP_LOGE(TAG, "OTA FAILED: recv timed out %d× at %u/%u KB",
@@ -3395,9 +3414,14 @@ static esp_err_t api_env_get(httpd_req_t *req) {
 //
 // SAFE ON BOTH httpd INSTANCES: reads only tls_cert_pem(), a module static
 // that is written before either server starts (and once more by the
-// reconcile step, immediately followed by a reboot), and uses no scratch
-// buffer. log_access()/peer_ipstr() are stack-only (char ipstr[48] +
-// getpeername), so the access line is safe on either task.
+// reconcile step), and uses no scratch buffer. log_access()/peer_ipstr()
+// are stack-only (char ipstr[48] + getpeername), so the access line is safe
+// on either task.
+//
+// A re-issue does NOT take effect at once: main_request_restart() defers the
+// reboot until the TX worker is idle plus ~2 s, so for up to one TX cycle
+// this route and the fingerprint on / show the NEW certificate while :443
+// still presents the OLD one. Expected; the reboot closes the gap.
 #if HAL_HAS_HTTPS
 static esp_err_t cert_get(httpd_req_t *req) {
     log_access(req, "GET /cert.pem");
@@ -3435,10 +3459,22 @@ static esp_err_t redirect_to_https(httpd_req_t *req) {
     if (!https_redirect_location(host, req->uri, loc, sizeof(loc))) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unusable Host header");
     }
+    // Who knocked on :80 matters as much as what they asked for — a node that
+    // suddenly sees plain-HTTP traffic wants the client IP in /log. log_access
+    // is stack-only (char ipstr[48] + getpeername) so it is safe on this
+    // second httpd task, same as in cert_get above.
+    log_access(req, ":80 redirect");
     ESP_LOGI(TAG, ":80 %s -> %s", req->uri, loc);
     httpd_resp_set_status(req, "301 Moved Permanently");
     httpd_resp_set_hdr(req, "Location", loc);
     httpd_resp_set_type(req, "text/plain");
+    // RFC 9110 §9.3.2: a HEAD response carries no body. esp_http_server has
+    // no HEAD special-casing, and this route is HTTP_ANY, so without this the
+    // 15-byte body below would be sent after the 301 headers and a keep-alive
+    // client would read it as the start of its NEXT response.
+    if (req->method == HTTP_HEAD) {
+        return httpd_resp_send(req, NULL, 0);
+    }
     return httpd_resp_send(req, "Moved to HTTPS\n", HTTPD_RESP_USE_STRLEN);
 }
 #endif  // HAL_HAS_HTTPS
@@ -3490,7 +3526,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // (httpd_ssl_start overwrites server_port with port_secure). The
     // threading model is unchanged too: ONE task, select() over sessions,
     // so the static-buffer pattern warned about above still holds.
-    esp_err_t err;
+    esp_err_t err = ESP_FAIL;
     if (tls_cert_pem() != NULL) {
         httpd_ssl_config_t sc = HTTPD_SSL_CONFIG_DEFAULT();
         sc.httpd = hc;
@@ -3501,6 +3537,18 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         // Five concurrent TLS sessions is plenty for one browser (page +
         // favicon + XHR) plus a script; LRU purge evicts idle ones beyond.
         sc.httpd.max_open_sockets = 5;
+        // V2.8.0: 30 s (inherited from hc) is too long HERE. httpd_sess_new
+        // calls open_fn synchronously on the httpd task, and httpd_ssl_open
+        // does the blocking esp_tls_server_session_create on the freshly
+        // accepted socket — which carries recv_wait_timeout as SO_RCVTIMEO.
+        // A client that connects to :443 and then sends nothing therefore
+        // freezes EVERY other HTTPS session for one whole recv timeout,
+        // before any handler runs. 10 s bounds that; the OTA keeps its
+        // weak-WiFi budget via the transport-aware RECV_MAX_RETRIES above.
+        // The plain :80 path (hc) is untouched and stays at 30 s.
+        sc.httpd.recv_wait_timeout = 10;
+        // Bounds the handshake loop itself, not just one recv inside it.
+        sc.tls_handshake_timeout_ms = 10000;
         sc.servercert     = (const uint8_t *)tls_cert_pem();
         sc.servercert_len = tls_cert_pem_len();      // counted NUL => PEM
         sc.prvtkey_pem    = (const uint8_t *)tls_key_pem();
@@ -3514,7 +3562,6 @@ void http_server_start(config_t *cfg, const char *chip_id) {
                      esp_err_to_name(err));
         }
     } else {
-        err = ESP_ERR_INVALID_STATE;
         ESP_LOGE(TAG, "no TLS credential (tls_cert_ensure failed) — plain HTTP on :80");
     }
     if (!s_https_up) {
@@ -3660,10 +3707,22 @@ void http_server_start(config_t *cfg, const char *chip_id) {
             static const httpd_uri_t r_any = {
                 .uri = "/*",        .method = HTTP_ANY,  .handler = redirect_to_https,
             };
-            httpd_register_uri_handler(s_redirect, &r_cert);
-            httpd_register_uri_handler(s_redirect, &r_log);
-            httpd_register_uri_handler(s_redirect, &r_env);
-            httpd_register_uri_handler(s_redirect, &r_any);
+            //
+            // Checked, unlike the main instance's: max_uri_handlers is exactly
+            // 4 here, so one silent ESP_ERR_HTTPD_HANDLERS_FULL would leave
+            // "/*" unregistered and every plain request 404 instead of
+            // redirecting — a failure mode that looks like "HTTPS broke the
+            // web UI" and has no other trace.
+            static const httpd_uri_t *const r_routes[] = {
+                &r_cert, &r_log, &r_env, &r_any,
+            };
+            for (size_t i = 0; i < sizeof(r_routes) / sizeof(r_routes[0]); i++) {
+                esp_err_t e = httpd_register_uri_handler(s_redirect, r_routes[i]);
+                if (e != ESP_OK) {
+                    ESP_LOGE(TAG, ":80 route %s failed to register: %s",
+                             r_routes[i]->uri, esp_err_to_name(e));
+                }
+            }
             ESP_LOGI(TAG, "HTTP listener on :80 (/log /api/env /cert.pem plain; everything else -> https)");
         }
     }

@@ -55,6 +55,11 @@ esp_err_t tls_cert_ensure(const char *chip_id);
  *  module statics and NVS; the RUNNING TLS server keeps its own copy, so the
  *  caller must reboot (main_request_restart()) to make it effective.
  *
+ *  That reboot is NOT immediate: main_request_restart() defers until the TX
+ *  worker is idle plus ~2 s, so there is a window of up to one TX cycle in
+ *  which /cert.pem and the fingerprint on / report the NEW certificate while
+ *  :443 still presents the OLD one. Expected, and it closes at the reboot.
+ *
  *  Loop guard: if NVS says the current certificate was RE-ISSUED less than
  *  10 minutes ago (first-time creation does not count — it stores no
  *  timestamp) and this boot is a software reset, the call logs an error

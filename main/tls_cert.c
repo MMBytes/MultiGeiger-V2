@@ -79,7 +79,7 @@ static esp_err_t parse_pem(mbedtls_x509_crt *crt, const char *pem, size_t len_in
     mbedtls_x509_crt_init(crt);
     int rc = mbedtls_x509_crt_parse(crt, (const unsigned char *)pem, len_incl_nul);
     if (rc != 0) {
-        ESP_LOGW(TAG, "stored certificate does not parse (-0x%04x)", (unsigned)-rc);
+        ESP_LOGW(TAG, "certificate PEM does not parse (-0x%04x)", (unsigned)-rc);
         return ESP_ERR_INVALID_STATE;
     }
     return ESP_OK;

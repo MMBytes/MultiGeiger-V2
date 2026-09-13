@@ -55,8 +55,9 @@ esp_err_t tls_cert_ensure(const char *chip_id);
  *  module statics and NVS; the RUNNING TLS server keeps its own copy, so the
  *  caller must reboot (main_request_restart()) to make it effective.
  *
- *  Loop guard: if NVS says the current certificate was issued less than
- *  10 minutes ago and this boot is a software reset, the call logs an error
+ *  Loop guard: if NVS says the current certificate was RE-ISSUED less than
+ *  10 minutes ago (first-time creation does not count — it stores no
+ *  timestamp) and this boot is a software reset, the call logs an error
  *  and returns ESP_OK with *reissued = false. That stops a DHCP server that
  *  hands out a new address on every boot from causing a reboot loop; the
  *  cure is a DHCP reservation, and the log line says so.

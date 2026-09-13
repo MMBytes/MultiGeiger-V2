@@ -46,7 +46,7 @@ static const char *TAG = "tls_cert";
 static const char *NS         = "geiger_tls";
 static const char *KEY_CRT    = "crt";
 static const char *KEY_KEY    = "key";
-static const char *KEY_ISSUED = "issued";     // u32 unix epoch, 0 if clock was not valid
+static const char *KEY_ISSUED = "issued";     // u32 unix epoch of the last RE-ISSUE; 0 after creation or when the clock was not valid
 
 // A P-256 cert with three SANs + BC + KU + EKU is ~750 B of PEM; a SEC1 P-256
 // key is ~230 B. Both well under the 4000-byte nvs_set_str ceiling. Static so
@@ -166,21 +166,34 @@ static uint32_t issued_from_nvs(void) {
 }
 
 static void log_nvs_usage(void) {
-    // The nvs partition is 0x6000 (three pages, one reserved). Cert + key +
-    // issued take ~33 entries next to the config namespace; if this ever
-    // reads close to full, the D9 fallback is the first symptom.
+    // The nvs partition is 0x6000 — SIX 4096-byte pages, one of them held
+    // back as the reserved page. Cert + key + issued take ~33 entries next
+    // to the config namespace; if this ever reads close to full, the D9
+    // fallback is the first symptom.
+    //
+    // available_entries is the headline figure, NOT free_entries: nvs.h
+    // documents free_entries as "includes also reserved entries", so a
+    // partition with no usable space left still reports a healthy-looking
+    // free count. available_entries is what a write can actually consume.
     nvs_stats_t st;
     if (nvs_get_stats(NULL, &st) == ESP_OK) {
-        ESP_LOGI(TAG, "NVS: %u of %u entries used (%u free)",
-                 (unsigned)st.used_entries, (unsigned)st.total_entries, (unsigned)st.free_entries);
+        ESP_LOGI(TAG, "NVS: %u of %u entries used, %u available (%u free incl. the reserved page)",
+                 (unsigned)st.used_entries, (unsigned)st.total_entries,
+                 (unsigned)st.available_entries, (unsigned)st.free_entries);
     }
 }
 
 // --- Generation ----------------------------------------------------------------
 
-/** Generate key + self-signed cert into s_key/s_crt and persist. @p sta_ip_be
- *  0 = no STA SAN (first boot, address unknown). */
-static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be) {
+/** Generate key + self-signed cert into s_key/s_crt and persist.
+ *
+ *  @param chip_id       CN and dNSName SAN.
+ *  @param sta_ip_be     0 = no STA SAN (first boot, address unknown).
+ *  @param stamp_issued  true only for a re-issue from tls_cert_reconcile();
+ *                       creation stores 0 so the loop guard cannot mistake a
+ *                       first boot for a reboot loop.
+ */
+static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_issued) {
     const int64_t t0 = esp_timer_get_time();
     esp_err_t result = ESP_FAIL;
     int rc;
@@ -322,7 +335,7 @@ static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be) {
         if (result == ESP_OK) result = fingerprint_of(&parsed);
         mbedtls_x509_crt_free(&parsed);
     }
-    if (result == ESP_OK) result = save_to_nvs(clock_ok ? (uint32_t)time(NULL) : 0);
+    if (result == ESP_OK) result = save_to_nvs((stamp_issued && clock_ok) ? (uint32_t)time(NULL) : 0);
     if (result == ESP_OK) {
         ESP_LOGI(TAG, "generated P-256 key + self-signed cert in %lld ms (%u B cert, %u B key, valid %s..%s%s)",
                  (long long)((esp_timer_get_time() - t0) / 1000),
@@ -359,7 +372,7 @@ esp_err_t tls_cert_ensure(const char *chip_id) {
         if (err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "NVS load failed (%s) — regenerating", esp_err_to_name(err));
         }
-        err = generate(chip_id, 0);
+        err = generate(chip_id, 0, false);
         if (err == ESP_OK) ESP_LOGI(TAG, "certificate SHA-256 %s", s_fp);
     }
     s_ready = (err == ESP_OK);
@@ -387,9 +400,17 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
     }
 
     // Loop guard (design D5): a re-issue leads to a reboot; if the address
-    // is different AGAIN within minutes of the last issue on a software
+    // is different AGAIN within minutes of the last RE-ISSUE on a software
     // reset, the DHCP server is handing out a fresh lease every boot and
     // re-issuing would loop forever.
+    //
+    // The guard only ever sees re-issues: generate() stamps KEY_ISSUED when
+    // called with stamp_issued=true, which only happens below, and stores 0
+    // on first-time creation. Without that distinction the first boot after
+    // an OTA would trip the guard and never add the STA address — an OTA
+    // reboot is ESP_RST_SW and the RTC carries a valid clock across it, so a
+    // certificate CREATED seconds ago would be indistinguishable from one
+    // re-issued seconds ago.
     const uint32_t issued = issued_from_nvs();
     if (now != 0 && issued != 0 && (now - (int64_t)issued) < REISSUE_LOOP_GUARD_S &&
         esp_reset_reason() == ESP_RST_SW) {
@@ -400,7 +421,7 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
 
     ESP_LOGW(TAG, "re-issuing certificate: %s%s", has_ip ? "" : "current address missing from SAN",
              expiring ? (has_ip ? "expires within 30 days" : " + expires within 30 days") : "");
-    err = generate(chip_id, sta_ip_be);
+    err = generate(chip_id, sta_ip_be, true);
     if (err != ESP_OK) {
         // generate() zeroed the statics; reload the previous credential so
         // the running server and /cert.pem stay consistent until reboot.

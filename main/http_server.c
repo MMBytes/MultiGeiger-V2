@@ -3389,11 +3389,11 @@ static esp_err_t api_env_get(httpd_req_t *req) {
 // SAFE ON BOTH httpd INSTANCES: reads only tls_cert_pem(), a module static
 // that is written before either server starts (and once more by the
 // reconcile step, immediately followed by a reboot), and uses no scratch
-// buffer. Deliberately NOT log_access(): keep the :80 handler set free of
-// anything but stack.
+// buffer. log_access()/peer_ipstr() are stack-only (char ipstr[48] +
+// getpeername), so the access line is safe on either task.
 #if HAL_HAS_HTTPS
 static esp_err_t cert_get(httpd_req_t *req) {
-    ESP_LOGI(TAG, "GET /cert.pem");
+    log_access(req, "GET /cert.pem");
     const char *pem = tls_cert_pem();
     if (!pem) {
         return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no certificate provisioned");
@@ -3403,7 +3403,38 @@ static esp_err_t cert_get(httpd_req_t *req) {
     // Length WITHOUT the NUL: esp-tls wants it counted, HTTP bodies do not.
     return httpd_resp_send(req, pem, (ssize_t)(tls_cert_pem_len() - 1));
 }
-#endif
+
+// V2.8.0: every request on :80 other than /cert.pem, /log and /api/env gets
+// a 301 to the same path on https://. Registered with HTTP_ANY so HEAD, PUT
+// and DELETE redirect too instead of getting 405. Stateless by construction
+// — Host is read into a stack buffer, the Location is built on the stack,
+// nothing static is touched — because this runs on the SECOND httpd task
+// and must never race the main server's static scratch buffers (see the
+// CRITICAL note in http_server_start). 301 rather than 308 on purpose: a
+// stale POST from a bookmarked http:// form should become a GET of the
+// https:// page, not a replayed POST.
+//
+// Never read or log the Authorization header here. A browser that logged
+// in over plain HTTP on the old firmware still sends its cached Basic
+// credential to this port on its first visit; we cannot stop that, but we
+// must not make it worse by copying it into /log.
+static esp_err_t redirect_to_https(httpd_req_t *req) {
+    char host[64];
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Host header required");
+    }
+    // "https://" + host (<=63) + uri (<= CONFIG_HTTPD_MAX_URI_LEN) + NUL.
+    char loc[8 + sizeof(host) + CONFIG_HTTPD_MAX_URI_LEN + 1];
+    if (!https_redirect_location(host, req->uri, loc, sizeof(loc))) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "unusable Host header");
+    }
+    ESP_LOGI(TAG, ":80 %s -> %s", req->uri, loc);
+    httpd_resp_set_status(req, "301 Moved Permanently");
+    httpd_resp_set_hdr(req, "Location", loc);
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "Moved to HTTPS\n", HTTPD_RESP_USE_STRLEN);
+}
+#endif  // HAL_HAS_HTTPS
 
 // --- Server bring-up ---------------------------------------------------------
 
@@ -3422,7 +3453,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers  = 14;                 // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards — 12 of 13 used there, 11 elsewhere) + /cert.pem on HAL_HAS_HTTPS boards
+    hc.max_uri_handlers  = 14;                 // 11 base: / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards, +/cert.pem on HAL_HAS_HTTPS boards — heltec_wifi_lora32_v4_r2 is both, so the worst case is 13 of 14)
     hc.lru_purge_enable = true;
     // CRITICAL — DO NOT change esp_http_server's threading model without
     // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
@@ -3564,6 +3595,63 @@ void http_server_start(config_t *cfg, const char *chip_id) {
                   " /lorawan_reset"
 #endif
                   ")");
+#endif
+
+#if HAL_HAS_HTTPS
+    // V2.8.0: minimal :80 instance. Only exists when TLS actually came up —
+    // in the fallback case the main server already owns :80.
+    if (s_https_up) {
+        httpd_config_t rc = HTTPD_DEFAULT_CONFIG();
+        rc.server_port      = 80;
+        // Both instances would otherwise bind the same UDP control port
+        // (32768) and the second httpd_start would fail with ESP_FAIL.
+        rc.ctrl_port        = ESP_HTTPD_DEF_CTRL_PORT + 1;
+        // log_get sends LOG_CHUNK (2 KB) slices straight from the ring (no
+        // copy); api_env_get holds a 192 B buffer; the redirect path holds
+        // Host + ~600 B Location plus one ESP_LOGI. 6 KB covers the worst
+        // of the three with margin; 4 KB is httpd's floor.
+        rc.stack_size       = 6144;
+        rc.max_uri_handlers = 4;         // /cert.pem /log /api/env + ANY /*
+        rc.max_open_sockets = 3;         // scripts polling /log + a redirect round trip
+        rc.lru_purge_enable = true;
+        rc.uri_match_fn     = httpd_uri_match_wildcard;
+        esp_err_t rerr = httpd_start(&s_redirect, &rc);
+        if (rerr != ESP_OK) {
+            ESP_LOGW(TAG, ":80 instance failed to start (%s) — HTTPS-only", esp_err_to_name(rerr));
+            s_redirect = NULL;
+        } else {
+            // The three machine-readable, unauthenticated routes stay on
+            // plain HTTP so scripts and peer nodes need no TLS client.
+            // Each was audited for the two-task rule (V2.8.0 plan, Task 5):
+            //   cert_get     — immutable module static, no scratch buffer
+            //   log_get      — snapshot under applog's mutex, zero-copy stream
+            //   api_env_get  — stack buffer + main_status_snapshot (spinlock
+            //                  on the one 64-bit field, torn-tolerant 32-bit)
+            // status_get and its format_* helpers are NOT on this list: they
+            // hold static scratch buffers and must stay single-task.
+            //
+            // Registration order matters with the wildcard matcher: the
+            // first registered handler whose template AND method match wins,
+            // so the exact GET routes must precede the HTTP_ANY "/*".
+            static const httpd_uri_t r_cert = {
+                .uri = "/cert.pem", .method = HTTP_GET,  .handler = cert_get,
+            };
+            static const httpd_uri_t r_log = {
+                .uri = "/log",      .method = HTTP_GET,  .handler = log_get,
+            };
+            static const httpd_uri_t r_env = {
+                .uri = "/api/env",  .method = HTTP_GET,  .handler = api_env_get,
+            };
+            static const httpd_uri_t r_any = {
+                .uri = "/*",        .method = HTTP_ANY,  .handler = redirect_to_https,
+            };
+            httpd_register_uri_handler(s_redirect, &r_cert);
+            httpd_register_uri_handler(s_redirect, &r_log);
+            httpd_register_uri_handler(s_redirect, &r_env);
+            httpd_register_uri_handler(s_redirect, &r_any);
+            ESP_LOGI(TAG, "HTTP listener on :80 (/log /api/env /cert.pem plain; everything else -> https)");
+        }
+    }
 #endif
 }
 

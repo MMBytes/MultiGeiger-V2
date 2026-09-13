@@ -56,6 +56,12 @@
 #include "lorawan.h"           // V2.6.23 (T8): lorawan_get_status()/_state_name()/_region_name()
                                // for /status; no-op stubs on the ten non-V4-R2 boards (see
                                // lorawan.h) so this include is unconditional like gnss.h/sgp41.h.
+#include "tls_cert.h"          // V2.8.0: PEM pointers + fingerprint for HTTPS
+#include "tls_logic.h"         // V2.8.0: https_redirect_location (Task 5)
+#include "freertos/task.h"     // V2.8.0: uxTaskGetStackHighWaterMark — httpd stack headroom on /
+#if HAL_HAS_HTTPS
+#include "esp_https_server.h"  // V2.8.0: httpd_ssl_start — same httpd underneath, TLS on top
+#endif
 #if HAL_HAS_LORAWAN
 #include "lorawan_codec.h"     // V2.6.23 (T8): lw_hex_decode() — /config POST EUI/key length
                                // validation, V4-R2 only. Ringfenced per the brief: other boards
@@ -65,6 +71,13 @@
 static const char *TAG = "http";
 
 static httpd_handle_t s_server   = NULL;
+#if HAL_HAS_HTTPS
+// V2.8.0: true once httpd_ssl_start() succeeded on :443. Read by the :80
+// instance bring-up (Task 5) and the /status Device card; false means we
+// fell back to plain HTTP on :80 and there is nothing to redirect to.
+static bool s_https_up = false;
+static httpd_handle_t s_redirect = NULL;   // :80 instance, NULL if not running
+#endif
 static config_t      *s_cfg      = NULL;
 static const char    *s_chip_id  = "";
 static char           s_mac_str[18] = "??:??:??:??:??:??";   // filled at start
@@ -427,6 +440,15 @@ static void format_device(char *out, size_t sz) {
     const char *antenna = "(N/A — internal only)";
 #endif
 
+#if HAL_HAS_HTTPS
+    // "SHA-256 AA:…:FF · <a>cert.pem</a>": 95 hex chars + fixed text. The
+    // fingerprint is generated text (hex + colons) so it needs no escaping.
+    char cert_line[160];
+    snprintf(cert_line, sizeof(cert_line),
+             "SHA-256 %s &middot; <a href=\"/cert.pem\">cert.pem</a>",
+             tls_cert_fingerprint());
+#endif
+
     snprintf(out, sz,
         "<div class=\"info\"><h3>Device</h3>"
         "<b>Chip ID:</b> %s<br>"
@@ -435,7 +457,10 @@ static void format_device(char *out, size_t sz) {
         "<b>Chip:</b> %s rev v%d.%d &middot; %d cores &middot; %s<br>"
         "<b>Memory:</b> %lu MB flash%s<br>"
         "<b>Firmware:</b> %s &nbsp; (built %s %s)<br>"
-        "<b>Antenna:</b> %s"
+        "<b>Antenna:</b> %s<br>"
+        // V2.8.0: certificate identity. Compare against what the browser
+        // shows before trusting it; the link downloads the PEM for import.
+        "<b>Certificate:</b> %s"
         "</div>",
         s_chip_id,
         s_mac_str,
@@ -448,7 +473,13 @@ static void format_device(char *out, size_t sz) {
         "",
 #endif
         VERSION_STR, fw_date, fw_time,
-        antenna);
+        antenna,
+#if HAL_HAS_HTTPS
+        s_https_up ? cert_line : "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>"
+#else
+        "plain HTTP (board has no PSRAM for a TLS server)"
+#endif
+        );
 }
 
 // --- System block ------------------------------------------------------------
@@ -550,6 +581,12 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t n
     main_status_t st;
     main_status_snapshot(&st);
 
+    // V2.8.0: this handler runs ON the httpd task, so the high-water mark
+    // read here is the httpd task's own — after TLS handshakes on HTTPS
+    // boards, which run on this task before any handler. Below ~1 KB means
+    // the stack_size in http_server_start needs raising.
+    const unsigned httpd_stack_free = (unsigned)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
+
     snprintf(out, sz,
              "<div class=\"info\"><h3>System</h3>"
              "<b>Uptime:</b> %s%s<br>"
@@ -558,6 +595,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t n
              "<b>Free heap:</b> %lu bytes<br>"
              "<b>Min free heap:</b> %lu bytes<br>"
              "<b>Max allocation:</b> %lu bytes<br>"
+             "<b>httpd stack headroom:</b> %u bytes<br>"
              "<b>I²C errors:</b> %lu since boot<br>"
              "<b>NTP:</b> %s<br>"
              // V2.4.9: resolved display layout mode. Shows what display.c
@@ -576,6 +614,7 @@ static void format_system(char *out, size_t sz, unsigned long uptime_s, time_t n
              (unsigned long)free_heap,
              (unsigned long)min_free,
              (unsigned long)max_alloc,
+             httpd_stack_free,
              (unsigned long)st.i2c_errors,
              ntp_line,
              display_mode_str(),
@@ -3342,6 +3381,30 @@ static esp_err_t api_env_get(httpd_req_t *req) {
     return httpd_resp_send(req, buf, n);
 }
 
+// --- /cert.pem (V2.8.0) -------------------------------------------------------
+// The device's self-signed certificate, so the user can import it once into
+// their OS / browser trust store and stop clicking through the warning.
+// Public by design (a certificate is the public half); no auth, no CSRF.
+//
+// SAFE ON BOTH httpd INSTANCES: reads only tls_cert_pem(), a module static
+// that is written before either server starts (and once more by the
+// reconcile step, immediately followed by a reboot), and uses no scratch
+// buffer. Deliberately NOT log_access(): keep the :80 handler set free of
+// anything but stack.
+#if HAL_HAS_HTTPS
+static esp_err_t cert_get(httpd_req_t *req) {
+    ESP_LOGI(TAG, "GET /cert.pem");
+    const char *pem = tls_cert_pem();
+    if (!pem) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no certificate provisioned");
+    }
+    httpd_resp_set_type(req, "application/x-pem-file");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"multigeiger.pem\"");
+    // Length WITHOUT the NUL: esp-tls wants it counted, HTTP bodies do not.
+    return httpd_resp_send(req, pem, (ssize_t)(tls_cert_pem_len() - 1));
+}
+#endif
+
 // --- Server bring-up ---------------------------------------------------------
 
 void http_server_start(config_t *cfg, const char *chip_id) {
@@ -3359,7 +3422,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers  = 13;                 // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards — 12 of 13 used there, 11 elsewhere)
+    hc.max_uri_handlers  = 14;                 // / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards — 12 of 13 used there, 11 elsewhere) + /cert.pem on HAL_HAS_HTTPS boards
     hc.lru_purge_enable = true;
     // CRITICAL — DO NOT change esp_http_server's threading model without
     // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
@@ -3382,7 +3445,49 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // consume it. Send-side keeps the default — responses are tiny.
     hc.recv_wait_timeout = 30;
 
+#if HAL_HAS_HTTPS
+    // V2.8.0: same httpd engine, TLS on top. `sc.httpd` is a full
+    // httpd_config_t, so copy `hc` in wholesale — stack, handler count, LRU
+    // purge and the 30 s OTA recv timeout all carry over unchanged
+    // (httpd_ssl_start overwrites server_port with port_secure). The
+    // threading model is unchanged too: ONE task, select() over sessions,
+    // so the static-buffer pattern warned about above still holds.
+    esp_err_t err;
+    if (tls_cert_pem() != NULL) {
+        httpd_ssl_config_t sc = HTTPD_SSL_CONFIG_DEFAULT();
+        sc.httpd = hc;
+        // TLS handshakes run on the httpd task BEFORE any handler; 8 KB was
+        // sized for plain form parsing. 10 KB is the esp_https_server
+        // default; /status reports the measured headroom.
+        sc.httpd.stack_size = 10240;
+        // Five concurrent TLS sessions is plenty for one browser (page +
+        // favicon + XHR) plus a script; LRU purge evicts idle ones beyond.
+        sc.httpd.max_open_sockets = 5;
+        sc.servercert     = (const uint8_t *)tls_cert_pem();
+        sc.servercert_len = tls_cert_pem_len();      // counted NUL => PEM
+        sc.prvtkey_pem    = (const uint8_t *)tls_key_pem();
+        sc.prvtkey_len    = tls_key_pem_len();
+        sc.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+        sc.port_secure    = 443;
+        err = httpd_ssl_start(&s_server, &sc);
+        s_https_up = (err == ESP_OK);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_ssl_start failed (%s) — falling back to plain HTTP on :80",
+                     esp_err_to_name(err));
+        }
+    } else {
+        err = ESP_ERR_INVALID_STATE;
+        ESP_LOGE(TAG, "no TLS credential (tls_cert_ensure failed) — plain HTTP on :80");
+    }
+    if (!s_https_up) {
+        // Design D9: an unreachable node is worse than the pre-V2.8.0 status
+        // quo. hc still says port 80. httpd_ssl_start leaves s_server
+        // untouched on failure.
+        err = httpd_start(&s_server, &hc);
+    }
+#else
     esp_err_t err = httpd_start(&s_server, &hc);
+#endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
         s_server = NULL;
@@ -3441,11 +3546,25 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     httpd_register_uri_handler(s_server, &uri_api_env);
     httpd_register_uri_handler(s_server, &uri_coredump_get);
     httpd_register_uri_handler(s_server, &uri_coredump_erase);
+#if HAL_HAS_HTTPS
+    static const httpd_uri_t uri_cert = {
+        .uri = "/cert.pem", .method = HTTP_GET, .handler = cert_get,
+    };
+    httpd_register_uri_handler(s_server, &uri_cert);
+#endif
+#if HAL_HAS_HTTPS
+    ESP_LOGI(TAG, "%s server listening on :%d (routes: / /favicon.ico /config /update /reboot /log /api/env /coredump.elf /coredump_erase /cert.pem"
+#if HAL_HAS_LORAWAN
+                  " /lorawan_reset"
+#endif
+                  ")", s_https_up ? "HTTPS" : "HTTP (fallback)", s_https_up ? 443 : 80);
+#else
     ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /api/env /coredump.elf /coredump_erase"
 #if HAL_HAS_LORAWAN
                   " /lorawan_reset"
 #endif
                   ")");
+#endif
 }
 
 httpd_handle_t http_server_get_handle(void) {

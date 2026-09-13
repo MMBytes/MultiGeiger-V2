@@ -16,15 +16,25 @@
  *    - `GET  /coredump.elf`   — stored crash dump, if any (basic auth)
  *    - `POST /coredump_erase` — clear the stored crash dump (basic auth)
  *    - `POST /lorawan_reset`  — wipe LoRaWAN session/nonces (basic auth; LoRaWAN boards only)
+ *    - `GET  /cert.pem`       — this device's self-signed certificate PEM (no auth; HTTPS boards)
  *
  *  Basic-auth password is the AP password from config; username is "admin".
+ *
+ *  V2.8.0: on HAL_HAS_HTTPS boards (all PSRAM boards) the server is TLS on
+ *  port 443 with a per-device certificate from tls_cert.h. Port 80 stays up
+ *  as a second, minimal instance: /log, /api/env and /cert.pem are served
+ *  plain there (all three unauthenticated and audited free of shared static
+ *  buffers, so scripts and peer nodes need no TLS client); every other
+ *  plain-HTTP request, any method, receives a 301 to the same path on
+ *  https://. The two Heltec V2 builds stay plain HTTP on :80.
+ *  Design: docs/superpowers/specs/2026-09-12-https-web-server-design.md
  */
 
 #include <stdbool.h>
 #include "esp_http_server.h"
 #include "config.h"
 
-/** @brief Start the server on port 80.
+/** @brief Start the web server (:443 TLS on HAL_HAS_HTTPS boards, else :80 plain).
  *
  *  @p cfg is captured by pointer: GET reads it, POST updates in place and
  *  calls config_save() + main_request_restart() (V2.4.1 A9 — was a polled

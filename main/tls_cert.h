@@ -95,6 +95,19 @@ size_t tls_key_pem_len(void);
 /** @brief SHA-256 over the certificate DER as "AA:BB:...:FF" (95 chars), or "". */
 const char *tls_cert_fingerprint(void);
 
+/** @brief One-line summary of what this boot did with the credential, for
+ *         the syslog boot banner (V2.8.1).
+ *
+ *  "loaded from NVS; SHA-256 AA:BB:…; names the current address, 798 days
+ *  left" or "generated in 412 ms (…); SHA-256 …; re-issued in 398 ms (…, STA
+ *  addr); new SHA-256 … after reboot". Every line tls_cert logs at boot
+ *  predates the syslog client and the reconcile verdict is logged a few lines
+ *  BEFORE the socket opens, so syslog_init() emits this instead. Grows as the
+ *  boot proceeds; read it after the reconcile step for the full story.
+ *  Never NULL; "nothing provisioned" before tls_cert_ensure() ran.
+ */
+const char *tls_cert_boot_summary(void);
+
 #else   // !HAL_HAS_HTTPS — Heltec V2 / 4 MB: plain HTTP, nothing to provision.
 
 static inline esp_err_t tls_cert_ensure(const char *chip_id) { (void)chip_id; return ESP_ERR_NOT_SUPPORTED; }
@@ -106,5 +119,6 @@ static inline size_t      tls_cert_pem_len(void)     { return 0; }
 static inline const char *tls_key_pem(void)          { return NULL; }
 static inline size_t      tls_key_pem_len(void)      { return 0; }
 static inline const char *tls_cert_fingerprint(void) { return ""; }
+static inline const char *tls_cert_boot_summary(void) { return "n/a"; }
 
 #endif  // HAL_HAS_HTTPS

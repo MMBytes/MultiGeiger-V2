@@ -17,6 +17,7 @@
 
 #if HAL_HAS_HTTPS
 
+#include <stdarg.h>            // va_list — summary_append
 #include <stdio.h>
 #include <stdlib.h>            // malloc/free — re-issue staging buffers
 #include <string.h>
@@ -62,6 +63,35 @@ static char   s_crt[CRT_PEM_MAX];
 static char   s_key[KEY_PEM_MAX];
 static char   s_fp[FP_STR_LEN];
 static bool   s_ready = false;
+
+// V2.8.1: one-line boot summary for the syslog banner. Every line this module
+// logs at boot predates the syslog client (it needs a LAN address, which only
+// arrives after the AP window), and the reconcile verdict lands in the same
+// main-loop tick as syslog_init(), a few lines BEFORE the socket opens — so
+// on the server none of it ever appeared, and on the node the first HTTPS
+// boot takes its ring with it when it reboots to load the re-issued pair.
+// Each decision point appends its verdict here; syslog_init() emits it next to
+// the firmware banner once the socket is live. Written from the main task
+// only (tls_cert_ensure and tls_cert_reconcile both run there).
+// 288: the longest honest line is a first enable — generated + fingerprint +
+// re-issued + new fingerprint — at ~205 bytes, plus an "NVS load failed"
+// prefix. 200 clipped exactly the segment that says a reboot is coming.
+#define BOOT_SUMMARY_MAX 288
+static char s_boot_summary[BOOT_SUMMARY_MAX] = "";
+
+static void summary_append(const char *fmt, ...) {
+    size_t used = strlen(s_boot_summary);
+    if (used >= sizeof(s_boot_summary) - 3) return;
+    if (used) {
+        s_boot_summary[used++] = ';';
+        s_boot_summary[used++] = ' ';
+        s_boot_summary[used] = 0;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_boot_summary + used, sizeof(s_boot_summary) - used, fmt, ap);
+    va_end(ap);
+}
 
 // Validity. 800 days: Apple refuses TLS server certificates valid for more
 // than 825 days (iOS 13 / macOS 10.15 onwards, private roots included), so
@@ -393,10 +423,13 @@ static esp_err_t generate(char *crt_out, size_t crt_sz, char *key_out, size_t ke
                              (stamp_issued && clock_ok) ? (uint32_t)time(NULL) : 0);
     }
     if (result == ESP_OK) {
+        const long long gen_ms = (long long)((esp_timer_get_time() - t0) / 1000);
         ESP_LOGI(TAG, "generated P-256 key + self-signed cert in %lld ms (%u B cert, %u B key, valid %s..%s%s)",
-                 (long long)((esp_timer_get_time() - t0) / 1000),
-                 (unsigned)strlen(crt_out), (unsigned)strlen(key_out), nb_s, na_s,
+                 gen_ms, (unsigned)strlen(crt_out), (unsigned)strlen(key_out), nb_s, na_s,
                  sta_ip_be ? ", STA address included" : ", no STA address yet");
+        summary_append("%s in %lld ms (valid %.8s..%.8s%s)",
+                       stamp_issued ? "re-issued" : "generated", gen_ms, nb_s, na_s,
+                       sta_ip_be ? ", STA addr" : ", AP addr only");
     } else {
         ESP_LOGE(TAG, "post-generation step failed: %s", esp_err_to_name(result));
     }
@@ -424,17 +457,21 @@ esp_err_t tls_cert_ensure(const char *chip_id) {
     esp_err_t err = load_from_nvs();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "certificate loaded from NVS, SHA-256 %s", s_fp);
+        summary_append("loaded from NVS");
     } else {
         if (err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "NVS load failed (%s) — regenerating", esp_err_to_name(err));
+            summary_append("NVS load failed (%s)", esp_err_to_name(err));
         }
         // Straight into the live statics: no server is running yet, so there
         // is nothing to keep consistent and no reader to tear.
         err = generate(s_crt, sizeof(s_crt), s_key, sizeof(s_key), s_fp, sizeof(s_fp),
                        chip_id, 0, false);
         if (err == ESP_OK) ESP_LOGI(TAG, "certificate SHA-256 %s", s_fp);
+        else summary_append("generation FAILED (%s) — plain HTTP", esp_err_to_name(err));
     }
     s_ready = (err == ESP_OK);
+    if (s_ready) summary_append("SHA-256 %.23s", s_fp);   // first 8 bytes identify it
     return err;
 }
 
@@ -458,8 +495,10 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
         if (now != 0) {
             ESP_LOGI(TAG, "certificate names the current address, %lld days left — no re-issue",
                      (long long)((valid_to - now) / 86400));
+            summary_append("names the current address, %lld days left", (long long)((valid_to - now) / 86400));
         } else {
             ESP_LOGI(TAG, "certificate names the current address, clock not yet valid — no re-issue");
+            summary_append("names the current address, clock not valid");
         }
         return ESP_OK;
     }
@@ -481,6 +520,8 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
         esp_reset_reason() == ESP_RST_SW) {
         ESP_LOGE(TAG, "address changed again %llds after the last re-issue — refusing to loop. "
                  "Give this node a DHCP reservation.", (long long)(now - (int64_t)issued));
+        summary_append("address changed again %llds after a re-issue — REFUSED (DHCP reservation?)",
+                       (long long)(now - (int64_t)issued));
         return ESP_OK;
     }
 
@@ -504,13 +545,17 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
         free(crt_stage);
         free(key_stage);
         ESP_LOGE(TAG, "no heap for the re-issue staging buffers — keeping the current certificate");
+        summary_append("re-issue skipped: no heap");
         return ESP_ERR_NO_MEM;
     }
     err = generate(crt_stage, CRT_PEM_MAX, key_stage, KEY_PEM_MAX, fp_stage, sizeof(fp_stage),
                    chip_id, sta_ip_be, true);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "certificate SHA-256 %s (effective after reboot)", fp_stage);
+        summary_append("new SHA-256 %.23s after reboot", fp_stage);
         if (reissued) *reissued = true;
+    } else {
+        summary_append("re-issue FAILED (%s) — keeping the current certificate", esp_err_to_name(err));
     }
     // key_stage held the new PRIVATE key in cleartext; free() alone leaves it
     // readable in the heap block until something else reuses it.
@@ -526,5 +571,6 @@ size_t      tls_cert_pem_len(void)     { return s_ready ? strlen(s_crt) + 1 : 0;
 const char *tls_key_pem(void)          { return s_ready ? s_key : NULL; }
 size_t      tls_key_pem_len(void)      { return s_ready ? strlen(s_key) + 1 : 0; }
 const char *tls_cert_fingerprint(void) { return s_ready ? s_fp : ""; }
+const char *tls_cert_boot_summary(void) { return s_boot_summary[0] ? s_boot_summary : "nothing provisioned"; }
 
 #endif  // HAL_HAS_HTTPS

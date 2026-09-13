@@ -9,6 +9,58 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.1 — the TLS state reaches syslog
+
+**In short:**
+
+1. **A third `boot:` banner line, `TLS: …`, now reaches the syslog server.**
+   In V2.8.0 none of the certificate work was visible server-side: the load
+   or generation and both "listening" lines are logged before the syslog
+   client exists (it needs a LAN address, which arrives after the AP window),
+   and the reconcile verdict is logged in the same main-loop tick as the
+   syslog start, a few lines before the socket opens. On the node itself the
+   first HTTPS boot takes its log ring with it when it reboots to load the
+   re-issued certificate. The new line summarises the whole boot from saved
+   state once the socket is live, for example:
+   `boot: TLS: HTTPS :443 + :80 plain/redirect — loaded from NVS; SHA-256
+   AA:BB:CC:DD:EE:FF:00:11; names the current address, 798 days left`
+   or, on a first enable, `… generated in N ms (valid 20260913..20281121, AP
+   addr only); SHA-256 …; re-issued in N ms (…, STA addr); new SHA-256 …
+   after reboot`. Nodes with HTTPS off report `HTTP :80 (HTTPS off in
+   config) — nothing provisioned`; boards without HTTPS report `HTTP :80 —
+   n/a`. This also captures the key-generation time V2.8.0 could not.
+2. **The `esp-tls-mbedtls: read error :-0x0050` lines now come with an
+   explanation.** On every HTTPS node, each browser page load logged two to
+   five of them at ERROR level. They are not a fault. A browser opens several
+   connections to a new host at once; each TLS handshake costs about a second
+   of software ECDSA on the node's single web-server task (the ESP32-S3 has no
+   elliptic-curve accelerator), so the spare connections wait their turn,
+   complete the handshake, and are then closed by the browser before it sends
+   a request. The first read on each of those finds the peer gone. Nothing
+   is lost and the page always loads, and it happens whether or not the
+   certificate is trusted — it is the browser's speculative pre-connection,
+   not a certificate retry. The esp-tls line stays at ERROR — the same tag
+   reports genuine TLS failures — but every such session now also logs
+   `TLS session on fd N closed before any request (a browser's abandoned
+   parallel connection — harmless)` at INFO. A `read error` WITHOUT that
+   companion line is a real mid-request reset worth looking at. A handshake
+   that never completes (about once per cold page load the browser hangs up
+   mid-handshake, `mbedtls_ssl_handshake returned -0x7280`) logs `TLS
+   handshake on fd N did not complete — see the esp-tls line above`; that
+   line is a marker, not a verdict — the mbedTLS code next to it says
+   whether it was a browser (`-0x7280`), a port scan or a real fault.
+3. **Tried and rejected: mbedTLS's fixed-point ECC optimisation.** Measured
+   on the bench node with a single-connection client, TLS setup took the same
+   1.1 s with and without `CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM`, so the
+   23 KB of flash it costs buys nothing here; left off.
+4. **Status page:** the certificate line moved from the Device card to the
+   bottom of the Network card, next to the address it certifies, and the
+   fingerprint now wraps inside the card instead of running past its edge.
+5. No change to counting, uploads or the web API. Binaries grow by a few
+   hundred bytes.
+
+---
+
 ## V2.8.0 — HTTPS for the node web UI (opt-in, PSRAM boards)
 
 **In short:**

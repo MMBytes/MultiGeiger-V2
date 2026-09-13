@@ -119,11 +119,89 @@ static void peer_ipstr(httpd_req_t *req, char *out, size_t outsz) {
     }
 }
 
+#if HAL_HAS_HTTPS
+static void tls_sess_mark_served(int fd);   // defined in the TLS session accounting block below
+#endif
 static void log_access(httpd_req_t *req, const char *what) {
     char ipstr[48];
     peer_ipstr(req, ipstr, sizeof(ipstr));
     ESP_LOGI(TAG, "%s from %s", what, ipstr);
+#if HAL_HAS_HTTPS
+    // Only the :443 instance has TLS sessions to account for; the :80
+    // handlers share this helper but must not touch the table (single-task
+    // rule, see the TLS session accounting block).
+    if (req->handle == s_server) tls_sess_mark_served(httpd_req_to_sockfd(req));
+#endif
 }
+
+#if HAL_HAS_HTTPS
+// --- TLS session accounting (V2.8.1) ------------------------------------------
+// A browser opens several connections to a new host at once; on this single
+// httpd task each TLS handshake is ~1 s of software ECDSA (the S3 has no ECC
+// block), so the spares wait their turn, COMPLETE the handshake, and are then
+// reset by the client before sending a request (bench + five-node review,
+// 2026-09-13; still the case with the CA imported into the browser, so it is
+// ordinary speculative pre-connection, not a certificate-error retry).
+// esp-tls logs each such first-read reset at ERROR
+// ("read error :-0x0050"), two to five per page load, and that tag also
+// carries every genuine TLS read/write failure — so it must stay at ERROR.
+// Instead, account for sessions here: mark the socket at its first request,
+// and at session close report the ones that never carried one at INFO. A
+// "read error" that is NOT paired with a "closed before any request" line is
+// the real thing.
+//
+// Both callbacks run on the :443 httpd task, and log_access() marks a
+// session only when the request arrived on that instance (req->handle ==
+// s_server) — the :80 handlers also call log_access() but never reach the
+// table — so every access is from ONE task and it needs no lock.
+#define TLS_SESS_SLOTS 8   // > max_open_sockets (5) + the accept in flight
+static struct { int fd; bool served; } s_tls_sess[TLS_SESS_SLOTS];
+
+static void tls_sess_mark_served(int fd) {
+    for (int i = 0; i < TLS_SESS_SLOTS; i++) {
+        if (s_tls_sess[i].fd == fd) { s_tls_sess[i].served = true; return; }
+    }
+}
+
+static void tls_sess_user_cb(esp_https_server_user_cb_arg_t *arg) {
+    int fd = -1;
+    if (!arg || !arg->tls || esp_tls_get_conn_sockfd(arg->tls, &fd) != ESP_OK) return;
+    switch (arg->user_cb_state) {
+    case HTTPD_SSL_USER_CB_SESS_CREATE:
+        for (int i = 0; i < TLS_SESS_SLOTS; i++) {
+            if (s_tls_sess[i].fd == 0 || s_tls_sess[i].fd == fd) {
+                s_tls_sess[i].fd = fd; s_tls_sess[i].served = false; return;
+            }
+        }
+        return;                      // table full: this session goes unaccounted
+    case HTTPD_SSL_USER_CB_SESS_ERROR:
+        // Handshake never completed. This fires for EVERY failed handshake —
+        // a browser hanging up mid-handshake (-0x7280, about once per cold
+        // page load), but also a port scan, a plaintext probe on :443, a
+        // version mismatch, or the 9 s handshake budget — and the callback
+        // cannot tell them apart: httpd_ssl_open clears the esp-tls error
+        // record before invoking it. So this line is a marker, not a verdict;
+        // the mbedTLS code on the esp-tls line above it says which case.
+        ESP_LOGI(TAG, "TLS handshake on fd %d did not complete — see the esp-tls "
+                      "line above (-0x7280 = client hung up, a browser's spare connection)", fd);
+        return;
+    case HTTPD_SSL_USER_CB_SESS_CLOSE:
+        for (int i = 0; i < TLS_SESS_SLOTS; i++) {
+            if (s_tls_sess[i].fd == fd) {
+                if (!s_tls_sess[i].served) {
+                    ESP_LOGI(TAG, "TLS session on fd %d closed before any request "
+                                  "(a browser's abandoned parallel connection — harmless)", fd);
+                }
+                s_tls_sess[i].fd = 0;
+                return;
+            }
+        }
+        return;
+    default:
+        return;
+    }
+}
+#endif  // HAL_HAS_HTTPS
 
 // --- Auth --------------------------------------------------------------------
 
@@ -332,6 +410,49 @@ static void wifi_phy_str(const wifi_ap_record_t *ap, char *out, size_t sz) {
     else        snprintf(out, sz, "%s", buf);
 }
 
+// --- Certificate line (V2.8.0; moved to the Network card in V2.8.1) -----------
+// The certificate is bound to the network — its SAN names the STA address and
+// it re-issues when that address changes — so it lives at the bottom of the
+// Network card, after the address it certifies. Every Network branch (STA,
+// AP-only, no connection) ends with it: an AP-only node serves the same
+// certificate at 192.168.4.1.
+//
+// Five states, not three: a /config POST writes *s_cfg in place before the
+// reboot that would act on it, so the live s_cfg->https_enable can disagree
+// with what THIS boot is doing; s_https_cfg_at_boot is the value latched in
+// http_server_start. The fingerprint is a 95-char token with no spaces, so
+// it needs .fp (monospace + overflow-wrap:anywhere) to wrap inside the card
+// instead of running past its edge (V2.8.1).
+//
+// Static return buffer: the whole page renders on the ONE :443 httpd task
+// (see the CRITICAL note in http_server_start), same rule as every other
+// scratch buffer in this file.
+static const char *cert_status_html(void) {
+#if HAL_HAS_HTTPS
+    if (s_https_up && s_cfg->https_enable) {
+        static char cert_line[192];
+        snprintf(cert_line, sizeof(cert_line),
+                 "SHA-256 <span class=\"fp\">%s</span> &middot; <a href=\"/cert.pem\">cert.pem</a>",
+                 tls_cert_fingerprint());
+        return cert_line;
+    }
+    if (s_https_up && !s_cfg->https_enable) {
+        return "HTTPS on this boot; disabled in /config &mdash; plain HTTP after the next reboot";
+    }
+    if (!s_https_up && s_cfg->https_enable && !s_https_cfg_at_boot) {
+        return "HTTPS enabled in /config &mdash; takes effect after the next reboot";
+    }
+    if (!s_https_up && !s_https_cfg_at_boot) {
+        return "plain HTTP (HTTPS off in /config)";
+    }
+    // Wanted at boot (s_https_cfg_at_boot) but httpd_ssl_start failed — the
+    // one genuine failure case, kept red.
+    return "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>";
+#else
+    return "plain HTTP (board has no PSRAM for a TLS server)";
+#endif
+}
+
 static void format_net_info(char *out, size_t sz) {
     wifi_mode_t mode = WIFI_MODE_NULL;
     esp_wifi_get_mode(&mode);
@@ -401,7 +522,8 @@ static void format_net_info(char *out, size_t sz) {
                  "<b>Gateway:</b> %s<br>"
                  "<b>Network Mask:</b> %s<br>"
                  "<b>DNS:</b> %s%s%s<br>"
-                 "<b>Reconnects:</b> %lu since boot"
+                 "<b>Reconnects:</b> %lu since boot<br>"
+                 "<b>Certificate:</b> %s"
                  "</div>",
                  ap_name_esc,
                  ssid_esc,
@@ -413,7 +535,8 @@ static void format_net_info(char *out, size_t sz) {
                  host_esc,
                  ip_s, gw_s, nm_s,
                  d1_s, has_d2 ? ", " : "", has_d2 ? d2_s : "",
-                 (unsigned long)st.reconnects);
+                 (unsigned long)st.reconnects,
+                 cert_status_html());
         return;
     }
 
@@ -423,11 +546,13 @@ static void format_net_info(char *out, size_t sz) {
         if (apn) esp_netif_get_ip_info(apn, &ip);
         char ip_s[16];
         esp_ip4addr_ntoa(&ip.ip, ip_s, sizeof(ip_s));
-        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>Hostname:</b> %s<br><b>IP:</b> %s (AP mode)</div>", ap_name_esc, host_esc, ip_s);
+        snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>AP SSID:</b> %s<br><b>Hostname:</b> %s<br><b>IP:</b> %s (AP mode)<br><b>Certificate:</b> %s</div>",
+                 ap_name_esc, host_esc, ip_s, cert_status_html());
         return;
     }
 
-    snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>Network:</b> No connection</div>");
+    snprintf(out, sz, "<div class=\"info\"><h3>Network</h3><b>Network:</b> No connection<br><b>Certificate:</b> %s</div>",
+             cert_status_html());
 }
 
 // --- Device identity block ---------------------------------------------------
@@ -463,36 +588,6 @@ static void format_device(char *out, size_t sz) {
     const char *antenna = "(N/A — internal only)";
 #endif
 
-#if HAL_HAS_HTTPS
-    // "SHA-256 AA:…:FF · <a>cert.pem</a>": 95 hex chars + fixed text. The
-    // fingerprint is generated text (hex + colons) so it needs no escaping.
-    char cert_line[160];
-    snprintf(cert_line, sizeof(cert_line),
-             "SHA-256 %s &middot; <a href=\"/cert.pem\">cert.pem</a>",
-             tls_cert_fingerprint());
-    // Fix wave 5 (five states, not three — a /config POST writes *s_cfg in
-    // place before the reboot that would act on it, so the live
-    // s_cfg->https_enable can disagree with what THIS boot is actually
-    // doing). s_https_cfg_at_boot is the value latched at http_server_start,
-    // before any POST could touch it. An if/else chain reads clearer here
-    // than a nested ternary.
-    const char *cert_status;
-    if (s_https_up && s_cfg->https_enable) {
-        cert_status = cert_line;
-    } else if (s_https_up && !s_cfg->https_enable) {
-        cert_status = "HTTPS on this boot; disabled in /config"
-                      " &mdash; plain HTTP after the next reboot";
-    } else if (!s_https_up && s_cfg->https_enable && !s_https_cfg_at_boot) {
-        cert_status = "HTTPS enabled in /config"
-                      " &mdash; takes effect after the next reboot";
-    } else if (!s_https_up && !s_https_cfg_at_boot) {
-        cert_status = "plain HTTP (HTTPS off in /config)";
-    } else {
-        // Wanted at boot (s_https_cfg_at_boot) but httpd_ssl_start failed —
-        // the one genuine failure case, kept red.
-        cert_status = "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>";
-    }
-#endif
 
     snprintf(out, sz,
         "<div class=\"info\"><h3>Device</h3>"
@@ -502,10 +597,7 @@ static void format_device(char *out, size_t sz) {
         "<b>Chip:</b> %s rev v%d.%d &middot; %d cores &middot; %s<br>"
         "<b>Memory:</b> %lu MB flash%s<br>"
         "<b>Firmware:</b> %s &nbsp; (built %s %s)<br>"
-        "<b>Antenna:</b> %s<br>"
-        // V2.8.0: certificate identity. Compare against what the browser
-        // shows before trusting it; the link downloads the PEM for import.
-        "<b>Certificate:</b> %s"
+        "<b>Antenna:</b> %s"
         "</div>",
         s_chip_id,
         s_mac_str,
@@ -518,15 +610,7 @@ static void format_device(char *out, size_t sz) {
         "",
 #endif
         VERSION_STR, fw_date, fw_time,
-        antenna,
-#if HAL_HAS_HTTPS
-        // Fix wave 5: cert_status picked above, five states (V2.8.0 design
-        // D13 extended) — see the if/else chain for which one applies.
-        cert_status
-#else
-        "plain HTTP (board has no PSRAM for a TLS server)"
-#endif
-        );
+        antenna);
 }
 
 // --- System block ------------------------------------------------------------
@@ -1265,6 +1349,12 @@ static const char s_favicon_svg[] =
     "</text></svg>";
 
 static esp_err_t favicon_get(httpd_req_t *req) {
+#if HAL_HAS_HTTPS
+    // Not access-logged (one per page load would be noise), but it IS a
+    // served request: without this a connection whose only request was the
+    // icon would be reported as "closed before any request".
+    if (req->handle == s_server) tls_sess_mark_served(httpd_req_to_sockfd(req));
+#endif
     httpd_resp_set_type(req, "image/svg+xml");
     httpd_resp_set_hdr(req, "Cache-Control", "max-age=86400");
     return httpd_resp_send(req, s_favicon_svg, HTTPD_RESP_USE_STRLEN);
@@ -1330,6 +1420,7 @@ static const char STATUS_HEAD[] =
     ".info{background:#f5f5f5;border:1px solid #ddd;padding:10px;border-radius:4px;margin:10px 0}"
     ".u{border-collapse:collapse;font-size:.95em}.ar{text-align:right;padding-left:10px}"
     ".g{color:#080}.r{color:#c00}.o{color:#c80}.d{color:#888}"
+    ".fp{font-family:monospace;overflow-wrap:anywhere}"
     "</style></head><body>";
 // V2.3.32: split into HEAD + TAIL so status_get can inject the optional
 // per-chip Madavi graphs link between them when madavi uploads are enabled.
@@ -3655,6 +3746,8 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         // budget equal to the recv timeout still lets a second 10 s recv start
         // (20 s measured on the bench). 9 s makes the true bound one recv.
         sc.tls_handshake_timeout_ms = 9000;
+        // V2.8.1: per-session accounting — see tls_sess_user_cb above.
+        sc.user_cb = tls_sess_user_cb;
         sc.servercert     = (const uint8_t *)tls_cert_pem();
         sc.servercert_len = tls_cert_pem_len();      // counted NUL => PEM
         sc.prvtkey_pem    = (const uint8_t *)tls_key_pem();
@@ -3845,6 +3938,16 @@ void http_server_start(config_t *cfg, const char *chip_id) {
             ESP_LOGI(TAG, "HTTP listener on :80 (/log /api/env /cert.pem plain; everything else -> https)");
         }
     }
+#endif
+}
+
+const char *http_server_transport_str(void) {
+#if HAL_HAS_HTTPS
+    if (s_https_up)          return s_redirect ? "HTTPS :443 + :80 plain/redirect" : "HTTPS :443 only (:80 instance failed)";
+    if (!s_https_cfg_at_boot) return "HTTP :80 (HTTPS off in config)";
+    return "HTTP :80 (fallback — TLS start failed)";
+#else
+    return "HTTP :80";
 #endif
 }
 

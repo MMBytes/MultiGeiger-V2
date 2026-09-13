@@ -33,6 +33,8 @@
 #include "hal.h"               // BOARD_NAME
 #include "coredump.h"          // coredump_have_dump
 #include "display.h"           // display_backend_str — panel line in banner
+#include "http_server.h"       // http_server_transport_str — TLS line in banner (V2.8.1)
+#include "tls_cert.h"          // tls_cert_boot_summary — TLS line in banner (V2.8.1)
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "esp_ota_ops.h"       // esp_ota_get_running_partition — boot slot in banner
 
@@ -149,6 +151,15 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // display_setup() has always completed by syslog_init() time (main.c
     // boots the display before WiFi), so the string is final here.
     ESP_LOGI("boot", "Display: %s", display_backend_str());
+
+    // V2.8.1: TLS verdict as a third banner line. The certificate load /
+    // generation, both "listening" lines and the reconcile decision are all
+    // logged before this socket exists (the reconcile even lands in the same
+    // main-loop tick as this call, a few lines earlier), so without this line
+    // the server never learns whether a node is on HTTPS, which certificate it
+    // presents, or whether it re-issued and rebooted. On boards without HTTPS
+    // the stubs make this "HTTP :80 — n/a".
+    ESP_LOGI("boot", "TLS: %s — %s", http_server_transport_str(), tls_cert_boot_summary());
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);

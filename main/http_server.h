@@ -51,3 +51,10 @@ void http_server_start(config_t *cfg, const char *chip_id);
  *  runs / if it failed. Lets other modules serialize onto the httpd task
  *  via httpd_queue_work() — see sd_card.c's mount/unmount for why. */
 httpd_handle_t http_server_get_handle(void);
+
+/** @brief Transport verdict for the syslog boot banner (V2.8.1): "HTTPS :443
+ *  + :80 plain/redirect", "HTTP :80 (HTTPS off in config)", "HTTP :80
+ *  (fallback — TLS start failed)" or "HTTP :80" on boards without HTTPS. The
+ *  "listening" log lines are emitted before syslog exists, so the server
+ *  reports what it is actually doing through this instead. Static string. */
+const char *http_server_transport_str(void);

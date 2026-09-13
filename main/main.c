@@ -1840,7 +1840,11 @@ void app_main(void) {
         // (the same two gates MQTT waits for below), make sure the TLS
         // certificate names the address people actually browse to and is not
         // about to expire. A re-issue takes effect on the reboot requested
-        // here; the running TLS server holds its own copy of the old PEM.
+        // here; the running TLS server holds its own copy of the old PEM, and
+        // so do the tls_cert statics — a re-issue is generated into heap
+        // staging buffers and written only to NVS, so /cert.pem, the
+        // fingerprint on / and what :443 actually presents all stay the same
+        // (old) certificate until the reboot loads the new pair.
         // Skipped while an OTA is in progress — the reboot would kill it.
         static bool tls_reconciled = false;
         if (!tls_reconciled && n_got_ip > 0 && ntp_time_valid() && !main_ota_in_progress()) {

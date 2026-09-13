@@ -118,6 +118,35 @@ static bool san_has_ip(const mbedtls_x509_crt *crt, uint32_t ip_be) {
     return false;
 }
 
+/** Confirm the stored private key belongs to @p crt.
+ *
+ *  save_to_nvs() writes `crt` then `key` and nvs_set_str persists each one
+ *  immediately, so a power loss between the two leaves a NEW certificate
+ *  beside the OLD key. Without this check the mismatch only surfaces when
+ *  httpd_ssl_start fails on the next boot — the node then falls back to plain
+ *  HTTP (design D9) and NEVER self-heals, because the stored pair still parses.
+ *  Catching it here costs one extra browser trust prompt (the regenerated cert
+ *  has a new fingerprint) and buys back HTTPS.
+ *
+ *  mbedTLS 4.1 (tf-psa-crypto): mbedtls_pk_parse_key() takes no RNG arguments
+ *  (pk.h:725) and mbedtls_pk_check_pair() takes just the two contexts
+ *  (pk.h:694) — both lost the RNG parameters they had in 3.x.
+ */
+static esp_err_t check_key_matches(const mbedtls_x509_crt *crt) {
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    int rc = mbedtls_pk_parse_key(&pk, (const unsigned char *)s_key, strlen(s_key) + 1,
+                                  NULL, 0);
+    if (rc == 0) rc = mbedtls_pk_check_pair(&crt->pk, &pk);
+    mbedtls_pk_free(&pk);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "stored key does not match the stored certificate (-0x%04x) — regenerating",
+                 (unsigned)-rc);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
 /** UTC epoch seconds of an mbedtls_x509_time (fields are already validated). */
 static int64_t x509_time_to_epoch(const mbedtls_x509_time *t) {
     return civil_to_epoch(t->year, (unsigned)t->mon, (unsigned)t->day,
@@ -140,6 +169,7 @@ static esp_err_t load_from_nvs(void) {
     mbedtls_x509_crt crt;
     err = parse_pem(&crt, s_crt, strlen(s_crt) + 1);
     if (err == ESP_OK) err = fingerprint_of(&crt, s_fp, sizeof(s_fp));
+    if (err == ESP_OK) err = check_key_matches(&crt);
     mbedtls_x509_crt_free(&crt);
     return err;
 }

@@ -3065,10 +3065,20 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         // httpd_recv_with_opt drains the session's pending buffer (body bytes
         // that arrived with the headers) into `buf` BEFORE recv and preserves
         // them only for a TIMEOUT — retrying the FIRST body read would drop
-        // them, so a first-read stall still aborts. NET_RECV_FAILED also
-        // covers a genuinely dead socket: the cost is then the full retry
-        // budget, exactly as on plain HTTP. remaining_len is untouched on a
-        // negative return, so each retry asks for exactly the same bytes.
+        // them, so a first-read stall still aborts. remaining_len is untouched
+        // on a negative return, so each retry asks for exactly the same bytes.
+        // Retrying a -0x004C is an IMPLEMENTATION dependency, not a contract:
+        // ssl.h:4994-5002 calls every non-positive mbedtls_ssl_read outside
+        // WANT_READ/WANT_WRITE/ASYNC/CRYPTO_IN_PROGRESS/CLIENT_RECONNECT/
+        // EARLY_DATA terminal for the SSL context. It works only because for
+        // stream transport ssl_msg.c:2034 hands the BIO error back unchanged
+        // and keeps in_left, so the next call resumes the same partially read
+        // record. RE-CHECK THIS ON EVERY mbedTLS UPGRADE. A genuinely dead
+        // socket still aborts on the first error rather than burning the
+        // budget: a peer reset is ECONNRESET/EPIPE -> MBEDTLS_ERR_NET_CONN_RESET
+        // (-0x0050, net_sockets.c:552), and the ENOTCONN/EHOSTUNREACH class
+        // that does map to -0x004C (:560) returns at once instead of blocking
+        // out the recv timeout.
         if (r == HTTPD_SOCK_ERR_TIMEOUT ||
             (r == MBEDTLS_ERR_NET_RECV_FAILED && received > 0)) {
             if (recv_retries < RECV_MAX_RETRIES) {
@@ -3083,6 +3093,18 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             free(buf);
             esp_ota_abort(ota);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv timeout");
+            return ESP_OK;
+        }
+        // V2.8.0: esp_mbedtls_read returns ESP_ERR_NO_MEM (+0x101) instead of a
+        // negative code on the TLS 1.3 session-ticket path (esp_tls_mbedtls.c),
+        // and httpd_req_recv passes a positive return straight through — the
+        // loop would read it as "257 bytes received" and flash 257 bytes of
+        // stale buffer. A recv can never deliver more than it was asked for.
+        if (r > (int)want) {
+            ESP_LOGE(TAG, "OTA: impossible recv count %d — aborting", r);
+            free(buf);
+            esp_ota_abort(ota);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
             return ESP_OK;
         }
         if (r <= 0) {

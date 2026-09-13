@@ -60,6 +60,13 @@ X_BOOL(wifi_ht20_only,         "wifi_ht20",  false)
 X_BOOL(wifi_ps_disabled,       "wifi_ps_dis", false)
 X_BOOL(use_external_antenna,   "wifi_ext_a", false)
 
+// V2.8.0 (design D13): opt-in TLS for the web UI. Off by default so a point
+// release never moves a deployed node to :443 and a browser trust prompt on
+// its own; shown on /config only on HAL_HAS_HTTPS (PSRAM) boards and applied
+// at the next boot, because the key generation and the listener both live in
+// the boot path.
+X_BOOL(https_enable,           "https_en",   false)
+
 // --- Tube ENABLE master switch ----------------------------------------------
 
 X_BOOL(tube_enabled,           "tube_en",    true)

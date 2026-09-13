@@ -27,6 +27,9 @@
  *  buffers, so scripts and peer nodes need no TLS client); every other
  *  plain-HTTP request, any method, receives a 301 to the same path on
  *  https://. The two Heltec V2 builds stay plain HTTP on :80.
+ *  HTTPS is opt-in per node via the `https_enable` config setting (default
+ *  off, applied at the next boot); with it off the board serves plain HTTP
+ *  on :80 exactly as V2.7.7 did.
  *  Design: docs/superpowers/specs/2026-09-12-https-web-server-design.md
  */
 

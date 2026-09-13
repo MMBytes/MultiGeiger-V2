@@ -159,9 +159,11 @@ void config_log_summary(const config_t *cfg) {
              (unsigned long)cfg->tx_interval_ms);
     LOG_PACED("  wifi:             ssid=%s pw=%s host=%s ap_name=%s",
              cfg->wifi_ssid, MASK(cfg->wifi_password), cfg->wifi_hostname, cfg->ap_name);
-    LOG_PACED("  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d",
+    // V2.8.0: https_enable rides on this line rather than gaining one of its
+    // own — every extra LOG_PACED line costs another paced syslog send.
+    LOG_PACED("  wifi:             11bg_only=%d ht20_only=%d ps_disabled=%d ext_antenna=%d https=%d",
              cfg->wifi_11bg_only, cfg->wifi_ht20_only, cfg->wifi_ps_disabled,
-             cfg->use_external_antenna);
+             cfg->use_external_antenna, cfg->https_enable);
     LOG_PACED("  madavi:           enabled=%d https=%d",
              cfg->send_madavi, cfg->madavi_https);
     LOG_PACED("  sensor.community: enabled=%d https=%d",

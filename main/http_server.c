@@ -477,7 +477,11 @@ static void format_device(char *out, size_t sz) {
         VERSION_STR, fw_date, fw_time,
         antenna,
 #if HAL_HAS_HTTPS
-        s_https_up ? cert_line : "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>"
+        // Three states, not two (V2.8.0 design D13): TLS up, TLS deliberately
+        // off, or TLS wanted and failed. Only the last one is red.
+        s_https_up            ? cert_line
+        : !s_cfg->https_enable ? "plain HTTP (HTTPS off in /config)"
+        : "<span style=\"color:#c00\">plain HTTP — TLS start failed, see /log</span>"
 #else
         "plain HTTP (board has no PSRAM for a TLS server)"
 #endif
@@ -1700,6 +1704,19 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_ext_a\" "
                      "id=\"wifi_ext_a\" %s %s> Use External Antenna Port <span class=\"r\">*</span>"
                      "%s</label></div>"
+#if HAL_HAS_HTTPS
+                     // V2.8.0 (design D13): per-node opt-in, default off. Only
+                     // rendered on HAL_HAS_HTTPS boards — on the others there is
+                     // no TLS server to enable, so the field stays out of the form
+                     // (and out of the POST parser) entirely.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"https_en\" "
+                     "id=\"https_en\" %s> "
+                     "Serve the web UI over HTTPS (port 443; applies after reboot) "
+                     "<span class=\"r\">*</span> "
+                     "<small>Generates a per-device certificate on first use; the browser "
+                     "warns once &mdash; see /cert.pem on the status page. Port 80 keeps "
+                     "/log and /api/env plain and redirects the rest.</small></label></div>"
+#endif
                      "<p>Chip ID (auto-derived from MAC): <code>%s</code><br>"
                      "MAC: <code>%s</code></p>"
                      "<h3>Hardware</h3>"
@@ -2181,6 +2198,9 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "disabled",   // greyed out
                      "",           // never checked on this board
                      " <small>(not available on this board)</small>",
+#endif
+#if HAL_HAS_HTTPS
+                     s_cfg->https_enable ? "checked" : "",    // V2.8.0: opt-in TLS
 #endif
                      e->chip, s_mac_str,
                      s_cfg->tube_enabled ? "checked" : "",
@@ -3561,7 +3581,10 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // threading model is unchanged too: ONE task, select() over sessions,
     // so the static-buffer pattern warned about above still holds.
     esp_err_t err = ESP_FAIL;
-    if (tls_cert_pem() != NULL) {
+    // Design D13: TLS is per-node opt-in. With https_enable off main.c never
+    // called tls_cert_ensure(), so there is no PEM to serve and this is the
+    // deliberate plain-HTTP path, not a failure.
+    if (s_cfg->https_enable && tls_cert_pem() != NULL) {
         httpd_ssl_config_t sc = HTTPD_SSL_CONFIG_DEFAULT();
         sc.httpd = hc;
         // TLS handshakes run on the httpd task BEFORE any handler; 8 KB was
@@ -3595,9 +3618,14 @@ void http_server_start(config_t *cfg, const char *chip_id) {
             ESP_LOGE(TAG, "httpd_ssl_start failed (%s) — falling back to plain HTTP on :80",
                      esp_err_to_name(err));
         }
-    } else {
+    } else if (!s_cfg->https_enable) {
         // Static zero-init already gives this; say it explicitly so the branch
         // states what it means rather than relying on the reader knowing.
+        // INFO, not ERROR: the operator asked for plain HTTP.
+        s_https_up = false;
+        ESP_LOGI(TAG, "HTTPS disabled in config — plain HTTP on :80");
+    } else {
+        // Opted in but no credential — that IS a failure (design D9).
         s_https_up = false;
         ESP_LOGE(TAG, "no TLS credential (tls_cert_ensure failed) — plain HTTP on :80");
     }
@@ -3679,7 +3707,12 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 #if HAL_HAS_LORAWAN
                   " /lorawan_reset"
 #endif
-                  ")", s_https_up ? "HTTPS" : "HTTP (fallback)", s_https_up ? 443 : 80);
+                  // V2.8.0: distinguish "the operator turned TLS off" (D13)
+                  // from "TLS was wanted and failed" (D9) — same port, very
+                  // different thing to chase in a log.
+                  ")", s_https_up ? "HTTPS"
+                                  : (s_cfg->https_enable ? "HTTP (fallback)" : "HTTP (HTTPS off)"),
+                  s_https_up ? 443 : 80);
 #else
     ESP_LOGI(TAG, "HTTP server listening on :80 (routes: / /favicon.ico /config /update /reboot /log /api/env /coredump.elf /coredump_erase"
 #if HAL_HAS_LORAWAN

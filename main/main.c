@@ -1689,12 +1689,40 @@ void app_main(void) {
     }
     tx_setup();
     lorawan_setup();
+
+    ESP_LOGI(TAG, "AP up: SSID=%s auth=%d (2-min boot window)",
+             (char *)apc.ap.ssid, apc.ap.authmode);
+    if (!have_sta_creds) {
+        ESP_LOGW(TAG, "no WiFi SSID configured — AP-only. "
+                 "Join %s and browse to %s://192.168.4.1/config",
+                 (char *)apc.ap.ssid,
+                 (HAL_HAS_HTTPS && g_cfg.https_enable) ? "https" : "http");
+    }
+    ESP_LOGI(TAG, "esp_wifi_start()");
+    ESP_ERROR_CHECK(esp_wifi_start());
+    boot_time_us = esp_timer_get_time();
+
+    // V2.8.0 (design D14): the web server, FTPS and MQTT are brought up HERE,
+    // after esp_wifi_start(), because tls_cert_ensure() generates the
+    // first-boot P-256 keypair and the certificate serial. ESP-IDF documents
+    // esp_random()/getrandom() as only PSEUDO-random between application start
+    // and the RF subsystem being enabled — see
+    // docs/en/api-reference/system/random.rst, sections "Startup" and
+    // "Enabling RF subsystem" (esp_wifi_start() is what enables it). Provisioning
+    // before the radio drew a long-lived private key from a weakly seeded
+    // generator; on an AP-only or LoRaWAN-only node nothing would ever replace
+    // it. Nothing in this block needs to run before the radio — the AP config
+    // page simply appears a few milliseconds later than it used to.
+    //
     // V2.8.0: provision (or load) the per-device TLS credential BEFORE the
     // web server starts — http_server_start() reads the PEM pointers. On
     // non-HTTPS boards this is an inline stub returning ESP_ERR_NOT_SUPPORTED
     // and http_server_start() ignores it. A failure here is logged inside
     // tls_cert and http_server_start() falls back to plain HTTP (design D9).
-    tls_cert_ensure(g_chip_id);
+    // Design D13: opt-in per node — with https_enable off we never generate a
+    // key at all, and http_server_start() serves plain HTTP on :80 exactly as
+    // V2.7.7 did.
+    if (g_cfg.https_enable) tls_cert_ensure(g_chip_id);
     http_server_start(&g_cfg, g_chip_id);
     log_ftp_init(g_chip_id, &g_cfg);
     // V2.4.2: MQTT 3.1.1 publish-only client. No-op if disabled / no broker.
@@ -1725,17 +1753,6 @@ void app_main(void) {
         ESP_LOGI(TAG, "MQTT deferred until STA has IP + NTP synced (broker=%s:%lu)",
                  g_cfg.mqtt_broker, (unsigned long)g_cfg.mqtt_port);
     }
-
-    ESP_LOGI(TAG, "AP up: SSID=%s auth=%d (2-min boot window)",
-             (char *)apc.ap.ssid, apc.ap.authmode);
-    if (!have_sta_creds) {
-        ESP_LOGW(TAG, "no WiFi SSID configured — AP-only. "
-                 "Join %s and browse to %s://192.168.4.1/config",
-                 (char *)apc.ap.ssid, HAL_HAS_HTTPS ? "https" : "http");
-    }
-    ESP_LOGI(TAG, "esp_wifi_start()");
-    ESP_ERROR_CHECK(esp_wifi_start());
-    boot_time_us = esp_timer_get_time();
 
     const TickType_t tx_interval = pdMS_TO_TICKS(g_cfg.tx_interval_ms);
     TickType_t next_tx = xTaskGetTickCount() + tx_interval;
@@ -1845,9 +1862,12 @@ void app_main(void) {
         // staging buffers and written only to NVS, so /cert.pem, the
         // fingerprint on / and what :443 actually presents all stay the same
         // (old) certificate until the reboot loads the new pair.
-        // Skipped while an OTA is in progress — the reboot would kill it.
+        // Skipped while an OTA is in progress — the reboot would kill it, and
+        // (design D13) when https_enable is off: there is no credential to
+        // reconcile and a re-issue reboot would be pure surprise.
         static bool tls_reconciled = false;
-        if (!tls_reconciled && n_got_ip > 0 && ntp_time_valid() && !main_ota_in_progress()) {
+        if (!tls_reconciled && g_cfg.https_enable && n_got_ip > 0 && ntp_time_valid()
+            && !main_ota_in_progress()) {
             tls_reconciled = true;
             esp_netif_t *sta_if = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
             esp_netif_ip_info_t ipi = { 0 };

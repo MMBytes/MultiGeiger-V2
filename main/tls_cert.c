@@ -18,6 +18,7 @@
 #if HAL_HAS_HTTPS
 
 #include <stdio.h>
+#include <stdlib.h>            // malloc/free — re-issue staging buffers
 #include <string.h>
 #include <time.h>
 
@@ -85,8 +86,8 @@ static esp_err_t parse_pem(mbedtls_x509_crt *crt, const char *pem, size_t len_in
     return ESP_OK;
 }
 
-/** Fill s_fp with SHA-256(DER) of an already-parsed cert. */
-static esp_err_t fingerprint_of(const mbedtls_x509_crt *crt) {
+/** Fill @p fp_out with SHA-256(DER) of an already-parsed cert. */
+static esp_err_t fingerprint_of(const mbedtls_x509_crt *crt, char *fp_out, size_t fp_sz) {
     uint8_t hash[32];
     size_t  olen = 0;
     psa_status_t st = psa_hash_compute(PSA_ALG_SHA_256, crt->raw.p, crt->raw.len,
@@ -95,7 +96,7 @@ static esp_err_t fingerprint_of(const mbedtls_x509_crt *crt) {
         ESP_LOGE(TAG, "psa_hash_compute failed (%d)", (int)st);
         return ESP_FAIL;
     }
-    fingerprint_hex(hash, sizeof(hash), s_fp, sizeof(s_fp));
+    fingerprint_hex(hash, sizeof(hash), fp_out, fp_sz);
     return ESP_OK;
 }
 
@@ -138,17 +139,19 @@ static esp_err_t load_from_nvs(void) {
 
     mbedtls_x509_crt crt;
     err = parse_pem(&crt, s_crt, strlen(s_crt) + 1);
-    if (err == ESP_OK) err = fingerprint_of(&crt);
+    if (err == ESP_OK) err = fingerprint_of(&crt, s_fp, sizeof(s_fp));
     mbedtls_x509_crt_free(&crt);
     return err;
 }
 
-static esp_err_t save_to_nvs(uint32_t issued_epoch) {
+/** Persist the pair in @p crt / @p key — which may be the live statics or a
+ *  re-issue's staging buffers — plus the re-issue timestamp. */
+static esp_err_t save_to_nvs(const char *crt, const char *key, uint32_t issued_epoch) {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
-    err = nvs_set_str(h, KEY_CRT, s_crt);
-    if (err == ESP_OK) err = nvs_set_str(h, KEY_KEY, s_key);
+    err = nvs_set_str(h, KEY_CRT, crt);
+    if (err == ESP_OK) err = nvs_set_str(h, KEY_KEY, key);
     if (err == ESP_OK) err = nvs_set_u32(h, KEY_ISSUED, issued_epoch);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
@@ -185,15 +188,28 @@ static void log_nvs_usage(void) {
 
 // --- Generation ----------------------------------------------------------------
 
-/** Generate key + self-signed cert into s_key/s_crt and persist.
+/** Generate key + self-signed cert into the caller's buffers and persist them.
  *
+ *  The outputs are explicit so a re-issue can write into STAGING buffers while
+ *  the live statics keep serving the certificate :443 is actually presenting
+ *  until the deferred reboot. tls_cert_ensure() passes the statics themselves
+ *  (first boot: nothing is serving yet).
+ *
+ *  @param crt_out       Certificate PEM out; >= CRT_PEM_MAX.
+ *  @param crt_sz        sizeof(*crt_out).
+ *  @param key_out       Private key PEM out; >= KEY_PEM_MAX.
+ *  @param key_sz        sizeof(*key_out).
+ *  @param fp_out        Fingerprint string out; >= FP_STR_LEN.
+ *  @param fp_sz         sizeof(*fp_out).
  *  @param chip_id       CN and dNSName SAN.
  *  @param sta_ip_be     0 = no STA SAN (first boot, address unknown).
  *  @param stamp_issued  true only for a re-issue from tls_cert_reconcile();
  *                       creation stores 0 so the loop guard cannot mistake a
  *                       first boot for a reboot loop.
  */
-static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_issued) {
+static esp_err_t generate(char *crt_out, size_t crt_sz, char *key_out, size_t key_sz,
+                          char *fp_out, size_t fp_sz,
+                          const char *chip_id, uint32_t sta_ip_be, bool stamp_issued) {
     const int64_t t0 = esp_timer_get_time();
     esp_err_t result = ESP_FAIL;
     int rc;
@@ -210,6 +226,12 @@ static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_is
     psa_reset_key_attributes(&attr);
     if (st != PSA_SUCCESS) {
         ESP_LOGE(TAG, "psa_generate_key failed (%d)", (int)st);
+        // Same contract as the epilogue: never leave a half-written pair for
+        // the getters to expose. Nothing is initialised yet, so zero here and
+        // return rather than jumping into the mbedTLS teardown labels.
+        memset(crt_out, 0, crt_sz);
+        memset(key_out, 0, key_sz);
+        if (fp_sz > 0) fp_out[0] = 0;
         return ESP_FAIL;
     }
 
@@ -221,7 +243,7 @@ static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_is
         ESP_LOGE(TAG, "mbedtls_pk_copy_from_psa failed (-0x%04x)", (unsigned)-rc);
         goto out_pk;
     }
-    rc = mbedtls_pk_write_key_pem(&pk, (unsigned char *)s_key, sizeof(s_key));
+    rc = mbedtls_pk_write_key_pem(&pk, (unsigned char *)key_out, key_sz);
     if (rc != 0) {
         ESP_LOGE(TAG, "mbedtls_pk_write_key_pem failed (-0x%04x)", (unsigned)-rc);
         goto out_pk;
@@ -323,7 +345,7 @@ static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_is
     // 3. Sign + PEM-encode in one call. ECDSA signatures are randomised, so
     //    the fingerprint MUST come from this exact output (parsed back below),
     //    never from a second _der() call.
-    rc = mbedtls_x509write_crt_pem(&crt, (unsigned char *)s_crt, sizeof(s_crt));
+    rc = mbedtls_x509write_crt_pem(&crt, (unsigned char *)crt_out, crt_sz);
     if (rc != 0) {
         ESP_LOGE(TAG, "mbedtls_x509write_crt_pem failed (-0x%04x)", (unsigned)-rc);
         goto out_crt;
@@ -331,15 +353,18 @@ static esp_err_t generate(const char *chip_id, uint32_t sta_ip_be, bool stamp_is
 
     {
         mbedtls_x509_crt parsed;
-        result = parse_pem(&parsed, s_crt, strlen(s_crt) + 1);
-        if (result == ESP_OK) result = fingerprint_of(&parsed);
+        result = parse_pem(&parsed, crt_out, strlen(crt_out) + 1);
+        if (result == ESP_OK) result = fingerprint_of(&parsed, fp_out, fp_sz);
         mbedtls_x509_crt_free(&parsed);
     }
-    if (result == ESP_OK) result = save_to_nvs((stamp_issued && clock_ok) ? (uint32_t)time(NULL) : 0);
+    if (result == ESP_OK) {
+        result = save_to_nvs(crt_out, key_out,
+                             (stamp_issued && clock_ok) ? (uint32_t)time(NULL) : 0);
+    }
     if (result == ESP_OK) {
         ESP_LOGI(TAG, "generated P-256 key + self-signed cert in %lld ms (%u B cert, %u B key, valid %s..%s%s)",
                  (long long)((esp_timer_get_time() - t0) / 1000),
-                 (unsigned)strlen(s_crt), (unsigned)strlen(s_key), nb_s, na_s,
+                 (unsigned)strlen(crt_out), (unsigned)strlen(key_out), nb_s, na_s,
                  sta_ip_be ? ", STA address included" : ", no STA address yet");
     } else {
         ESP_LOGE(TAG, "post-generation step failed: %s", esp_err_to_name(result));
@@ -351,9 +376,9 @@ out_pk:
     mbedtls_pk_free(&pk);
     if (result != ESP_OK) {
         // Never leave a half-written pair behind for the getters to expose.
-        memset(s_crt, 0, sizeof(s_crt));
-        memset(s_key, 0, sizeof(s_key));
-        s_fp[0] = 0;
+        memset(crt_out, 0, crt_sz);
+        memset(key_out, 0, key_sz);
+        if (fp_sz > 0) fp_out[0] = 0;
     }
     return result;
 }
@@ -372,7 +397,10 @@ esp_err_t tls_cert_ensure(const char *chip_id) {
         if (err != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "NVS load failed (%s) — regenerating", esp_err_to_name(err));
         }
-        err = generate(chip_id, 0, false);
+        // Straight into the live statics: no server is running yet, so there
+        // is nothing to keep consistent and no reader to tear.
+        err = generate(s_crt, sizeof(s_crt), s_key, sizeof(s_key), s_fp, sizeof(s_fp),
+                       chip_id, 0, false);
         if (err == ESP_OK) ESP_LOGI(TAG, "certificate SHA-256 %s", s_fp);
     }
     s_ready = (err == ESP_OK);
@@ -394,8 +422,14 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
     const int64_t now      = ntp_time_valid() ? (int64_t)time(NULL) : 0;
     const bool    expiring = (now != 0) && (valid_to - now < CERT_RENEW_MARGIN_S);
     if (has_ip && !expiring) {
-        ESP_LOGI(TAG, "certificate names the current address, %lld days left — no re-issue",
-                 (long long)((valid_to - now) / 86400));
+        // now == 0 means the clock is not trustworthy (a future caller that
+        // skips main.c's NTP gate); a "days left" from epoch 0 would be a lie.
+        if (now != 0) {
+            ESP_LOGI(TAG, "certificate names the current address, %lld days left — no re-issue",
+                     (long long)((valid_to - now) / 86400));
+        } else {
+            ESP_LOGI(TAG, "certificate names the current address, clock not yet valid — no re-issue");
+        }
         return ESP_OK;
     }
 
@@ -421,17 +455,30 @@ esp_err_t tls_cert_reconcile(const char *chip_id, uint32_t sta_ip_be, bool *reis
 
     ESP_LOGW(TAG, "re-issuing certificate: %s%s", has_ip ? "" : "current address missing from SAN",
              expiring ? (has_ip ? "expires within 30 days" : " + expires within 30 days") : "");
-    err = generate(chip_id, sta_ip_be, true);
-    if (err != ESP_OK) {
-        // generate() zeroed the statics; reload the previous credential so
-        // the running server and /cert.pem stay consistent until reboot.
-        s_ready = false;
-        if (load_from_nvs() == ESP_OK) s_ready = true;
-        return err;
+    // STAGING buffers, not the live statics: the running TLS server presents
+    // the OLD certificate until the deferred reboot, so overwriting s_crt/s_key
+    // here would make /cert.pem and the fingerprint on / advertise a
+    // certificate :443 is not using — and a concurrent reader could catch a
+    // half-written PEM. NVS gets the NEW pair; memory keeps the OLD one until
+    // the reboot loads it back. On failure nothing in memory changed at all.
+    char *crt_stage = malloc(CRT_PEM_MAX);
+    char *key_stage = malloc(KEY_PEM_MAX);
+    char  fp_stage[FP_STR_LEN];
+    if (!crt_stage || !key_stage) {
+        free(crt_stage);
+        free(key_stage);
+        ESP_LOGE(TAG, "no heap for the re-issue staging buffers — keeping the current certificate");
+        return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "certificate SHA-256 %s (effective after reboot)", s_fp);
-    if (reissued) *reissued = true;
-    return ESP_OK;
+    err = generate(crt_stage, CRT_PEM_MAX, key_stage, KEY_PEM_MAX, fp_stage, sizeof(fp_stage),
+                   chip_id, sta_ip_be, true);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "certificate SHA-256 %s (effective after reboot)", fp_stage);
+        if (reissued) *reissued = true;
+    }
+    free(crt_stage);
+    free(key_stage);
+    return err;
 }
 
 const char *tls_cert_pem(void)         { return s_ready ? s_crt : NULL; }

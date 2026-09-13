@@ -51,14 +51,17 @@ esp_err_t tls_cert_ensure(const char *chip_id);
  *
  *  Why: Chrome/Edge/Safari do not suppress a name mismatch even for a
  *  trusted certificate, so the DHCP address people actually browse to must
- *  be in the SAN or "trust it once" never works. A re-issue overwrites the
- *  module statics and NVS; the RUNNING TLS server keeps its own copy, so the
- *  caller must reboot (main_request_restart()) to make it effective.
+ *  be in the SAN or "trust it once" never works. A re-issue writes the NEW
+ *  pair to NVS only; the module statics — and with them the RUNNING TLS
+ *  server, /cert.pem and the fingerprint on / — keep the OLD certificate, so
+ *  the caller must reboot (main_request_restart()) to make it effective.
  *
- *  That reboot is NOT immediate: main_request_restart() defers until the TX
- *  worker is idle plus ~2 s, so there is a window of up to one TX cycle in
- *  which /cert.pem and the fingerprint on / report the NEW certificate while
- *  :443 still presents the OLD one. Expected, and it closes at the reboot.
+ *  That reboot is NOT immediate (main_request_restart() defers until the TX
+ *  worker is idle plus ~2 s), which is why the new pair is generated into
+ *  heap STAGING buffers: everything the device reports stays consistent with
+ *  what :443 actually presents until the reboot, and no concurrent reader of
+ *  the live PEMs can see a half-written one. A failed re-issue leaves memory
+ *  completely untouched.
  *
  *  Loop guard: if NVS says the current certificate was RE-ISSUED less than
  *  10 minutes ago (first-time creation does not count — it stores no

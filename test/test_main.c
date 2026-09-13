@@ -1466,6 +1466,33 @@ static int test_redirect_exact_fit(void) {
     return 1;
 }
 
+// The three below document what the builder deliberately does NOT do: it
+// strips the port and rejects an empty/IPv6-literal host, but it does not
+// validate the remaining characters. A trailing dot is a legal FQDN; a space
+// or an "@" makes a URL the browser refuses to follow, which is an acceptable
+// outcome for a Host header that was already nonsense.
+
+static int test_redirect_host_trailing_dot_passes_through(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("node.lan.", "/", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://node.lan./");
+    return 1;
+}
+
+static int test_redirect_host_with_space_passes_through(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("bad host", "/", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://bad host/");
+    return 1;
+}
+
+static int test_redirect_host_with_at_passes_through(void) {
+    char out[128];
+    EXPECT_INT(https_redirect_location("user@evil", "/", out, sizeof(out)), 1);
+    EXPECT_STREQ(out, "https://user@evil/");
+    return 1;
+}
+
 static int test_redirect_null_args_fail(void) {
     char out[8] = "junk";
     EXPECT_INT(https_redirect_location(NULL, "/", out, sizeof(out)), 0);
@@ -1529,6 +1556,15 @@ static int test_generalized_time_roundtrip(void) {
 static int test_generalized_time_buffer_too_small(void) {
     char out[14] = "junk";
     EXPECT_INT(epoch_to_generalized_time(0, out, sizeof(out)), 0);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+
+static int test_generalized_time_negative_fails(void) {
+    // Pre-1970 has no GeneralizedTime here (the era maths would still produce
+    // a year, but a certificate that old is a bug, not a date).
+    char out[15] = "junk";
+    EXPECT_INT(epoch_to_generalized_time(-1, out, sizeof(out)), 0);
     EXPECT_STREQ(out, "");
     return 1;
 }
@@ -1705,6 +1741,9 @@ int main(void) {
     RUN(test_redirect_rejects_uri_without_slash);
     RUN(test_redirect_truncation_fails_and_empties);
     RUN(test_redirect_exact_fit);
+    RUN(test_redirect_host_trailing_dot_passes_through);
+    RUN(test_redirect_host_with_space_passes_through);
+    RUN(test_redirect_host_with_at_passes_through);
     RUN(test_redirect_null_args_fail);
 
     printf("== tls_logic: civil_to_epoch / generalized time ==\n");
@@ -1716,6 +1755,7 @@ int main(void) {
     RUN(test_generalized_time_800_days_later);
     RUN(test_generalized_time_roundtrip);
     RUN(test_generalized_time_buffer_too_small);
+    RUN(test_generalized_time_negative_fails);
 
     printf("\n");
     if (g_failures == 0) {

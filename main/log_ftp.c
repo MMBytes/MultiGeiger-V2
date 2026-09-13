@@ -892,7 +892,7 @@ static bool do_ftp_upload(void) {
     // observed at file head from V2.3.16-V2.3.23 once the ring had wrapped.
     applog_stream_t stream;
     if (!applog_stream_begin(&stream)) {
-        ESP_LOGE(TAG, "applog_stream_begin failed (applog not initialised?)");
+        ESP_LOGE(TAG, "applog_stream_begin refused (another snapshot in flight, or applog not initialised) — skipping this upload");
         return false;
     }
     size_t body_len = stream.len_a + stream.len_b + stream.len_c;

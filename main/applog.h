@@ -52,11 +52,19 @@ void applog_init(void);
  *                  seg_b = ring tail remainder past the danger zone;
  *                  seg_c = ring[0 .. s_pos]   (newer pre-wrap half)
  *
- *  Returns false only if applog has not been initialised; otherwise true,
- *  with all-NULL segments if the ring is empty.
+ *  Returns false if applog has not been initialised, OR if another snapshot
+ *  is already in flight (V2.8.0); otherwise true, with all-NULL segments if
+ *  the ring is empty. Only one snapshot may be live at a time because the
+ *  scratch copy is a single shared buffer that the caller streams after the
+ *  mutex is released — a second begin() would overwrite it under the first
+ *  reader. Callers must handle false: /log answers 503 + Retry-After, the
+ *  FTPS uploader skips that upload.
  *
- *  Pair every begin() with exactly one end(). end() remains a no-op —
- *  scratch is reused across snapshots, not freed.
+ *  Pair every begin() with exactly one end(). end() is no longer a no-op:
+ *  it releases the in-flight slot and MUST be called on EVERY exit path
+ *  after a successful begin(), or all later snapshots are locked out for
+ *  the life of the boot. Scratch is still reused across snapshots, not
+ *  freed.
  */
 typedef struct {
     const char *seg_a;   /**< first segment (scratch copy when wrapped, ring otherwise); NULL if empty */

@@ -50,6 +50,14 @@ static const char *TAG = "applog";
 // applog_vprintf only runs after init succeeds.
 static char             *s_ring        = NULL;
 static char             *s_snap_scratch = NULL; // V2.3.24: snapshot scratch (see SNAP_SCRATCH_BYTES)
+// V2.8.0: only ONE snapshot may be live at a time. The scratch copy is a
+// single shared buffer handed to the caller by pointer and streamed AFTER
+// s_mtx is released, so a second begin() would overwrite the bytes the first
+// caller is still reading. Three callers can race for it: log_get() now runs
+// on two httpd tasks (:443 and :80 since V2.8.0) and the FTPS uploader runs
+// on the main task. Guarded by s_mtx; volatile because it is read and written
+// from different tasks.
+static volatile bool     s_snap_busy    = false; // a snapshot is in flight
 static size_t            s_pos         = 0;     // next write offset
 static bool              s_wrapped     = false; // has the ring wrapped at least once
 static size_t            s_valid_end   = 0;     // high-water when not wrapped; == size when wrapped
@@ -354,6 +362,16 @@ bool applog_stream_begin(applog_stream_t *out) {
 
     xSemaphoreTake(s_mtx, portMAX_DELAY);
 
+    // V2.8.0: refuse a second in-flight snapshot. Marked on EVERY successful
+    // begin, not just the scratch path — the zero-copy fallback segments read
+    // the live ring too, and a symmetric rule is the one callers can reason
+    // about. Released by applog_stream_end().
+    if (s_snap_busy) {
+        xSemaphoreGive(s_mtx);
+        return false;
+    }
+    s_snap_busy = true;
+
     if (s_wrapped) {
         // Skip to the first newline after s_pos so the snapshot starts on a
         // clean line boundary (the byte at s_pos itself is mid-line: it's
@@ -412,7 +430,13 @@ bool applog_stream_begin(applog_stream_t *out) {
 }
 
 void applog_stream_end(void) {
-    // V2.3.24: still a no-op. Scratch is reused across snapshots, not freed.
-    // Kept as a public API so callers always pair begin/end (forward-compat
-    // for any future per-snapshot bookkeeping).
+    // V2.8.0: no longer a no-op — this releases the single in-flight slot
+    // taken by applog_stream_begin(). Scratch itself is still reused across
+    // snapshots, not freed. A caller that skips end() after a successful
+    // begin locks every later snapshot out permanently, so every exit path
+    // of every caller must reach here.
+    if (!s_mtx) return;
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    s_snap_busy = false;
+    xSemaphoreGive(s_mtx);
 }

@@ -3267,7 +3267,14 @@ static esp_err_t log_get(httpd_req_t *req) {
 
     applog_stream_t s;
     if (!applog_stream_begin(&s)) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "applog uninit");
+        // V2.8.0: begin() also refuses when another snapshot is in flight —
+        // two readers, one shared scratch buffer (the :443 and :80 httpd
+        // tasks and the FTPS uploader all call this). Transient, so 503 +
+        // Retry-After rather than a 500 that looks like a broken node.
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_hdr(req, "Retry-After", "2");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "log snapshot busy or applog not initialised — retry\n", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
 
@@ -3421,7 +3428,7 @@ static esp_err_t cert_get(httpd_req_t *req) {
 static esp_err_t redirect_to_https(httpd_req_t *req) {
     char host[64];
     if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Host header required");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Host header missing or too long");
     }
     // "https://" + host (<=63) + uri (<= CONFIG_HTTPD_MAX_URI_LEN) + NUL.
     char loc[8 + sizeof(host) + CONFIG_HTTPD_MAX_URI_LEN + 1];
@@ -3605,6 +3612,12 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         rc.server_port      = 80;
         // Both instances would otherwise bind the same UDP control port
         // (32768) and the second httpd_start would fail with ESP_FAIL.
+        // Note HTTPD_SSL_CONFIG_DEFAULT() itself sets ctrl_port to
+        // ESP_HTTPD_DEF_CTRL_PORT + 1 for exactly this reason; the main
+        // instance is back on 32768 only because `sc.httpd = hc` copies the
+        // plain HTTPD_DEFAULT_CONFIG() wholesale over it. If that whole-struct
+        // assignment ever becomes a field-by-field copy, :443 keeps the +1 and
+        // collides with this instance — move this one to +2 then.
         rc.ctrl_port        = ESP_HTTPD_DEF_CTRL_PORT + 1;
         // log_get sends LOG_CHUNK (2 KB) slices straight from the ring (no
         // copy); api_env_get holds a 192 B buffer; the redirect path holds
@@ -3624,7 +3637,9 @@ void http_server_start(config_t *cfg, const char *chip_id) {
             // plain HTTP so scripts and peer nodes need no TLS client.
             // Each was audited for the two-task rule (V2.8.0 plan, Task 5):
             //   cert_get     — immutable module static, no scratch buffer
-            //   log_get      — snapshot under applog's mutex, zero-copy stream
+            //   log_get      — snapshot protected by applog's in-flight guard
+            //                  (s_snap_busy): the shared scratch buffer admits
+            //                  one reader at a time, a second gets 503
             //   api_env_get  — stack buffer + main_status_snapshot (spinlock
             //                  on the one 64-bit field, torn-tolerant 32-bit)
             // status_get and its format_* helpers are NOT on this list: they

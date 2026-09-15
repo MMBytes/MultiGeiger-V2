@@ -32,6 +32,9 @@
 #include "diag.h"              // V2.4.32: diag_log_heap (net-RAM split at OTA-prep)
 #include "coredump.h"          // V2.4.18: panic dump availability + summary + /coredump.elf
 #include "hal.h"
+#if HAL_HAS_PSRAM
+#include "esp_psram.h"         // V2.8.2: esp_psram_get_size — the /status Memory line was a literal "8 MB"
+#endif
 #include "pm_sensor.h"
 #include "env_sensor.h"
 #include "noise_sensor.h"
@@ -181,9 +184,15 @@ static void tls_sess_user_cb(esp_https_server_user_cb_arg_t *arg) {
         // version mismatch, or the 9 s handshake budget — and the callback
         // cannot tell them apart: httpd_ssl_open clears the esp-tls error
         // record before invoking it. So this line is a marker, not a verdict;
-        // the mbedTLS code on the esp-tls line above it says which case.
-        ESP_LOGI(TAG, "TLS handshake on fd %d did not complete — see the esp-tls "
-                      "line above (-0x7280 = client hung up, a browser's spare connection)", fd);
+        // the code on the esp-tls line above it says which case. V2.8.2: name
+        // the two codes an operator actually meets. The stress test of
+        // 2026-09-15 showed a silent client logs
+        // "esp_tls_create_server_session failed, 0xffff7ff7" — that is
+        // -0x8009 = ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT, our 9 s
+        // tls_handshake_timeout_ms — and the old text still blamed a browser.
+        ESP_LOGI(TAG, "TLS handshake on fd %d did not complete — see the esp-tls line above "
+                      "(-0x7280 = client hung up, a browser's spare connection; "
+                      "0xffff7ff7 = the 9 s handshake budget, a client that never spoke)", fd);
         return;
     case HTTPD_SSL_USER_CB_SESS_CLOSE:
         for (int i = 0; i < TLS_SESS_SLOTS; i++) {
@@ -588,6 +597,19 @@ static void format_device(char *out, size_t sz) {
     const char *antenna = "(N/A — internal only)";
 #endif
 
+    // V2.8.2: report the PSRAM the chip actually found, not a literal. The
+    // string was hard-coded "8 MB" for every HAL_HAS_PSRAM board and so lied on
+    // the six 2 MB boards (QT Py PICO, Heltec V4-R2, SparkFun Thing Plus S3,
+    // TFT Feather, Feather V2, Feather S3 4MB/2MB); only FeatherS3-D, XIAO S3
+    // and SparkFun C5 truly have 8 MB. Same call applog.c uses for its boot
+    // line. Reads 0 if PSRAM init failed — honest, unlike the old literal.
+#if HAL_HAS_PSRAM
+    char psram[32];
+    snprintf(psram, sizeof(psram), " &middot; %u MB PSRAM",
+             (unsigned)(esp_psram_get_size() / (1024 * 1024)));
+#else
+    const char *psram = "";      // no PSRAM line at all on internal-RAM-only boards
+#endif
 
     snprintf(out, sz,
         "<div class=\"info\"><h3>Device</h3>"
@@ -604,11 +626,7 @@ static void format_device(char *out, size_t sz) {
         BOARD_NAME,
         model, chip.revision / 100, chip.revision % 100, chip.cores, feat[0] ? feat : "?",
         (unsigned long)(flash_size / (1024 * 1024)),
-#if HAL_HAS_PSRAM
-        " &middot; 8 MB PSRAM",
-#else
-        "",
-#endif
+        psram,
         VERSION_STR, fw_date, fw_time,
         antenna);
 }
@@ -3704,6 +3722,25 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // recv calls (request body reads); idle keep-alive connections don't
     // consume it. Send-side keeps the default — responses are tiny.
     hc.recv_wait_timeout = 30;
+    // V2.8.2: TCP keepalive on every accepted socket (IDF sets SO_KEEPALIVE +
+    // TCP_KEEPIDLE/INTVL/CNT in httpd_accept_conn). Without it a session whose
+    // peer vanished without a FIN — a browser on a VPN that dropped, a phone
+    // that went to sleep — is never closed: the node only learns a peer is gone
+    // when it tries to SEND, and an idle session never sends. Observed
+    // 2026-09-15 on two nodes: two such ghosts each, 28.5 KB of TLS buffers
+    // apiece, held 26 h until LRU purge (max_open_sockets) happened to need the
+    // slot. A live peer answers probes in its kernel, so a healthy idle browser
+    // is never dropped; only an unreachable one, after idle + interval x count.
+    //   REAP TIME MUST STAY ABOVE THE OTA WEAK-WIFI BUDGET: update_post rides
+    //   through recv_max_retries x recv_wait_timeout = 150 s of link outage
+    //   per chunk. A stalled upload is a SILENT socket, so a reap below 150 s
+    //   would kill an OTA the retry loop was about to save. 120 + 4 x 15 =
+    //   180 s. Raise these together with that budget, never independently.
+    // hc is copied wholesale into sc.httpd below, so :443 inherits it too.
+    hc.keep_alive_enable   = true;
+    hc.keep_alive_idle     = 120;   // s of silence before the first probe
+    hc.keep_alive_interval = 15;    // s between unanswered probes
+    hc.keep_alive_count    = 4;     // unanswered probes before lwIP drops it
 
 #if HAL_HAS_HTTPS
     // V2.8.0: same httpd engine, TLS on top. `sc.httpd` is a full

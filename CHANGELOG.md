@@ -9,6 +9,56 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.2 — TCP keepalive on web sessions; two status/log corrections
+
+Follow-ups from a memory review of the HTTPS change on the six deployed
+nodes (V2.7.7 baseline vs V2.8.1, 39 h) and a stress test on two 2 MB-PSRAM
+boards. The review's headline first, because it is what the release is
+about: **HTTPS costs ~13.5 KB of internal RAM standing and 28.5 KB per open
+session (mbedTLS buffers, in PSRAM), and every session gives it all back on
+close** — dozens of sessions over 39 h left two 8 MB nodes exactly on their
+baseline. Under stress (60 back-to-back handshakes, 5/10/20-way bursts, six
+silent half-open connections, two concurrent 950 KB `/log` downloads over
+TLS) neither test node rebooted or leaked a byte; the limit is the single
+web task's ~1.1 s of software ECDSA per handshake, not memory.
+
+**In short:**
+
+1. **Sessions whose peer vanished are now closed by TCP keepalive.** Two
+   nodes were each holding two idle HTTPS sessions for 26 hours — a browser
+   on a VPN that dropped without a FIN. The node only learns a peer is gone
+   when it tries to send, and an idle session never sends, so such a ghost
+   lived until the LRU purge happened to need its slot (bounded at
+   `max_open_sockets` × 28.5 KB ≈ 143 KB, so never dangerous — just untidy
+   and it consumed the browser's burst capacity). Every accepted socket now
+   carries `SO_KEEPALIVE` (idle 120 s, interval 15 s, 4 probes): an
+   unreachable peer is reaped after 180 s; a live idle browser answers the
+   probes in its kernel and is never touched. The 180 s deliberately sits
+   above the OTA's 150 s weak-WiFi budget — a stalled upload is a silent
+   socket too. Both the :443 and the :80 instance get it.
+2. **The status page now reports the PSRAM the chip actually found.** The
+   Memory line was a literal "8 MB PSRAM" on every PSRAM board and so lied on
+   the six 2 MB boards (only FeatherS3-D, XIAO S3 and SparkFun C5 truly have
+   8 MB).
+3. **The `TLS handshake on fd N did not complete` marker names the second
+   code you will meet.** A client that connects to :443 and never speaks
+   (a port scan, or the stress test's half-open connections) logs
+   `esp_tls_create_server_session failed, 0xffff7ff7` — that is −0x8009,
+   `ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT`, the node's own 9 s handshake
+   budget doing its job — and the marker beside it still blamed a browser.
+   It now says which is which. The callback itself still cannot tell them
+   apart (unchanged); only the text is corrected.
+4. **Known and left as is:** a `/log` download over TLS (~27 s for a 1 MB
+   ring) stalls every other HTTPS request until it finishes — the single
+   web task processes handlers serially, by design (see the V2.4.22
+   static-buffer note in `http_server_start`). Read `/log` from :80 in
+   scripts, as before.
+5. No change to counting, uploads or the web API. Binaries grow by ~2 KB on
+   the PSRAM boards (the keepalive setsockopt path in esp_http_server is now
+   linked, plus the PSRAM-size call) and ~300 B on the Heltec V2 variants.
+
+---
+
 ## V2.8.1 — the TLS state reaches syslog
 
 **In short:**

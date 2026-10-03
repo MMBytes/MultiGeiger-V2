@@ -9,6 +9,31 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.4 — Live display CPM runs only while it can be shown
+
+V2.8.3's once-a-second display code ran on every node using the radiation
+layout — including nodes with the display switched off and boards with no
+panel at all, where it sampled the tube counter every second for a value
+nobody could see. It now does nothing unless a display was found at boot,
+the radiation layout is active and the display is switched on. Nothing
+changes while the display is on, and uploaded values are unaffected as
+before.
+
+1. **No panel, the rotation layout, or a SerLCD** (which has no radiation
+   screen even when that layout is forced): the 1 Hz display code does not
+   run at all.
+2. **Display switched off, or the tube disabled:** no counter sampling. The
+   display code still runs once a second only to keep the panel blank (or,
+   with the tube disabled, to draw the zero placeholder as before).
+3. **Switching the display back on** from the web page starts a fresh 60 s
+   window: on the OLED, live values appear about 10 s later, rather than
+   first showing an average over the whole time the display was off. (The
+   TFT's backlight still only turns on after a reboot, as before.)
+4. The live window's sample ring (~590 bytes of RAM) is still reserved on
+   every board; only the work is gated.
+
+---
+
 ## V2.8.3 — Radiation display updates every second
 
 The single-page radiation display (the small OLED on the Heltec boards, or a

@@ -139,6 +139,14 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
  */
 bool display_is_multipage(void);
 
+/** @brief V2.8.4: true if this boot's panel can draw the single-page
+ *  radiation screen — OLED or TFT. False for SerLCD (its display_running()
+ *  is a stub: no radiation layout) and on boards without a display. Valid
+ *  after display_setup(); main.c gates the 1 Hz live CPM on it so a panel
+ *  that cannot show the value does not sample it.
+ */
+bool display_has_radiation_screen(void);
+
 /** @brief V2.4.9: human-readable description of the resolved mode, used
  *  by /status. Always non-NULL.
  */

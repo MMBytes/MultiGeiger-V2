@@ -95,3 +95,14 @@ void history_get(history_snapshot_t *out);
  *          1-count-in-1-s = 60 CPM spike.
  */
 bool history_live_cpm(uint32_t now_ms, bool use_filtered, uint32_t *cpm_out);
+
+/** @brief V2.8.4: empty the live display window.
+ *
+ *  Called by the display tick on every pass while the live CPM is not wanted
+ *  (display switched off, tube disabled), so sampling stops entirely and the
+ *  ring holds nothing stale when it is wanted again: the next
+ *  history_live_cpm() starts a fresh window (false for the first 10 s)
+ *  instead of averaging over the whole time the display was off.
+ *  Main task only, like history_live_cpm().
+ */
+void history_live_reset(void);

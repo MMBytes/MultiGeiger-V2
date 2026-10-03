@@ -214,6 +214,12 @@ static void live_push(uint32_t total, uint32_t now_ms, bool use_filtered, uint32
     s_live_bw       = bw;
 }
 
+void history_live_reset(void) {
+    // Count alone defines validity (head is left where it is — every reader
+    // indexes back from head over count slots), same as the internal resets.
+    s_live_count = 0;
+}
+
 bool history_live_cpm(uint32_t now_ms, bool use_filtered, uint32_t *cpm_out) {
     if (!tube_is_enabled()) return false;
 

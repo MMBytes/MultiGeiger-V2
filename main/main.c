@@ -682,6 +682,13 @@ static bool tm_tube_window(char *cell, size_t cap, void *arg) {
 
 // --- V2.8.3 live radiation display ------------------------------------------
 
+// V2.8.4: true only if display_setup() brought a panel up (probe hit on the
+// I2C boards, init OK on the TFT; always false on headless builds) AND that
+// panel has the radiation screen (not a SerLCD, whose display_running() is a
+// stub). Written once in app_main before the main loop starts; read only by
+// the main task after.
+static bool s_display_present = false;
+
 #define DISPLAY_SPLASH_US  7000000LL  // boot splash dwell — same 7 s the
                                       // rotation task waits (PAGE_DWELL_MS)
 #define DISPLAY_REDRAW_MS  900u       // < the main loop's ~1000 ms+work pass,
@@ -697,16 +704,38 @@ static bool tm_tube_window(char *cell, size_t cap, void *arg) {
  *  their own task and do not stall it. The status line is drawn here too —
  *  display_set_status() only stores — so this is the panel's only writer.
  *
+ *  V2.8.4: does nothing at all unless a panel that can draw the radiation
+ *  screen came up at boot (s_display_present) and the radiation layout is
+ *  active, and samples the live CPM only while the
+ *  display is switched on and the tube is enabled — "display off" or
+ *  "no display" means the feature is off, not merely invisible.
+ *
  *  @param now_ms        Monotonic ms clock (same as history_tick).
  *  @param use_filtered  Count source — same decision as history_tick.
  */
 static void display_live_tick(uint32_t now_ms, bool use_filtered) {
-    if (display_is_multipage()) return;   // rotation task owns the panel
+    // V2.8.4 gate, level 1: no usable panel (headless board, probe miss, TFT
+    // init failure, or a SerLCD without a radiation screen), or the rotation
+    // layout (its own task owns the panel) → no tick at all.
+    if (!s_display_present || display_is_multipage()) return;
 
-    // Sample on every pass, splash included, so the window already spans
-    // ~7 s by the time the splash ends.
-    uint32_t live_cpm = 0;
-    bool     live_ok  = history_live_cpm(now_ms, use_filtered, &live_cpm);
+    // Level 2: the live CPM is only wanted while it can be shown. Display off
+    // or tube disabled → no sampling, and the ring is emptied each pass so a
+    // later switch-on starts a fresh window instead of averaging over the
+    // whole off period. display_running() is still called below in that
+    // case: with show_display=false it is what blanks the panel (once), and
+    // with the tube disabled it draws the zero placeholder as before.
+    bool     want_live = g_cfg.show_display &&
+                         g_cfg.tube_enabled && tube_is_enabled();
+    uint32_t live_cpm  = 0;
+    bool     live_ok   = false;
+    if (want_live) {
+        // Sample on every pass, splash included, so the window already spans
+        // ~7 s by the time the splash ends.
+        live_ok = history_live_cpm(now_ms, use_filtered, &live_cpm);
+    } else {
+        history_live_reset();
+    }
 
     // 64-bit uptime (not the uint32 now_ms) so the splash gate cannot re-arm
     // at the 49.7-day ms rollover.
@@ -717,13 +746,14 @@ static void display_live_tick(uint32_t now_ms, bool use_filtered) {
     static uint32_t s_last_draw_ms = 0;
     if (s_drawn && (uint32_t)(now_ms - s_last_draw_ms) < DISPLAY_REDRAW_MS) return;
 
-    // Tube off → zeros, same placeholder do_tx_cycle always drew. Tube on but
-    // the window still < 10 s (just after boot or a pcnt_filter toggle) →
-    // leave the panel as it is (splash, or the last frame) rather than show
-    // a short-window spike.
+    // Tube off → zeros, same placeholder do_tx_cycle always drew. Display
+    // off → zeros too, but display_running() only blanks. Live CPM wanted but
+    // the window still < 10 s (just after boot, a switch-on, or a pcnt_filter
+    // toggle) → leave the panel as it is (splash, or the last frame) rather
+    // than show a short-window spike.
     int cpm   = 0;
     int nsvph = 0;
-    if (g_cfg.tube_enabled && tube_is_enabled()) {
+    if (want_live) {
         if (!live_ok) return;
         cpm = (live_cpm > 99999u) ? 99999 : (int)live_cpm;
         float usvph = (live_cpm / 60.0f) * tube_cps_to_usvph(g_cfg.tube_type);
@@ -1526,8 +1556,11 @@ void app_main(void) {
 
     // Display: probes both buses internally, marks bus 2 kept-alive
     // itself if it lands there.
-    display_setup(g_cfg.show_display, g_cfg.oled_brightness_pct,
-                  (display_mode_t)g_cfg.display_mode);
+    // V2.8.4: keep the result — display_live_tick() is gated on it.
+    // display_has_radiation_screen() is only valid after display_setup().
+    s_display_present = display_setup(g_cfg.show_display, g_cfg.oled_brightness_pct,
+                                      (display_mode_t)g_cfg.display_mode) &&
+                        display_has_radiation_screen();
     display_boot_screen();
 
     // End-of-init: if the secondary bus was lazily enabled but no

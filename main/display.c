@@ -704,6 +704,12 @@ bool display_is_multipage(void) {
     return s_is_multipage;
 }
 
+// V2.8.4: SerLCD has no radiation layout (display_running() is a stub for
+// it), so only the OLED backend counts here.
+bool display_has_radiation_screen(void) {
+    return s_backend == BACKEND_OLED;
+}
+
 const char *display_mode_str(void) {
     switch (s_resolved_mode) {
         case DISPLAY_MODE_AUTO:      return s_is_multipage
@@ -1371,6 +1377,11 @@ bool display_is_multipage(void) {
     return s_is_multipage;
 }
 
+// V2.8.4: the TFT always has the radiation layout (render_radiation_page).
+bool display_has_radiation_screen(void) {
+    return true;
+}
+
 const char *display_mode_str(void) {
     switch (s_resolved_mode) {
         case DISPLAY_MODE_RADIATION: return "radiation (forced)";
@@ -1460,6 +1471,7 @@ void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
 void display_set_status(int index, int value) { (void)index; (void)value; }
 void display_update_snapshot(const display_snapshot_t *snap) { (void)snap; }
 bool display_is_multipage(void) { return false; }
+bool display_has_radiation_screen(void) { return false; }   // V2.8.4
 const char *display_mode_str(void) { return "no display"; }
 // V2.6.30: no display hardware on this board class — fixed "none" keeps
 // the /status line and syslog banner shape identical across the fleet.

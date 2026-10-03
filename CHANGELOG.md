@@ -9,6 +9,55 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.3 — Radiation display updates every second
+
+The single-page radiation display (the small OLED on the Heltec boards, or a
+TFT with the layout forced to radiation) used to be redrawn only once per
+upload cycle — every 150 s by default the CPM and dose jumped to a new value and
+then sat still. It now redraws about once a second with a live CPM.
+**Uploaded values do not change**: every upload target, MQTT, the status page
+and the rolling 5/15-minute averages are computed exactly as before.
+
+1. **The displayed CPM is a 60-second sliding window, updated every second.**
+   It is computed from the tube's since-boot pulse total — the same counter
+   the 5/15-minute averages already sample — with its own sample ring, so it
+   cannot move the per-cycle upload count or the averages. It is therefore
+   *not* the uploaded number: the upload covers the whole cycle (default
+   150 s), the display the last 60 s, so the two normally differ by a few
+   CPM. nSv/h on the display is derived from the same 60 s value. The
+   rotation layouts (Radiation page on the big panels) are unchanged.
+2. **Boot:** the running screen appears about 10 s after boot, once its
+   window holds 10 s of data (the splash stays for at least 7 s) — instead
+   of after the first upload cycle. The HV indicator shows `H` from the
+   start instead of `.` until the first cycle.
+3. **Pauses, by design.** The redraw runs on the main task, so the display
+   can hold its last frame for a few seconds while that task is busy (sensor
+   reads at the start of each cycle, the daily FTPS log upload). The uploads
+   themselves run on their own task and do not pause it. After a long pause
+   the CPM is taken over the whole gap, so it stays correct.
+4. **No flicker.** The OLED is cleared once and its fixed-width fields are
+   then overwritten in place; clearing it every second blinked visibly.
+5. **The status line (W/s/m/r/H) is now drawn only by the display redraw.**
+   Upload state changes used to draw it straight from the upload task, which
+   could interleave with the main task's drawing and garble glyphs once the
+   display redraws every second. Changes now appear within about a second
+   (up to ~10 s while the display holds its last frame, see items 2 and 7).
+   The OLED brightness command is likewise sent as one I²C transaction, so a
+   brightness change saved from the web page cannot be split by a redraw.
+6. **A failing display bus cannot stall the node.** If an OLED write fails,
+   the rest of that frame is skipped and redraws pause for about 30 s
+   (one `OLED write failed` warning, one `OLED writes recovered` line) —
+   otherwise a stuck bus would block the main task for ~28 s per frame,
+   every second.
+7. Only with the PCNT width filter *and* HV blanking both enabled: once per
+   cycle the phantom subtraction lowers the count total in one step. The
+   display notices each subtraction, restarts its window and holds the
+   previous value for ~10 s — otherwise it would read low (or 0 on a slow
+   node) for up to a minute every cycle. Stock configurations (both off)
+   are unaffected.
+
+---
+
 ## V2.8.2 — TCP keepalive on web sessions; two status/log corrections
 
 Follow-ups from a memory review of the HTTPS change on the six deployed

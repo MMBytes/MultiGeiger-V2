@@ -680,6 +680,60 @@ static bool tm_tube_window(char *cell, size_t cap, void *arg) {
     return true;
 }
 
+// --- V2.8.3 live radiation display ------------------------------------------
+
+#define DISPLAY_SPLASH_US  7000000LL  // boot splash dwell — same 7 s the
+                                      // rotation task waits (PAGE_DWELL_MS)
+#define DISPLAY_REDRAW_MS  900u       // < the main loop's ~1000 ms+work pass,
+                                      // so loop jitter never skips a redraw
+
+/** @brief Redraw the single-page radiation screen ~1 Hz with a live CPM.
+ *
+ *  Called every main-loop pass. The CPM is history_live_cpm()'s 60 s sliding
+ *  window over the monotonic tube totals — display-only, read without
+ *  touching tube_read(), so the uploaded per-cycle values are unaffected.
+ *  Runs on the main task, so it pauses while that task is busy (do_tx_cycle's
+ *  sensor reads, the daily FTPS log upload); the TX worker's uploads run on
+ *  their own task and do not stall it. The status line is drawn here too —
+ *  display_set_status() only stores — so this is the panel's only writer.
+ *
+ *  @param now_ms        Monotonic ms clock (same as history_tick).
+ *  @param use_filtered  Count source — same decision as history_tick.
+ */
+static void display_live_tick(uint32_t now_ms, bool use_filtered) {
+    if (display_is_multipage()) return;   // rotation task owns the panel
+
+    // Sample on every pass, splash included, so the window already spans
+    // ~7 s by the time the splash ends.
+    uint32_t live_cpm = 0;
+    bool     live_ok  = history_live_cpm(now_ms, use_filtered, &live_cpm);
+
+    // 64-bit uptime (not the uint32 now_ms) so the splash gate cannot re-arm
+    // at the 49.7-day ms rollover.
+    int64_t up_us = esp_timer_get_time();
+    if (up_us < DISPLAY_SPLASH_US) return;
+
+    static bool     s_drawn        = false;
+    static uint32_t s_last_draw_ms = 0;
+    if (s_drawn && (uint32_t)(now_ms - s_last_draw_ms) < DISPLAY_REDRAW_MS) return;
+
+    // Tube off → zeros, same placeholder do_tx_cycle always drew. Tube on but
+    // the window still < 10 s (just after boot or a pcnt_filter toggle) →
+    // leave the panel as it is (splash, or the last frame) rather than show
+    // a short-window spike.
+    int cpm   = 0;
+    int nsvph = 0;
+    if (g_cfg.tube_enabled && tube_is_enabled()) {
+        if (!live_ok) return;
+        cpm = (live_cpm > 99999u) ? 99999 : (int)live_cpm;
+        float usvph = (live_cpm / 60.0f) * tube_cps_to_usvph(g_cfg.tube_type);
+        nsvph = (int)(usvph * 1000.0f);
+    }
+    display_running((int)(up_us / 1000000LL), nsvph, cpm, g_cfg.show_display);
+    s_drawn        = true;
+    s_last_draw_ms = now_ms;
+}
+
 static void do_tx_cycle(void) {
     uint32_t counts_raw, dt_ms, min_us, max_us, hv_pulses;
     bool hv_error;
@@ -984,22 +1038,12 @@ static void do_tx_cycle(void) {
     display_set_status(DSP_STATUS_HV,
                        (!g_cfg.tube_enabled) ? DSP_HV_OK :
                        (hv_error ? DSP_HV_ERROR : DSP_HV_OK));
-    int time_sec   = (int)(esp_timer_get_time() / 1000000LL);
+    // V2.6.32: per-cycle values for the rotation snapshot below (TFT rotation
+    // Radiation page). V2.8.3: single-page radiation mode no longer draws
+    // here — display_live_tick() redraws ~1 Hz from the main loop with a live
+    // 60 s CPM, so the panel is not tied to the TX cycle any more.
     int rad_nsvph  = g_cfg.tube_enabled ? (int)(usvph * 1000.0f) : 0;
     int cpm_disp   = g_cfg.tube_enabled ? (int)cpm : 0;
-    // V2.3.29 / V2.4.9: multi-page rotation owns the panel when active.
-    // Suppress the radiation-page draw to avoid a briefly-flashed page
-    // being overwritten by the next rotation tick. When rotation is OFF
-    // (single-page radiation mode), render the radiation page here per
-    // TX cycle. Decision was compile-time HAL_MULTIPAGE_ROTATION pre-
-    // V2.4.9; now runtime via display_is_multipage().
-    if (!display_is_multipage()) {
-        display_running(time_sec, rad_nsvph, cpm_disp, g_cfg.show_display);
-    } else {
-        // V2.6.32: rad_nsvph/cpm_disp now feed the snapshot below (TFT
-        // rotation Radiation page); uptime is read live at render time.
-        (void)time_sec;
-    }
 
     float bme_t = 0, bme_h = 0, bme_p = 0;
     bool  bme_valid = false;
@@ -1589,6 +1633,12 @@ void app_main(void) {
     // LOW output but skips ISR install + HV gptimer; speaker pulse callback
     // can still be registered (it just never fires without ISR pulses).
     tube_setup(g_cfg.tube_enabled);
+    // V2.8.3: seed the radiation screen's HV glyph. The 1 Hz screen appears
+    // ~10 s after boot, but do_tx_cycle sets DSP_STATUS_HV only at the first
+    // cycle (one tx_interval, 150 s by default) — until then it would read
+    // '.' (NODISPLAY). OK is the same value do_tx_cycle uses for a disabled
+    // tube, and an HV fault can't be known before the first cycle anyway.
+    display_set_status(DSP_STATUS_HV, DSP_HV_OK);
 
     // V2.5.16: optional PCNT pulse-width filter+comb (off by default). Brought
     // up after tube_setup so the count pin is already an input with the GMC ISR
@@ -2167,6 +2217,8 @@ void app_main(void) {
             // (GMC ACPM, ThingSpeak f3/f4) track the filtered CPM when the
             // width filter is on.
             history_tick(now_ms, g_cfg.pcnt_filter && tube_pcnt_active());
+            // V2.8.3: 1 Hz radiation screen — same count-source decision.
+            display_live_tick(now_ms, g_cfg.pcnt_filter && tube_pcnt_active());
             log_ftp_loop(now_ms);
         }
 

@@ -72,7 +72,8 @@ void display_tft_render_radiation(const display_snapshot_t *snap);
 
 /** @brief V2.6.32: single-page radiation-mode entry point — same layout
  *  as display_tft_render_radiation() but fed directly from display.c's
- *  display_running() args (mode=RADIATION boards, one render per TX
- *  cycle, no rotation task).
+ *  display_running() args (mode=RADIATION boards, no rotation task).
+ *  V2.8.3: one full-frame render ~1 Hz from main.c's display_live_tick()
+ *  (was one per TX cycle).
  */
 void display_tft_render_running(int time_sec, int rad_nsvph, int cpm);

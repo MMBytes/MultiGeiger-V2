@@ -37,6 +37,25 @@ static uint8_t  s_hour_n;          // minute samples accumulated this hour
 
 static SemaphoreHandle_t s_mux;
 
+// --- V2.8.3 live display window (main task only; no mutex) -----------------
+// Deliberately disjoint from the sampler state above: sharing s_last_total or
+// the re-prime would let the display shift the uploaded cpm5/cpm15.
+#define LIVE_WINDOW_MS    60000u  // sliding window the display CPM spans
+#define LIVE_SAMPLE_MS      900u  // ≥ this between samples; < the main loop's
+                                  // ~1000 ms+work period, so jitter never
+                                  // skips a slot (a 1000 gate could alias)
+#define LIVE_MIN_SPAN_MS  10000u  // below this the window is too short to
+                                  // show (1 count in 1 s would read 60 CPM)
+#define LIVE_SLOTS           72u  // > LIVE_WINDOW_MS / LIVE_SAMPLE_MS (67), so
+                                  // the 60 s-old sample is never overwritten
+static uint32_t s_live_total[LIVE_SLOTS];
+static uint32_t s_live_ms[LIVE_SLOTS];
+static uint8_t  s_live_head;       // index of next write
+static uint8_t  s_live_count;      // valid entries (caps at LIVE_SLOTS)
+static bool     s_live_filtered;   // source the ring's samples came from
+static uint32_t s_live_bw;         // tube_get_blanked_wide_total() at the
+                                   // newest sample (subtract-mode step watch)
+
 // Push v into a circular ring (head = next write, count caps at depth).
 static void ring_push(uint16_t *ring, uint8_t depth,
                       uint8_t *head, uint8_t *count, uint16_t v) {
@@ -69,14 +88,20 @@ void history_init(void) {
     s_filtered_src = false;
     s_hour_sum = 0;
     s_hour_n = 0;
+    s_live_head = s_live_count = 0;
+    s_live_filtered = false;
+    s_live_bw       = 0;
     s_mux = xSemaphoreCreateMutex();
     if (!s_mux) ESP_LOGE(TAG, "mutex alloc failed — history disabled");
 }
 
-void history_tick(uint32_t now_ms, bool use_filtered) {
-    if (!s_mux) return;
-    if (!tube_is_enabled()) return;   // radiation-only; dust node collects nothing
+// --- Count source -----------------------------------------------------------
 
+// The monotonic count total both consumers (history_tick, history_live_cpm)
+// take their deltas from. V2.8.3: factored out so the 1 Hz display window and
+// the uploaded cpm5/cpm15 can never disagree on WHICH total they count —
+// only the sampling state is per-consumer.
+static uint32_t source_total(bool use_filtered) {
     // V2.5.16: count source = PCNT width-filtered monotonic total when the
     // filter is on, else the raw ISR total — so cpm5/cpm15 stay consistent with
     // the filtered per-cycle CPM. Both totals are monotonic since boot; this is
@@ -95,8 +120,17 @@ void history_tick(uint32_t now_ms, bool use_filtered) {
     // the UNFILTERED branch is untouched — plain counting mode sees no
     // change. A blank on/off toggle shifts only future increments, never the
     // level, so no source re-prime is needed.
-    uint32_t total = use_filtered ? (tube_pcnt_filtered_total() - tube_get_blanked_wide_total())
-                                  : tube_get_total_counts();
+    return use_filtered ? (tube_pcnt_filtered_total() - tube_get_blanked_wide_total())
+                        : tube_get_total_counts();
+}
+
+// --- 60 s sampler (uploaded cpm5/cpm15 + /status graph) ---------------------
+
+void history_tick(uint32_t now_ms, bool use_filtered) {
+    if (!s_mux) return;
+    if (!tube_is_enabled()) return;   // radiation-only; dust node collects nothing
+
+    uint32_t total = source_total(use_filtered);
 
     // (Re)prime on the first tick (now_ms unknown at init) OR on a source
     // switch (a runtime pcnt_filter toggle) — the two totals have different
@@ -165,4 +199,88 @@ void history_get(history_snapshot_t *out) {
     out->cpm5    = s_cpm5;
     out->cpm15   = s_cpm15;
     xSemaphoreGive(s_mux);
+}
+
+// --- V2.8.3 live display window ---------------------------------------------
+
+// Append one (total, ms) sample at head; the oldest is overwritten when full.
+// bw = the wide-phantom total the sample was taken against (see below).
+static void live_push(uint32_t total, uint32_t now_ms, bool use_filtered, uint32_t bw) {
+    s_live_total[s_live_head] = total;
+    s_live_ms[s_live_head]    = now_ms;
+    s_live_head = (uint8_t)((s_live_head + 1) % LIVE_SLOTS);
+    if (s_live_count < LIVE_SLOTS) s_live_count++;
+    s_live_filtered = use_filtered;
+    s_live_bw       = bw;
+}
+
+bool history_live_cpm(uint32_t now_ms, bool use_filtered, uint32_t *cpm_out) {
+    if (!tube_is_enabled()) return false;
+
+    uint32_t total = source_total(use_filtered);
+    uint32_t bw    = tube_get_blanked_wide_total();
+
+    // Source switch: the raw and filtered totals differ in magnitude, so a
+    // delta across the switch is garbage — empty the ring and start over.
+    if (s_live_count > 0 && use_filtered != s_live_filtered) s_live_count = 0;
+
+    // PCNT subtract mode: do_tx_cycle subtracts the cycle's wide phantoms
+    // (~18) from the filtered total in ONE step, via tube_note_blanked_wide().
+    // Every sample before that step is ~18 counts too high against the ones
+    // after it, so a window spanning it reads low (or 0 on a slow node) for
+    // up to a minute, every cycle. Comparing totals cannot catch the step
+    // reliably — it lands inside do_tx_cycle's multi-second main-task pause,
+    // where new counts can hide it — so watch the subtrahend itself instead:
+    // tube_note_blanked_wide() runs on this same main task, so a change since
+    // the newest sample is exact, never a race. Restart the window and let
+    // the caller hold its last frame for ~10 s. Unfiltered totals never
+    // include the subtrahend, so the check is skipped there.
+    if (s_live_count > 0 && use_filtered && bw != s_live_bw) {
+        s_live_count = 0;
+        live_push(total, now_ms, use_filtered, bw);
+        return false;
+    }
+
+    // Append at most one sample per ~1 s. The newest slot sits at head-1.
+    uint8_t newest = (uint8_t)((s_live_head + LIVE_SLOTS - 1) % LIVE_SLOTS);
+    if (s_live_count == 0 || (uint32_t)(now_ms - s_live_ms[newest]) >= LIVE_SAMPLE_MS) {
+        live_push(total, now_ms, use_filtered, bw);
+    }
+
+    // Window base = the NEWEST sample at least LIVE_WINDOW_MS old, else the
+    // oldest one held. Steady state: the sample ~60 s back (LIVE_SLOTS keeps
+    // one that old in the ring). Boot / reset / source switch: none is 60 s
+    // old yet, so the oldest post-reset sample — the window grows from 0 and
+    // the LIVE_MIN_SPAN_MS gate below holds the display until it spans 10 s.
+    // Main-task stall > 60 s (daily FTPS upload): the base stays on the last
+    // pre-stall sample until post-stall samples are 60 s old, so the window is
+    // never shorter than 60 s after a stall (a "within 60 s" rule would land
+    // on a seconds-old post-stall sample and blank, then show a noisy short
+    // window). The rate is over the actual span, so a longer window is still
+    // correct. Unsigned ms differences are wrap-safe across the 49.7-day
+    // uint32 rollover.
+    uint8_t base = (uint8_t)((s_live_head + LIVE_SLOTS - s_live_count) % LIVE_SLOTS);
+    for (uint8_t i = 1; i <= s_live_count; i++) {
+        uint8_t idx = (uint8_t)((s_live_head + LIVE_SLOTS - i) % LIVE_SLOTS);   // newest backwards
+        if ((uint32_t)(now_ms - s_live_ms[idx]) >= LIVE_WINDOW_MS) {
+            base = idx;
+            break;
+        }
+    }
+
+    uint32_t span_ms = now_ms - s_live_ms[base];
+    if (span_ms < LIVE_MIN_SPAN_MS) return false;
+
+    uint32_t d = total - s_live_total[base];
+    // Backstop for the subtrahend watch above: a total below the base would
+    // wrap to a top-bit delta. history_tick reads that as 0 because
+    // cpm5/cpm15 average it out; the live display would paint "0" (a
+    // dead-looking tube), so restart the window instead.
+    if (d & 0x80000000u) {
+        s_live_count = 0;
+        live_push(total, now_ms, use_filtered, bw);
+        return false;
+    }
+    *cpm_out = (uint32_t)(((uint64_t)d * 60000ULL) / span_ms);
+    return true;
 }

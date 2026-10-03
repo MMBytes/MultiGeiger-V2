@@ -26,7 +26,8 @@
  *  Two layouts:
  *    display_running()       — radiation-focused: time + nSv/h on top, big
  *                              CPM digits, 5-char W/sc/M/R/HV status line.
- *                              Driven per-TX-cycle on Heltec.
+ *                              V2.8.3: redrawn ~1 Hz from the main loop with
+ *                              a live 60 s CPM (was once per TX cycle).
  *    display_update_snapshot — V2.3.29 multi-page rotation on FeatherS3-D.
  *                              Display task wakes every 5 s and rotates
  *                              through Env / PM Mass / PM Number / Uploads
@@ -132,8 +133,9 @@ typedef enum {
 bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mode);
 
 /** @brief V2.4.9: true if the multi-page rotation is active for this boot.
- *  Resolved by display_setup(); use this in main.c::do_tx_cycle to decide
- *  between display_running() (false) and display_update_snapshot() (true).
+ *  Resolved by display_setup(). main.c gates on it twice: display_live_tick()
+ *  draws display_running() only when false (V2.8.3, ~1 Hz), and do_tx_cycle
+ *  feeds display_update_snapshot() only when true.
  */
 bool display_is_multipage(void);
 
@@ -168,6 +170,13 @@ void display_set_contrast(uint8_t pct);
 void display_boot_screen(void);
 
 /** @brief Draw the running screen.
+ *
+ *  V2.8.3: called ~1 Hz by the main task only (radiation mode). The OLED
+ *  backend clears the panel on the first draw after boot/splash/blank, then
+ *  overwrites its fixed-width fields in place (no per-second blink); values
+ *  are clamped to the field widths. Main task only — the OLED draw sequence
+ *  is not safe against a concurrent drawer.
+ *
  *  @param time_sec     Seconds since boot (for the top-left timestamp).
  *  @param rad_nsvph    Dose rate as µSv/h × 1000.
  *  @param cpm          Counts per minute (large digits).
@@ -176,8 +185,11 @@ void display_boot_screen(void);
  */
 void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display);
 
-/** @brief Update a status indicator and redraw the status line.
- *         Safe to call from any task context.
+/** @brief Record a status indicator for the radiation screen's status line.
+ *
+ *  V2.8.3: stores the value only; the next ~1 Hz display_running() draws it.
+ *  (Drawing here from the TX worker's task raced the main task's redraw.)
+ *  Safe to call from any task context.
  */
 void display_set_status(int index, int value);
 

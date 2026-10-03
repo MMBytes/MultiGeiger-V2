@@ -215,6 +215,10 @@ static char s_backend_desc[24] = "none";
 static i2c_master_dev_handle_t s_dev = NULL;
 static bool s_show    = false;   // set by display_setup()
 static bool s_cleared = true;    // panel is blank (no running screen drawn)
+// V2.8.3: the running layout is fully on the panel, so display_running() can
+// overwrite its fixed-width fields in place. False after boot, the splash, or
+// a blank — the next draw then does ONE full clear first.
+static bool s_running_drawn = false;
 // V2.3.30: OLED contrast / SerLCD backlight in percent (10..100). Set via
 // display_set_contrast() — called from display_setup() at boot with the
 // configured value, and from http_server.c's /config save handler for live
@@ -251,9 +255,29 @@ static const char *STATUS_CHARS[DSP_STATUS_MAX] = {
 // I2C helpers
 // ------------------------------------------------------------------
 
+// V2.8.3: frame-scoped fail-fast for the 1 Hz running screen. One frame is
+// ~140 transactions at a 200 ms timeout each, so a wedged bus (a sensor
+// holding SDA/SCL low on the shared Heltec V2 bus) would cost ~28 s per frame
+// — at 1 Hz that starves the whole main task. display_running() arms the
+// guard; after the first failed transaction every later one in that frame
+// returns at once, and display_running() then backs off for a while. Outside
+// a running frame (init, splash, rotation task) the guard is off and nothing
+// changes. Only the main task arms it, and the HTTP task's contrast writes
+// (display_set_contrast) call i2c_master_transmit() directly, so they are
+// never skipped by it and never trip it.
+static bool s_frame_guard  = false;   // inside a display_running() frame
+static bool s_frame_failed = false;   // a transaction failed this frame
+
+static esp_err_t oled_xfer(const uint8_t *buf, size_t len) {
+    if (s_frame_guard && s_frame_failed) return ESP_FAIL;
+    esp_err_t err = i2c_master_transmit(s_dev, buf, len, 200);
+    if (s_frame_guard && err != ESP_OK) s_frame_failed = true;
+    return err;
+}
+
 static esp_err_t oled_cmd(uint8_t c) {
-    uint8_t buf[2] = { 0x00, c };  // 0x00 = Co=0, D/C=0 (command stream)
-    return i2c_master_transmit(s_dev, buf, 2, 200);
+    const uint8_t buf[2] = { 0x00, c };  // 0x00 = Co=0, D/C=0 (command stream)
+    return oled_xfer(buf, 2);
 }
 
 static esp_err_t oled_data(const uint8_t *d, int n) {
@@ -262,7 +286,7 @@ static esp_err_t oled_data(const uint8_t *d, int n) {
     if (n > OLED_WIDTH) n = OLED_WIDTH;
     buf[0] = 0x40;
     memcpy(buf + 1, d, n);
-    return i2c_master_transmit(s_dev, buf, n + 1, 200);
+    return oled_xfer(buf, (size_t)n + 1);
 }
 
 static void oled_goto(int page, int col) {
@@ -315,12 +339,6 @@ static void oled_draw_string(int page, int col, const char *s) {
     }
 }
 
-static void oled_clear_page(int page) {
-    static const uint8_t zeros[OLED_WIDTH] = { 0 };
-    oled_goto(page, 0);
-    oled_data(zeros, OLED_WIDTH);
-}
-
 // Draw a single glyph scaled 2x — 16 px wide × 16 px tall (2 pages).
 // Space renders blank, digits render as digits; anything else maps to '?'.
 static void oled_draw_glyph_2x(int page, int col, char c) {
@@ -364,12 +382,15 @@ static char status_char(int idx) {
     return (val >= 0 && val < len) ? chars[val] : '?';
 }
 
+// V2.8.3: draws over the previous line in place — no page clear first. The
+// line is always exactly 9 glyphs, so every pixel it ever lit is overwritten,
+// and the rest of page 7 stays blank from the one full clear in
+// display_running(). A clear-then-draw blinked visibly at the 1 Hz redraw.
 static void redraw_status_line(void) {
     char line[17];
     snprintf(line, sizeof(line), "%c %c %c %c %c",
              status_char(0), status_char(1), status_char(2),
              status_char(3), status_char(4));
-    oled_clear_page(7);
     oled_draw_string(7, 0, line);
 }
 
@@ -711,7 +732,8 @@ void display_boot_screen(void) {
     oled_draw_string(0, 0, "  Multi-Geiger");
     oled_draw_string(1, 0, "________________");
     oled_draw_string(5, 0, VERSION_STR);
-    s_cleared = false;
+    s_cleared       = false;
+    s_running_drawn = false;   // splash covers the layout — full redraw next
 }
 
 static void format_time(int secs, char *out, size_t outsz) {
@@ -726,26 +748,28 @@ static void format_time(int secs, char *out, size_t outsz) {
     }
 }
 
-void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
-    if (s_backend == BACKEND_SERLCD) {
-        // SerLCD has no radiation/CPM page in V2.3.28. main.c only calls
-        // display_running() on non-FeatherS3-D boards, and SerLCD has been
-        // tested only on FeatherS3-D dust-sensor deployments — so this
-        // path is unreachable in practice. Safety stub.
-        (void)time_sec; (void)rad_nsvph; (void)cpm; (void)use_display;
-        return;
+// V2.8.3: one running-screen frame (time + nSv/h, big CPM, status line),
+// overwritten in place. Split out of display_running() so the blank and the
+// draw share one frame guard + back-off there.
+static void draw_running_frame(int time_sec, int rad_nsvph, int cpm) {
+    // Called every ~1 s from the main loop (was once per TX cycle). Clear the
+    // panel only on the FIRST draw; after that every field below is fixed
+    // width and overwrites itself in place — a full clear each second blanked
+    // the whole panel for ~10 ms and read as a visible blink.
+    if (!s_running_drawn) {
+        oled_clear();
+        s_running_drawn = true;
     }
-    if (s_backend != BACKEND_OLED) return;
-    if (!s_dev) return;
-    if (!use_display) {
-        if (!s_cleared) {
-            oled_clear();
-            s_cleared = true;
-        }
-        return;
-    }
-    oled_clear();
     s_cleared = false;
+
+    // Clamp to the field widths so the in-place overwrite stays exact: a
+    // wider value would shift glyphs, and a later narrower one would leave
+    // the extra glyph stale on the panel. The CPM limit matches the TFT
+    // layout; nSv/h is clamped to this layout's own %7d field (TFT: %5d).
+    if (rad_nsvph < 0)       rad_nsvph = 0;
+    if (rad_nsvph > 9999999) rad_nsvph = 9999999;
+    if (cpm < 0)             cpm = 0;
+    if (cpm > 99999)         cpm = 99999;
 
     char ts[4];
     format_time(time_sec, ts, sizeof(ts));
@@ -760,6 +784,61 @@ void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
     oled_draw_string_2x(3, 24, digits);
 
     redraw_status_line();
+}
+
+void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {
+    if (s_backend == BACKEND_SERLCD) {
+        // SerLCD has no radiation/CPM page in V2.3.28. main.c only calls
+        // display_running() on non-FeatherS3-D boards, and SerLCD has been
+        // tested only on FeatherS3-D dust-sensor deployments — so this
+        // path is unreachable in practice. Safety stub.
+        (void)time_sec; (void)rad_nsvph; (void)cpm; (void)use_display;
+        return;
+    }
+    if (s_backend != BACKEND_OLED) return;
+    if (!s_dev) return;
+
+    // V2.8.3: back-off after a failed frame (see s_frame_guard). 30 skipped
+    // calls ≈ 30 s at the 1 Hz caller, so a wedged bus costs one 200 ms
+    // timeout per ~30 s instead of the main task's whole time budget. Applies
+    // to the blank below too: a live show_display=false during a wedge waits
+    // out the back-off instead of stalling 32 × 200 ms on an unguarded clear.
+    static uint8_t s_skip_frames = 0;
+    static bool    s_fail_logged = false;
+    if (s_skip_frames > 0) {
+        s_skip_frames--;
+        return;
+    }
+    s_frame_guard  = true;
+    s_frame_failed = false;
+
+    if (!use_display) {
+        // Blank once. s_cleared is set only if the clear went through, so a
+        // clear cut short by a failing bus is retried after the back-off.
+        if (!s_cleared) {
+            oled_clear();
+            s_cleared = !s_frame_failed;
+        }
+        s_running_drawn = false;
+    } else {
+        draw_running_frame(time_sec, rad_nsvph, cpm);
+    }
+
+    s_frame_guard = false;
+    if (s_frame_failed) {
+        // Panel content is now unknown (frame cut short) → full clear on the
+        // first frame after recovery. Log the transitions only, not every
+        // retry, so a long wedge doesn't flood syslog.
+        s_running_drawn = false;
+        s_skip_frames   = 30;
+        if (!s_fail_logged) {
+            ESP_LOGW(TAG, "OLED write failed — backing off redraws (~30 s)");
+            s_fail_logged = true;
+        }
+    } else if (s_fail_logged) {
+        ESP_LOGI(TAG, "OLED writes recovered");
+        s_fail_logged = false;
+    }
 }
 
 // V2.3.30: live brightness change. Stores the new value in s_brightness_pct
@@ -788,12 +867,23 @@ void display_set_contrast(uint8_t pct) {
 
     if (s_backend == BACKEND_OLED) {
         if (pct == 0) {
-            oled_cmd(0xAE);                               // display OFF (sleep)
+            // display OFF (sleep). V2.8.3: direct transmit, like the ON path
+            // below — through oled_cmd() it would pass the main task's frame
+            // guard, and an OFF landing inside an already-failed frame would
+            // be dropped with nothing to retry it.
+            const uint8_t off[2] = { 0x00, 0xAE };
+            i2c_master_transmit(s_dev, off, sizeof(off), 200);
         } else {
-            uint8_t level = (uint8_t)((pct * 255) / 100);
-            oled_cmd(0xAF);                               // ensure ON (idempotent)
-            oled_cmd(0x81);
-            oled_cmd(level);
+            // V2.8.3: ONE I2C transaction (control byte 0x00 = command
+            // stream, then ON + contrast + its argument). This runs on the
+            // HTTP task (/config save) while the main task now redraws every
+            // second; as three separate oled_cmd() calls, a main-task page
+            // command landing between 0x81 and its argument would be taken
+            // as the contrast value and the level byte as a command —
+            // a wrong brightness that persists until the next save.
+            uint8_t level  = (uint8_t)((pct * 255) / 100);
+            uint8_t seq[4] = { 0x00, 0xAF, 0x81, level };
+            i2c_master_transmit(s_dev, seq, sizeof(seq), 200);
         }
     } else if (s_backend == BACKEND_SERLCD) {
         uint8_t level = (uint8_t)((pct * 255) / 100);     // pct=0 → level=0 → backlight off
@@ -803,19 +893,16 @@ void display_set_contrast(uint8_t pct) {
 
 void display_set_status(int index, int value) {
     if (index < 0 || index >= DSP_STATUS_MAX) return;
+    // V2.8.3: store only — no drawing here. The TX worker calls this from
+    // its own task (s/m/r sending/idle/error), and the OLED draw is a
+    // multi-transaction goto+data sequence through one static buffer
+    // (oled_data), so a draw from here could interleave with the main
+    // task's 1 Hz display_running() and misplace or tear glyphs. The 1 Hz
+    // redraw picks the new value up within a second instead, which leaves
+    // the main task as the panel's only writer in radiation mode (rotation
+    // mode never drew the status line — its display task owns the panel).
+    // A plain int store is atomic on the 32-bit cores, so no lock.
     s_status[index] = value;
-    // V2.3.29 / V2.4.9: on multi-page boots the display task owns the panel
-    // — the radiation-era status line at page 7 would overlay whichever
-    // page is currently rendered (PM10 bottom half, Pressure bottom half,
-    // etc), so skip the redraw. s_status[] is still updated above so any
-    // future backend that wants to surface status (e.g. SerLCD RGB
-    // backlight = green/red) can read it.
-    if (s_is_multipage) return;
-    // Single-page (radiation) path — status line lives on page 7 of the
-    // running screen, redrawn every time a subsystem state changes.
-    if (s_backend != BACKEND_OLED) return;
-    if (!s_dev || !s_show || s_cleared) return;
-    redraw_status_line();
 }
 
 // ====================================================================
@@ -1152,9 +1239,9 @@ static void display_task(void *arg) {
 // pairs it with at least one sensor" assumption predated real hardware).
 // The rotation gains a Radiation page (first, gated on snapshot
 // rad_valid = tube_enabled), and mode=RADIATION now resolves to the
-// OLED-style single-page layout rendered per TX cycle via
-// display_running(). AUTO resolves to rotation (big-panel rule, same as
-// the OLED branch's SSD1309/SerLCD arm).
+// OLED-style single-page layout rendered via display_running() (~1 Hz
+// from main.c's display_live_tick() since V2.8.3). AUTO resolves to
+// rotation (big-panel rule, same as the OLED branch's SSD1309/SerLCD arm).
 // ====================================================================
 
 #include "display_tft.h"
@@ -1270,8 +1357,8 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     display_set_contrast(brightness_pct);
 
     // Single-page (radiation) boots skip the rotation task — main.c
-    // renders via display_running() once per TX cycle instead, same
-    // split as the OLED branch.
+    // renders via display_running() instead (~1 Hz from
+    // display_live_tick() since V2.8.3), same split as the OLED branch.
     if (s_is_multipage) {
         xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
     }
@@ -1328,9 +1415,9 @@ void display_set_contrast(uint8_t pct) {
 }
 
 // V2.6.32: single-page radiation layout (mode=RADIATION). Same contract
-// as the OLED branch: main.c calls this once per TX cycle only when
-// rotation is off; when use_display goes false, blank the panel once
-// and stay dark until it comes back.
+// as the OLED branch: main.c calls this ~1 Hz (V2.8.3, was once per TX
+// cycle) only when rotation is off; when use_display goes false, blank
+// the panel once and stay dark until it comes back.
 static bool s_cleared = false;
 
 void display_running(int time_sec, int rad_nsvph, int cpm, bool use_display) {

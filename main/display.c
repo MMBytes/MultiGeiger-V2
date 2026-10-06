@@ -955,6 +955,7 @@ void display_update_snapshot(const display_snapshot_t *snap) {
 #include "esp_heap_caps.h"
 #include "main_status.h"      // V2.4.1 (A4): consolidated status snapshot
 #include "transmission.h"
+#include "util.h"             // V2.8.5: fmt_kilo4 (PM number-concentration cells)
 
 // main.c-defined accessor (separate from main_status — controls per-target
 // row visibility on the Uploads page).
@@ -1016,20 +1017,11 @@ static void render_oled_pm_mass(void) {
 }
 
 // PM number-concentration value formatted into 4 chars after the "nX.X"
-// label, so the row stays exactly 8 chars at 2x font:
-//   < 1000   :  integer right-aligned via %4d  →  " 234" / "  89" / "   9"
-//   1k–9.9k  :  "x.xk" with %3.1fk             →  "3.4k" / "9.9k"
-//   ≥ 10k    :  "xxk " with %2dk (clamped 99)  →  "10k " / "99k "
+// label, so the row stays exactly 8 chars at 2x font. V2.8.5: the band
+// logic moved to util.h fmt_kilo4() (host-tested) — 9950..9999 used to
+// render as the 5-char "10.0k" and push the row off the 128 px panel.
 static void fmt_n_value(char *out, size_t outsz, float v) {
-    if (v < 1000.0f) {
-        snprintf(out, outsz, "%4d", (int)(v + 0.5f));
-    } else if (v < 10000.0f) {
-        snprintf(out, outsz, "%3.1fk", v / 1000.0f);
-    } else {
-        int k = (int)(v / 1000.0f + 0.5f);
-        if (k > 99) k = 99;
-        snprintf(out, outsz, "%2dk ", k);
-    }
+    fmt_kilo4(out, outsz, v);
 }
 
 static void render_oled_pm_number(void) {

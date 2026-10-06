@@ -20,6 +20,7 @@
 #include "net_arp.h"           // net_arp_send_gratuitous
 #include "transmission.h"      // tx_is_idle
 #include "mqtt.h"              // mqtt_is_initialized / mqtt_stop (V2.4.31)
+#include "main_status.h"       // main_ota_in_progress (V2.8.5)
 
 static const char *TAG = "periodic";
 
@@ -69,6 +70,14 @@ void periodic_loop(uint32_t now_ms) {
     if (!tx_is_idle()) {
         // TX worker busy — try again on next loop tick (1 s). No
         // timestamp update so we keep retrying until idle.
+        return;
+    }
+    // V2.8.5 (review 2.6): never during an OTA upload. The upload runs on the
+    // httpd task — over TLS on https_enable nodes, with its record keys in PSA
+    // slots — and mbedtls_psa_crypto_free() is not safe against a concurrent
+    // PSA user. Same deferral as the busy case: retry next tick; a successful
+    // OTA reboots first anyway.
+    if (main_ota_in_progress()) {
         return;
     }
 

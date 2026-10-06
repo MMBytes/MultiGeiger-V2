@@ -779,6 +779,10 @@ static void do_tx_cycle(void) {
     uint32_t diag_hist[TUBE_DIAG_NBUCKETS] = {0};
     tube_get_diag(&diag_raw_edges, &diag_guard_removed, &diag_hv_coincident,
                   &diag_hv_blanked, diag_hist);
+    // V2.8.5 (review 2.7): HV FET pulses stretched past HV_ON_LONG_US this
+    // cycle (count + longest on-time) — see tube_get_hv_ontime().
+    uint32_t diag_hv_on_long = 0, diag_hv_on_max_us = 0;
+    tube_get_hv_ontime(&diag_hv_on_long, &diag_hv_on_max_us);
 
     // V2.5.16: snapshot the parallel PCNT width-comb ONCE here (the read
     // advances each unit's per-cycle delta base, so re-reading would zero the
@@ -936,7 +940,7 @@ static void do_tx_cycle(void) {
         // subset (of `counts`, not of raw_edges-counts like the two before
         // it), tested against hv_pulses/cum on the CYCLE line above: a real
         // Poisson tube shows this near-zero; HV-pickup shows it tracking
-        // hv_pulses ~1:1 (radiation_overcounting_independent_review.md).
+        // hv_pulses ~1:1 (the 2026 phantom-count investigation; see hal.h).
         // V2.6.29: hv_blanked slots after hv_coincident (edt_us stays last) —
         // would-be counts the HV blanking window dropped (NOT in `counts`,
         // disjoint from guard_removed, but — like guard_removed — a SUBSET of
@@ -965,6 +969,18 @@ static void do_tx_cycle(void) {
                  (unsigned long)diag_hist[4], (unsigned long)diag_hist[5],
                  (unsigned long)diag_hist[6], (unsigned long)diag_hist[7],
                  (unsigned long)diag_hist[8], (unsigned long)diag_hist[9]);
+
+        // V2.8.5 (review 2.7): HV FET on-time, on its OWN line. Deliberately
+        // not appended to DIAG above: the analysis scripts match that line
+        // field by field, and a new field in it made the shared parser return
+        // nothing at all (the V2.7.6 silent-breakage class). Expect long=0
+        // and max_us ~1500-1600 on a quiet cycle; long>0 means a FET pulse
+        // outlived its turn-off tick (flash erase / cache off), max_us says
+        // by how much. Collected for a week before deciding whether HV needs
+        // holding off during OTA (review 2.7 levels 2/3).
+        ESP_LOGI(TAG, "HVON: long=%lu max_us=%lu (threshold %u us)",
+                 (unsigned long)diag_hv_on_long, (unsigned long)diag_hv_on_max_us,
+                 (unsigned)HV_ON_LONG_US);
 
 #if TUBE_REJLOG_ENABLE
         // V2.7.2: sub-b1 reject profiler dump. The DIAG histogram above bins
@@ -1837,8 +1853,14 @@ void app_main(void) {
                  g_cfg.mqtt_broker, (unsigned long)g_cfg.mqtt_port);
     }
 
+    // V2.8.5 (review 1.9): track when the last cycle RAN, not when the next
+    // is due. `now >= last + interval` breaks at the 32-bit tick wrap (~497
+    // days at 100 Hz): last + interval wraps to a small number and every tick
+    // before the wrap compares true, firing do_tx_cycle back to back for up
+    // to one interval. util.h's tick_interval_* use unsigned elapsed-time
+    // arithmetic, which is wrap-safe (host-tested across the wrap).
     const TickType_t tx_interval = pdMS_TO_TICKS(g_cfg.tx_interval_ms);
-    TickType_t next_tx = xTaskGetTickCount() + tx_interval;
+    TickType_t last_tx = xTaskGetTickCount();
 
 #if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
     // When we defer a disconnect to the roaming app, the time we started waiting
@@ -1849,7 +1871,8 @@ void app_main(void) {
 
     while (1) {
         TickType_t now = xTaskGetTickCount();
-        TickType_t wait = (next_tx > now) ? (next_tx - now) : 1;
+        TickType_t wait = tick_interval_remaining(now, last_tx, tx_interval);
+        if (wait == 0) wait = 1;   // due now: poll on the next tick (was `: 1`)
         // Cap wait so post-loop polls (NTP, AP window, STA watchdog, FTP)
         // run at least once a second. The restart flag is now event-driven
         // (V2.4.1 A9 — EV_RESTART wakes us within µs) but the other periodic
@@ -2227,18 +2250,18 @@ void app_main(void) {
                 ESP_LOGW(TAG, "restart requested — deferring until TX cycle completes");
                 defer_logged = true;
             }
-        } else if (xTaskGetTickCount() >= next_tx) {
+        } else if (tick_interval_elapsed(xTaskGetTickCount(), last_tx, tx_interval)) {
             // V2.4.24: skip the scheduled TX cycle while an OTA upload is
             // in progress — frees WiFi airtime for the OTA POST instead
             // of competing with it via three TLS handshakes to Madavi /
             // sensor.community / Radmon. Non-sticky: as soon as
             // update_post returns (success or failure), the next main
             // tick fires the deferred TX cycle. We deliberately do NOT
-            // advance next_tx in the skip case so the cycle fires
+            // advance last_tx in the skip case so the cycle fires
             // immediately on resume rather than after a fresh tx_interval.
             if (!main_ota_in_progress()) {
                 do_tx_cycle();
-                next_tx = xTaskGetTickCount() + tx_interval;
+                last_tx = xTaskGetTickCount();
             }
         }
 

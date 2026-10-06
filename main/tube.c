@@ -99,10 +99,25 @@ static volatile uint32_t isr_hv_blanked_total = 0;
 // it actually counts, checks whether the gap since that stamp falls inside
 // [HV_COINCIDENT_MIN_US, HV_COINCIDENT_MAX_US] (tube.h). isr_hv_coincident
 // tallies the hits; snapshot+reset via tube_get_diag() alongside the other
-// permanent diagnostics. See radiation_overcounting_independent_review.md
-// for the field evidence this is built to test.
+// permanent diagnostics. Built to test the HV-coupling hypothesis of the
+// 2026 phantom-count investigation (the V2.6.34 cutover in hal.h).
 static volatile uint64_t isr_last_hv_pulse_us = 0;
 static volatile uint32_t isr_hv_coincident    = 0;
+
+// --- V2.8.5: HV FET on-time telemetry (review 2.7, level 1) ---
+// The FET is driven high in S_PULSE_H and low by the NEXT gptimer tick that
+// reaches S_PULSE_L, nominally PERIODS(1500) later. That tick is a normal
+// interrupt: while the flash cache is disabled (an OTA erase, an NVS write)
+// it cannot run, so the FET can stay on for the whole erase — tens to
+// hundreds of ms at DCR-limited inductor current. Nothing measured this.
+// recharge_tick now times every pulse from its own two stamps (the existing
+// isr_last_hv_pulse_us at turn-on, the turn-off time below) and keeps, per
+// DIAG window: how many pulses exceeded HV_ON_LONG_US and the longest
+// on-time seen. Both under mux_hv (written by recharge_tick only),
+// snapshot + reset by tube_get_hv_ontime(). Measurement only: nothing here
+// changes when or how long the FET is driven.
+static volatile uint32_t isr_hv_on_long   = 0;
+static volatile uint32_t isr_hv_on_max_us = 0;
 
 #if TUBE_REJLOG_ENABLE
 // --- V2.7.2: sub-b1 reject profiler state (see tube.h TUBE_REJLOG_ENABLE) ---
@@ -206,6 +221,14 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
             // S_PULSE_H stamp above (64-bit store, two independent ISRs).
             portENTER_CRITICAL_ISR(&mux_hv);
             isr_last_hv_off_us = (uint64_t)esp_timer_get_time();
+            // V2.8.5: on-time of the pulse just ended = turn-off stamp minus
+            // the S_PULSE_H turn-on stamp (same lock, same 64-bit clock).
+            {
+                const uint32_t on_us =
+                    (uint32_t)(isr_last_hv_off_us - isr_last_hv_pulse_us);
+                if (on_us > isr_hv_on_max_us) isr_hv_on_max_us = on_us;
+                if (on_us > HV_ON_LONG_US)    isr_hv_on_long++;
+            }
             portEXIT_CRITICAL_ISR(&mux_hv);
             state = S_CHECK;
             next_state = PERIODS(1000);
@@ -650,4 +673,15 @@ void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
     isr_hv_coincident  = 0;
     isr_hv_blanked     = 0;
     portEXIT_CRITICAL(&mux_gmc);
+}
+
+void tube_get_hv_ontime(uint32_t *n_long, uint32_t *max_us) {
+    // V2.8.5: separate from tube_get_diag() because these two are written
+    // under mux_hv (recharge_tick), not mux_gmc (the count ISR).
+    portENTER_CRITICAL(&mux_hv);
+    *n_long = isr_hv_on_long;
+    *max_us = isr_hv_on_max_us;
+    isr_hv_on_long   = 0;
+    isr_hv_on_max_us = 0;
+    portEXIT_CRITICAL(&mux_hv);
 }

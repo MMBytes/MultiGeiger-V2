@@ -111,6 +111,12 @@ static SemaphoreHandle_t s_state_mux = NULL;
 // Cleared by mqtt_stop() so the poll re-arms after the OTA teardown.
 static bool s_initialized = false;
 
+// V2.8.5: why the last mqtt_init() deliberately did not start a client, or
+// NULL. Read by the /status MQTT block (httpd task); written only by
+// mqtt_init() on the main task. A pointer to a string literal, so a reader
+// sees either the old or the new value, never a torn one.
+static const char *volatile s_cfg_error = NULL;
+
 // Topic scratch — built once at init from prefix + chip_id, reused for
 // every publish to avoid repeated snprintf cost in the hot path. Sized
 // generously: prefix up to 31 + chip-id up to 19 + "/availability" = 13
@@ -245,6 +251,7 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     // below still register as "initialized" — keeps main.c's poll from
     // calling init in a loop when MQTT is intentionally off.
     s_initialized = true;
+    s_cfg_error   = NULL;
     if (!cfg->mqtt_enable) {
         ESP_LOGI(TAG, "disabled (mqtt_enable=false)");
         return;
@@ -322,10 +329,22 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
                 break;
             case 1:  // Mode B — custom CA cert from NVS
                 if (cfg->mqtt_tls_ca[0] == 0) {
-                    ESP_LOGW(TAG, "TLS Mode B selected but mqtt_tls_ca is empty — "
-                                  "falling back to skip-verify so connect doesn't loop");
-                    mc.broker.verification.skip_cert_common_name_check = true;
-                    tls_mode_str = "B (no CA configured — degraded to skip-verify)";
+                    // V2.8.5: refuse instead of degrading. Until V2.8.4 an
+                    // empty CA fell back to skip-verify, i.e. a Mode B node
+                    // silently connected UNVERIFIED and handed its MQTT
+                    // credentials to whoever answered on the broker's
+                    // address. Unverified TLS stays available, but only as
+                    // the explicit Mode D. s_initialized stays true so the
+                    // main-loop poll does not retry every second; /config
+                    // refuses to save this combination and /status shows
+                    // the reason.
+                    ESP_LOGE(TAG, "TLS Mode B (custom CA) selected but no CA "
+                                  "certificate is configured — NOT connecting. "
+                                  "Paste the broker's CA on /config, or choose "
+                                  "Mode D to connect unverified.");
+                    s_cfg_error = "TLS Mode B is selected but no CA certificate "
+                                  "is configured &mdash; not connecting";
+                    return;
                 } else {
                     mc.broker.verification.certificate = cfg->mqtt_tls_ca;
                     // certificate_len = 0 → esp-tls treats input as NUL-terminated
@@ -339,8 +358,9 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
                 // (now set in sdkconfig.defaults). skip_cert_common_name_check
                 // alone only skips the CN match — with no CA attached and the
                 // kconfig pair off, esp-tls hard-fails the handshake with
-                // "No server verification option set", so Mode D (and the
-                // Mode B empty-CA fallback above) could never connect.
+                // "No server verification option set", so Mode D could
+                // never connect. (V2.8.5: Mode D is now the ONLY path that
+                // connects unverified — Mode B with an empty CA refuses.)
                 mc.broker.verification.skip_cert_common_name_check = true;
                 tls_mode_str = "D (skip verification)";
                 break;
@@ -419,9 +439,15 @@ void mqtt_publish_state(const main_status_t *st,
     // esp_mqtt_client_publish call. Keeps mqtt_stop() (called by OTA
     // teardown on the httpd task) from destroying the handle between
     // our NULL-check and the publish — the original TOCTOU described
-    // in the V2.4.22 audit. esp_mqtt_client_publish is a non-blocking
-    // enqueue per IDF docs (returns immediately, internal task does
-    // the network I/O) so holding a mutex across it is safe.
+    // in the V2.4.22 audit.
+    // V2.8.5 correction: esp_mqtt_client_publish is NOT a pure enqueue. Its
+    // header (mqtt_client.h) says it "might block for several seconds" —
+    // it writes on the caller's task, bounded by the network timeout
+    // (~10 s). On a half-open broker link this call can therefore stall the
+    // main task, and anyone waiting on s_state_mux (mqtt_stop on the httpd
+    // task), for up to that long. Accepted: keepalive detects the dead link
+    // within a cycle or two and the stall is bounded. The non-blocking
+    // alternative is esp_mqtt_client_enqueue(); not adopted (review 1.3).
     if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
     if (!s_client || !s_connected) {
         ESP_LOGD(TAG, "publish skipped (client=%p connected=%d)",
@@ -716,4 +742,8 @@ void mqtt_stop(void) {
 
 bool mqtt_is_initialized(void) {
     return s_initialized;
+}
+
+const char *mqtt_config_error(void) {
+    return s_cfg_error;
 }

@@ -412,6 +412,10 @@ bool config_post_apply_field(config_t *next, const char *key, const char *val,
     // out-of-range numerics keep the prior field value. V2.5.34: a
     // matched-but-out-of-range numeric sets *out_rejected (if non-NULL)
     // so the caller can report the silent no-save instead of hiding it.
+    // V2.8.5: numerics parse with parse_long_strict / parse_float_strict
+    // (util.h). strtol(val, NULL, 10) turned "abc" into 0 and "12abc" into
+    // 12 and stored them; a value that is not entirely a number is now
+    // reported as rejected like an out-of-range one, prior value kept.
     #define X_STR(name, size, k, def)                            \
         if (strcmp(key, k) == 0) {                               \
             safe_strcpy(next->name, val, (size));                \
@@ -424,24 +428,27 @@ bool config_post_apply_field(config_t *next, const char *key, const char *val,
         }
     #define X_U32(name, k, def, lo, hi)                          \
         if (strcmp(key, k) == 0) {                               \
-            long _v = strtol(val, NULL, 10);                     \
-            if (_v >= (long)(lo) && _v <= (long)(hi))            \
+            long _v = 0;                                         \
+            if (parse_long_strict(val, &_v) &&                   \
+                _v >= (long)(lo) && _v <= (long)(hi))            \
                 next->name = (uint32_t)_v;                       \
             else if (out_rejected) *out_rejected = true;         \
             return true;                                         \
         }
     #define X_F32(name, k, def, lo, hi)                          \
         if (strcmp(key, k) == 0) {                               \
-            float _v = strtof(val, NULL);                        \
-            if (_v >= (lo) && _v <= (hi))                        \
+            float _v = 0.0f;                                     \
+            if (parse_float_strict(val, &_v) &&                  \
+                _v >= (lo) && _v <= (hi))                        \
                 next->name = _v;                                 \
             else if (out_rejected) *out_rejected = true;         \
             return true;                                         \
         }
     #define X_U8(name, k, def, lo, hi)                           \
         if (strcmp(key, k) == 0) {                               \
-            long _v = strtol(val, NULL, 10);                     \
-            if (_v >= (long)(lo) && _v <= (long)(hi))            \
+            long _v = 0;                                         \
+            if (parse_long_strict(val, &_v) &&                   \
+                _v >= (long)(lo) && _v <= (long)(hi))            \
                 next->name = (uint8_t)_v;                        \
             else if (out_rejected) *out_rejected = true;         \
             return true;                                         \

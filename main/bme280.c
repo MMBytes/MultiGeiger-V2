@@ -3,6 +3,7 @@
 #include <string.h>
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"     // V2.8.5: esp_rom_delay_us (sub-tick waits)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
@@ -172,13 +173,18 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, bool skip_addr_77) {
 
     // Soft reset, give the chip its 2 ms settling time, then poll the
     // calibration-copying bit until the NVM is ready (datasheet 5.4.1).
+    // V2.8.5: precise busy-waits, as in the V2.3.31 sweep of the other
+    // drivers. At CONFIG_FREERTOS_HZ=100, pdMS_TO_TICKS(5) and (2) are 0
+    // ticks — vTaskDelay(0) is a bare yield — so the reset settle and the
+    // poll back-off did not wait at all, and the calibration read could land
+    // mid NVM copy. 5 ms + up to 20 x 2 ms runs once, at boot.
     err = i2c_dev_write_reg(s_dev, REG_RESET, 0xB6);
     if (err != ESP_OK) return err;
-    vTaskDelay(pdMS_TO_TICKS(5));
+    esp_rom_delay_us(5000);
     for (int i = 0; i < 20; i++) {
         uint8_t status = 0;
         if (i2c_dev_read_regs(s_dev, REG_STATUS, &status, 1) == ESP_OK && !(status & 0x01)) break;
-        vTaskDelay(pdMS_TO_TICKS(2));
+        esp_rom_delay_us(2000);
     }
 
     err = read_calibration();

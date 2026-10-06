@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>   // strtol / strtof (parse_long_strict, parse_float_strict)
 
 /** @brief Bounded string copy with guaranteed null termination.
  *
@@ -154,8 +155,12 @@ static inline void url_encode_query_value(char *dst, size_t dstsz, const char *s
  *  it cares about.
  *
  *  V2.4.1+ (T1): moved from http_server.c.
+ *  V2.8.5: `bufsz == 0` returns without writing — the terminator store
+ *  below used to hit out[0] of a zero-length buffer. No caller passes 0
+ *  today; the guard keeps the "always safe" promise true for the next one.
  */
 static inline void html_esc(const char *in, char *out, size_t bufsz) {
+    if (bufsz == 0) return;
     size_t o = 0;
     while (*in && o + 7 < bufsz) {
         switch (*in) {
@@ -204,4 +209,109 @@ static inline void format_uptime_hm(unsigned long s, char *out, size_t sz) {
     } else {
         snprintf(out, sz, "%02luh %02lum", h, m % 60);
     }
+}
+
+// --- V2.8.5 pure helpers (host-tested in test/test_main.c) -----------------
+
+/** @brief Parse a whole string as a base-10 integer, rejecting anything else.
+ *
+ *  `strtol(val, NULL, 10)` — what the /config schema dispatch used before —
+ *  returns 0 for "abc", 12 for "12abc" and 0 for "", so a typo silently
+ *  became a valid-looking value (e.g. `tube_type=abc` stored Unknown and
+ *  zeroed the uploaded dose). This accepts only an optional sign and digits
+ *  with nothing left over; leading whitespace is tolerated because strtol
+ *  skips it. Overflow saturates to LONG_MIN/LONG_MAX, which every caller's
+ *  range check then rejects, so errno is not consulted.
+ *
+ *  @param s    NUL-terminated input. NULL or empty → false.
+ *  @param out  Written only on success.
+ *  @return true if the entire string was a number.
+ */
+static inline bool parse_long_strict(const char *s, long *out) {
+    if (!s || !*s || !out) return false;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0') return false;
+    *out = v;
+    return true;
+}
+
+/** @brief Float counterpart of parse_long_strict(). "nan" parses but fails
+ *  every caller's `>= lo && <= hi` test (all NaN comparisons are false);
+ *  "inf" parses and fails the upper bound — so neither can be stored. */
+static inline bool parse_float_strict(const char *s, float *out) {
+    if (!s || !*s || !out) return false;
+    char *end = NULL;
+    float v = strtof(s, &end);
+    if (end == s || *end != '\0') return false;
+    *out = v;
+    return true;
+}
+
+/** @brief Wrap-safe "has `interval` elapsed since `last`?" for 32-bit tick
+ *  counters.
+ *
+ *  `now >= last + interval` breaks when the counter wraps (FreeRTOS ticks
+ *  at 100 Hz wrap every ~497 days): `last + interval` overflows to a small
+ *  number and the comparison is true on every tick. Unsigned subtraction
+ *  gives the true elapsed count across the wrap as long as the real gap is
+ *  below 2^32 ticks.
+ */
+static inline bool tick_interval_elapsed(uint32_t now, uint32_t last,
+                                         uint32_t interval) {
+    return (uint32_t)(now - last) >= interval;
+}
+
+/** @brief Ticks left until `interval` has elapsed since `last`, or 0 if it
+ *  already has. Same wrap-safe arithmetic as tick_interval_elapsed(). */
+static inline uint32_t tick_interval_remaining(uint32_t now, uint32_t last,
+                                               uint32_t interval) {
+    uint32_t elapsed = now - last;
+    return (elapsed >= interval) ? 0u : (interval - elapsed);
+}
+
+/** @brief Format a non-negative count into exactly 4 characters for a
+ *  fixed-width display cell.
+ *
+ *  - below 1000      : right-aligned integer  " 234" / "   9" / "1000"
+ *  - 1000 .. 9949    : one decimal + k        "3.4k" / "9.9k"
+ *  - 9950 and above  : integer + k + space    "10k " / "99k " (clamped)
+ *
+ *  The 9950 boundary is the point where `%3.1f` of v/1000 rounds up to
+ *  "10.0", which made 9950..9999 render as the 5-character "10.0k" and
+ *  overflow the 128 px OLED row at 2x font (display.c PM number screen).
+ *  `outsz` must be at least 5; smaller buffers get a truncated string.
+ */
+static inline void fmt_kilo4(char *out, size_t outsz, float v) {
+    if (v < 1000.0f) {
+        snprintf(out, outsz, "%4d", (int)(v + 0.5f));
+    } else if (v < 9950.0f) {
+        snprintf(out, outsz, "%3.1fk", (double)(v / 1000.0f));
+    } else {
+        int k = (int)(v / 1000.0f + 0.5f);
+        // v >= 9950 makes k >= 10 already; the lower clamp tells the compiler
+        // so, which keeps -Wformat-truncation quiet on 2-digit output.
+        if (k < 10) k = 10;
+        if (k > 99) k = 99;
+        snprintf(out, outsz, "%2dk ", k);
+    }
+}
+
+/** @brief Turn strftime's "%z" offset ("+1000") at the end of `buf` into
+ *  the RFC 3339 form ("+10:00") in place.
+ *
+ *  @param buf    String of length `n` ending in a 5-char ±HHMM offset.
+ *  @param n      strlen(buf).
+ *  @param bufsz  Capacity of buf; the splice needs n + 2 bytes.
+ *  @return The new length (n + 1), or n unchanged when the tail is not a
+ *          ±HHMM offset or the buffer has no room for the colon.
+ */
+static inline size_t tz_offset_add_colon(char *buf, size_t n, size_t bufsz) {
+    if (n < 5 || n + 2 > bufsz) return n;
+    if (buf[n - 5] != '+' && buf[n - 5] != '-') return n;
+    buf[n + 1] = '\0';
+    buf[n]     = buf[n - 1];   // shift offset minutes right by one
+    buf[n - 1] = buf[n - 2];
+    buf[n - 2] = ':';          // colon between offset hours and minutes
+    return n + 1;
 }

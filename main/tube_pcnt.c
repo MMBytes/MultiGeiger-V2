@@ -3,6 +3,8 @@
 #include "driver/pulse_cnt.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"   // V2.8.5: vTaskDelay in tube_pcnt_stop()
+#include "freertos/task.h"
 #include "hal.h"   // PIN_GMC_COUNT_INPUT
 
 static const char *TAG = "tube_pcnt";
@@ -33,14 +35,18 @@ static uint32_t s_widths[TUBE_PCNT_NWIDTHS];
 static pcnt_unit_handle_t    s_units[TUBE_PCNT_NWIDTHS] = { 0 };
 static pcnt_channel_handle_t s_chans[TUBE_PCNT_NWIDTHS] = { 0 };
 static uint32_t              s_last_read[TUBE_PCNT_NWIDTHS] = { 0 };  // per-cycle delta base
-static bool s_active = false;
+// V2.8.5: volatile — written by tube_pcnt_stop() on the httpd task, read by
+// the main task's readers below, possibly on the other core. Without it the
+// compiler may keep a reader's copy in a register across the check.
+static volatile bool s_active = false;
 
 bool tube_pcnt_active(void) { return s_active; }
 
-// Best-effort teardown of every unit/channel created so far. Used only on the
-// init failure path; returns are intentionally ignored (a half-built unit may
-// not be in a stoppable/disable-able state, which is fine — we just want the
-// peripheral and its GPIO-matrix tap released).
+// Best-effort teardown of every unit/channel created so far. Used on the
+// init failure path and by tube_pcnt_stop() (OTA prep); returns are
+// intentionally ignored (a half-built unit may not be in a stoppable /
+// disable-able state, which is fine — we just want the peripheral and its
+// GPIO-matrix tap released).
 static void tube_pcnt_teardown(void) {
     for (int i = 0; i < TUBE_PCNT_NWIDTHS; i++) {
         if (s_units[i]) {
@@ -164,20 +170,34 @@ fail:
 
 void tube_pcnt_stop(void) {
     if (!s_active) return;   // idempotent — nothing up
-    tube_pcnt_teardown();    // releases the units/channels + their internal DRAM
+    // V2.8.5 (review 2.8a): retire the flag BEFORE freeing anything. This runs
+    // on the httpd task (OTA prep) while the main task keeps calling
+    // tube_pcnt_read() / tube_pcnt_filtered_total() every second, possibly on
+    // the other core. Until V2.8.4 the units were deleted first and the flag
+    // cleared after, so a reader that passed its s_active check could call
+    // pcnt_unit_get_count() on a handle being freed. Now: new readers see
+    // false and return zeros; the delay lets a reader already past its check
+    // finish its few-microsecond read before the handles go away. A reader
+    // preempted for longer than that between check and use remains possible
+    // in principle — a mutex would close it and was judged not worth the
+    // count-path cost for an OTA-only path.
     s_active = false;
+    vTaskDelay(pdMS_TO_TICKS(100));
+    tube_pcnt_teardown();    // releases the units/channels + their internal DRAM
     ESP_LOGI(TAG, "PCNT width-comb stopped (released for OTA/teardown)");
 }
 
 void tube_pcnt_read(uint32_t out[TUBE_PCNT_NWIDTHS]) {
     for (int i = 0; i < TUBE_PCNT_NWIDTHS; i++) {
-        if (s_active && s_units[i]) {
+        // V2.8.5: take the handle once, after the flag — see tube_pcnt_stop().
+        pcnt_unit_handle_t u = s_active ? s_units[i] : NULL;
+        if (u) {
             // Per-cycle value = delta of the monotonic accumulator since the
             // last read (no clear → no lost-edge window). Unsigned subtraction
             // is wrap-safe. This consumer's last-read base is independent of
             // history.c's, so both can read the same total without interfering.
             int total = 0;
-            pcnt_unit_get_count(s_units[i], &total);
+            pcnt_unit_get_count(u, &total);
             uint32_t t = (total < 0) ? 0u : (uint32_t)total;
             out[i] = t - s_last_read[i];
             s_last_read[i] = t;
@@ -188,8 +208,10 @@ void tube_pcnt_read(uint32_t out[TUBE_PCNT_NWIDTHS]) {
 }
 
 uint32_t tube_pcnt_filtered_total(void) {
-    if (!s_active) return 0u;
+    // V2.8.5: handle taken once, after the flag — see tube_pcnt_stop().
+    pcnt_unit_handle_t u = s_active ? s_units[TUBE_PCNT_NWIDTHS - 1] : NULL;  // widest = filter width
+    if (!u) return 0u;
     int total = 0;
-    pcnt_unit_get_count(s_units[TUBE_PCNT_NWIDTHS - 1], &total);  // widest = filter width
+    pcnt_unit_get_count(u, &total);
     return (total < 0) ? 0u : (uint32_t)total;
 }

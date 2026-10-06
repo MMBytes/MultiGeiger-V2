@@ -227,8 +227,17 @@ static void tx_task(void *arg) {
     (void)arg;
     tx_context_t ctx;
     while (1) {
-        if (xQueueReceive(s_tx_queue, &ctx, portMAX_DELAY) == pdTRUE) {
+        // V2.8.5 (review 2.6): peek → mark busy → receive. tx_is_idle() is
+        // "!busy && queue empty"; with the old receive-then-busy order there
+        // was a window where the job had left the queue but busy was not yet
+        // set, so the PSA-refresh and OTA-prep gates could read "idle" while
+        // a TLS upload was about to start. Peeking leaves the item counted
+        // in the queue until busy is already true. Single consumer, so the
+        // receive below always takes the item just peeked; the queue ops'
+        // critical sections order the busy store before the dequeue.
+        if (xQueuePeek(s_tx_queue, &ctx, portMAX_DELAY) == pdTRUE) {
             s_tx_busy = true;
+            (void)xQueueReceive(s_tx_queue, &ctx, 0);
             tx_run(&ctx);
             s_tx_busy = false;
         }
@@ -792,10 +801,18 @@ static int send_gmc(const tx_context_t *c) {
         return -3;
     }
     float usv = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type);   // µSv/h
-    char url[256];
+    // V2.8.5: percent-encode the two IDs, as Radmon's credentials have been
+    // since V2.5.20 — an `&`, `+`, `%` or space in either broke the query.
+    // 3x worst case each; url sized for base (~31) + both encoded IDs (2 x
+    // 96) + the numeric fields (~50).
+    char aid_enc[CFG_USER_NAME_MAX * 3 + 1];
+    char gid_enc[CFG_USER_NAME_MAX * 3 + 1];
+    url_encode_query_value(aid_enc, sizeof(aid_enc), c->gmc_account_id);
+    url_encode_query_value(gid_enc, sizeof(gid_enc), c->gmc_geiger_id);
+    char url[320];
     snprintf(url, sizeof(url),
              "%s?AID=%s&GID=%s&CPM=%lu&ACPM=%lu&uSV=%.4f",
-             c->gmc.url_http, c->gmc_account_id, c->gmc_geiger_id,
+             c->gmc.url_http, aid_enc, gid_enc,
              (unsigned long)c->cpm, (unsigned long)c->cpm5, (double)usv);
 
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
@@ -833,10 +850,15 @@ static int send_thingspeak(const tx_context_t *c) {
     const char *base = c->thingspeak.use_https ? c->thingspeak.url_https
                                                : c->thingspeak.url_http;
     float usv = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type);   // µSv/h
-    char url[320];
+    // V2.8.5: percent-encode the write key (same reason as GMC above). url
+    // sized for base (~34) + encoded key (192) + fields 1-4 (~70) + the
+    // optional env fields 5-7 (~45).
+    char key_enc[CFG_TOKEN_MAX * 3 + 1];
+    url_encode_query_value(key_enc, sizeof(key_enc), c->thingspeak_api_key);
+    char url[384];
     int n = snprintf(url, sizeof(url),
              "%s?api_key=%s&field1=%lu&field2=%.4f&field3=%lu&field4=%lu",
-             base, c->thingspeak_api_key,
+             base, key_enc,
              (unsigned long)c->cpm, (double)usv,
              (unsigned long)c->cpm5, (unsigned long)c->cpm15);
     // Optional env fields (matches ESPGeiger field5/6/7 = temp/humidity/pressure).
@@ -889,11 +911,15 @@ static int send_thingspeak_pm(const tx_context_t *c) {
     }
     const char *base = c->thingspeak_pm.use_https
                        ? c->thingspeak_pm.url_https : c->thingspeak_pm.url_http;
-    char url[320];
+    // V2.8.5: percent-encode the write key, as for the radiation channel.
+    // url sized for base + encoded key (192) + fields 1-4, 8 (~80) + env (~45).
+    char key_enc[CFG_TOKEN_MAX * 3 + 1];
+    url_encode_query_value(key_enc, sizeof(key_enc), c->thingspeak_pm_api_key);
+    char url[384];
     int n = snprintf(url, sizeof(url),
              "%s?api_key=%s&field1=%.2f&field2=%.2f&field3=%.2f&field4=%.2f"
              "&field8=%.2f",
-             base, c->thingspeak_pm_api_key,
+             base, key_enc,
              (double)c->pm.pm1_0, (double)c->pm.pm2_5,
              (double)c->pm.pm4_0, (double)c->pm.pm10,
              (double)c->pm.typ_size_um);

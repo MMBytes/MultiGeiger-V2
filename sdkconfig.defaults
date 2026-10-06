@@ -75,9 +75,15 @@ CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # TX worker blocks on TLS for seconds at a time; that legitimately starves IDLE
-# on its CPU. Stop the task watchdog from monitoring both IDLE tasks — the wdt
-# is still armed for every other named task (main, tx, tcpip, wifi), so a real
-# hang in one of those still fires.
+# on its CPU. Stop the task watchdog from monitoring both IDLE tasks.
+# V2.8.5 correction: with these two off the task watchdog watches NOTHING. The
+# IDF TWDT only monitors tasks that subscribe via esp_task_wdt_add(), and no
+# task in this firmware does — the earlier claim here that main, tx, tcpip and
+# wifi stay watched was wrong. A hung task therefore stays hung; recovery
+# relies on the main loop's own restart paths (deferred restart, heap guard,
+# STA watchdog), which need a healthy main loop. Subscribing main + tx with a
+# timeout above their worst legitimate block is the fix if that is ever
+# needed (review 1.2, parked: no hang observed since the V2.3.x FTPS fix).
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is not set
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
 
@@ -91,8 +97,9 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
 # V2.5.20 (review R1): allow esp-tls connections that deliberately carry NO
 # verification option to proceed UNVERIFIED instead of failing the handshake.
-# Required by MQTT TLS "Mode D — skip server verification" (and the Mode B
-# empty-CA fallback) in mqtt.c: esp-mqtt's skip_cert_common_name_check only
+# Required by MQTT TLS "Mode D — skip server verification" in mqtt.c (since
+# V2.8.5 the only unverified path: Mode B with an empty CA now refuses to
+# connect instead of falling back): esp-mqtt's skip_cert_common_name_check only
 # skips the CN match — without these two symbols a no-CA config aborts with
 # "No server verification option set", so Mode D could never connect.
 # Connections that DO attach the CA bundle / a custom CA still verify fully;

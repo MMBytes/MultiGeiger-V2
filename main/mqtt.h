@@ -63,9 +63,10 @@ void mqtt_init(const config_t *cfg, const char *chip_id);
  *  never started or already stopped.
  *
  *  After this call, `mqtt_is_initialized()` returns false, so main.c's
- *  poll loop will re-init MQTT on the next tick. On a successful OTA the
- *  device reboots before that matters; on a failed OTA, MQTT comes back
- *  within ~1 s.
+ *  poll loop re-inits MQTT on the next tick — UNLESS the OTA path has set
+ *  main_suspend_services(), which it does before calling this. On a
+ *  successful OTA the device reboots; on a failed one MQTT stays off until
+ *  a reboot or a successful retry (the OTA error response says so).
  */
 void mqtt_stop(void);
 
@@ -78,6 +79,15 @@ void mqtt_stop(void);
  *  (disabled / empty broker) — semantics match the old main.c flag.
  */
 bool mqtt_is_initialized(void);
+
+/** @brief Why the last mqtt_init() refused to start a client, or NULL.
+ *
+ *  V2.8.5: set when the stored configuration cannot be used safely —
+ *  today only "TLS Mode B with no CA certificate", which used to fall back
+ *  to an unverified connection. The string is HTML-safe (it may contain
+ *  entities) and static; /status shows it in the MQTT block.
+ */
+const char *mqtt_config_error(void);
 
 /** @brief Publish one snapshot of sensor state to `<prefix>/<chip>/state`.
  *

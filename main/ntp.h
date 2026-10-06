@@ -8,6 +8,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <time.h>
 
 /** @brief Set the process TZ environment variable + tzset(). Independent of
@@ -44,10 +45,23 @@ bool ntp_time_valid(void);
  */
 void ntp_poll(void);
 
+/** @brief Buffer size for ntp_localtime_str(): 25 chars of
+ *  "YYYY-MM-DDTHH:MM:SS+HH:MM" plus NUL, with headroom for a 5-digit year. */
+#define NTP_LOCALTIME_STR_LEN 40
+
 /** @brief Current local time as RFC 3339 with numeric UTC offset, e.g.
  *  "2026-06-13T20:45:50+10:00" (DST-aware via the configured TZ).
- *  Static buffer — not reentrant. */
-const char *ntp_localtime_str(void);
+ *
+ *  V2.8.5: writes into the caller's buffer. It used to return one static
+ *  buffer, shared by syslog (called from whichever task logs) and the SD
+ *  logger (main task) — two tasks formatting at once could hand one of them
+ *  the other's half-written string.
+ *
+ *  @param buf    Destination; NTP_LOCALTIME_STR_LEN bytes is always enough.
+ *  @param bufsz  Size of buf. 0 returns "" without writing.
+ *  @return buf (or a static "" when bufsz is 0), for direct use in printf.
+ */
+const char *ntp_localtime_str(char *buf, size_t bufsz);
 
 /** @brief Boot epoch (wall_time - uptime), refreshed on every SNTP sync.
  *  Returns 0 if no sync has occurred yet this session.

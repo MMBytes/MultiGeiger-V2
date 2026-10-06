@@ -9,6 +9,76 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.5 — Safer MQTT TLS, OTA and settings handling; HV on-time telemetry
+
+A maintenance release from a whole-codebase review. It fixes a set of small
+but real bugs and race windows, refuses one insecure MQTT setting that used to
+degrade silently, and adds a per-cycle log line that measures the HV
+charge-pulse on-time. Counting, dose calculation and upload contents are
+unchanged except where an item below says otherwise.
+
+1. **MQTT TLS Mode B (custom CA) with no CA certificate no longer connects.**
+   This combination used to fall back, without saying so, to a TLS connection
+   that does not verify the broker — handing the MQTT username and password
+   to whoever answers on the broker's address. The node now logs an error and
+   does not start MQTT; the status page shows "not started — TLS Mode B is
+   selected but no CA certificate is configured — not connecting"; and /config refuses to save
+   the combination (previous TLS settings kept, field listed as not saved).
+   Mode D remains the explicit way to connect without verification.
+   **If a node uses Mode B, check that its CA field is filled before
+   updating** — a node that relied on the fallback stops publishing until a
+   CA is pasted or Mode D is chosen.
+2. **A failed OTA now says what it left switched off.** Before writing, the
+   upload stops MQTT, the FTP log upload and, where present, the pulse tick
+   and the PCNT width filter, and none of them restart if the upload fails. The error text now
+   says so: they stay off until a successful retry or a reboot. The "keep
+   services suspended" flag is also set before MQTT is stopped, so the main
+   loop can no longer restart MQTT (and its ~50 KB TLS session) part-way
+   through the upload — the out-of-memory case this teardown exists to
+   prevent on 4 MB Heltec boards.
+3. **Numeric /config fields reject text.** A value that is not entirely a
+   number ("abc", "12abc", empty) used to be stored as its leading number or
+   as 0 — an invalid tube type became "Unknown" and zeroed the uploaded dose,
+   an invalid OLED brightness switched the panel off. Such values are now
+   reported as not saved, previous value kept, like out-of-range ones.
+4. **GMCMap IDs and ThingSpeak write keys are URL-encoded** (radiation and PM
+   channels), as Radmon credentials have been since V2.5.20. A value
+   containing `&`, `+`, `%` or a space no longer breaks the request.
+   Alphanumeric keys and IDs are sent exactly as before.
+5. **Status and config pages.** The MQTT broker name and topic prefix are
+   HTML-escaped on the status page (a `<` or `"` in either broke the page).
+   /config is sent with `Cache-Control: no-store`, so browsers do not cache
+   the page that carries the stored passwords.
+6. **Sensor timing.** The BME280 soft-reset wait and the DNMS command-to-read
+   gaps were meant to be 2–5 ms but were 0 ms at the firmware's 100 Hz
+   scheduler tick. They are now precise busy-waits, the same fix V2.3.31
+   applied to the other drivers. This removes one cause of intermittent
+   BME280 calibration and DNMS read failures.
+7. **PM number-concentration display.** Values from 9950 to 9999 showed as
+   "10.0k" — five characters in a four-character cell, pushing the row off
+   the OLED. They now show "10k".
+8. **Scheduler and race fixes**, with no visible change in normal operation:
+   the upload-cycle timer is safe across the 32-bit tick-counter wrap (after
+   ~497 days of uptime it would have fired back to back for one interval);
+   the upload worker marks itself busy before taking a job off its queue,
+   closing a window in which the daily crypto refresh or OTA preparation
+   could see it as idle; neither crypto reset runs during an OTA upload; the
+   PCNT width filter is marked inactive before it is torn down for an OTA;
+   and syslog and the SD logger no longer share one timestamp buffer.
+9. **New log line `HVON: long=N max_us=M`**, after each `DIAG` line when the
+   tube is enabled. It counts the HV charge pulses in the cycle whose FET
+   on-time exceeded 2 ms and gives the longest on-time. Nominal is about
+   1.5 ms. The turn-off is a timer interrupt that cannot run while flash is
+   being erased, so longer pulses are expected around OTA updates and
+   settings saves. Measurement only — HV control is unchanged — to decide
+   whether HV should be paused during an OTA. The `DIAG` line itself is
+   unchanged, so existing log parsers keep working.
+10. Code comments corrected: the task watchdog currently watches no task (an
+    earlier comment said otherwise), and the MQTT publish call can block for
+    up to the network timeout.
+
+---
+
 ## V2.8.4 — Live display CPM runs only while it can be shown
 
 V2.8.3's once-a-second display code ran on every node using the radiation

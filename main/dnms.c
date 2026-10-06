@@ -4,6 +4,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"     // V2.8.5: esp_rom_delay_us (command-to-read gap)
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sensirion_crc.h"
@@ -21,6 +22,14 @@ static const char *TAG = "dnms";
 #define CMD_CALCULATE_LEQ       0x0003
 #define CMD_READ_DATA_READY     0x0004
 #define CMD_READ_LEQ            0x0005
+
+// Gap between writing a command and reading its response, in µs. 5 ms as the
+// driver always intended. V2.8.5: busy-wait (esp_rom_delay_us) instead of
+// vTaskDelay(pdMS_TO_TICKS(5)) — at CONFIG_FREERTOS_HZ=100 that is 0 ticks, a
+// bare yield, so the read followed the command immediately and risked a NACK
+// or CRC failure (a lost noise sample). Same fix the V2.3.31 sweep applied to
+// sht45/sps30/veml7700/sgp41; these three sites were missed then.
+#define DNMS_CMD_TO_READ_US     5000
 
 // Response sizes. All counted in raw bytes ON THE WIRE (data words + interleaved
 // CRC bytes), NOT in payload bytes.
@@ -98,7 +107,7 @@ esp_err_t dnms_init(i2c_master_bus_handle_t bus) {
         s_dev = NULL;
         return ESP_FAIL;
     }
-    vTaskDelay(pdMS_TO_TICKS(5));
+    esp_rom_delay_us(DNMS_CMD_TO_READ_US);   // V2.8.5: see DNMS_CMD_TO_READ_US
 
     uint8_t wire[VERSION_WIRE_LEN];
     if (recv(wire, sizeof(wire)) != ESP_OK) {
@@ -149,7 +158,7 @@ esp_err_t dnms_data_ready(bool *ready) {
     if (!s_ready || !s_dev || !ready) return ESP_FAIL;
 
     if (send_cmd(CMD_READ_DATA_READY) != ESP_OK) return ESP_FAIL;
-    vTaskDelay(pdMS_TO_TICKS(5));
+    esp_rom_delay_us(DNMS_CMD_TO_READ_US);   // V2.8.5: see DNMS_CMD_TO_READ_US
 
     uint8_t wire[DATA_READY_WIRE_LEN];
     if (recv(wire, sizeof(wire)) != ESP_OK) return ESP_FAIL;
@@ -168,7 +177,7 @@ esp_err_t dnms_read_leq(noise_sample_t *out) {
     if (!out) return ESP_ERR_INVALID_ARG;
 
     if (send_cmd(CMD_READ_LEQ) != ESP_OK) return ESP_FAIL;
-    vTaskDelay(pdMS_TO_TICKS(5));
+    esp_rom_delay_us(DNMS_CMD_TO_READ_US);   // V2.8.5: see DNMS_CMD_TO_READ_US
 
     uint8_t wire[READ_LEQ_WIRE_LEN];
     if (recv(wire, sizeof(wire)) != ESP_OK) return ESP_FAIL;

@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_timer.h"
+#include "util.h"        // tz_offset_add_colon (V2.8.5)
 
 static const char *TAG = "ntp";
 
@@ -106,12 +107,12 @@ void ntp_poll(void) {
     ESP_LOGI(TAG, "sync OK: %s", buf);
 }
 
-const char *ntp_localtime_str(void) {
+const char *ntp_localtime_str(char *buf, size_t bufsz) {
     // NOTE: called from syslog.c emit_packet() on every emitted line, under
     // applog's NON-recursive mutex. Must NOT ESP_LOG here (nor add a callee
     // that does) — it would re-enter applog and self-deadlock. time() /
     // localtime_r() / strftime() are all log-free; keep it that way.
-    static char buf[40];
+    if (!buf || bufsz == 0) return "";
     time_t t;
     time(&t);
     struct tm tm_local;
@@ -119,14 +120,12 @@ const char *ntp_localtime_str(void) {
     // Local RFC 3339 with the numeric UTC offset that the TZ string + tzset()
     // resolved (DST-aware: %z is +1000 in AEST, +1100 in AEDT). strftime emits
     // the offset without the colon RFC 3339 requires ("...+1000"), so splice
-    // it in: "...+1000" -> "...+10:00".
-    size_t n = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &tm_local);
-    if (n >= 5 && (buf[n - 5] == '+' || buf[n - 5] == '-')) {
-        buf[n + 1] = '\0';
-        buf[n]     = buf[n - 1];   // shift offset minutes right by one
-        buf[n - 1] = buf[n - 2];
-        buf[n - 2] = ':';          // colon between offset hours and minutes
-    }
+    // it in: "...+1000" -> "...+10:00" (util.h, host-tested). strftime
+    // returns 0 and leaves the contents unspecified when the result does not
+    // fit, so terminate explicitly in that case.
+    size_t n = strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%S%z", &tm_local);
+    if (n == 0) { buf[0] = '\0'; return buf; }
+    tz_offset_add_colon(buf, n, bufsz);
     return buf;
 }
 

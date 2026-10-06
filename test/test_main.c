@@ -1569,6 +1569,135 @@ static int test_generalized_time_negative_fails(void) {
     return 1;
 }
 
+// --- util.h: V2.8.5 helpers -------------------------------------------------
+// parse_long_strict / parse_float_strict replace strtol(val, NULL, 10) in the
+// /config schema dispatch, where "abc" used to store 0.
+
+static int test_parse_long_strict_accepts_numbers(void) {
+    long v = -1;
+    EXPECT_INT(parse_long_strict("150000", &v), 1);  EXPECT_INT(v, 150000);
+    EXPECT_INT(parse_long_strict("-7", &v), 1);      EXPECT_INT(v, -7);
+    EXPECT_INT(parse_long_strict("+3", &v), 1);      EXPECT_INT(v, 3);
+    EXPECT_INT(parse_long_strict(" 42", &v), 1);     EXPECT_INT(v, 42);
+    EXPECT_INT(parse_long_strict("0", &v), 1);       EXPECT_INT(v, 0);
+    return 1;
+}
+
+static int test_parse_long_strict_rejects_garbage(void) {
+    long v = 99;
+    EXPECT_INT(parse_long_strict("abc", &v), 0);
+    EXPECT_INT(parse_long_strict("12abc", &v), 0);
+    EXPECT_INT(parse_long_strict("", &v), 0);
+    EXPECT_INT(parse_long_strict("0x10", &v), 0);
+    EXPECT_INT(parse_long_strict("1.5", &v), 0);
+    EXPECT_INT(parse_long_strict("4 ", &v), 0);
+    EXPECT_INT(parse_long_strict(NULL, &v), 0);
+    EXPECT_INT(parse_long_strict("5", NULL), 0);
+    EXPECT_INT(v, 99);   // never written on failure
+    return 1;
+}
+
+static int test_parse_float_strict(void) {
+    float f = -1.0f;
+    EXPECT_INT(parse_float_strict("2.47", &f), 1);
+    if (fabsf(f - 2.47f) > 1e-6f) return 0;
+    EXPECT_INT(parse_float_strict("-0.5", &f), 1);
+    if (fabsf(f + 0.5f) > 1e-6f) return 0;
+    f = 7.0f;
+    EXPECT_INT(parse_float_strict("abc", &f), 0);
+    EXPECT_INT(parse_float_strict("1.5x", &f), 0);
+    EXPECT_INT(parse_float_strict("", &f), 0);
+    if (f != 7.0f) return 0;   // untouched on failure
+    // nan / inf parse, but no range check can accept them.
+    EXPECT_INT(parse_float_strict("nan", &f), 1);
+    if (f >= 0.0f && f <= 100.0f) return 0;
+    EXPECT_INT(parse_float_strict("inf", &f), 1);
+    if (f >= 0.0f && f <= 100.0f) return 0;
+    return 1;
+}
+
+static int test_tick_interval_plain(void) {
+    EXPECT_INT(tick_interval_elapsed(1000, 0, 1000), 1);
+    EXPECT_INT(tick_interval_elapsed(999, 0, 1000), 0);
+    EXPECT_INT(tick_interval_remaining(400, 0, 1000), 600);
+    EXPECT_INT(tick_interval_remaining(1500, 0, 1000), 0);
+    return 1;
+}
+
+static int test_tick_interval_across_wrap(void) {
+    // The cycle ran 100 ticks before the counter wraps; interval 15000
+    // (150 s at 100 Hz). From `last` to 0 is exactly 100 ticks.
+    const uint32_t last = UINT32_MAX - 99u;
+    EXPECT_INT(tick_interval_elapsed(5u, last, 15000u), 0);        // 105 elapsed
+    EXPECT_INT(tick_interval_remaining(5u, last, 15000u), 15000 - 105);
+    EXPECT_INT(tick_interval_elapsed(14899u, last, 15000u), 0);    // 14999 elapsed
+    EXPECT_INT(tick_interval_elapsed(14900u, last, 15000u), 1);    // 15000 elapsed
+    // The old `now >= next` form, with next = last + interval computed
+    // before the wrap: next wraps to 14900, so every tick still BEFORE the
+    // wrap compares true and the cycle fires back to back. The new form
+    // sees only 49 ticks elapsed there.
+    const uint32_t old_next   = last + 15000u;         // wrapped to 14900
+    const uint32_t pre_wrap   = UINT32_MAX - 50u;
+    EXPECT_INT(pre_wrap >= old_next, 1);               // the bug
+    EXPECT_INT(tick_interval_elapsed(pre_wrap, last, 15000u), 0);
+    return 1;
+}
+
+static int test_fmt_kilo4_bands(void) {
+    char b[8];
+    fmt_kilo4(b, sizeof(b), 0.0f);      EXPECT_STREQ(b, "   0");
+    fmt_kilo4(b, sizeof(b), 234.4f);    EXPECT_STREQ(b, " 234");
+    fmt_kilo4(b, sizeof(b), 999.6f);    EXPECT_STREQ(b, "1000");
+    fmt_kilo4(b, sizeof(b), 3420.0f);   EXPECT_STREQ(b, "3.4k");
+    fmt_kilo4(b, sizeof(b), 9949.0f);   EXPECT_STREQ(b, "9.9k");
+    fmt_kilo4(b, sizeof(b), 150000.0f); EXPECT_STREQ(b, "99k ");
+    return 1;
+}
+
+static int test_fmt_kilo4_9950_boundary_stays_4_chars(void) {
+    // 9950..9999 used to print "10.0k" (5 chars) and overflow the OLED row.
+    char b[8];
+    const float vals[] = { 9950.0f, 9975.0f, 9999.9f, 10000.0f, 10499.0f };
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+        fmt_kilo4(b, sizeof(b), vals[i]);
+        EXPECT_INT(strlen(b), 4);
+        EXPECT_STREQ(b, "10k ");
+    }
+    return 1;
+}
+
+static int test_tz_offset_add_colon(void) {
+    char b[40] = "2026-06-13T20:45:50+1000";
+    EXPECT_INT(tz_offset_add_colon(b, strlen(b), sizeof(b)), 25);
+    EXPECT_STREQ(b, "2026-06-13T20:45:50+10:00");
+    char m[40] = "2026-01-01T00:00:00-0330";
+    tz_offset_add_colon(m, strlen(m), sizeof(m));
+    EXPECT_STREQ(m, "2026-01-01T00:00:00-03:30");
+    return 1;
+}
+
+static int test_tz_offset_add_colon_refuses_unsafe(void) {
+    // No room for the extra byte: unchanged.
+    char tight[25] = "2026-06-13T20:45:50+1000";   // 24 chars + NUL, exactly full
+    EXPECT_INT(tz_offset_add_colon(tight, 24, sizeof(tight)), 24);
+    EXPECT_STREQ(tight, "2026-06-13T20:45:50+1000");
+    // Tail is not an offset: unchanged.
+    char z[40] = "2026-06-13T20:45:50Z";
+    EXPECT_INT(tz_offset_add_colon(z, strlen(z), sizeof(z)), strlen("2026-06-13T20:45:50Z"));
+    EXPECT_STREQ(z, "2026-06-13T20:45:50Z");
+    char shortb[8] = "+10";
+    EXPECT_INT(tz_offset_add_colon(shortb, 3, sizeof(shortb)), 3);
+    return 1;
+}
+
+static int test_html_esc_zero_bufsz_writes_nothing(void) {
+    char guard[2] = { 'X', 'Y' };
+    html_esc("a&b", guard, 0);
+    EXPECT_INT(guard[0], 'X');
+    EXPECT_INT(guard[1], 'Y');
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // Runner
 // ----------------------------------------------------------------------------
@@ -1756,6 +1885,18 @@ int main(void) {
     RUN(test_generalized_time_roundtrip);
     RUN(test_generalized_time_buffer_too_small);
     RUN(test_generalized_time_negative_fails);
+
+    // V2.8.5 helpers
+    RUN(test_parse_long_strict_accepts_numbers);
+    RUN(test_parse_long_strict_rejects_garbage);
+    RUN(test_parse_float_strict);
+    RUN(test_tick_interval_plain);
+    RUN(test_tick_interval_across_wrap);
+    RUN(test_fmt_kilo4_bands);
+    RUN(test_fmt_kilo4_9950_boundary_stays_4_chars);
+    RUN(test_tz_offset_add_colon);
+    RUN(test_tz_offset_add_colon_refuses_unsafe);
+    RUN(test_html_esc_zero_bufsz_writes_nothing);
 
     printf("\n");
     if (g_failures == 0) {

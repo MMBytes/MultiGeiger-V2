@@ -219,7 +219,8 @@ static bool write_row(void) {
     // only this display conversion changes; TZ is applied unconditionally at
     // boot in main.c so this reflects tz_posix even though standalone mode
     // never runs ntp_setup()/NTP itself.
-    n = append_safe(row, sizeof(row), n, "%s,%llu", ntp_localtime_str(),
+    char ts[NTP_LOCALTIME_STR_LEN];   // V2.8.5: caller-owned (was shared static)
+    n = append_safe(row, sizeof(row), n, "%s,%llu", ntp_localtime_str(ts, sizeof(ts)),
                     (unsigned long long)(esp_timer_get_time() / 1000000LL));
 
     // GPS cells: empty on fix loss, while DateTime above keeps running on

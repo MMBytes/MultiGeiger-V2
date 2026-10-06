@@ -1124,11 +1124,28 @@ static void format_mqtt(char *out, size_t sz) {
 
     const bool connected = mqtt_is_connected();
     const uint32_t pubs  = mqtt_publish_count();
-    const char *state_html = connected
+    // V2.8.5: a client that mqtt_init() refused to start (today: TLS Mode B
+    // with no CA certificate) says WHY instead of a bare "disconnected".
+    const char *cfg_err = mqtt_config_error();
+    static char state_err[160];
+    if (cfg_err) {
+        snprintf(state_err, sizeof(state_err),
+                 "<span style='color:#c00'>not started &mdash; %s</span>", cfg_err);
+    }
+    const char *state_html = cfg_err ? state_err
+        : connected
         ? "<span style='color:#080'>connected</span>"
         : "<span style='color:#c00'>disconnected</span>";
+    // V2.8.5: broker and topic prefix are user-entered config strings, so
+    // they are HTML-escaped like ap_name / wifi_hostname on this page (they
+    // went in raw before — a `<` or `"` in either broke the page). Static,
+    // not stack, per the V2.4.22 pattern: all handlers share one 8 KB task.
+    static char broker_esc[ESC_WORST(CFG_MQTT_HOST_MAX)];
+    static char prefix_esc[ESC_WORST(CFG_MQTT_PFX_MAX)];
+    html_esc(s_cfg->mqtt_broker,       broker_esc, sizeof(broker_esc));
+    html_esc(s_cfg->mqtt_topic_prefix, prefix_esc, sizeof(prefix_esc));
     const char *broker_html = (s_cfg->mqtt_broker[0])
-        ? s_cfg->mqtt_broker
+        ? broker_esc
         : "<i>(not set)</i>";
 
     // V2.4.6: TLS status row. Compact one-liner — full config lives on /config.
@@ -1138,7 +1155,10 @@ static void format_mqtt(char *out, size_t sz) {
     } else {
         switch (s_cfg->mqtt_tls_mode) {
             case 0:  tls_html = "<span style='color:#080'>on &mdash; Mode A (Mozilla CA bundle)</span>"; break;
-            case 1:  tls_html = "<span style='color:#080'>on &mdash; Mode B (custom CA cert)</span>";    break;
+            case 1:  tls_html = s_cfg->mqtt_tls_ca[0]
+                         ? "<span style='color:#080'>on &mdash; Mode B (custom CA cert)</span>"
+                         : "<span style='color:#c00'>on &mdash; Mode B, but no CA cert configured</span>";
+                     break;
             case 2:  tls_html = "<span style='color:#c80'>on &mdash; Mode D (skip verification)</span>"; break;
             default: tls_html = "<span style='color:#c00'>on &mdash; unknown mode</span>";              break;
         }
@@ -1156,7 +1176,7 @@ static void format_mqtt(char *out, size_t sz) {
         broker_html, (unsigned long)s_cfg->mqtt_port,
         state_html,
         (unsigned long)pubs,
-        s_cfg->mqtt_topic_prefix[0] ? s_cfg->mqtt_topic_prefix : "<i>(empty)</i>",
+        s_cfg->mqtt_topic_prefix[0] ? prefix_esc : "<i>(empty)</i>",
         s_cfg->mqtt_ha_discovery ? "enabled" : "disabled",
         tls_html);
 }
@@ -2479,6 +2499,10 @@ static esp_err_t config_get(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
+    // V2.8.5: this page carries every stored secret (WiFi / MQTT / FTP /
+    // Radmon passwords, API tokens) in its password inputs. no-store keeps
+    // the browser and any proxy from writing it to a disk cache.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_send(req, body, n > 0 ? n : 0);
     free(body);
     free(e_mca);
@@ -2583,8 +2607,10 @@ static esp_err_t config_post(httpd_req_t *req) {
         // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
         bool oor = false;   // matched a known field but value out of range/step
         if (strcmp(p, "oled_bright") == 0) {
-            long v = strtol(val, NULL, 10);
-            if (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0)) {
+            // V2.8.5: strict parse — "abc" used to read as 0, i.e. panel OFF.
+            long v = -1;
+            if (parse_long_strict(val, &v) &&
+                (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0))) {
                 cfg_next.oled_brightness_pct = (uint8_t)v;
             } else {
                 oor = true;   // V2.5.34: out-of-step value kept prior — report it
@@ -2706,6 +2732,23 @@ static esp_err_t config_post(httpd_req_t *req) {
         cfg_next.deadtime_guard = false;
     }
 
+    // V2.8.5: MQTT TLS Mode B (custom CA) with an empty CA certificate is
+    // refused. mqtt_init() will not connect with it (it used to fall back to
+    // an UNVERIFIED connection), so storing it would only produce a node that
+    // silently stops publishing. Keep the previous mode + CA and report the
+    // field like an out-of-range value; Mode D remains the explicit way to
+    // connect without verification.
+    if (cfg_next.mqtt_tls_enable && cfg_next.mqtt_tls_mode == 1 &&
+        cfg_next.mqtt_tls_ca[0] == '\0') {
+        cfg_next.mqtt_tls_mode = s_cfg->mqtt_tls_mode;
+        safe_strcpy(cfg_next.mqtt_tls_ca, s_cfg->mqtt_tls_ca,
+                    sizeof(cfg_next.mqtt_tls_ca));
+        // Last writer of `rejected`, so the returned length is not kept.
+        (void)append_safe(rejected, sizeof(rejected), rej_n, "%s%s",
+                          rej_n ? ", " : "",
+                          "mqtt_tls_m (Mode B needs a CA certificate)");
+    }
+
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
     // stays unchanged so the device continues on the old in-memory config
     // and the user can retry without a RAM/NVS split-brain until next reboot.
@@ -2755,7 +2798,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     // no separate warn[] buffer. Previously an out-of-range value was kept silently
     // with no feedback, so a too-large ftp_int looked like the save did nothing.
     if (rejected[0]) {
-        ESP_LOGW(TAG, "config POST: out-of-range value(s) NOT saved (kept prior): %s",
+        ESP_LOGW(TAG, "config POST: invalid or out-of-range value(s) NOT saved (kept prior): %s",
                  rejected);
     }
     if (restart_after_save) main_request_restart();
@@ -2780,8 +2823,8 @@ static esp_err_t config_post(httpd_req_t *req) {
         "<title>Saved</title></head><body><h1>%s</h1>", h1);
     if (rejected[0]) {
         n = append_safe(page, sizeof(page), n,
-            "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were out "
-            "of range and were NOT saved (previous value kept): %s</p>", rejected);
+            "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were invalid "
+            "or out of range and were NOT saved (previous value kept): %s</p>", rejected);
     }
     append_safe(page, sizeof(page), n, "%s</body></html>", body);
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
@@ -3022,7 +3065,7 @@ static esp_err_t update_get(httpd_req_t *req) {
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"
         "<progress id=\"p\" value=\"0\" max=\"1\"></progress>"
-        "<div id=\"msg\"></div>"
+        "<div id=\"msg\" style=\"white-space:pre-wrap\"></div>"   // V2.8.5: keep the failure note's line breaks
         "<p><a href=\"/\">Back to status</a></p>"
         "<script>"
         "function upload(){"
@@ -3069,6 +3112,27 @@ fail:
 // --- POST /update (stream body into OTA partition) --------------------------
 
 #define OTA_CHUNK 1024
+
+// V2.8.5 (review 1.1): every failure inside update_post_inner() happens AFTER
+// the teardown at its top — MQTT, the FTP log push, the pulse tick and the
+// PCNT width filter are stopped and main_suspend_services() keeps MQTT /
+// syslog re-init off. Nothing restarts them on failure (deliberately: a
+// reboot is the one well-tested way back), so the response says so instead
+// of leaving the user to find out from a dark Home Assistant dashboard.
+// Sent as chunks with a fixed note so no extra stack buffer lands on the
+// 8 KB httpd task (several call sites already hold 128-384 B messages).
+static void ota_send_fail(httpd_req_t *req, const char *status, const char *what) {
+    static const char note[] =
+        "\n\nThe update was not applied; the running firmware is unchanged. "
+        "MQTT, the FTP log upload and, where present, the pulse tick and the "
+        "PCNT width filter were stopped for the upload and stay off until a "
+        "successful retry or a reboot.";
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, HTTPD_TYPE_TEXT);
+    httpd_resp_send_chunk(req, what, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);
+}
 
 // V2.4.24: split the auth + flag-management front-end into a thin wrapper
 // so the ~250-line body doesn't have to set/clear main_ota_in_progress
@@ -3121,6 +3185,12 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     if (spins >= 600) {
         ESP_LOGW(TAG, "OTA prep: TX still busy after 60s — proceeding anyway");
     }
+    // V2.8.5 (review 1.8): suspend FIRST. The main loop polls every ~1 s and
+    // re-inits MQTT whenever it is down and services are not suspended; with
+    // this call after mqtt_stop() (as it was until V2.8.4) a poll landing in
+    // the gap rebuilt the ~50 KB TLS client mid-OTA — the exact Heltec OOM
+    // the teardown exists to prevent. See the V2.4.17 note further down.
+    main_suspend_services();
     log_ftp_pause();
     mqtt_stop();
     // V2.5.28: syslog deliberately stays UP through the whole flash (was
@@ -3144,13 +3214,14 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                       // ALWAYS has something to release — measured below the
                       // heap noise floor and it does not move `largest`, so
                       // this call is kept for hygiene rather than necessity.
-    // V2.4.17: tell the main-loop poll NOT to re-init MQTT/syslog. Without
-    // this the poll re-armed both within ~1 s of the stops above, undoing
-    // the V2.4.13 heap-freeing intent during the bulk of the OTA write.
-    // log_ftp_pause is already sticky; MQTT and syslog needed the equivalent
-    // gate. Flag is set-only — device reboots on OTA success; on failure,
-    // user must manually /reboot to restore services.
-    main_suspend_services();
+    // V2.4.17: main_suspend_services() (called at the top of this teardown
+    // since V2.8.5) tells the main-loop poll NOT to re-init MQTT/syslog.
+    // Without it the poll re-armed both within ~1 s of the stops above,
+    // undoing the V2.4.13 heap-freeing intent during the bulk of the OTA
+    // write. log_ftp_pause is already sticky; MQTT and syslog needed the
+    // equivalent gate. Flag is set-only — device reboots on OTA success; on
+    // failure everything stays off until a reboot or a successful retry, and
+    // ota_send_fail() tells the user so.
     ESP_LOGI(TAG, "OTA prep: heap free=%u min=%u largest=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
@@ -3159,13 +3230,18 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // V2.4.1 (C5): content_len is size_t; hold as size_t throughout.
     size_t total = req->content_len;
     if (total == 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        // V2.8.5: logged here because ota_send_fail() does not log (the
+        // httpd_resp_send_err() it replaced did) — every other failure site
+        // below already carries its own ESP_LOGE.
+        ESP_LOGW(TAG, "OTA refused: empty body");
+        ota_send_fail(req, "400 Bad Request", "empty body");
         return ESP_OK;
     }
 
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (!target) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA slot");
+        ESP_LOGE(TAG, "OTA FAILED: no OTA slot (esp_ota_get_next_update_partition)");
+        ota_send_fail(req, "500 Internal Server Error", "no OTA slot");
         return ESP_OK;
     }
 
@@ -3181,7 +3257,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         snprintf(msg, sizeof(msg),
                  "Image (%u bytes) larger than OTA partition (%lu bytes)",
                  (unsigned)total, (unsigned long)target->size);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        ota_send_fail(req, "400 Bad Request", msg);
         return ESP_OK;
     }
 
@@ -3192,14 +3268,14 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     esp_err_t err = esp_ota_begin(target, total, &ota);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA FAILED: esp_ota_begin — %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        ota_send_fail(req, "500 Internal Server Error", esp_err_to_name(err));
         return ESP_OK;
     }
 
     char *buf = malloc(OTA_CHUNK);
     if (!buf) {
         esp_ota_abort(ota);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        ota_send_fail(req, "500 Internal Server Error", "oom");
         return ESP_OK;
     }
 
@@ -3262,7 +3338,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                      recv_max_retries, (unsigned)(received / 1024), (unsigned)(total / 1024));
             free(buf);
             esp_ota_abort(ota);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv timeout");
+            ota_send_fail(req, "500 Internal Server Error", "recv timeout");
             return ESP_OK;
         }
         // V2.8.0: esp_mbedtls_read returns ESP_ERR_NO_MEM (+0x101) instead of a
@@ -3274,7 +3350,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             ESP_LOGE(TAG, "OTA: impossible recv count %d — aborting", r);
             free(buf);
             esp_ota_abort(ota);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
+            ota_send_fail(req, "500 Internal Server Error", "recv failed");
             return ESP_OK;
         }
         if (r <= 0) {
@@ -3282,7 +3358,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                      (unsigned)(received / 1024), (unsigned)(total / 1024), r);
             free(buf);
             esp_ota_abort(ota);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
+            ota_send_fail(req, "500 Internal Server Error", "recv failed");
             return ESP_OK;
         }
         recv_retries = 0;   // got bytes — reset the retry budget
@@ -3292,7 +3368,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                      (unsigned)(received / 1024), esp_err_to_name(err));
             free(buf);
             esp_ota_abort(ota);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+            ota_send_fail(req, "500 Internal Server Error", esp_err_to_name(err));
             return ESP_OK;
         }
         received += (size_t)r;
@@ -3313,7 +3389,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA FAILED: esp_ota_end — %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        ota_send_fail(req, "500 Internal Server Error", esp_err_to_name(err));
         return ESP_OK;
     }
     ESP_LOGI(TAG, "OTA image written + finalized (esp_ota_end ok) — verifying");
@@ -3339,7 +3415,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_partition_read(image header) failed: %s",
                  esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+        ota_send_fail(req, "500 Internal Server Error",
                             "Could not read uploaded image header");
         return ESP_OK;
     }
@@ -3349,7 +3425,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_get_partition_description failed: %s",
                  esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+        ota_send_fail(req, "500 Internal Server Error",
                             "Could not read uploaded image descriptor");
         return ESP_OK;
     }
@@ -3368,7 +3444,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                  "expected 'geiger_v2'. This does not look like a "
                  "MultiGeiger-V2 firmware build.",
                  new_desc.project_name);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        ota_send_fail(req, "400 Bad Request", msg);
         return ESP_OK;
     }
 
@@ -3422,7 +3498,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
                  "uploaded the correct geiger_v2_<board>.bin file from the "
                  "GitHub release for THIS board family.",
                  expected_board, new_desc.version, (unsigned)img_hdr.chip_id);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, msg);
+        ota_send_fail(req, "400 Bad Request", msg);
         return ESP_OK;
     }
 
@@ -3433,7 +3509,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA FAILED: esp_ota_set_boot_partition — %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        ota_send_fail(req, "500 Internal Server Error", esp_err_to_name(err));
         return ESP_OK;
     }
 

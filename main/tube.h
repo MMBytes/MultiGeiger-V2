@@ -143,11 +143,18 @@ typedef struct {
 // ~190µs dead-time gate itself plus the FET's own 1500µs H-phase so a
 // pulse right on the gate edge isn't misattributed; upper bound covers the
 // 2.5ms (1500+1000µs) full charge-pulse period plus margin — the field
-// evidence (radiation_overcounting_independent_review.md) shows spurious
+// evidence (the 2026 phantom-count investigation) shows spurious
 // counts landing ~2.5-3ms after HV activity starts, matching the firmware's
 // own 2-pulse charge-train spacing.
 #define HV_COINCIDENT_MIN_US 200
 #define HV_COINCIDENT_MAX_US 3000
+
+// V2.8.5: an HV FET pulse whose on-time exceeds this is counted as "long" in
+// the DIAG line (hv_on_long). Nominal on-time is the 1500 µs S_PULSE_H phase
+// plus up to one 100 µs timer period; 2 ms leaves room for ordinary interrupt
+// latency, so anything above it means the turn-off tick was held off —
+// typically by a flash erase with the cache disabled. See tube_get_hv_ontime().
+#define HV_ON_LONG_US 2000
 
 /** @brief Configure GPIOs, install ISRs, and start the recharge timer.
  *
@@ -274,7 +281,7 @@ uint32_t tube_get_blanked_wide_total(void);
  *                       START of the most recent HV charge pulse fell inside
  *                       [HV_COINCIDENT_MIN_US, HV_COINCIDENT_MAX_US]. Tests the
  *                       HV-recharge-coupling hypothesis in
- *                       radiation_overcounting_independent_review.md: a real
+ *                       the 2026 phantom-count investigation: a real
  *                       Poisson tube shows this tracking background rate
  *                       (near-zero at typical HV cadence); electrical pickup
  *                       from the charge pump shows it tracking hv_pulses 1:1.
@@ -301,6 +308,19 @@ uint32_t tube_get_blanked_wide_total(void);
 void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
                    uint32_t *hv_coincident, uint32_t *hv_blanked,
                    uint32_t hist[TUBE_DIAG_NBUCKETS]);
+
+/** @brief Snapshot + reset the HV FET on-time telemetry (V2.8.5).
+ *
+ *  Every HV charge pulse is timed from FET turn-on (S_PULSE_H) to turn-off
+ *  (S_PULSE_L) in the recharge timer ISR. The turn-off is a later timer
+ *  tick, which cannot fire while the flash cache is disabled, so a flash
+ *  erase that starts inside a pulse stretches it. This reports how often
+ *  that happened since the last call. Measurement only.
+ *
+ *  @param n_long  Out: pulses whose on-time exceeded HV_ON_LONG_US.
+ *  @param max_us  Out: longest on-time seen, µs (0 if no pulse ended).
+ */
+void tube_get_hv_ontime(uint32_t *n_long, uint32_t *max_us);
 
 /** @brief Drain the sub-b1 reject profiler ring (snapshot + reset).
  *

@@ -228,7 +228,14 @@ static void emit_packet(const char *line, size_t len) {
     // collector you don't control the header matches the in-message device
     // time. ntp_localtime_str() owns that one-strftime format. Pre-sync stays
     // NILVALUE "-" so the collector falls back to its own receive time.
-    const char *ts = ntp_time_valid() ? ntp_localtime_str() : "-";
+    // V2.8.5: syslog's own time-string buffer. Pre-V2.8.5 ntp_localtime_str()
+    // returned one static buffer shared with the SD logger (main task), so a
+    // line logged from another task could pick up a half-written string.
+    // BSS, not stack, for the same reason as s_emit_buf above (this runs on
+    // whichever task logged, some with small stacks); single-threaded by the
+    // same applog mutex.
+    static char s_ts_buf[NTP_LOCALTIME_STR_LEN];
+    const char *ts = ntp_time_valid() ? ntp_localtime_str(s_ts_buf, sizeof(s_ts_buf)) : "-";
 
     // Strip trailing newlines — rsyslog adds its own.
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {

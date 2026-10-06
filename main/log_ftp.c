@@ -50,6 +50,7 @@
 // for the nuclear-reset path when slot exhaustion persists.
 
 #include "applog.h"
+#include "main_status.h"   // V2.8.5: main_ota_in_progress() gates the PSA reset
 #include "mqtt.h"          // V2.4.14: mqtt_stop()/mqtt_is_initialized() for FTPS heap teardown
 #include "ntp.h"
 #include "transmission.h"
@@ -1089,7 +1090,11 @@ done:
     //
     // Both gated on tx_is_idle() — calling mbedtls_psa_crypto_free while
     // the HTTPS worker is mid-handshake on CPU1 would corrupt its state.
-    // Sub-microsecond race window accepted (worst case: one HTTPS retry).
+    // V2.8.5 (review 2.6): the old dequeue-then-busy window in tx_task is
+    // closed (it now peeks, marks busy, then dequeues), and the reset is
+    // also held off while an OTA upload is in progress — that upload's TLS
+    // session on the httpd task keeps its keys in the same PSA slot pool.
+    // A deferred reset simply waits for the next upload's check.
     bool        should_reset = false;
     const char *reset_reason = NULL;
 
@@ -1112,7 +1117,7 @@ done:
         reset_reason = "preemptive (write stall leaks PSA state in mbedTLS 4.x)";
     }
 
-    if (should_reset && tx_is_idle()) {
+    if (should_reset && tx_is_idle() && !main_ota_in_progress()) {
         ESP_LOGW(TAG, "PSA crypto subsystem reset: %s", reset_reason);
         mbedtls_psa_crypto_free();
         psa_status_t ps = psa_crypto_init();
@@ -1124,7 +1129,9 @@ done:
                      (int)ps);
         }
     } else if (should_reset) {
-        ESP_LOGW(TAG, "PSA reset deferred (worker busy): %s", reset_reason);
+        ESP_LOGW(TAG, "PSA reset deferred (%s): %s",
+                 main_ota_in_progress() ? "OTA in progress" : "worker busy",
+                 reset_reason);
     }
 
     // V2.3.15: post-upload heap snapshot. Compare against the pre-upload

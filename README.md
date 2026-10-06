@@ -14,7 +14,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 - Optional **ambient light**: lux (two sensor families supported).
 - Optional **air-quality index**: NOx index from a Sensirion SGP41 (log, `/status` and MQTT/Home Assistant only — no upload target carries it).
 - Optional **standalone CSV logging** to a microSD card: one row of every attached sensor's readings per cycle, timestamped from the GNSS clock, for nodes deployed without a network.
-- **Battery telemetry** on boards with a MAX17048 fuel gauge (voltage, state of charge) or a raw ADC battery sense.
+- **Battery telemetry** (voltage, state of charge) on boards with an onboard MAX17048 fuel gauge.
 - Optional **GNSS position display** — auto-detected PA1010D or MAX-M10S receiver shows fix, satellites, HDOP, lat/lon (OpenStreetMap link), and altitude on `/status`; display-only (NTP is the sole time source).
 - Per-cycle upload (default 150 s, configurable 10 s – 1 h) to any subset of **nine** public back-ends.
 - **MQTT publish** with 24 Home Assistant Discovery entities, three TLS modes including custom CA.
@@ -232,7 +232,7 @@ Optional: `git config core.hooksPath .githooks` enables a pre-commit scan that r
 
 ### Release workflow
 
-`git tag -a V2.X.Y && git push --tags` is the release ceremony. GitHub Actions `release.yml` first runs the cheap gates (host tests, cppcheck on every board, a `## V2.X.Y` section present in `CHANGELOG.md`, `VERSION_STR` equal to the tag), then builds all eleven boards, creates the GitHub Release with the artefacts, `SHA256SUMS` and the CHANGELOG section as body, and finally publishes the web flasher — only if the tag is the newest release, so re-running an old tag never rolls the flasher back.
+`git tag -a V2.X.Y && git push --tags` is the release ceremony. GitHub Actions `release.yml` first runs the cheap gates (host tests, cppcheck on every board, a `## V2.X.Y` section present in `CHANGELOG.md`), then builds all eleven boards (each build also verifies that `VERSION_STR` equals the tag and that the image fits its OTA slot), creates the GitHub Release with the artefacts, `SHA256SUMS` and the CHANGELOG section as body, and finally publishes the web flasher — only if the tag is the newest release, so re-running an old tag never rolls the flasher back.
 
 ## Repository layout
 
@@ -265,9 +265,10 @@ main/                       firmware C sources
   sgp41.c                   SGP41 NOx index (+ sensirion_crc.h, sensirion_gas_index_algorithm.c)
   fuel_gauge.c              MAX17048 battery fuel gauge
   sd_card.c sd_logger.c     microSD mount + standalone CSV logger
-  lorawan.c lorawan_codec.c LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
+  lorawan.cpp lorawan_codec.h
+                            LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
   telemetry.c / .h          sensor-reading registry shared by SD logger and status
-  env_api.c                 /api/env JSON endpoint
+  env_api.h                 /api/env JSON contract (served by http_server.c)
   tls_cert.c / tls_logic.h  per-device HTTPS certificate (generation, NVS storage)
   display.c display_tft.c display_serlcd.c neopixel.c led.c
                             display drivers (OLED / ST7789 TFT / SerLCD) + LED pulse-tick

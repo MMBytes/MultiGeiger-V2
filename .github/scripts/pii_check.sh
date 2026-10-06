@@ -15,12 +15,19 @@
 #                                      messages of e.g. origin/main...HEAD
 #   pii_check.sh --stdin <label>       scan arbitrary text (a tag message,
 #                                      an extracted release-notes section)
-# Exit: 0 = clean, 1 = findings printed, 2 = usage.
+# Exit: 0 = clean, 1 = findings printed, 2 = usage / bad range.
 #
 # Patterns are deliberately generic (private-IPv4 ranges, MAC shape, chip-ID
 # SSID shape, OS user-profile paths) — listing the actual values to catch
 # would itself publish them. Place names and coordinates cannot be matched
 # generically; those still rely on the human reading the diff.
+#
+# Implementation notes: matching uses bash's own `=~` (no grep process per
+# line — on a Windows git-bash that turns a 2 000-line diff into minutes), and
+# the scan functions are fed by redirection, never by a pipe, because a
+# function at the end of a pipeline runs in a subshell and its findings
+# counter would be lost (the first version of this script printed hits and
+# then exited 0 for exactly that reason).
 
 set -u
 
@@ -42,15 +49,17 @@ PATTERNS=(
   '/(Users|home)/[a-z][a-z0-9_-]+/'
 )
 
-# Strings that match a pattern above but are NOT private data. Each is a
-# fixed string; a line containing one is re-checked with it blanked out.
+# Values that match a pattern above but are NOT private data. Each is an ERE
+# anchored so that only the exact token matches (a trailing boundary class
+# stops "192.168.4.1" from also excusing "192.168.4.17"); every match is
+# replaced by a space before the patterns run, so the boundary classes in
+# PATTERNS still see a separator.
 ALLOW=(
-  '192.168.4.1'        # ESP-IDF's default soft-AP address (first-boot setup page)
-  '192.0.2.'           # RFC 5737 documentation range
-  'esp32-1234567'      # the fictional chip ID used in docs/index.html and examples
-  'aa:bb:cc:dd:ee:ff'  # placeholder MAC
-  'AA:BB:CC:DD:EE:FF'
-  '/home/runner/'      # GitHub Actions workspace
+  '192\.168\.4\.1([^0-9]|$)'        # ESP-IDF's default soft-AP address (first-boot setup page)
+  '192\.0\.2\.[0-9]{1,3}([^0-9]|$)' # RFC 5737 documentation range
+  'esp32-1234567([^0-9]|$)'         # the fictional chip ID used in docs/index.html and examples
+  '[Aa][Aa]:[Bb][Bb]:[Cc][Cc]:[Dd][Dd]:[Ee][Ee]:[Ff][Ff]'  # placeholder MAC
+  '/home/runner/'                   # GitHub Actions workspace
 )
 
 # Paths never scanned: 3D models hold float tuples that look like anything,
@@ -59,54 +68,86 @@ SKIP_PATHS='(^|/)3d-Files/|^\.github/scripts/pii_check\.sh$'
 
 findings=0
 
-# scan_text <label> : reads text on stdin, prints hits as "label:lineno: text".
+# report <label> <lineno> <text>
+report() {
+  printf '%s:%s: %s\n' "$1" "$2" "$3"
+  findings=$((findings + 1))
+}
+
+# matches <text> : 0 if the text (after allow-list blanking) hits a pattern.
+matches() {
+  local stripped=$1 a p
+  for a in "${ALLOW[@]}"; do
+    while [[ $stripped =~ $a ]]; do stripped=${stripped/"${BASH_REMATCH[0]}"/ }; done
+  done
+  for p in "${PATTERNS[@]}"; do
+    [[ $stripped =~ $p ]] && return 0
+  done
+  return 1
+}
+
+# scan_text <label> : reads text on stdin, reports hits as "label:lineno: text".
 scan_text() {
-  local label=$1 n=0 line stripped a p
+  local label=$1 n=0 line
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
-    stripped=$line
-    for a in "${ALLOW[@]}"; do stripped=${stripped//"$a"/}; done
-    # bash's own ERE engine: no grep process per line, which on a Windows
-    # git-bash turns a 2 000-line diff into minutes.
-    for p in "${PATTERNS[@]}"; do
-      if [[ $stripped =~ $p ]]; then
-        printf '%s:%d: %s\n' "$label" "$n" "$line"
-        findings=$((findings + 1))
-        break
-      fi
-    done
+    line=${line%$'\r'}
+    matches "$line" && report "$label" "$n" "$line"
   done
 }
 
 # scan_diff : reads a unified diff on stdin, scans only added lines, reports
-# them against the destination file path.
+# them against the destination file path and its line number in the new file
+# (tracked from the @@ hunk headers).
 scan_diff() {
-  local file="" skip=0 line
+  local file="" skip=0 lineno=0 line
   while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
     case "$line" in
+      'diff --git '*)
+        file=""; skip=0 ;;
       '+++ b/'*)
         file=${line#+++ b/}
-        if [[ $file =~ $SKIP_PATHS ]]; then skip=1; else skip=0; fi
-        continue ;;
-      '+++ '*|'--- '*|'diff --git'*|'index '*|'Binary files'*) continue ;;
+        if [[ $file =~ $SKIP_PATHS ]]; then skip=1; else skip=0; fi ;;
+      '+++ '*|'--- '*|'index '*|'Binary files'*|'old mode'*|'new mode'*|'similarity'*|'rename '*|'new file'*|'deleted file'*)
+        ;;
+      '@@ '*)
+        # "@@ -a,b +c,d @@" (or "+c @@" when d == 1): c is the first new line.
+        if [[ $line =~ \+([0-9]+) ]]; then lineno=${BASH_REMATCH[1]}; else lineno=0; fi ;;
       '+'*)
-        [ "$skip" -eq 1 ] && continue
-        scan_text "$file" <<<"${line#+}" ;;
+        if [ "$skip" -eq 0 ] && [ -n "$file" ]; then
+          matches "${line#+}" && report "$file" "$lineno" "${line#+}"
+        fi
+        lineno=$((lineno + 1)) ;;
+      ' '*)
+        lineno=$((lineno + 1)) ;;
     esac
   done
 }
 
 case "${1:-}" in
   --staged)
-    git diff --cached --no-color --unified=0 --diff-filter=AMRC -- . | scan_diff
+    scan_diff < <(git diff --cached --no-color --unified=0 --diff-filter=AMRC -- .)
     ;;
   --range)
     [ -n "${2:-}" ] || { echo "usage: $0 --range <rev-range>"; exit 2; }
-    git diff --no-color --unified=0 --diff-filter=AMRC "$2" -- . | scan_diff
-    # Commit messages in the range, each labelled by its short hash.
+    range=$2
+    # Both ends must resolve: an unfetched base would otherwise diff against
+    # nothing and report a silent "clean".
+    base=${range%%.*}
+    if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+      echo "::error::cannot resolve the base of range '$range' — fetch it first"
+      exit 2
+    fi
+    scan_diff < <(git diff --no-color --unified=0 --diff-filter=AMRC "$range" -- .)
+    # Commit messages: only the commits reachable from the tip and not from
+    # the base. `A...B` would be the symmetric difference and drag in every
+    # commit on the base branch since the merge base (e.g. a PR failing for
+    # a message already on main), so the three dots become two here. Merge
+    # commits (GitHub's synthetic refs/pull/N/merge) carry no authored text.
     while read -r sha; do
-      git log -1 --format=%B "$sha" | scan_text "commit $sha"
-    done < <(git rev-list "$2" 2>/dev/null)
+      scan_text "commit ${sha:0:9}" < <(git log -1 --format=%B "$sha")
+    done < <(git rev-list --no-merges "${range/.../..}")
     ;;
   --stdin)
     scan_text "${2:-stdin}"

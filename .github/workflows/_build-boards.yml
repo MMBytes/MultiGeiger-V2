@@ -134,10 +134,15 @@ jobs:
             exit 1
           fi
           SLOT=""
-          while IFS=, read -r name type sub off size flags; do
+          while IFS=, read -r name type sub off size flags || [ -n "$name" ]; do
             case "$name" in \#*|"") continue;; esac
-            type=${type// /}; size=${size// /}
+            type=${type// /}; size=${size// /}; size=${size%$'\r'}
             [ "$type" = "app" ] || continue
+            # gen_esp32part.py accepts hex, decimal and K/M suffixes.
+            case "$size" in
+              *[Mm]) size=$(( ${size%[Mm]} * 1048576 ));;
+              *[Kk]) size=$(( ${size%[Kk]} * 1024 ));;
+            esac
             v=$((size))
             if [ -z "$SLOT" ] || [ "$v" -lt "$SLOT" ]; then SLOT=$v; fi
           done < "$PT"

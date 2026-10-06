@@ -1,6 +1,6 @@
 # Release workflow — fire on tag push, build all 11 boards, create the GitHub
-# Release with all 66 artefacts attached (11 boards × 5 .bin + 1 elf .zip),
-# and publish the web flasher to Pages.
+# Release with all 67 artefacts attached (11 boards × 5 .bin + 1 elf .zip,
+# plus SHA256SUMS), and publish the web flasher to Pages.
 #
 # Trigger:
 #   git tag V2.4.2 && git push --tags
@@ -62,6 +62,10 @@ jobs:
   changelog-check:
     name: changelog preflight
     runs-on: ubuntu-latest
+    # The tag reaches the shell ONLY through this env var: a workflow_dispatch
+    # input interpolated straight into `run:` text would be executed verbatim.
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -70,16 +74,11 @@ jobs:
       - name: Verify CHANGELOG.md has a section for the tag
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          # Use the SAME heading match the extract step (release job) uses, so
-          # this preflight passes if and only if the extractor will find a
-          # non-empty body — they can't disagree. (Both accept a bare "## TAG"
-          # heading or "## TAG <sep> title"; the [^0-9A-Za-z] boundary stops
-          # V2.4.1 matching V2.4.10.)
-          if awk -v ver="$TAG" '
-            /^## / && ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { found=1; exit }
-            END { exit(found ? 0 : 1) }
-          ' CHANGELOG.md; then
+          # changelog_section.sh is the single definition of "the section for
+          # a tag", shared with the release-body extraction below, so this
+          # preflight passes if and only if the extractor will find a
+          # non-empty body — they can't disagree.
+          if .github/scripts/changelog_section.sh "$TAG" >/dev/null; then
             echo "::notice::CHANGELOG.md section for ${TAG} present"
           else
             echo "::error::CHANGELOG.md has no '## ${TAG}' section — add release notes before tagging (the release body is extracted from it)."
@@ -89,16 +88,11 @@ jobs:
       - name: No private data in the tag message or release notes
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           # The release body is generated from CHANGELOG.md and the tag
           # annotation is public on the tag page — scan both with the same
           # script the push workflow runs on diffs (.github/scripts/pii_check.sh).
           git tag -l --format='%(contents)' "$TAG" | .github/scripts/pii_check.sh --stdin "tag $TAG"
-          awk -v ver="$TAG" '
-            /^## / { if (in_section) exit
-                     if ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next } }
-            in_section { print }
-          ' CHANGELOG.md | .github/scripts/pii_check.sh --stdin "CHANGELOG $TAG"
+          .github/scripts/changelog_section.sh "$TAG" | .github/scripts/pii_check.sh --stdin "CHANGELOG $TAG"
 
       - name: Board lists consistent
         run: .github/scripts/check_board_lists.sh
@@ -120,6 +114,8 @@ jobs:
     # `gh release create` needs write access to repository contents.
     permissions:
       contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -166,30 +162,10 @@ jobs:
       - name: Extract release notes from CHANGELOG.md
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          # Extract the section between "## TAG" and the next "## ".
-          #
-          # Match two heading shapes:
-          #   * "## V2.4.2"           — heading with no trailing text
-          #   * "## V2.4.2 — title"   — heading with a separator + label
-          #     (the trailing `[^0-9A-Za-z]` check on the next char prevents
-          #     V2.4.1 from also matching V2.4.10).
-          # The bug pre-V2.4.4 was matching only the second shape, so bare-
-          # heading sections released with the placeholder. The changelog-check
-          # job above fails the run before here if the section is missing.
-          #
-          # `sed` post-processor: drop any trailing `---` horizontal rule +
-          # blank lines between version sections so they don't look like noise
-          # at the bottom of the release page.
-          awk -v ver="$TAG" '
-            /^## / {
-              if (in_section) exit
-              if ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next }
-            }
-            in_section { print }
-          ' CHANGELOG.md \
-            | sed -e :a -e '/^[[:space:]-]*$/{$d;N;ba' -e '}' \
-            > release_notes.md
+          # Same script as the changelog-check preflight, which has already
+          # failed the run if the section is missing; the fallback body below
+          # is kept only as a belt-and-braces guard.
+          .github/scripts/changelog_section.sh "$TAG" > release_notes.md || true
           if [ ! -s release_notes.md ]; then
             echo "::warning::no matching section in CHANGELOG.md for tag $TAG"
             {
@@ -207,7 +183,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           # If a release already exists for this tag (re-run scenario), upload
           # assets to it instead of creating a duplicate.
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -249,6 +224,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         # NB: unlike build/release, this checkout intentionally does NOT use
@@ -263,7 +240,6 @@ jobs:
         id: gate
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           # The flasher always serves "the latest release". Re-dispatching an
           # older tag (e.g. to re-upload its assets) must therefore leave Pages
           # alone; only the highest V<major>.<minor>.<patch> tag publishes.
@@ -289,7 +265,6 @@ jobs:
         if: steps.gate.outputs.deploy == 'true'
         run: |
           set -e
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p _site/firmware
           # The install page, manifests and vendored esp-web-tools.
           cp -r docs/. _site/

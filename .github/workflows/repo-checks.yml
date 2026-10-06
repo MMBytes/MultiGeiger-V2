@@ -25,9 +25,13 @@ env:
 permissions:
   contents: read
 
+# A PR run recomputes the whole merge-base..HEAD delta, so a superseded one can
+# be cancelled. A push run scans before..HEAD of THAT push: cancelling it when
+# a second push lands would leave the first push's lines and messages
+# unscanned by any run, so push runs always complete.
 concurrency:
   group: repo-checks-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pii-check:

@@ -48,7 +48,9 @@ suitable for boards in the first and third groups.
 - **Revision A** is the V1.10 iteration of the upstream MultiGeiger mainboard
   lineage (ecocurious2 V1.4 → a third-party V1.9 respin for the Heltec WiFi
   LoRa 32 V4 module → this V1.10 rework: HV_CAP_FULL moved from GPIO2 to
-  GPIO6, piezo on GPIO4/5). Kept in Eagle like its ancestors.
+  GPIO3 and GMC_COUNT to GPIO6 — the V2.6.34 design had those two the other
+  way round and was never built — piezo on GPIO4/5). Kept in Eagle like its
+  ancestors.
 - **Revision B** and **Revision C** are this project's own KiCad 8 designs.
   They keep the upstream HV topology (flyback boost, zener-regulated rail,
   Si22G tube) and add module sockets, a Qwiic / STEMMA QT connector and

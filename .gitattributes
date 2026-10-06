@@ -13,3 +13,9 @@
 # repo, the rest being local-only helpers - carried LF endings until V2.7.3.
 # An eol= rule is per-repository and settles it for every clone.
 *.cmd text eol=crlf
+
+# The opposite problem for the shell scripts: bash treats a CR as part of the
+# command, so a CRLF checkout (core.autocrlf=true on Windows) breaks the
+# pre-commit hook and the CI scripts with "$'\r': command not found".
+*.sh text eol=lf
+.githooks/* text eol=lf

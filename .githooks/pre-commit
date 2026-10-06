@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Pre-commit hook: refuse a commit whose staged diff adds private data
+# (LAN / MAC / hostname / user-path shapes). Same script CI runs on every
+# push, so a hit here is a hit there.
+#
+# Enable once per clone (hooks are not tracked by git):
+#     git config core.hooksPath .githooks
+# Bypass for a deliberate exception:  git commit --no-verify
+exec "$(git rev-parse --show-toplevel)/.github/scripts/pii_check.sh" --staged

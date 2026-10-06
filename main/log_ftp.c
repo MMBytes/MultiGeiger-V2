@@ -397,7 +397,7 @@ static bool tls_ctx_init(ftp_tls_ctx_t *t) {
     //   -1". V2.3.15's io_recv1 now handles -0x7B00 like WANT_READ.
     //
     // BUG 2 (PARKED): Even with bug 1 fixed, TLS 1.3 against THIS specific
-    //   FTPS server (project LAN, 192.168.123.1) fails with "426 Data
+    //   FTPS server (the project LAN server) fails with "426 Data
     //   Connection: Connection reset by peer" on the data channel after
     //   STOR. Verified independent of session reuse (with PSK or without —
     //   same 426). Most likely the server doesn't fully implement TLS 1.3

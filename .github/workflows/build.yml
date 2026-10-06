@@ -43,6 +43,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# Read-only token for every job here: this workflow only builds and uploads
+# run artefacts. (The repository default is already read-only; stating it
+# keeps that true even if the repo setting is ever relaxed.)
+permissions:
+  contents: read
+
 # V2.5.31: cancel a superseded in-flight run when a newer commit lands on the
 # same branch/PR — no point finishing a 7-board build for code already replaced.
 # (release.yml deliberately has NO cancel-in-progress: never abort a release.)
@@ -51,42 +57,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # V2.4.1+ (T1): host-side unit tests for the pure helpers in main/util.h +
-  # main/tube_logic.h. Runs first because it's cheap (~10 s) and a regression
-  # here likely means the IDF builds will also fail — fail-fast on the cheap
-  # signal. See test/test_main.c for the cases.
-  #
-  # The valgrind sweep on the same binary catches leaks / use-after-free /
-  # uninit-reads in the pure helpers for free.
+  # V2.4.1+ (T1): host-side unit tests for the pure helpers (util.h,
+  # tube_logic.h, history.c, ...) natively and under valgrind. Cheap (~10 s)
+  # and a regression here likely means the IDF builds will also fail —
+  # fail-fast on the cheap signal. Reusable gate shared with release.yml so a
+  # tag can't ship what a push would have failed.
   host-test:
-    name: host-test (pure helpers + valgrind)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install valgrind
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
-
-      - name: Build host tests
-        run: |
-          set -e
-          # -g -O1 keeps debug info + lets valgrind report line numbers,
-          # without the compiler optimising away the bugs valgrind catches.
-          gcc -I main -Wall -Wextra -Werror -std=c11 -g -O1 \
-              -o test/run test/test_main.c
-
-      - name: Run host tests (native)
-        run: ./test/run
-
-      - name: Run host tests under valgrind
-        run: |
-          valgrind --error-exitcode=2 \
-                   --leak-check=full \
-                   --show-leak-kinds=all \
-                   --track-origins=yes \
-                   --errors-for-leak-kinds=all \
-                   ./test/run
+    uses: ./.github/workflows/_host-test.yml
 
   # V2.4.1+ (T3): cppcheck static analysis — reusable gate shared with
   # release.yml so the baseline can't drift. Informational until 2026-05-17,

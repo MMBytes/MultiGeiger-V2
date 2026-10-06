@@ -24,8 +24,8 @@ sdkconfig.*.old
 release_staging/
 
 # IDF Component Manager: `dependencies.lock` is IGNORED (V2.5.13) — its `target:`
-# field flips esp32<->esp32s3 per board across our 6-target matrix, churning the
-# tree on every build. Reproducibility is preserved by pinning the EXACT esp-mqtt
+# field flips esp32<->esp32s3<->esp32c5 per board across the board matrix,
+# churning the tree on every build. Reproducibility is preserved by pinning the EXACT esp-mqtt
 # version (`==1.0.0`) in main/idf_component.yml (committed, never churns). The
 # fetched component sources under `managed_components/` are regenerated on every
 # clean build and must NOT be committed.
@@ -55,3 +55,15 @@ release_stage_*/
 # anchored so it never touches build_*/ outputs (already ignored) or anything
 # intentional in a subdir.
 /*.bin
+
+# Private material that lives inside this working copy but is not part of the
+# public project: local session notes, and three independent git repositories
+# (analysis scripts, weather CSVs, planning/review documents) whose contents
+# name deployment details. Git never descends into a nested .git, so these
+# rules only keep the folders out of `git status` / `git add .` here. They
+# used to live in the untracked .git/info/exclude, which protected one clone
+# only.
+claude_sessions.local.md
+docs/superpowers/
+docs/scripts/
+docs/rainfall_data/

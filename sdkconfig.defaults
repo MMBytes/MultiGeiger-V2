@@ -131,6 +131,16 @@ CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_SIZE is not set
 
+# Application compiler optimisation level: DELIBERATELY left at the IDF
+# default, -Og (CONFIG_COMPILER_OPTIMIZATION_DEBUG=y), on every board,
+# release builds included. Every timing figure this project has measured —
+# count-path ISR latency, the PCNT width gate, the dead-time guard, HV FET
+# on-time — was taken on -Og binaries. Switching to -Os/-O2 changes that
+# timing and so needs a bracketed bench soak on the count path first (the
+# measurement noise floor forbids a simple before/after). Flash headroom is
+# not the constraint: every board is below 80 % of its app slot (gated in
+# CI). Change this only together with that soak.
+
 # PSA crypto key-slot pool (V2.3.15). mbedTLS 4.x routes legacy crypto
 # (mbedtls_aes_*, mbedtls_md_*, ECDHE key derivation, AES-GCM init) through
 # PSA. Each TLS handshake allocates ~5–10 PSA slots transiently; AES-GCM

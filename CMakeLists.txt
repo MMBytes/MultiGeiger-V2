@@ -165,6 +165,20 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(geiger_v2)
 
 # ----------------------------------------------------------------------------
+# Toolchain pin. Every release is built by CI with ESP-IDF v6.0.3
+# (.github/workflows/_build-boards.yml), while main/idf_component.yml only
+# demands ">=6.0.3". A local build on any other IDF still works, but it is
+# not the binary that ships — say so once per configure rather than letting
+# a toolchain difference masquerade as a firmware bug.
+# ----------------------------------------------------------------------------
+idf_build_get_property(_geiger_idf_ver IDF_VER)
+if(NOT _geiger_idf_ver MATCHES "^v6\\.0\\.3($|-)")
+    message(WARNING "ESP-IDF ${_geiger_idf_ver} in use; releases are built with v6.0.3 "
+                    "(see .github/workflows/_build-boards.yml). Fine for development, "
+                    "not release-equivalent.")
+endif()
+
+# ----------------------------------------------------------------------------
 # V2.4.3: PSA key-slot count override.
 #
 # `CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT` was a valid kconfig knob through IDF

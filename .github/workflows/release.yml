@@ -7,9 +7,14 @@
 #       OR  Actions tab → "release" → "Run workflow" → enter the existing tag
 #
 # Gates run cheapest-first so a bad tag fails in seconds, not after an 11-board
-# build: cppcheck + changelog preflight → build (merge + stage) → release → pages.
-# The cppcheck gate and the board matrix are reusable workflows shared with
-# build.yml (_cppcheck.yml / _build-boards.yml) so the two pipelines can't drift.
+# build: host-test + cppcheck + changelog preflight → build (merge + stage) →
+# release → pages. The host-test and cppcheck gates and the board matrix are
+# reusable workflows shared with build.yml (_host-test.yml / _cppcheck.yml /
+# _build-boards.yml) so the two pipelines can't drift.
+#
+# Pages publishes only when the tag being released is the NEWEST release tag:
+# a workflow_dispatch of an older tag (to re-upload its assets) must not roll
+# the public web flasher back to old firmware.
 #
 # Pre-flight: don't push the tag until build.yml is green on the same commit. If
 # a build fails AFTER the tag is pushed, the tag exists with no release —
@@ -32,9 +37,19 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# Read-only by default; the two jobs that must write (release → contents,
+# pages → pages/id-token) widen their own scope below.
+permissions:
+  contents: read
+
 jobs:
-  # Hard gate, shared with build.yml. Checks out the tag being released so the
-  # released commit's source is the one analysed.
+  # Hard gates, shared with build.yml. Each checks out the tag being released
+  # so the released commit's source is the one tested / analysed.
+  host-test:
+    uses: ./.github/workflows/_host-test.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
   cppcheck:
     uses: ./.github/workflows/_cppcheck.yml
     with:
@@ -71,10 +86,27 @@ jobs:
             exit 1
           fi
 
+      - name: No private data in the tag message or release notes
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          # The release body is generated from CHANGELOG.md and the tag
+          # annotation is public on the tag page — scan both with the same
+          # script the push workflow runs on diffs (.github/scripts/pii_check.sh).
+          git tag -l --format='%(contents)' "$TAG" | .github/scripts/pii_check.sh --stdin "tag $TAG"
+          awk -v ver="$TAG" '
+            /^## / { if (in_section) exit
+                     if ($0 == "## " ver || $0 ~ "^## " ver "[^0-9A-Za-z]") { in_section = 1; next } }
+            in_section { print }
+          ' CHANGELOG.md | .github/scripts/pii_check.sh --stdin "CHANGELOG $TAG"
+
+      - name: Board lists consistent
+        run: .github/scripts/check_board_lists.sh
+
   # Reusable board matrix; release:true → build + merge-bin + VERSION_STR==tag
   # check + staged board-suffixed artefacts (release-<board>) for the release job.
   build:
-    needs: [cppcheck, changelog-check]
+    needs: [host-test, cppcheck, changelog-check]
     uses: ./.github/workflows/_build-boards.yml
     with:
       release: true
@@ -121,6 +153,15 @@ jobs:
           fi
           echo "::notice::$EXPECTED artefacts staged"
           ls -la artefacts/
+
+      - name: Write SHA256SUMS
+        run: |
+          set -e
+          # One checksum file over every released artefact so a downloaded
+          # image can be verified against the release page. Generated AFTER
+          # the count check so it is never mistaken for a board artefact.
+          (cd artefacts && sha256sum *.bin *.zip > SHA256SUMS)
+          cat artefacts/SHA256SUMS
 
       - name: Extract release notes from CHANGELOG.md
         run: |
@@ -171,12 +212,12 @@ jobs:
           # assets to it instead of creating a duplicate.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::notice::release $TAG already exists, uploading assets (--clobber)"
-            gh release upload "$TAG" artefacts/*.bin artefacts/*.zip --clobber
+            gh release upload "$TAG" artefacts/*.bin artefacts/*.zip artefacts/SHA256SUMS --clobber
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --notes-file release_notes.md \
-              artefacts/*.bin artefacts/*.zip
+              artefacts/*.bin artefacts/*.zip artefacts/SHA256SUMS
           fi
           echo "::notice::release ready at $(gh release view "$TAG" --json url -q .url)"
 
@@ -193,7 +234,10 @@ jobs:
   # ONE-TIME SETUP (repo owner): Settings → Pages → Source = "GitHub Actions".
   pages:
     name: deploy web flasher to Pages
-    needs: build          # needs the merged bins; build itself gates on cppcheck + changelog
+    # Needs the merged bins (build) AND a published release (release): if
+    # `gh release create` failed there must be no flasher advertising firmware
+    # that has no release page behind it.
+    needs: [build, release]
     runs-on: ubuntu-latest
     permissions:
       pages: write        # deploy-pages
@@ -215,7 +259,26 @@ jobs:
         # the bins come from the build job's artefacts of inputs.tag's source.
         uses: actions/checkout@v7
 
+      - name: Only the newest release tag may publish the flasher
+        id: gate
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          # The flasher always serves "the latest release". Re-dispatching an
+          # older tag (e.g. to re-upload its assets) must therefore leave Pages
+          # alone; only the highest V<major>.<minor>.<patch> tag publishes.
+          git fetch --tags --force --quiet
+          NEWEST=$(git tag -l 'V*' | grep -E '^V[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          if [ "$TAG" = "$NEWEST" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is the newest release tag — publishing the web flasher"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::$TAG is not the newest release tag ($NEWEST) — release assets were published, the web flasher keeps serving $NEWEST"
+          fi
+
       - name: Download built artefacts (for the merged bins)
+        if: steps.gate.outputs.deploy == 'true'
         uses: actions/download-artifact@v8
         with:
           path: artefacts/
@@ -223,6 +286,7 @@ jobs:
           merge-multiple: true
 
       - name: Assemble Pages site (docs/ + firmware/)
+        if: steps.gate.outputs.deploy == 'true'
         run: |
           set -e
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
@@ -234,14 +298,32 @@ jobs:
           # Stamp the real version into the served manifests (repo files keep the
           # literal "latest"; only the published copies get the tag).
           sed -i "s/\"version\": \"latest\"/\"version\": \"$TAG\"/" _site/manifests/*.json
+          # Cross-check before anything is served: every manifest must point at
+          # a firmware file that exists, every merged image must be reachable
+          # from some manifest, and the install page must list every manifest.
+          # A board added to the build matrix but not to docs/ (or the reverse)
+          # fails here instead of 404-ing in someone's browser.
+          for m in _site/manifests/*.json; do
+            for p in $(jq -r '.builds[].parts[].path' "$m"); do
+              [ -f "_site/manifests/$p" ] || { echo "::error::$m references missing firmware $p"; exit 1; }
+            done
+            grep -qF "manifests/$(basename "$m")" _site/index.html \
+              || { echo "::error::docs/index.html does not offer $(basename "$m")"; exit 1; }
+          done
+          for b in _site/firmware/geiger_v2_merged_*.bin; do
+            grep -qF "$(basename "$b")" _site/manifests/*.json \
+              || { echo "::error::no manifest references $(basename "$b")"; exit 1; }
+          done
           echo "Published site tree:"
           find _site -maxdepth 2 -type f | sort
 
       - name: Upload Pages artifact
+        if: steps.gate.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
       - name: Deploy to GitHub Pages
+        if: steps.gate.outputs.deploy == 'true'
         id: deploy
         uses: actions/deploy-pages@v5

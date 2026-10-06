@@ -6,7 +6,7 @@
 # `docs/en/migration-guides/release-6.x/6.0/protocols.rst` line 151. Pinned to
 # an EXACT version (`==1.0.0`) in this committed manifest so dev + CI builds are
 # reproducible WITHOUT committing `dependencies.lock` (which churns its `target:`
-# field per board across our 5-target matrix — ignored since V2.5.13). Bump this
+# field per board across the board matrix — ignored since V2.5.13). Bump this
 # deliberately when you want a newer esp-mqtt.
 #
 # Added V2.4.2 alongside the new mqtt.c module.

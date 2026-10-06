@@ -1,0 +1,63 @@
+# Reusable host-test gate — called by BOTH build.yml (commit / PR) and
+# release.yml (tag push) via `uses:`, so a tag can no longer ship code whose
+# pure-helper tests fail. Until this file existed the tests ran only in
+# build.yml; release.yml's `build` job needed just [cppcheck, changelog-check],
+# and the only thing protecting a tag was the manual "CI green before tag"
+# habit.
+#
+# What runs: test/test_main.c compiled with the host gcc against the pure
+# helpers in main/ (util.h, tube_logic.h, history.c, ...), natively and again
+# under valgrind. ~10 s. No ESP-IDF involved. See test/test_main.c for the
+# cases and _test.cmd for the equivalent local run.
+name: host-test (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (default: the caller's triggering ref)."
+        type: string
+        default: ''
+        required: false
+
+# Reusable workflows do NOT inherit the caller's env, so the Node 20→24
+# deprecation opt-in (see build.yml) must be repeated here.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# Read-only token: this workflow only checks out and runs a binary.
+permissions:
+  contents: read
+
+jobs:
+  host-test:
+    name: host-test (pure helpers + valgrind)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install valgrind
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+
+      - name: Build host tests
+        run: |
+          set -e
+          # -g -O1 keeps debug info + lets valgrind report line numbers,
+          # without the compiler optimising away the bugs valgrind catches.
+          gcc -I main -Wall -Wextra -Werror -std=c11 -g -O1 \
+              -o test/run test/test_main.c
+
+      - name: Run host tests (native)
+        run: ./test/run
+
+      - name: Run host tests under valgrind
+        run: |
+          valgrind --error-exitcode=2 \
+                   --leak-check=full \
+                   --show-leak-kinds=all \
+                   --track-origins=yes \
+                   --errors-for-leak-kinds=all \
+                   ./test/run

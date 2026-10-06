@@ -1,8 +1,8 @@
-# Reusable board-build matrix — the SINGLE source of the board list, called
-# by build.yml (release:false → CI build) and release.yml (release:true → build
-# + merge-bin + version==tag check + staged artefacts). Adding/removing a board
-# now means editing the matrix HERE only (plus EXPECTED_BOARDS in release.yml's
-# count check, which is deliberately kept as an independent guard).
+# Reusable board-build matrix, called by build.yml (release:false → CI build)
+# and release.yml (release:true → build + merge-bin + version==tag check +
+# staged artefacts). The matrix below must match CMakeLists.txt's selector;
+# .github/scripts/check_board_lists.sh (run by repo-checks.yml and the release
+# preflight) fails if it — or any of the other board lists — drifts.
 #
 # V2.5.31: extracted from the two duplicated build jobs (build.yml + release.yml
 # each carried their own copy of the matrix). Also adds:
@@ -39,6 +39,10 @@ on:
 # Reusable workflows do not inherit caller env — repeat the Node 24 opt-in.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# Read-only token: this workflow builds and uploads run artefacts only.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -111,20 +115,52 @@ jobs:
             idf.py -B build_$B -DBOARD=$B build;
             if [ "${{ inputs.release }}" = "true" ]; then idf.py -B build_$B -DBOARD=$B merge-bin -o geiger_v2_merged_$B.bin; fi
 
-      - name: Report binary size
-        if: ${{ !inputs.release }}
+      - name: Flash-size gate
         run: |
           set -e
-          BIN="build_${{ matrix.board }}/geiger_v2.bin"
+          B=${{ matrix.board }}
+          BIN="build_$B/geiger_v2.bin"
           if [ ! -f "$BIN" ]; then
             echo "::error::binary not produced at $BIN"
             exit 1
           fi
           SIZE=$(stat -c%s "$BIN")
-          HEX=$(printf '0x%x' "$SIZE")
-          echo "::notice::${{ matrix.board }} geiger_v2.bin = $SIZE bytes ($HEX)"
-          echo "## ${{ matrix.board }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "geiger_v2.bin: **$SIZE bytes** ($HEX)" >> "$GITHUB_STEP_SUMMARY"
+          # Smallest app slot of the partition table this board builds with.
+          # CMakeLists.txt points the generated cache at sdkconfig.<board> in
+          # the repo root, and that cache names the table.
+          PT=$(sed -n 's/^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="\([^"]*\)"/\1/p' "sdkconfig.$B")
+          if [ -z "$PT" ] || [ ! -f "$PT" ]; then
+            echo "::error::cannot resolve the partition table for $B (got '$PT')"
+            exit 1
+          fi
+          SLOT=""
+          while IFS=, read -r name type sub off size flags; do
+            case "$name" in \#*|"") continue;; esac
+            type=${type// /}; size=${size// /}
+            [ "$type" = "app" ] || continue
+            v=$((size))
+            if [ -z "$SLOT" ] || [ "$v" -lt "$SLOT" ]; then SLOT=$v; fi
+          done < "$PT"
+          if [ -z "$SLOT" ]; then
+            echo "::error::no app partition found in $PT"
+            exit 1
+          fi
+          PCT=$((SIZE * 100 / SLOT))
+          LINE="$B geiger_v2.bin = $SIZE bytes, ${PCT} % of the $SLOT-byte app slot ($PT)"
+          echo "## $B" >> "$GITHUB_STEP_SUMMARY"
+          echo "$LINE" >> "$GITHUB_STEP_SUMMARY"
+          # An OTA image must fit one slot and esp_ota_begin has no tolerance.
+          # 92 % fails the build; 85 % warns so growth is seen before it bites.
+          # Baseline when the gate was added (2026-10-06, V2.8.4): 63–78 %,
+          # the C5 highest.
+          if [ "$PCT" -ge 92 ]; then
+            echo "::error::$LINE — exceeds the 92 % flash-size gate"
+            exit 1
+          elif [ "$PCT" -ge 85 ]; then
+            echo "::warning::$LINE — above the 85 % flash-size watch line"
+          else
+            echo "::notice::$LINE"
+          fi
 
       - name: Verify VERSION_STR embedded
         run: |

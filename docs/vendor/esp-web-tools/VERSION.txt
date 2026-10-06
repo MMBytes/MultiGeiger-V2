@@ -3,6 +3,9 @@ esp-web-tools — vendored (self-hosted) copy
 
 Pinned version : 10.4.0
 Source         : https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-10.4.0.tgz
+Licence        : Apache-2.0 — the upstream LICENSE text is kept alongside as
+                 ./LICENSE (https://github.com/esphome/esp-web-tools); it is
+                 required to accompany the redistributed files.
 Vendored from  : package/dist/web/  (the whole directory — install-button.js
                  is the entry, but it dynamically imports the sibling hashed
                  chunks at runtime, so all files are required)
@@ -30,7 +33,7 @@ PowerShell, from the repo root:
     Invoke-WebRequest "https://registry.npmjs.org/esp-web-tools/-/esp-web-tools-$v.tgz" -OutFile $tgz
     tar -xzf $tgz -C $tmp
     $dest = "docs\vendor\esp-web-tools"
-    Get-ChildItem $dest -File | Where-Object Name -ne "VERSION.txt" | Remove-Item -Force
+    Get-ChildItem $dest -File | Where-Object Name -notin "VERSION.txt","LICENSE" | Remove-Item -Force
     Copy-Item (Join-Path $tmp "package\dist\web\*") -Destination $dest -Force
 
 Then sanity-check there are no external CDN URLs baked in:

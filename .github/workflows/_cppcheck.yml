@@ -32,6 +32,10 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# Read-only token: this workflow analyses sources and uploads run artefacts.
+permissions:
+  contents: read
+
 jobs:
   # Builds cppcheck 2.21.0 from source ONCE and hands it to every matrix leg
   # below via artifact, instead of each of the 10 legs building it in
@@ -126,29 +130,39 @@ jobs:
         # defines as CMakeLists.txt's add_compile_definitions() calls, so a
         # define added there without a matching leg here silently goes
         # unanalyzed again (see the V2.6.8 note above).
+        #
+        # The CONFIG_* defines mirror the Kconfig symbols the SOURCES test
+        # with #if (grep '#if.*CONFIG_' main/): cppcheck never sees
+        # sdkconfig.h, and once any -D is given it analyses only that one
+        # configuration, so without these every CONFIG_-gated block (WiFi
+        # roaming app, PSRAM mode/speed reporting, the C5's 5 GHz / Wi-Fi 6
+        # paths) was checked as if compiled out. Values follow the board's
+        # sdkconfig.defaults overlay (sdkconfig.defaults.psram sets the
+        # roaming app on every PSRAM board; the SOC_* caps come from the C5's
+        # generated sdkconfig).
         include:
           - board: heltec_v2
             defines: -DBOARD_HELTEC_V2=1
           - board: heltec_v2_4mb
             defines: -DBOARD_HELTEC_V2=1 -DBOARD_HELTEC_V2_4MB=1
           - board: feathers3_d
-            defines: -DBOARD_FEATHERS3_D=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_FEATHERS3_D=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1
           - board: adafruit_qtpy_esp32_pico
-            defines: -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_SPEED_40M=1
           - board: seeed_xiao_esp32s3
-            defines: -DBOARD_SEEED_XIAO_ESP32S3=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_SEEED_XIAO_ESP32S3=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_OCT=1 -DCONFIG_SPIRAM_SPEED_80M=1
           - board: heltec_wifi_lora32_v4_r2
-            defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1 -DCONFIG_GEIGER_LORAWAN=1
+            defines: -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 -DMQTT_RICH_STATE=1 -DCONFIG_GEIGER_LORAWAN=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1
           - board: sparkfun_thing_plus_esp32s3
-            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1
           - board: sparkfun_thing_plus_esp32c5
-            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1 -DCONFIG_SOC_WIFI_HE_SUPPORT=1 -DCONFIG_SOC_WIFI_SUPPORT_5G=1
           - board: adafruit_esp32s3_tft_feather
-            defines: -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1
           - board: adafruit_esp32_feather_v2
-            defines: -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_SPEED_40M=1
           - board: adafruit_esp32s3_feather_4mb_2mbpsram
-            defines: -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 -DMQTT_RICH_STATE=1
+            defines: -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 -DMQTT_RICH_STATE=1 -DCONFIG_SPIRAM=1 -DCONFIG_ESP_WIFI_ENABLE_ROAMING_APP=1 -DCONFIG_SPIRAM_MODE_QUAD=1 -DCONFIG_SPIRAM_SPEED_80M=1
     steps:
       - name: Checkout
         uses: actions/checkout@v7

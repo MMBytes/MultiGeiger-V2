@@ -12,6 +12,9 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 - Optional **PM (particulate matter)**: PM1 / PM2.5 / PM4 / PM10 plus number concentrations and typical particle size.
 - Optional **noise**: LAeq / LAmin / LAmax dB(A).
 - Optional **ambient light**: lux (two sensor families supported).
+- Optional **air-quality index**: NOx index from a Sensirion SGP41 (log, `/status` and MQTT/Home Assistant only — no upload target carries it).
+- Optional **standalone CSV logging** to a microSD card: one row of every attached sensor's readings per cycle, timestamped from the GNSS clock, for nodes deployed without a network.
+- **Battery telemetry** on boards with a MAX17048 fuel gauge (voltage, state of charge) or a raw ADC battery sense.
 - Optional **GNSS position display** — auto-detected PA1010D or MAX-M10S receiver shows fix, satellites, HDOP, lat/lon (OpenStreetMap link), and altitude on `/status`; display-only (NTP is the sole time source).
 - Per-cycle upload (default 150 s, configurable 10 s – 1 h) to any subset of **nine** public back-ends.
 - **MQTT publish** with 24 Home Assistant Discovery entities, three TLS modes including custom CA.
@@ -41,7 +44,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 | `adafruit_esp32_feather_v2` | Adafruit ESP32 Feather V2, #5400/#5900 (ESP32-PICO-MINI-02) | 8 MB | Second-source MCU (original ESP32 LX6, not S3) for the Feathers3d_new_pcb shared carrier. External I²C OLED wired to the header SDA/SCL pins, NOT the board's onboard STEMMA QT connector — NEOPIXEL_I2C_POWER only gates that connector's own regulator, and it isn't driven until neopixel_init() runs after sensor/display probing, so a display wired to the connector would never be found. Onboard WS2812 NeoPixel. No I²C fuel gauge — raw ADC `BAT_VOLT_PIN`/GPIO35 battery sense only. 2 MB in-package PSRAM. |
 | `adafruit_esp32s3_feather_4mb_2mbpsram` | Adafruit ESP32-S3 Feather, 4MB/2MB PSRAM, STEMMA QT, #5477 (ESP32-S3) | 4 MB | Shares the Feathers3d_new_pcb carrier PCB. No onboard display — external I²C OLED via STEMMA QT, probe-detected. Onboard MAX17048 fuel gauge, onboard WS2812 NeoPixel. Single STEMMA QT I²C bus power-gated on GPIO7 (no always-on bus) — same pattern as `adafruit_esp32s3_tft_feather`'s gate, different GPIO. Onboard red "#13" LED (not the NeoPixel) flashes on each Geiger pulse. 2 MB external QSPI PSRAM (feathers3_d-class, not in-package). |
 
-Build/flash invocation takes a board argument — see `_build.cmd` / `_flash.cmd` / `_merge.cmd` helpers. All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
+Every build takes a `-DBOARD=<target>` argument — see [Build from source](#build-from-source). All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
 
 ### LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
 
@@ -82,6 +85,10 @@ The driver mix lets a node combine, e.g., SHT45 (best RH) + BMP581 (best pressur
 | **VEML7700** | 0x10 | Ambient light (lux) | Vishay I²C, alternative to ALS-PT19. |
 | **PA1010D** | 0x10 | GNSS position + time (display-only) | Adafruit 4415 (MediaTek MT3333). Detected by live NMEA sniff — disambiguates from a VEML7700 at the same address. |
 | **MAX-M10S** | 0x42 | GNSS position + time (display-only) | SparkFun Qwiic (u-blox DDC). Factory chip serial queried via UBX-SEC-UNIQID and shown on `/status`. |
+| **Sensirion SGP41** | 0x59 | NOx index | VOC + NOx gas sensor; only the NOx index is surfaced (log / `/status` / MQTT). Runs its own sampling task — it needs a 1 Hz conditioning cadence. |
+| **MAX17048** | 0x36 | Battery voltage, state of charge | Onboard fuel gauge on the FeatherS3-D, SparkFun Thing Plus and Adafruit Feather boards that carry one. |
+
+A microSD socket (SDMMC 4-bit on ESP32-S3 boards, SPI where the chip has no SDMMC host) enables the standalone CSV logger when present; see `main/sd_logger.h` for the file layout.
 
 ### Displays
 
@@ -147,11 +154,13 @@ V2.3.33 web security audit + V2.4.x follow-ups (see CHANGELOG):
 - **Basic auth** on `/config`, `/update`, `/reboot`, `/coredump.elf` (user `admin`, password = configured AP password).
 - **Constant-time password comparison** to defeat timing oracles.
 - **CSRF protection**: POSTs to `/config` / `/update` / `/reboot` require an `Origin` header matching the device's URL — protects against drive-by browser POSTs. **Note for curl users**: add `-H "Origin: http://device:port"` or you'll get a 403.
-- **OTA size clamp**: rejects images larger than the OTA partition (2 MB) before writing.
+- **OTA size clamp**: rejects an image larger than the target OTA slot before writing (2 MB on 8 MB-flash boards, 1.875 MB on 4 MB-flash boards).
 - **X-Frame-Options: DENY** on all responses.
 - **TX is paused during OTA** (V2.4.24): scheduled cycles skip while an OTA upload is in progress, giving the OTA the full WiFi airtime.
 
-Deferred for future work: HTTPS for the device UI itself, signed OTA images, NVS encryption, rate limiting.
+- **HTTPS for the device UI** (V2.8.0, PSRAM boards): optional, per-device self-signed certificate, see "What it does" above.
+
+Deferred for future work: signed OTA images, NVS encryption, rate limiting. The device is designed for a trusted LAN; do not expose it to the internet.
 
 ## Installation
 
@@ -163,25 +172,26 @@ Every [release](https://github.com/MMBytes/MultiGeiger-V2/releases) attaches per
 
 **`esptool` first flash:** Install [`esptool`](https://github.com/espressif/esptool) (`pip install esptool`); replace `COM3` with your actual serial port.
 
-**First flash of a blank / fresh / bricked device — use `geiger_v2_merged_<board>-<version>.bin`:**
+**First flash of a blank / fresh / bricked device — use `geiger_v2_merged_<board>.bin`:**
 
 ```
-esptool --chip esp32 --port COM3 write-flash 0x0 geiger_v2_merged_heltec_v2-<version>.bin
+esptool --chip esp32 --port COM3 write-flash 0x0 geiger_v2_merged_heltec_v2.bin
 ```
 
-(For ESP32-S3 boards substitute `--chip esp32s3`. FeatherS3-D additionally needs `--before no-reset --after no-reset` and the BOOT+RST button dance.)
+Use `--chip esp32s3` for the ESP32-S3 boards and `--chip esp32c5` for the SparkFun Thing Plus ESP32-C5. FeatherS3-D additionally needs `--before no-reset --after no-reset` and the BOOT+RST button dance.
 
-The merged image bundles the bootloader, partition table, OTA slot pointer, and the app at their correct flash offsets — a single-file factory flash.
+The merged image bundles the bootloader, partition table, OTA slot pointer, and the app at their correct flash offsets — a single-file factory flash. Each release also attaches the separate parts (`bootloader_<board>.bin`, `partition-table_<board>.bin`, `ota_data_initial_<board>.bin`), the matching debug symbols (`elf_<board>.zip`, for decoding a coredump) and a `SHA256SUMS` file.
 
 **Upgrading a device already running this firmware:**
 
-- **OTA (recommended)** — browse to `http://<device-ip>/update`, log in (`admin` / your configured AP password), pick the `geiger_v2.bin` artefact for your board. No cable, keeps your NVS (WiFi credentials, MQTT broker, etc.) intact.
+- **OTA (recommended)** — browse to `http://<device-ip>/update`, log in (`admin` / your configured AP password), pick the `geiger_v2_<board>.bin` artefact for your board. No cable, keeps your NVS (WiFi credentials, MQTT broker, etc.) intact.
+- **Board revision matters**: the firmware has no runtime board-revision detection. Before flashing an older carrier or mainboard, read the compatibility table in [`Hardware/README.md`](Hardware/README.md).
 
 ### First boot
 
-The device comes up as an open WiFi AP named after its chip ID (derived from the MAC). Connect to it, browse to `http://192.168.4.1/config`, and set WiFi credentials, admin password, and back-end choices. After the 2-minute boot window or a manual reboot, it joins your network in STA mode.
+The device comes up as a WPA2-protected WiFi access point named after its chip ID (`esp32-<number>`, e.g. `esp32-1234567`). The AP password is the configured AP password — `ESP32Geiger` on a fresh device. Join it, browse to `http://192.168.4.1/config`, and set WiFi credentials, the AP/admin password and your back-end choices. The AP stays up for about two minutes after boot; after that window, or a manual reboot, the device joins your network in STA mode.
 
-Default web credentials (change these on first login):
+Default credentials (change these on first login — the same password protects the web UI and the setup AP):
 
 | Field | Default |
 |---|---|
@@ -194,7 +204,7 @@ Needed only if you want to modify the firmware.
 
 ### Requirements
 
-- [ESP-IDF v6.0](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html) — pure IDF, not arduino-esp32, not PlatformIO
+- [ESP-IDF v6.0.3](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html) — pure IDF, not arduino-esp32, not PlatformIO. Releases are built with exactly v6.0.3; CMake warns if a different IDF is in use.
 - A Windows / Linux / macOS host with the IDF tools installed
 - USB cable with data lines
 
@@ -203,17 +213,26 @@ Needed only if you want to modify the firmware.
 With the IDF environment sourced (`export.ps1` on Windows, `export.sh` on Linux/macOS):
 
 ```
-idf.py -B build_heltec_v2 -D SDKCONFIG_DEFAULTS=sdkconfig.defaults.heltec_v2 build
-idf.py -B build_heltec_v2 -p <PORT> flash monitor
+idf.py -B build_heltec_v2 -DBOARD=heltec_v2 build
+idf.py -B build_heltec_v2 -DBOARD=heltec_v2 -p <PORT> flash monitor
+idf.py -B build_heltec_v2 -DBOARD=heltec_v2 merge-bin -o geiger_v2_merged_heltec_v2.bin   # single-file factory image
 ```
 
-Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, `adafruit_esp32s3_tft_feather`, `adafruit_esp32_feather_v2`, or `adafruit_esp32s3_feather_4mb_2mbpsram` for other boards. Per-board build/cache directories prevent cross-board sdkconfig pollution.
+`-DBOARD=` selects the chip target, the board macros and the per-board `sdkconfig.defaults.<board>` overlay in one go — do not pass `SDKCONFIG_DEFAULTS` yourself. Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, `adafruit_esp32s3_tft_feather`, `adafruit_esp32_feather_v2`, or `adafruit_esp32s3_feather_4mb_2mbpsram` for other boards, and use a matching `-B build_<board>` directory: the generated `sdkconfig.<board>` cache is per board, so boards never pollute each other.
 
-The repo includes `_build.cmd <board>`, `_flash.cmd <board>`, `_merge.cmd <board>` helpers that wrap the above.
+Host-side unit tests for the pure helpers need only a C compiler:
+
+```
+gcc -I main -Wall -Wextra -Werror -std=c11 -o test/run test/test_main.c && ./test/run
+```
+
+(`_test.cmd` wraps the same on Windows.) Static analysis runs in CI with cppcheck 2.21.0, one leg per board.
+
+Optional: `git config core.hooksPath .githooks` enables a pre-commit scan that refuses to commit private-network data (LAN/MAC/hostname shapes) — the same check CI runs on every push.
 
 ### Release workflow
 
-`git tag V2.X.Y && git push --tags` is the entire release ceremony — GitHub Actions `release.yml` builds all eleven boards in parallel and creates the GitHub Release with bundled artefacts + CHANGELOG body. Manual fallback documented in `_merge.cmd`.
+`git tag -a V2.X.Y && git push --tags` is the release ceremony. GitHub Actions `release.yml` first runs the cheap gates (host tests, cppcheck on every board, a `## V2.X.Y` section present in `CHANGELOG.md`, `VERSION_STR` equal to the tag), then builds all eleven boards, creates the GitHub Release with the artefacts, `SHA256SUMS` and the CHANGELOG section as body, and finally publishes the web flasher — only if the tag is the newest release, so re-running an old tag never rolls the flasher back.
 
 ## Repository layout
 
@@ -243,9 +262,17 @@ main/                       firmware C sources
   pm_sensor.c sps30.c       particulate matter
   noise_sensor.c dnms.c     noise (DNMS / NAM)
   als.c veml7700.c          ambient light
-  display.c display_serlcd.c neopixel.c led.c
-                            display drivers + LED pulse-tick (XIAO onboard LED)
-  speaker.c                 pulse tick (boards with speaker)
+  sgp41.c                   SGP41 NOx index (+ sensirion_crc.h, sensirion_gas_index_algorithm.c)
+  fuel_gauge.c              MAX17048 battery fuel gauge
+  sd_card.c sd_logger.c     microSD mount + standalone CSV logger
+  lorawan.c lorawan_codec.c LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
+  telemetry.c / .h          sensor-reading registry shared by SD logger and status
+  env_api.c                 /api/env JSON endpoint
+  tls_cert.c / tls_logic.h  per-device HTTPS certificate (generation, NVS storage)
+  display.c display_tft.c display_serlcd.c neopixel.c led.c
+                            display drivers (OLED / ST7789 TFT / SerLCD) + LED pulse-tick
+  speaker.c / speaker_logic.h
+                            pulse tick (boards with speaker)
   i2c_bus.c                 shared I²C bus handle + mutex
   applog.c                  in-memory log ring buffer
   diag.c / .h               I²C error counter + per-cycle heap split logging
@@ -254,13 +281,22 @@ main/                       firmware C sources
   sysinfo.h                 chip model string, reset-reason string
   main_status.h             request-restart IPC (main loop ← HTTP/TX workers)
 partitions.csv              factory + dual-OTA (2 MB each) + coredump (64 KB) on 8 MB flash
-partitions_4mb.csv          tighter layout for 4 MB-flash boards (heltec_v2_4mb, sparkfun_thing_plus_esp32s3)
+partitions_4mb.csv          dual-OTA (1.875 MB each) + coredump for the four 4 MB-flash boards
+                            (heltec_v2_4mb, sparkfun_thing_plus_esp32s3,
+                            adafruit_esp32s3_tft_feather, adafruit_esp32s3_feather_4mb_2mbpsram)
 sdkconfig.defaults.<board>  per-board IDF configuration
 sdkconfig.defaults.psram    shared WiFi-roaming app + PSRAM-offload knobs (PSRAM boards)
 CHANGELOG.md                per-release WHAT/WHY notes
+docs/                       web flasher (index.html + manifests/ + vendored esp-web-tools),
+                            TTN payload formatter
+.github/workflows/          build.yml, release.yml, repo-checks.yml + the reusable
+                            _host-test / _cppcheck / _build-boards gates
+.github/scripts/            board-list consistency check, private-data scan
 
-Hardware/                   PCB design files (KiCad)
-  Revision_B/               FeatherS3-D host PCB (single-module design)
+Hardware/                   PCB design files — see Hardware/README.md for the
+                            revision → board → minimum-firmware map
+  Revision_A/               MultiGeiger V1.10 mainboard for the Heltec WiFi LoRa 32 V4 (Eagle)
+  Revision_B/               FeatherS3-D-format carrier PCB (KiCad 8)
     geiger.kicad_pro / .kicad_pcb / .kicad_sch
                             KiCad 8 project sources
     0_Custom_Library.pretty / geiger.pretty
@@ -279,11 +315,17 @@ Hardware/                   PCB design files (KiCad)
 
 ## PCB design files
 
-Two PCB revisions are included in the `Hardware/` directory.
+Three PCB revisions are included in the `Hardware/` directory. [`Hardware/README.md`](Hardware/README.md) maps each revision to the modules it carries and the **minimum firmware** it needs — read it before flashing an older board.
 
-### Revision B — FeatherS3-D host
+### Revision A — MultiGeiger V1.10 mainboard
 
-[`Hardware/Revision_B/`](Hardware/Revision_B/) is the full KiCad 8 project for the single-module FeatherS3-D PCB, plus fabrication-ready Gerbers, pick-and-place CSVs, schematic PDF, BOM, and 3D STEP exports. Si22G tube; full BOM uses metal-film resistors and polypropylene HV capacitors throughout.
+[`Hardware/Revision_A/`](Hardware/Revision_A/) is the Eagle project for the V1.10 iteration of the upstream MultiGeiger mainboard, re-laid for the Heltec WiFi LoRa 32 V4 (R2) module (`heltec_wifi_lora32_v4_r2` firmware, V2.7.1 or later), with Gerbers, pick-and-place CSV, BOM, schematic PDF and renderings.
+
+- **Browse the schematic**: [`Hardware/Revision_A/Deliverables/Schematic/geiger-v2.pdf`](Hardware/Revision_A/Deliverables/Schematic/geiger-v2.pdf)
+
+### Revision B — FeatherS3-D-format carrier
+
+[`Hardware/Revision_B/`](Hardware/Revision_B/) is the full KiCad 8 project for the Feather-format carrier PCB (FeatherS3-D, SparkFun Thing Plus ESP32-S3 and the three Adafruit Feather targets share it), plus fabrication-ready Gerbers, pick-and-place CSVs, schematic PDF, BOM, and 3D STEP exports. Si22G tube; full BOM uses metal-film resistors and polypropylene HV capacitors throughout.
 
 - **Browse the schematic**: [`Hardware/Revision_B/Deliverables/Schematic/geiger.pdf`](Hardware/Revision_B/Deliverables/Schematic/geiger.pdf)
 - **3D renderings**: [`Hardware/Revision_B/Deliverables/Renderings/`](Hardware/Revision_B/Deliverables/Renderings/)
@@ -293,11 +335,11 @@ Two PCB revisions are included in the `Hardware/` directory.
 
 [`Hardware/Revision_C/`](Hardware/Revision_C/) is a shared-footprint PCB that accepts either the Adafruit QT Py ESP32-PICO or the Seeed XIAO ESP32-S3 in the same U1 socket — both use the same Geiger pin map (HV_FET / GMC / interrupt on A0 / A1 / SCK), so one board runs both `adafruit_qtpy_esp32_pico` and `seeed_xiao_esp32s3` firmware builds. Same HV circuit as Revision B; no piezo (sealed-tube form factor). On-board Qwiic / STEMMA QT connector with on-board pull-ups.
 
-- **Browse the schematic**: [`Hardware/Revision_C/Deliverables/Schematic/MultiGeiger 2.0 Rev C.pdf`](<Hardware/Revision_C/Deliverables/Schematic/MultiGeiger 2.0 Rev C.pdf>)
+- **Browse the schematic**: [`Hardware/Revision_C/Deliverables/Schematic/geiger.pdf`](Hardware/Revision_C/Deliverables/Schematic/geiger.pdf)
 - **3D renderings**: [`Hardware/Revision_C/Deliverables/Renderings/`](Hardware/Revision_C/Deliverables/Renderings/)
 - **Re-fabricate**: upload Gerbers + PnP CSV from `Revision_C/Deliverables/`
 
-**License** for both revisions: same GPL-3.0-or-later as the firmware.
+**License** for all three revisions: same GPL-3.0-or-later as the firmware.
 
 ## Documentation
 

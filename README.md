@@ -226,7 +226,7 @@ Host-side unit tests for the pure helpers need only a C compiler:
 gcc -I main -Wall -Wextra -Werror -std=c11 -o test/run test/test_main.c && ./test/run
 ```
 
-(`_test.cmd` wraps the same on Windows.) Static analysis runs in CI with cppcheck 2.21.0, one leg per board.
+(`_test.cmd` wraps the same on Windows.) Static analysis runs in CI with cppcheck 2.22.0, one leg per board.
 
 Optional: `git config core.hooksPath .githooks` enables a pre-commit scan that refuses to commit private-network data (LAN/MAC/hostname shapes) — the same check CI runs on every push.
 

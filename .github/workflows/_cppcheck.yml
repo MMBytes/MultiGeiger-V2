@@ -37,7 +37,7 @@ permissions:
   contents: read
 
 jobs:
-  # Builds cppcheck 2.21.0 from source ONCE and hands it to every matrix leg
+  # Builds cppcheck 2.22.0 from source ONCE and hands it to every matrix leg
   # below via artifact, instead of each of the 10 legs building it in
   # parallel. The first cut of this (single build step inlined into the
   # matrix job, cached via actions/cache) had all 10 legs race to build AND
@@ -48,17 +48,17 @@ jobs:
   # This job runs once; the matrix below downloads its output instead of
   # rebuilding.
   build-cppcheck:
-    name: build cppcheck 2.21.0
+    name: build cppcheck 2.22.0
     runs-on: ubuntu-latest
     steps:
       # Ubuntu's apt package is frozen at whatever shipped with the runner's
       # Ubuntu release (2.13.0 on ubuntu-latest as of this writing) and never
       # rolls forward within that release. Build from source instead, pinned
-      # to 2.21.0 by commit SHA (mirroring the espressif/esp-idf-ci-action
+      # to 2.22.0 by commit SHA (mirroring the espressif/esp-idf-ci-action
       # SHA-pin convention in build.yml) for a reproducible baseline. Local
       # pre-build gating in _build.cmd points at whatever cppcheck is
-      # installed on the dev machine — currently 2.21.0, in sync with this
-      # pin as of 2026-07-11; bump the local install again if this pin moves.
+      # installed on the dev machine — 2.21.0 when this pin moved to 2.22.0
+      # (2026-10-06); upgrade it so local and CI findings agree.
       # Cached by version so only the first run after a version bump pays the
       # build cost at all.
       # Build with prefix /usr/local (cmake's default) — the SAME prefix the
@@ -86,19 +86,19 @@ jobs:
       # `sudo cmake --install` into /usr/local (only paid on a cache miss)
       # purely so the binary's baked-in FILESDIR matches where matrix jobs
       # deploy it.
-      - name: Cache cppcheck 2.21.0 build
+      - name: Cache cppcheck 2.22.0 build
         id: cppcheck_cache
         uses: actions/cache@v6
         with:
           path: cppcheck-dist
-          key: cppcheck-2.21.0-e73bf44-${{ runner.os }}
+          key: cppcheck-2.22.0-a436ca3-${{ runner.os }}
 
-      - name: Build cppcheck 2.21.0
+      - name: Build cppcheck 2.22.0
         if: steps.cppcheck_cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
           git clone --depth 1 https://github.com/danmar/cppcheck.git /tmp/cppcheck-src
-          git -C /tmp/cppcheck-src fetch --depth 1 origin e73bf44c3e49686b7495fab352d03a6c6075516b # tag 2.21.0
+          git -C /tmp/cppcheck-src fetch --depth 1 origin a436ca35ed1887bee789765122b65ed2d7a7e045 # tag 2.22.0
           git -C /tmp/cppcheck-src checkout e73bf44c3e49686b7495fab352d03a6c6075516b
           cmake -S /tmp/cppcheck-src -B /tmp/cppcheck-build -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/cppcheck-build -j"$(nproc)"
@@ -113,7 +113,7 @@ jobs:
       - name: Upload cppcheck build
         uses: actions/upload-artifact@v7
         with:
-          name: cppcheck-2.21.0-build
+          name: cppcheck-2.22.0-build
           path: cppcheck-dist
           retention-days: 1
 
@@ -169,10 +169,10 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Download cppcheck 2.21.0 build
+      - name: Download cppcheck 2.22.0 build
         uses: actions/download-artifact@v8
         with:
-          name: cppcheck-2.21.0-build
+          name: cppcheck-2.22.0-build
           path: /tmp/cppcheck-dist
 
       - name: Install cppcheck from downloaded build

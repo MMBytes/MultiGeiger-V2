@@ -156,8 +156,8 @@ jobs:
           echo "$LINE" >> "$GITHUB_STEP_SUMMARY"
           # An OTA image must fit one slot and esp_ota_begin has no tolerance.
           # 92 % fails the build; 85 % warns so growth is seen before it bites.
-          # Baseline when the gate was added (2026-10-06, V2.8.4): 63–78 %,
-          # the C5 highest.
+          # Baseline when the gate was added (2026-10-06, V2.8.4, CI build):
+          # 63–79 %, the C5 highest.
           if [ "$PCT" -ge 92 ]; then
             echo "::error::$LINE — exceeds the 92 % flash-size gate"
             exit 1
@@ -168,12 +168,15 @@ jobs:
           fi
 
       - name: Verify VERSION_STR embedded
+        # The tag reaches the shell only via env — a dispatch input interpolated
+        # into run: text would execute verbatim (same rule as release.yml).
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           set -e
           VER=$(grep -oP 'VERSION_STR[ \t]+"\K[^"]+' main/version.h)
           # Release mode: the version baked in MUST equal the tag being released.
           if [ "${{ inputs.release }}" = "true" ]; then
-            TAG="${{ inputs.tag }}"
             if [ "$VER" != "$TAG" ]; then
               echo "::error::main/version.h VERSION_STR='$VER' does not match the tag '$TAG' — bump VERSION_STR and re-tag before releasing."
               exit 1

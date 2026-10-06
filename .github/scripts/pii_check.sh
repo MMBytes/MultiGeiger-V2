@@ -107,9 +107,15 @@ scan_diff() {
       'diff --git '*)
         file=""; skip=0 ;;
       '+++ b/'*)
-        file=${line#+++ b/}
+        # git appends a TAB after a path that contains a space.
+        file=${line#+++ b/}; file=${file%$'\t'}
         if [[ $file =~ $SKIP_PATHS ]]; then skip=1; else skip=0; fi ;;
-      '+++ '*|'--- '*|'index '*|'Binary files'*|'old mode'*|'new mode'*|'similarity'*|'rename '*|'new file'*|'deleted file'*)
+      '+++ '*)
+        # Any other +++ shape (a quoted path would land here if the diff were
+        # produced without core.quotepath=off) is a parser gap: count it, so a
+        # gap can never read as "clean".
+        report "diff-header" 0 "unrecognised header, file not scanned: $line" ;;
+      '--- '*|'index '*|'Binary files'*|'old mode'*|'new mode'*|'similarity'*|'rename '*|'new file'*|'deleted file'*)
         ;;
       '@@ '*)
         # "@@ -a,b +c,d @@" (or "+c @@" when d == 1): c is the first new line.
@@ -127,19 +133,23 @@ scan_diff() {
 
 case "${1:-}" in
   --staged)
-    scan_diff < <(git diff --cached --no-color --unified=0 --diff-filter=AMRC -- .)
+    # core.quotepath=off: with the default (on), a path with non-ASCII
+    # characters is printed quoted and octal-escaped, which the header
+    # parser would not recognise.
+    scan_diff < <(git -c core.quotepath=off diff --cached --no-color --unified=0 --diff-filter=AMRC -- .)
     ;;
   --range)
     [ -n "${2:-}" ] || { echo "usage: $0 --range <rev-range>"; exit 2; }
     range=$2
     # Both ends must resolve: an unfetched base would otherwise diff against
-    # nothing and report a silent "clean".
-    base=${range%%.*}
+    # nothing and report a silent "clean". Cut at the first two-dot run, not
+    # the first dot — refs like V2.8.4 contain dots.
+    base=${range%%..*}
     if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
       echo "::error::cannot resolve the base of range '$range' — fetch it first"
       exit 2
     fi
-    scan_diff < <(git diff --no-color --unified=0 --diff-filter=AMRC "$range" -- .)
+    scan_diff < <(git -c core.quotepath=off diff --no-color --unified=0 --diff-filter=AMRC "$range" -- .)
     # Commit messages: only the commits reachable from the tip and not from
     # the base. `A...B` would be the symmetric difference and drag in every
     # commit on the base branch since the merge base (e.g. a PR failing for

@@ -147,6 +147,10 @@ bool fuel_gauge_present(void) {
     return s_ready && s_user_present;
 }
 
+bool fuel_gauge_chip_ready(void) {
+    return s_ready;
+}
+
 void fuel_gauge_set_user_present(bool present) {
     s_user_present = present;
 }
@@ -218,6 +222,7 @@ esp_err_t fuel_gauge_read_diag(uint16_t *version, uint8_t *status) {
 esp_err_t fuel_gauge_init(i2c_master_bus_handle_t bus) { (void)bus; return ESP_OK; }
 bool      fuel_gauge_vbus_present(void)                { return false; }
 bool      fuel_gauge_present(void)                     { return false; }
+bool      fuel_gauge_chip_ready(void)                  { return false; }
 void      fuel_gauge_set_user_present(bool present)    { (void)present; }
 esp_err_t fuel_gauge_read(float *volts, float *soc_pct, float *rate_pct_per_hr) {
     (void)volts; (void)soc_pct; (void)rate_pct_per_hr;

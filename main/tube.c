@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "hal/gpio_ll.h"   // V2.8.6: inline FET write in recharge_tick (cache-safe)
 
 static const char *TAG = "tube";
 
@@ -116,6 +117,9 @@ static volatile uint32_t isr_hv_coincident    = 0;
 // on-time seen. Both under mux_hv (written by recharge_tick only),
 // snapshot + reset by tube_get_hv_ontime(). Measurement only: nothing here
 // changes when or how long the FET is driven.
+// V2.8.6: the tick is now cache-safe (see hv_fet_write below), so a flash
+// erase no longer holds it off; these counters stay as the proof — long=0
+// expected even across an OTA (http_server.c logs an HVON-OTA window).
 static volatile uint32_t isr_hv_on_long   = 0;
 static volatile uint32_t isr_hv_on_max_us = 0;
 
@@ -172,6 +176,19 @@ void tube_set_pulse_callback(tube_pulse_cb_t cb) {
 
 static gptimer_handle_t recharge_timer = NULL;
 
+// V2.8.6 (review 2.7, level 3): the recharge interrupt is now cache-safe
+// (CONFIG_GPTIMER_ISR_CACHE_SAFE, sdkconfig.defaults), so it keeps running
+// through a flash erase and ends each FET pulse on time. That only holds if
+// nothing it calls lives in flash — and gpio_set_level() does (it would need
+// CONFIG_GPIO_CTRL_FUNC_IN_IRAM, ~0.4 KB IRAM). gpio_ll_set_level() is a
+// static inline register write (out_w1ts/out_w1tc; on the C5 a ROM call,
+// also cache-independent), so it compiles into recharge_tick itself.
+// gpio_set_level()'s pin-validity check is not lost: tube_setup() configures
+// this same pin through gpio_config(), which rejects an invalid output pin.
+static inline void IRAM_ATTR hv_fet_write(uint32_t level) {
+    gpio_ll_set_level(GPIO_LL_GET_HW(GPIO_PORT_0), PIN_HV_FET_OUTPUT, level);
+}
+
 static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
                                     const gptimer_alarm_event_data_t *edata,
                                     void *user_ctx) {
@@ -199,7 +216,7 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
     }
     while (state < S_FULL) {
         if (state == S_PULSE_H) {
-            gpio_set_level(PIN_HV_FET_OUTPUT, 1);
+            hv_fet_write(1);
             // V2.6.9: stamp the coincidence-diagnostic clock at the START of
             // the pulse (not S_FULL/S_CHECK) — that's the earliest moment any
             // electrical coupling into the count node could occur, so it's
@@ -212,7 +229,7 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
             return false;
         }
         if (state == S_PULSE_L) {
-            gpio_set_level(PIN_HV_FET_OUTPUT, 0);
+            hv_fet_write(0);
             // V2.6.29: stamp FET turn-off — the drain flyback (and its phantom
             // count ~10 µs later on Rev B/C boards) starts at THIS instant, so
             // this is the zero-point for the HV blanking window. Stamped for

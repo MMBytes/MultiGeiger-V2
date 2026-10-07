@@ -9,6 +9,65 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.6 — HV charge pulses end on time during flash writes; more boot detail in syslog
+
+The HV charge pulse is switched off by a timer interrupt 1.5 ms after it
+starts. Until now that interrupt could not run while the flash was being
+erased or written (OTA updates, settings saves), so a pulse that began just
+before an erase stayed on for the whole erase — tens to hundreds of
+milliseconds. It now runs through flash operations on every board, and two
+new log lines measure the HV pulses across an OTA update to confirm it.
+The boot lines sent to syslog also gain the build, chip, flash, PSRAM and
+sensor details that were previously visible only on the serial console.
+Counting, dose calculation and uploads are unchanged.
+
+1. **The HV timer interrupt keeps running during flash writes**
+   (`CONFIG_GPTIMER_ISR_CACHE_SAFE`, all boards). Its code and data were
+   already in internal RAM; the one remaining flash-resident call, the FET
+   pin write, is now an inline register write. No measurable RAM cost.
+   Flash "auto-suspend", the other way to keep interrupts running during
+   an erase, was not used: it is not supported by the flash chips on the
+   FeatherS3-D and Heltec V4 boards, and enabling it there stops the node
+   from booting.
+2. **`HVON-OTA: window=pre long=N max_us=M`** when an authenticated upload
+   starts: the HV pulses since the last cycle, so that the next line covers
+   the upload and nothing else.
+3. **`HVON-OTA: window=ota ok=K long=N max_us=M dur_ms=D`** when the upload
+   ends, whether it succeeded or failed: the HV pulses during receive,
+   flash erase and write, verify and commit, and how long that took.
+   `ok=1` means the new firmware was committed, `ok=0` that the upload
+   failed or was refused. With item 1 in place, `long=0` is expected.
+   V2.8.5's per-cycle `HVON:` line could not show this, because the node
+   restarts before the next cycle is logged.
+4. Both lines use their own `HVON-OTA:` prefix, so scripts that read one
+   `HVON:` line per cycle are not affected. After a failed update, the next
+   cycle's `HVON:` line covers only the time since the update ended. Nodes
+   with the tube disabled write neither line.
+5. **More hardware and build detail in the boot lines sent to syslog.**
+   Most of this was until now shown only on the serial console or kept in
+   the device's RAM log. The existing `boot: Firmware …` line is unchanged;
+   each addition is its own line:
+   - `Build:` the first 9 digits of the firmware's ELF SHA-256, the same
+     prefix a crash report prints (it separates two builds with the same
+     version number and matches a coredump to its ELF), the build time,
+     the bootloader's IDF version (OTA updates never replace the
+     bootloader), and whether secure boot and flash encryption are on.
+   - `SoC:` chip package version, radio features, CPU and crystal clock,
+     and what is inside the chip package: flash/PSRAM flags on the
+     ESP32, the flash and PSRAM capacity codes on the ESP32-S3 and C5.
+   - `Flash:` the exact flash part (JEDEC ID and IDF driver), physical and
+     configured size (`?` if the size cannot be decoded), and the flash
+     mode and clock set in the build configuration.
+   - `PSRAM:` size, mode and clock, or `none`.
+   - `Sensors:` what the boot probe found: tube on/off and the
+     environment, PM, noise, VOC, light, GNSS and fuel-gauge sensors, each
+     by name or `none`. A fitted fuel gauge with "Battery attached" off
+     shows as `MAX17048 (no battery set)`.
+   The lines are sent about 10 ms apart, as the settings summary already
+   is, so a slow network cannot drop them.
+
+---
+
 ## V2.8.5 — Safer MQTT TLS, OTA and settings handling; HV on-time telemetry
 
 A maintenance release from a whole-codebase review. It fixes a set of small

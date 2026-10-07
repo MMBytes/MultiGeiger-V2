@@ -3143,12 +3143,58 @@ static void ota_send_fail(httpd_req_t *req, const char *status, const char *what
 // scheduler so OTA gets the WiFi airtime to itself).
 static esp_err_t update_post_inner(httpd_req_t *req);
 
+// --- V2.8.6: HV FET on-time across the OTA itself ---------------------------
+// V2.8.5's per-cycle "HVON:" line can never see a SUCCESSFUL OTA: the node
+// reboots ~2 s after the commit, before the next cycle logs, so the window
+// that holds the flash erase (the one event the measurement exists for) is
+// lost — seen on the test node's 2026-10-07 OTA. Two extra lines close the gap:
+//   window=pre  — counters since the last cycle, read-and-reset here so the
+//                 next line covers the upload and nothing else;
+//   window=ota  — the upload, erase, write, verify and commit, logged on
+//                 EVERY exit path (success and failure) from this wrapper,
+//                 with ok=1 only when the new image was committed.
+// Own prefix "HVON-OTA:", not "HVON:", so a script that treats each
+// "HVON: long=" line as one cycle does not count an OTA as an extra cycle.
+// Both reads happen INSIDE main_ota_begin()/main_ota_end(): the main loop's
+// cycle also reads-and-resets these counters (main.c do_tx_cycle), and once
+// the gate drops it fires the deferred cycle on its next tick — on the other
+// core of a dual-core chip that can beat a read placed after main_ota_end()
+// and leave window=ota empty. After a failed OTA the next cycle's HVON line
+// covers only the time since the upload ended; the three lines still tile.
+// Skipped when the tube is off: no recharge timer, nothing to measure.
+static bool s_ota_committed = false;   // set by update_post_inner() at commit
+
+static void ota_log_hv_ontime(const char *window, int64_t t0_us) {
+    if (!tube_is_enabled()) return;
+    uint32_t n_long = 0, max_us = 0;
+    tube_get_hv_ontime(&n_long, &max_us);
+    if (t0_us == 0) {
+        ESP_LOGI(TAG, "HVON-OTA: window=%s long=%lu max_us=%lu (threshold %u us)",
+                 window, (unsigned long)n_long, (unsigned long)max_us,
+                 (unsigned)HV_ON_LONG_US);
+    } else {
+        // ok= carries the outcome in the line itself: not every refusal path
+        // logs an "OTA FAILED" line, and other tasks' lines (e.g. the main
+        // loop's "restart requested") can land between SUCCESS and this one.
+        ESP_LOGI(TAG, "HVON-OTA: window=%s ok=%d long=%lu max_us=%lu dur_ms=%lu "
+                      "(threshold %u us)",
+                 window, s_ota_committed ? 1 : 0,
+                 (unsigned long)n_long, (unsigned long)max_us,
+                 (unsigned long)((esp_timer_get_time() - t0_us) / 1000),
+                 (unsigned)HV_ON_LONG_US);
+    }
+}
+
 static esp_err_t update_post(httpd_req_t *req) {
     log_access(req, "POST /update");
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
     main_ota_begin();
+    s_ota_committed = false;
+    ota_log_hv_ontime("pre", 0);
+    const int64_t t_ota_us = esp_timer_get_time();
     esp_err_t result = update_post_inner(req);
+    ota_log_hv_ontime("ota", t_ota_us);
     main_ota_end();
     return result;
 }
@@ -3513,6 +3559,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         return ESP_OK;
     }
 
+    s_ota_committed = true;   // V2.8.6: HVON-OTA window=ota reports ok=1
     main_request_restart();
     ESP_LOGW(TAG, "OTA SUCCESS: %s -> %.32s (%u bytes) — boot set to %s, rebooting in ~2s",
              VERSION_STR, new_desc.version, (unsigned)total, target->label);

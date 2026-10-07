@@ -978,6 +978,8 @@ static void do_tx_cycle(void) {
         // outlived its turn-off tick (flash erase / cache off), max_us says
         // by how much. Collected for a week before deciding whether HV needs
         // holding off during OTA (review 2.7 levels 2/3).
+        // V2.8.6: level 3 taken (cache-safe recharge tick); this line and the
+        // HVON-OTA window in http_server.c now verify it rather than decide it.
         ESP_LOGI(TAG, "HVON: long=%lu max_us=%lu (threshold %u us)",
                  (unsigned long)diag_hv_on_long, (unsigned long)diag_hv_on_max_us,
                  (unsigned)HV_ON_LONG_US);

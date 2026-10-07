@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include "sdkconfig.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
 
@@ -41,4 +42,33 @@ static inline const char *chip_model_str(esp_chip_model_t m) {
         case CHIP_ESP32C5: return "ESP32-C5";
         default:           return "?";
     }
+}
+
+// V2.8.6: PSRAM bus mode / clock as baked into THIS binary. IDF prints its own
+// "found N MB PSRAM, speed X, mode Y" line from esp_psram_init(), before
+// app_main — so before the applog hook exists — and neither value is
+// runtime-queryable afterwards. Shared by applog's ring-setup line and the
+// syslog boot banner (was an inline #if ladder in applog.c since V2.6.10).
+// The plain ESP32 has no mode *choice* in Kconfig, but its Kconfig.spiram
+// defines SPIRAM_MODE_QUAD=y unconditionally, so the QUAD arm covers it.
+static inline const char *psram_mode_str(void) {
+#if CONFIG_SPIRAM_MODE_OCT
+    return "octal";
+#elif CONFIG_SPIRAM_MODE_QUAD
+    return "quad";
+#else
+    return "unknown";
+#endif
+}
+
+static inline const char *psram_speed_str(void) {
+#if CONFIG_SPIRAM_SPEED_120M
+    return "120MHz";
+#elif CONFIG_SPIRAM_SPEED_80M
+    return "80MHz";
+#elif CONFIG_SPIRAM_SPEED_40M
+    return "40MHz";
+#else
+    return "unknown";
+#endif
 }

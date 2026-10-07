@@ -149,6 +149,21 @@ CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 # CI warns at 85 % and fails at 92 %. Change this only together with that
 # soak.
 
+# V2.8.6 (review 2.7, level 3): let the HV recharge timer interrupt run while
+# the flash cache is off. Every flash erase/write (OTA, NVS save) disables the
+# cache, and a non-IRAM interrupt is masked until it ends — so a FET pulse
+# started just before an erase stayed on for the whole erase (tens to
+# hundreds of ms) instead of 1.5 ms. With this set the gptimer interrupt is
+# allocated ESP_INTR_FLAG_IRAM. Everything the handler touches is already
+# cache-safe on every board: the driver ISR (GPTIMER_ISR_HANDLER_IN_IRAM=y,
+# IDF default), its object (GPTIMER_OBJ_CACHE_SAFE, internal RAM),
+# recharge_tick (IRAM_ATTR), esp_timer_get_time (ESP_TIMER_IN_IRAM=y),
+# tube.c's statics (internal .bss) and the FET write (gpio_ll_set_level,
+# inline). Cost: ~0 B IRAM. Not CONFIG_SPI_FLASH_AUTO_SUSPEND: the FeatherS3-D
+# Winbond and Heltec V4 Boya flash parts are not on IDF's suspend list, and an
+# unlisted part fails an assert at boot (no app rollback to save it).
+CONFIG_GPTIMER_ISR_CACHE_SAFE=y
+
 # PSA crypto key-slot pool (V2.3.15). mbedTLS 4.x routes legacy crypto
 # (mbedtls_aes_*, mbedtls_md_*, ECDHE key derivation, AES-GCM init) through
 # PSA. Each TLS handshake allocates ~5–10 PSA slots transiently; AES-GCM

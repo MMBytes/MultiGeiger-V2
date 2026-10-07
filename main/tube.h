@@ -154,6 +154,7 @@ typedef struct {
 // plus up to one 100 µs timer period; 2 ms leaves room for ordinary interrupt
 // latency, so anything above it means the turn-off tick was held off —
 // typically by a flash erase with the cache disabled. See tube_get_hv_ontime().
+// V2.8.6: the tick is cache-safe now, so long>0 would point at something new.
 #define HV_ON_LONG_US 2000
 
 /** @brief Configure GPIOs, install ISRs, and start the recharge timer.
@@ -313,9 +314,10 @@ void tube_get_diag(uint32_t *raw_edges, uint32_t *guard_removed,
  *
  *  Every HV charge pulse is timed from FET turn-on (S_PULSE_H) to turn-off
  *  (S_PULSE_L) in the recharge timer ISR. The turn-off is a later timer
- *  tick, which cannot fire while the flash cache is disabled, so a flash
- *  erase that starts inside a pulse stretches it. This reports how often
- *  that happened since the last call. Measurement only.
+ *  tick, which until V2.8.6 could not fire while the flash cache was
+ *  disabled, so a flash erase that started inside a pulse stretched it.
+ *  V2.8.6 made the tick cache-safe; this reports how often a pulse still
+ *  ran long since the last call. Measurement only.
  *
  *  @param n_long  Out: pulses whose on-time exceeded HV_ON_LONG_US.
  *  @param max_us  Out: longest on-time seen, µs (0 if no pulse ended).

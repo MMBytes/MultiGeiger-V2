@@ -37,6 +37,30 @@
 #include "tls_cert.h"          // tls_cert_boot_summary — TLS line in banner (V2.8.1)
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "esp_ota_ops.h"       // esp_ota_get_running_partition — boot slot in banner
+#include "esp_flash.h"         // esp_flash_default_chip — flash line in banner (V2.8.6)
+#include "esp_flash_chips/spi_flash_chip_driver.h"   // spi_flash_chip_t::name
+// V2.8.6: further banner lines (Build / SoC / PSRAM / Sensors)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"     // vTaskDelay — per-line pacing of the banner
+#include "esp_app_desc.h"      // esp_app_get_description, esp_app_get_elf_sha256
+#include "esp_bootloader_desc.h"   // esp_bootloader_desc_t
+#include "esp_secure_boot.h"   // esp_secure_boot_enabled
+#include "esp_efuse.h"         // esp_efuse_get_pkg_ver, esp_efuse_is_flash_encryption_enabled
+                               // (esp_flash_encrypt.h's esp_flash_encryption_enabled is deprecated in IDF 6)
+#include "esp_efuse_table.h"   // ESP_EFUSE_FLASH_CAP / ESP_EFUSE_PSRAM_CAP (S3 / C5 SoC line)
+#include "esp_clk_tree.h"      // esp_clk_tree_src_get_freq_hz — CPU / XTAL clock
+#if HAL_HAS_PSRAM
+#include "esp_psram.h"         // esp_psram_get_size
+#endif
+#include "env_sensor.h"        // env_sensor_present / env_sensor_name
+#include "pm_sensor.h"         // pm_sensor_present / pm_sensor_name
+#include "noise_sensor.h"      // noise_sensor_present / noise_sensor_name
+#include "sgp41.h"             // sgp41_present
+#include "veml7700.h"          // veml7700_present
+#include "als.h"               // als_present
+#include "gnss.h"              // gnss_present / gnss_chip_name
+#include "fuel_gauge.h"        // fuel_gauge_chip_ready / fuel_gauge_present
+#include "tube.h"              // tube_is_enabled
 
 static const char *TAG = "syslog";
 
@@ -70,6 +94,167 @@ static bool               s_in_emit = false;
 // the lines for /log and the scheduled FTPS upload.
 static uint32_t           s_tx_count   = 0;
 static uint32_t           s_drop_count = 0;
+
+// --- V2.8.6: boot banner detail lines ---------------------------------------
+// Hardware and build facts that until now existed only on the serial console
+// (IDF's own startup prints) or in the RAM /log, so server-side forensics
+// could not tell which build, bootloader, module variant or sensor set a node
+// had. Each is its OWN "boot: <Key>:" line — the "boot: Firmware" line stays
+// byte-identical because ~10 docs/scripts parsers match it up to "Chip:" and
+// count boots by "Firmware V". All are called from syslog_init() on the main
+// task after the socket is live, so every line goes straight to the server.
+
+// Flash bus mode / clock chosen in menuconfig. Not CONFIG_ESPTOOLPY_FLASHMODE
+// / _FLASHFREQ: those are the esptool image-HEADER strings, which IDF folds
+// on purpose (QIO and QOUT are written as "dio", 120M as "80m") — so they
+// would keep reading "dio 80m" after a switch to QIO. Today all 11 boards
+// are DIO at 40 or 80 MHz.
+#if CONFIG_ESPTOOLPY_FLASHMODE_QIO
+#define BANNER_FLASH_MODE "qio"
+#elif CONFIG_ESPTOOLPY_FLASHMODE_QOUT
+#define BANNER_FLASH_MODE "qout"
+#elif CONFIG_ESPTOOLPY_FLASHMODE_DIO
+#define BANNER_FLASH_MODE "dio"
+#elif CONFIG_ESPTOOLPY_FLASHMODE_DOUT
+#define BANNER_FLASH_MODE "dout"
+#elif CONFIG_ESPTOOLPY_FLASHMODE_OPI
+#define BANNER_FLASH_MODE "opi"
+#else
+#define BANNER_FLASH_MODE "?"
+#endif
+#if CONFIG_ESPTOOLPY_FLASHFREQ_120M
+#define BANNER_FLASH_FREQ "120m"
+#else
+#define BANNER_FLASH_FREQ CONFIG_ESPTOOLPY_FLASHFREQ   // only 120M is folded
+#endif
+
+// The banner grew from 5 to 9 lines sent back to back. On the tight-heap
+// heltec_v2 a burst like that outran the WiFi/lwIP drain once already
+// (V2.5.29, the config dump) — same remedy: a 1-tick yield after each line.
+#define BANNER_PACE() vTaskDelay(pdMS_TO_TICKS(10))
+
+// Build identity: which exact image and which bootloader. Two builds can carry
+// the same VERSION_STR (an OTA of V2.8.5 -> V2.8.5 is in the 2026-10 logs),
+// so the ELF SHA-256 prefix is what ties a node — and a coredump pulled from
+// it — to one specific ELF. IDF keeps only CONFIG_APP_RETRIEVE_LEN_ELF_SHA hex
+// digits of it in RAM (default 9, unchanged here): the same prefix the panic
+// handler prints as "ELF file SHA256:", so the two match character for
+// character. The bootloader is never touched by OTA, so each node runs
+// whatever its first USB flash installed; IDF documents features that depend
+// on its age. Read from flash with esp_ota_get_bootloader_description(NULL) —
+// one ~80-byte SPI read, so cache and non-IRAM interrupts are off for its
+// duration (fine on the main task; the HV tick is cache-safe since V2.8.6).
+// esp_bootloader_get_description() would instead return the APP's own weak
+// copy of the struct (the app's IDF version), not the bootloader's.
+// Bootloaders older than the descriptor format return ESP_ERR_NOT_FOUND.
+// Secure boot: on the plain ESP32 esp_secure_boot_enabled() is a build-config
+// constant (false unless secure boot is compiled in); S3/C5 read the eFuse.
+// Flash encryption is a live eFuse read on all three.
+static void banner_build(void) {
+    char elf[CONFIG_APP_RETRIEVE_LEN_ELF_SHA + 1];  // hex digits + NUL
+    esp_app_get_elf_sha256(elf, sizeof(elf));
+    const esp_app_desc_t *app = esp_app_get_description();
+
+    esp_bootloader_desc_t bl;
+    char bl_str[80];
+    const esp_err_t bl_err = esp_ota_get_bootloader_description(NULL, &bl);
+    if (bl_err == ESP_OK) {
+        // idf_ver / date_time are fixed-size fields: bound the reads.
+        snprintf(bl_str, sizeof(bl_str), "IDF %.32s (%.24s)",
+                 bl.idf_ver, bl.date_time[0] ? bl.date_time : "no date");
+    } else {
+        snprintf(bl_str, sizeof(bl_str), "no descriptor (%s)", esp_err_to_name(bl_err));
+    }
+    ESP_LOGI("boot", "Build: ELF %s - built %.16s %.16s - bootloader %s - "
+                     "secure boot %s, flash encryption %s",
+             elf, app->date, app->time, bl_str,
+             esp_secure_boot_enabled() ? "ON" : "off",
+             esp_efuse_is_flash_encryption_enabled() ? "ON" : "off");
+    BANNER_PACE();
+}
+
+// Module variant and clocks. Package version (eFuse) is printed raw: its
+// numbering is per chip family (TRM eFuse tables). What is in the package
+// differs by family:
+//  - ESP32: esp_chip_info() derives CHIP_FEATURE_EMB_FLASH / EMB_PSRAM from
+//    the package ID (e.g. PICO-V3-02, D0WDR2-V3 carry PSRAM), so those bits
+//    are meaningful there and are printed as emb_flash / emb_psram.
+//  - ESP32-S3 / C5: IDF never sets those two bits; in-package flash and PSRAM
+//    are separate eFuse fields (FLASH_CAP, PSRAM_CAP — on the S3 e.g. PSRAM_CAP
+//    {0 none, 1 8M, 2 2M, 3 16M, 4 4M}), printed raw as flash_cap / psram_cap.
+//    This is what separates an N8 from an N8R8 module with the same pkg value.
+// Every timing figure in this project was measured at a known CPU clock, so
+// the live value is logged rather than CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ (a
+// register read here, no calibration). 0 if the clock query fails.
+static void banner_soc(const esp_chip_info_t *chip) {
+    const uint32_t f = chip->features;
+    uint32_t cpu_hz = 0, xtal_hz = 0;
+    if (esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_CPU, ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED,
+                                     &cpu_hz) != ESP_OK) cpu_hz = 0;
+    if (esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_XTAL, ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED,
+                                     &xtal_hz) != ESP_OK) xtal_hz = 0;
+    char in_pkg[40];
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C5
+    uint8_t flash_cap = 0, psram_cap = 0;   // fields are 2-3 bits wide
+    esp_efuse_read_field_blob(ESP_EFUSE_FLASH_CAP, &flash_cap,
+                              (size_t)esp_efuse_get_field_size(ESP_EFUSE_FLASH_CAP));
+    esp_efuse_read_field_blob(ESP_EFUSE_PSRAM_CAP, &psram_cap,
+                              (size_t)esp_efuse_get_field_size(ESP_EFUSE_PSRAM_CAP));
+    snprintf(in_pkg, sizeof(in_pkg), "flash_cap=%u psram_cap=%u",
+             (unsigned)flash_cap, (unsigned)psram_cap);
+#else
+    snprintf(in_pkg, sizeof(in_pkg), "emb_flash=%d emb_psram=%d",
+             (f & CHIP_FEATURE_EMB_FLASH) ? 1 : 0, (f & CHIP_FEATURE_EMB_PSRAM) ? 1 : 0);
+#endif
+    ESP_LOGI("boot", "SoC: %s pkg %lu - wifi=%d bt=%d ble=%d 802.15.4=%d %s - "
+                     "CPU %lu MHz, XTAL %lu MHz",
+             chip_model_str(chip->model), (unsigned long)esp_efuse_get_pkg_ver(),
+             (f & CHIP_FEATURE_WIFI_BGN) ? 1 : 0, (f & CHIP_FEATURE_BT) ? 1 : 0,
+             (f & CHIP_FEATURE_BLE) ? 1 : 0, (f & CHIP_FEATURE_IEEE802154) ? 1 : 0,
+             in_pkg,
+             (unsigned long)(cpu_hz / 1000000), (unsigned long)(xtal_hz / 1000000));
+    BANNER_PACE();
+}
+
+// PSRAM as built and found. applog logs the same facts at ring setup, but
+// that is before WiFi, so they reached /log only — never the server.
+static void banner_psram(void) {
+#if HAL_HAS_PSRAM
+    ESP_LOGI("boot", "PSRAM: %u MB, mode=%s speed=%s",
+             (unsigned)(esp_psram_get_size() >> 20), psram_mode_str(), psram_speed_str());
+#else
+    ESP_LOGI("boot", "PSRAM: none (board has none)");
+#endif
+    BANNER_PACE();
+}
+
+// What the boot probe found, one key per sensor class, "none" when absent —
+// so a server log alone says which data a node can produce (e.g. whether it
+// has its own T/RH or relies on a neighbour's). All probes have finished by
+// syslog_init() time: main.c probes both I2C buses before WiFi starts.
+// fuel= reports the CHIP (fuel_gauge_chip_ready), not fuel_gauge_present(),
+// which also needs the user's "Battery attached" setting: a fitted gauge with
+// that box unticked shows "MAX17048 (no battery set)" instead of "none".
+// light= names both sources when a board has both (FeatherS3-D onboard
+// ALS-PT19 plus a STEMMA VEML7700), in env_sensor_name()'s "A+B" style.
+static void banner_sensors(void) {
+    const bool veml = veml7700_present(), pt19 = als_present();
+    const char *light = (veml && pt19) ? "VEML7700+ALS-PT19"
+                      : veml ? "VEML7700" : pt19 ? "ALS-PT19" : "none";
+    const char *fuel = !fuel_gauge_chip_ready() ? "none"
+                     : fuel_gauge_present()     ? "MAX17048"
+                                                : "MAX17048 (no battery set)";
+    ESP_LOGI("boot", "Sensors: tube=%s env=%s pm=%s noise=%s voc=%s light=%s gnss=%s fuel=%s",
+             tube_is_enabled() ? "on" : "off",
+             env_sensor_present() ? env_sensor_name() : "none",
+             pm_sensor_present() ? pm_sensor_name() : "none",
+             noise_sensor_present() ? noise_sensor_name() : "none",
+             sgp41_present() ? "SGP41" : "none",
+             light,
+             gnss_present() ? gnss_chip_name() : "none",
+             fuel);
+    BANNER_PACE();
+}
 
 void syslog_init(const char *host, uint16_t port, const char *hostname) {
     if (!host || !host[0] || port == 0) {
@@ -144,6 +329,11 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
              coredump_have_dump() ? "PRESENT (/coredump.elf)" : "none",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    BANNER_PACE();
+
+    // V2.8.6: build identity and module variant right after the summary.
+    banner_build();
+    banner_soc(&chip);
 
     // V2.6.30: attached display panel as a second banner line. The probe
     // verdict is logged by display.c long before WiFi + syslog exist, so —
@@ -151,6 +341,40 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // display_setup() has always completed by syslog_init() time (main.c
     // boots the display before WiFi), so the string is final here.
     ESP_LOGI("boot", "Display: %s", display_backend_str());
+    BANNER_PACE();
+
+    // V2.8.6: flash part as a banner line. IDF prints only the driver family
+    // ("detected chip: winbond") and only on the serial console at startup,
+    // so the exact part was unknown for every deployed node. It mattered for
+    // review 2.7: CONFIG_SPI_FLASH_AUTO_SUSPEND is allowed per JEDEC ID
+    // (Winbond 0xEF4017 only, four GD parts, XMC-D, FM), and enabling it on an
+    // unlisted part fails an assert at boot. JEDEC = manufacturer byte + 16-bit
+    // device ID. chip_id and chip_drv were filled in by esp_flash_init at
+    // startup, so reading them costs no flash transaction. The physical size
+    // is decoded arithmetically from that same ID, but the call still brackets
+    // it like any flash op (cache and non-IRAM interrupts off for a few µs,
+    // other core stalled) — it sends no SPI command. "?" when the ID does not
+    // follow the size-byte convention (driver returns UNSUPPORTED_CHIP).
+    // The header size is what the image was built for; mode and clock are the
+    // menuconfig choice (BANNER_FLASH_MODE / _FREQ above).
+    {
+        const esp_flash_t *fc = esp_flash_default_chip;
+        uint32_t phys = 0;
+        char phys_str[12] = "?";
+        if (fc && esp_flash_get_physical_size(NULL, &phys) == ESP_OK && phys) {
+            snprintf(phys_str, sizeof(phys_str), "%lu", (unsigned long)(phys >> 20));
+        }
+        ESP_LOGI("boot", "Flash: JEDEC 0x%06lX (driver %s) - %s MB physical, %lu MB header - "
+                         "build mode %s %s",
+                 fc ? (unsigned long)fc->chip_id : 0UL,
+                 (fc && fc->chip_drv && fc->chip_drv->name) ? fc->chip_drv->name : "?",
+                 phys_str, fc ? (unsigned long)(fc->size >> 20) : 0UL,
+                 BANNER_FLASH_MODE, BANNER_FLASH_FREQ);
+        BANNER_PACE();
+    }
+
+    banner_psram();
+    banner_sensors();
 
     // V2.8.1: TLS verdict as a third banner line. The certificate load /
     // generation, both "listening" lines and the reconcile decision are all
@@ -160,6 +384,7 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // presents, or whether it re-issued and rebooted. On boards without HTTPS
     // the stubs make this "HTTP :80 — n/a".
     ESP_LOGI("boot", "TLS: %s — %s", http_server_transport_str(), tls_cert_boot_summary());
+    BANNER_PACE();
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);

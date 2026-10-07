@@ -82,6 +82,9 @@ idf_component_register(
         spi_flash
         espcoredump            # V2.4.18: panic dump to flash, read via /coredump.elf
         esp_psram              # V2.6.10: applog.c boot-time PSRAM mode/speed log line
+        efuse                  # V2.8.6: syslog.c banner — package version, flash encryption state
+        bootloader_support     # V2.8.6: syslog.c banner — secure boot state (esp_secure_boot_enabled)
+        esp_app_format         # V2.8.6: syslog.c banner — ELF SHA-256 (esp_app_get_elf_sha256)
         fatfs                  # V2.6.19: standalone SD logging (sd_card.c/sd_logger.c)
         sdmmc
         esp_driver_sdmmc

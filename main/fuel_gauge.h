@@ -76,6 +76,13 @@ bool fuel_gauge_vbus_present(void);
  */
 bool fuel_gauge_present(void);
 
+/** @brief True if the MAX17048 answered its probe at boot, regardless of the
+ *  user's "Battery attached" setting (V2.8.6). For hardware inventory only —
+ *  the syslog boot banner — so a fitted gauge with batt_present off is not
+ *  reported as absent. Readings stay gated on fuel_gauge_present().
+ */
+bool fuel_gauge_chip_ready(void);
+
 /** @brief Set the user-confirmed battery-presence flag (mirrors the
  *  `batt_present` config bool). Call once at boot after fuel_gauge_init(),
  *  and again on every live /config Save so a checkbox change takes effect

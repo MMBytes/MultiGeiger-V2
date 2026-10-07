@@ -2103,6 +2103,30 @@ void app_main(void) {
             }
         }
 
+        // V2.8.7: boot banner for nodes whose syslog never starts. Until V2.8.6
+        // the "boot: …" lines existed only inside syslog_init(), so a node with
+        // syslog off logged none of them, not even into /log. Same tick and
+        // same place as the syslog path above (after the TLS reconcile), so the
+        // TLS line is as final as it is there. Two triggers, one-shot:
+        //  - syslog not configured: the first tick with an STA address;
+        //  - otherwise (syslog wanted but never up, e.g. a syslog host that
+        //    never resolves), or with no WiFi at all (setup AP, wrong
+        //    password, standalone radio-off): BANNER_FALLBACK_US after boot.
+        // If syslog does come up later, syslog_init() logs the banner again
+        // so the server still gets its copy. !syslog_is_initialized() is
+        // implied by !syslog_boot_banner_logged() today (syslog_init logs the
+        // banner before returning); kept as a guard should syslog ever gain a
+        // second init path.
+        {
+            const int64_t BANNER_FALLBACK_US = 180LL * 1000 * 1000;   // 3 min
+            const bool syslog_wanted = g_cfg.syslog_enable && g_cfg.syslog_host[0];
+            if (!syslog_boot_banner_logged() && !syslog_is_initialized() &&
+                ((!syslog_wanted && n_got_ip > 0) ||
+                 esp_timer_get_time() >= BANNER_FALLBACK_US)) {
+                syslog_boot_banner();
+            }
+        }
+
         // End of boot AP window: stop the AP and switch to STA-only.
         // Radio is never shared — AP is fully down before STA starts.
         //

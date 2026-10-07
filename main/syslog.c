@@ -101,8 +101,11 @@ static uint32_t           s_drop_count = 0;
 // could not tell which build, bootloader, module variant or sensor set a node
 // had. Each is its OWN "boot: <Key>:" line — the "boot: Firmware" line stays
 // byte-identical because ~10 docs/scripts parsers match it up to "Chip:" and
-// count boots by "Firmware V". All are called from syslog_init() on the main
-// task after the socket is live, so every line goes straight to the server.
+// count boots by "Firmware V". All are called from syslog_boot_banner() on the
+// main task: with the socket live when syslog_init() is the caller, or into the
+// RAM ring alone from main.c's no-syslog fallback (V2.8.7). Server-side files
+// only ever get the socket-live copy; the RAM ring (/log, FTPS upload) can
+// hold the lines twice when syslog starts after that fallback.
 
 // Flash bus mode / clock chosen in menuconfig. Not CONFIG_ESPTOOLPY_FLASHMODE
 // / _FLASHFREQ: those are the esptool image-HEADER strings, which IDF folds
@@ -131,7 +134,14 @@ static uint32_t           s_drop_count = 0;
 // The banner grew from 5 to 9 lines sent back to back. On the tight-heap
 // heltec_v2 a burst like that outran the WiFi/lwIP drain once already
 // (V2.5.29, the config dump) — same remedy: a 1-tick yield after each line.
-#define BANNER_PACE() vTaskDelay(pdMS_TO_TICKS(10))
+// V2.8.7: only while the UDP socket is live — without syslog the lines go to
+// the RAM ring alone and there is no network queue to protect (same rule as
+// config_log_summary's LOG_PACED, which pays nothing when syslog is off).
+#define BANNER_PACE() do { if (s_sock >= 0) vTaskDelay(pdMS_TO_TICKS(10)); } while (0)
+
+// V2.8.7: set once the banner has been logged at least once this boot, by
+// either caller — see syslog_boot_banner_logged().
+static bool s_banner_logged = false;
 
 // Build identity: which exact image and which bootloader. Two builds can carry
 // the same VERSION_STR (an OTA of V2.8.5 -> V2.8.5 is in the 2026-10 logs),
@@ -256,60 +266,21 @@ static void banner_sensors(void) {
     BANNER_PACE();
 }
 
-void syslog_init(const char *host, uint16_t port, const char *hostname) {
-    if (!host || !host[0] || port == 0) {
-        ESP_LOGI(TAG, "disabled (host=%s port=%u)",
-                 host ? host : "<null>", (unsigned)port);
-        return;
-    }
-    if (s_sock >= 0) {
-        ESP_LOGW(TAG, "init called twice — ignoring");
-        return;
-    }
-
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "socket() failed: errno=%d", errno);
-        return;
-    }
-
-    memset(&s_addr, 0, sizeof(s_addr));
-    s_addr.sin_family = AF_INET;
-    s_addr.sin_port   = htons(port);
-
-    // Accept either IPv4 dotted-quad or hostname. inet_aton succeeds on the
-    // numeric path; gethostbyname is the DNS fallback. DNS lookup is one-
-    // shot at init — if the server IP changes the user must reboot. This
-    // matches the FTPS / Madavi behaviour for symmetry.
-    if (inet_aton(host, &s_addr.sin_addr) == 0) {
-        const struct hostent *he = gethostbyname(host);
-        if (!he || he->h_length <= 0 || !he->h_addr) {
-            ESP_LOGE(TAG, "resolve failed: %s", host);
-            close(sock);
-            return;
-        }
-        memcpy(&s_addr.sin_addr, he->h_addr, (size_t)he->h_length);
-    }
-
-    if (hostname && hostname[0]) {
-        size_t n = strnlen(hostname, sizeof(s_hostname) - 1);
-        memcpy(s_hostname, hostname, n);
-        s_hostname[n] = 0;
-    }
-
-    // Atomic publish — set s_sock LAST so syslog_emit's NULL-check is a
-    // safe barrier. Without this, a concurrent vprintf could observe a
-    // valid s_sock but stale s_addr.
-    s_sock = sock;
-
+// --- V2.8.7: boot banner, callable with or without syslog -------------------
+// Until V2.8.6 these lines were logged only from inside syslog_init(), so a
+// node with syslog off (or a syslog host that never resolves) never logged
+// them at all — not even into the RAM /log ring. They now live here, with two
+// callers: syslog_init() (unchanged order: banner, then "started"), and
+// main.c's loop for nodes whose syslog never comes up. Both run on the main
+// task, outside applog's mutex, so ESP_LOG here is safe (see file header).
+// Called a second time if syslog starts after main.c's fallback already
+// logged it locally — the server must still get its copy.
+void syslog_boot_banner(void) {
     // V2.5.22: boot summary as the FIRST line the server sees. The real boot
     // banner (version / board / chip / reset reason) is logged before WiFi +
     // syslog come up, so it never reaches the server — leaving the firmware
     // version and reset reason invisible to server-side forensics (the gap that
-    // once hid an OTA behind an unexplained count-rate jump). Now that the
-    // socket is live, emit a one-line summary BEFORE "started" so it leads every
-    // device's server-side log. (syslog_init runs once at startup, outside
-    // applog's mutex, so ESP_LOG here is safe — see file header.)
+    // once hid an OTA behind an unexplained count-rate jump).
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     const char *model = chip_model_str(chip.model);
@@ -385,6 +356,63 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // the stubs make this "HTTP :80 — n/a".
     ESP_LOGI("boot", "TLS: %s — %s", http_server_transport_str(), tls_cert_boot_summary());
     BANNER_PACE();
+    s_banner_logged = true;
+}
+
+bool syslog_boot_banner_logged(void) {
+    return s_banner_logged;
+}
+
+void syslog_init(const char *host, uint16_t port, const char *hostname) {
+    if (!host || !host[0] || port == 0) {
+        ESP_LOGI(TAG, "disabled (host=%s port=%u)",
+                 host ? host : "<null>", (unsigned)port);
+        return;
+    }
+    if (s_sock >= 0) {
+        ESP_LOGW(TAG, "init called twice — ignoring");
+        return;
+    }
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed: errno=%d", errno);
+        return;
+    }
+
+    memset(&s_addr, 0, sizeof(s_addr));
+    s_addr.sin_family = AF_INET;
+    s_addr.sin_port   = htons(port);
+
+    // Accept either IPv4 dotted-quad or hostname. inet_aton succeeds on the
+    // numeric path; gethostbyname is the DNS fallback. DNS lookup is one-
+    // shot at init — if the server IP changes the user must reboot. This
+    // matches the FTPS / Madavi behaviour for symmetry.
+    if (inet_aton(host, &s_addr.sin_addr) == 0) {
+        const struct hostent *he = gethostbyname(host);
+        if (!he || he->h_length <= 0 || !he->h_addr) {
+            ESP_LOGE(TAG, "resolve failed: %s", host);
+            close(sock);
+            return;
+        }
+        memcpy(&s_addr.sin_addr, he->h_addr, (size_t)he->h_length);
+    }
+
+    if (hostname && hostname[0]) {
+        size_t n = strnlen(hostname, sizeof(s_hostname) - 1);
+        memcpy(s_hostname, hostname, n);
+        s_hostname[n] = 0;
+    }
+
+    // Atomic publish — set s_sock LAST so syslog_emit's NULL-check is a
+    // safe barrier. Without this, a concurrent vprintf could observe a
+    // valid s_sock but stale s_addr.
+    s_sock = sock;
+
+    // V2.8.7: the banner lines live in syslog_boot_banner() so nodes whose
+    // syslog never starts can log them too (main.c). Emitted here BEFORE
+    // "started", so they still lead every device's server-side log.
+    syslog_boot_banner();
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);

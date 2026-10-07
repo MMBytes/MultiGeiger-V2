@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.7 — Boot detail lines also logged without syslog
+
+The `boot: …` lines (Firmware, Build, SoC, Display, Flash, PSRAM, Sensors,
+TLS) were logged only when the node started its syslog connection, so a node
+with syslog switched off never logged them at all, not even into the log
+shown on its `/log` page. They are now logged on every node, whether or not
+it sends syslog.
+
+1. **Syslog on:** unchanged. The lines are logged when the syslog connection
+   starts, ahead of `syslog: started`, and sent to the server.
+2. **Syslog off:** the lines are logged once, when the node first gets an
+   address on the network.
+3. **No network, or a syslog host name that cannot be resolved:** the lines
+   are logged 3 minutes after boot, so they are in `/log` and on the serial
+   console even for a node in setup mode. If syslog starts later, the lines
+   are sent to the server at that point as well, so `/log` then holds them
+   twice. (A syslog server that is merely down counts as syslog on: the
+   lines are logged when the connection starts, as in item 1.)
+4. Without syslog, the lines are written back to back; the 10 ms gap between
+   them is only needed while they are being sent over the network.
+
+---
+
 ## V2.8.6 — HV charge pulses end on time during flash writes; more boot detail in syslog
 
 The HV charge pulse is switched off by a timer interrupt 1.5 ms after it

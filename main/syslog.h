@@ -57,6 +57,19 @@ void syslog_stop(void);
 /** @brief True if the syslog socket is currently open. */
 bool syslog_is_initialized(void);
 
+/** @brief Log the "boot: …" banner lines (V2.8.7).
+ *
+ *  Firmware / Build / SoC / Display / Flash / PSRAM / Sensors / TLS. Called
+ *  by syslog_init() once the socket is live, and by main.c's loop for nodes
+ *  whose syslog never starts, so the lines always reach the RAM /log ring.
+ *  Paces 10 ms per line only while the syslog socket is open. Main task only:
+ *  logs via ESP_LOG, so it must never run inside the applog/syslog emit path.
+ */
+void syslog_boot_banner(void);
+
+/** @brief True once syslog_boot_banner() has run at least once this boot. */
+bool syslog_boot_banner_logged(void);
+
 /** @brief Cumulative UDP send stats since boot (either pointer may be NULL).
  *
  *  `dropped` counts `sendto()` failures — usually a DOWN LINK (no route, so

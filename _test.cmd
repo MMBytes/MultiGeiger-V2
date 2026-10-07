@@ -1,8 +1,9 @@
 @echo off
-REM Host-side test runner. Compiles test/test_main.c with a regular host
-REM C compiler and runs it. No ESP-IDF involvement.
+REM Host-side test runner. Compiles test/test_main.c and main/history.c
+REM (through the test/shim stand-in headers) with a regular host C compiler
+REM and runs the result. No ESP-IDF involvement.
 REM
-REM Usage:    _test.cmd
+REM Usage:    _test.cmd [test-name-substring]
 REM
 REM Requires gcc on PATH (install MSYS2 / MinGW-w64 or WSL on Windows;
 REM Linux + macOS have gcc/clang out of the box). CI runs the same
@@ -29,12 +30,16 @@ if errorlevel 1 (
     exit /b 1
 )
 cd /d "%~dp0"
-gcc -I main -Wall -Wextra -Werror -std=c11 -o test\run.exe test\test_main.c
+REM V2.8.8: same flags and sources as .github/workflows/_host-test.yml
+REM (HOST_TEST_CFLAGS / HOST_TEST_SRCS) - keep the two in step. test\shim
+REM stands in for the ESP-IDF headers that main\history.c includes.
+gcc -I test\shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1 -o test\run.exe test\test_main.c main\history.c
 if errorlevel 1 (
     echo Build failed.
     exit /b 1
 )
-test\run.exe
+REM Optional argument: run only tests whose name contains it (e.g. history_).
+test\run.exe %1
 set "RC=%ERRORLEVEL%"
 del test\run.exe >nul 2>nul
 exit /b %RC%

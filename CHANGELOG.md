@@ -9,6 +9,48 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.8 — Host tests: history maths, HTML escaping, sanitizer and 32-bit runs
+
+A test-only release: the firmware behaves exactly as V2.8.7. The host tests
+(the `test/` suite CI runs before every build and release) now cover the CPM
+history code and the HTML-escaping contract, and run four ways instead of two.
+
+1. **CPM history (`history.c`) is now tested** — the code behind the
+   `/status` graph, the 5- and 15-minute averages sent to GMCMap and
+   ThingSpeak, and the live CPM on the display. This code has changed in five
+   earlier releases, two of them bug fixes. The tests compile the unchanged
+   firmware file and check: the first sample after boot, the 60 s sampling,
+   the 5/15-minute averages, the hourly roll-up, the ring of the last 60
+   minutes, a falling filtered total reading as 0 instead of 65534, a
+   count-source switch, the 49.7-day millisecond-counter wrap, and the live
+   display window (10 s minimum, 60 s span at the fastest sampling rate, long
+   main-task pauses, restarts, and a very high count rate that needs 64-bit
+   arithmetic).
+2. **HTML escaping contract.** Every escape buffer that holds a text setting
+   is sized with `ESC_WORST()`. New tests check that a value made only of
+   quotes fits that size exactly, that one byte less drops only the last
+   character, and, over 20,000 random inputs, that escaping never writes past
+   the buffer, always terminates the string, never leaves a raw `<`, `>`, `"`
+   or half an `&…;` entity, and never cuts a value short when the buffer is
+   sized correctly. `ESC_WORST()` moves from `http_server.c` to `util.h`, next
+   to `html_esc()`, unchanged. An audit found every one of the 33 text
+   settings escaped before it reaches a web page.
+3. **Two more CI runs of the same tests:** with AddressSanitizer and
+   UndefinedBehaviorSanitizer (out-of-bounds access, invalid shifts, signed
+   overflow, converting a NaN or out-of-range number to an integer, and
+   similar bugs that valgrind cannot see), and built as 32-bit
+   code like the ESP32 chips themselves (the normal CI computer is 64-bit,
+   where `long` is twice as wide). Each was checked to fail on a bug planted
+   for it.
+4. **Clearer test failures and a test filter.** A failing check now names
+   the source line and the expression that failed. `_test.cmd history_` (or
+   `test/run history_`) runs only the tests whose name contains the given
+   text, and a filter that matches no test fails instead of passing.
+5. The 32-bit run immediately exposed three tests whose expected value
+   wrapped where `long` is 32 bits; they now compare correctly.
+
+---
+
 ## V2.8.7 — Boot detail lines also logged without syslog
 
 The `boot: …` lines (Firmware, Build, SoC, Display, Flash, PSRAM, Sensors,

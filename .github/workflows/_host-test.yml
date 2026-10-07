@@ -6,9 +6,21 @@
 # habit.
 #
 # What runs: test/test_main.c compiled with the host gcc against the pure
-# helpers in main/ (util.h, tube_logic.h, history.c, ...), natively and again
-# under valgrind. ~10 s. No ESP-IDF involved. See test/test_main.c for the
-# cases and _test.cmd for the equivalent local run.
+# helpers in main/ (util.h, tube_logic.h, ...) plus firmware units compiled
+# unchanged through test/shim/ (V2.8.8: history.c). Four legs, one source and
+# flag set: native, valgrind, AddressSanitizer + UBSan, and -m32. ~1 min. No
+# ESP-IDF involved. See test/test_main.c for the cases and _test.cmd for the
+# equivalent local run.
+#
+# V2.8.8 (review 2.1 A) — why the two extra legs:
+#  - ASan/UBSan catch what valgrind cannot see: stack/global overruns, signed
+#    overflow, invalid shifts, and float->int conversion of NaN/out-of-range
+#    values (lorawan_codec.h), each as a hard failure. The last one needs
+#    float-cast-overflow named explicitly: unlike clang, gcc leaves it out of
+#    -fsanitize=undefined.
+#  - -m32 builds for ILP32, the target's data model (the ESP32s are 32-bit),
+#    where `long` is 32 bits; the default runner is LP64 (64-bit long), so
+#    code that reasons about 32-bit long (env_api.h) is otherwise untested.
 name: host-test (reusable)
 
 on:
@@ -24,6 +36,12 @@ on:
 # deprecation opt-in (see build.yml) must be repeated here.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # V2.8.8: one definition for every leg, so they can never test different
+  # code. -I test/shim stands in for the ESP-IDF headers the firmware units
+  # include; BOARD_HELTEC_V2 only lets hal.h resolve (pin/capability macros,
+  # unused by the tested code). Keep in step with _test.cmd.
+  HOST_TEST_CFLAGS: "-I test/shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1"
+  HOST_TEST_SRCS: "test/test_main.c main/history.c"
 
 # Read-only token: this workflow only checks out and runs a binary.
 permissions:
@@ -39,19 +57,38 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Install valgrind
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind
+      - name: Install valgrind and 32-bit gcc support
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind gcc-multilib
 
       - name: Build host tests
         run: |
           set -e
           # -g -O1 keeps debug info + lets valgrind report line numbers,
           # without the compiler optimising away the bugs valgrind catches.
-          gcc -I main -Wall -Wextra -Werror -std=c11 -g -O1 \
-              -o test/run test/test_main.c
+          # Flags/sources word-split on purpose (no quotes around the vars).
+          gcc $HOST_TEST_CFLAGS -o test/run $HOST_TEST_SRCS
 
       - name: Run host tests (native)
         run: ./test/run
+
+      - name: Run host tests with AddressSanitizer + UBSan
+        env:
+          # Any UBSan report aborts the run with a non-zero exit (not just a
+          # printed warning); leaks are reported by ASan's LeakSanitizer.
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
+        run: |
+          set -e
+          gcc $HOST_TEST_CFLAGS -fsanitize=address,undefined,float-cast-overflow \
+              -fno-sanitize-recover=all -fno-omit-frame-pointer \
+              -o test/run_san $HOST_TEST_SRCS
+          ./test/run_san
+
+      - name: Run host tests as 32-bit (-m32, ILP32 like the target)
+        run: |
+          set -e
+          gcc $HOST_TEST_CFLAGS -m32 -o test/run32 $HOST_TEST_SRCS
+          ./test/run32
 
       - name: Run host tests under valgrind
         run: |

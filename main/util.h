@@ -145,6 +145,18 @@ static inline void url_encode_query_value(char *dst, size_t dstsz, const char *s
     dst[o] = 0;
 }
 
+/** @brief Destination size that holds html_esc() of any `max`-char input.
+ *
+ *  Worst case is 6 bytes out per byte in (every char -> "&quot;"). Why +2,
+ *  not +1: html_esc's loop guard (`o + 7 < bufsz`) reserves a full 7 bytes
+ *  (6-byte escape + NUL) before emitting ANY char, with a STRICT inequality,
+ *  so emitting the Nth char after N-1 six-byte expansions needs
+ *  bufsz >= 6N+2. A 6N+1 buffer drops the final char of a max-length
+ *  all-quotes value (V2.6.24 MAX-review finding). V2.8.8: moved here from
+ *  http_server.c so test/test_main.c pins this exact macro.
+ */
+#define ESC_WORST(max) ((max) * 6 + 2)
+
 /** @brief Escape `&`, `"`, `<`, `>` for safe use inside an HTML
  *         `value="..."` attribute.
  *

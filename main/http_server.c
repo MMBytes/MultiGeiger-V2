@@ -371,14 +371,9 @@ static void set_security_headers(httpd_req_t *req) {
 // comment that called "&amp;" the worst case), which made html_esc truncate
 // metacharacter-dense values — and for /config that truncation is not just
 // cosmetic: the form re-displays the shortened value and the next Save
-// PERSISTS it back. Size every escape destination with this macro.
-//
-// Why +2, not +1: html_esc's loop guard (`o + 7 < bufsz`, util.h) reserves
-// a full 7 bytes (6-byte escape + NUL) before emitting ANY char, with a
-// STRICT inequality — so emitting the Nth char after N-1 six-byte
-// expansions needs bufsz >= 6N+2. A `6N+1` buffer drops the final char of
-// a max-length all-quotes value (V2.6.24 MAX-review finding).
-#define ESC_WORST(max) ((max) * 6 + 2)
+// PERSISTS it back. Size every escape destination with ESC_WORST().
+// V2.8.8: ESC_WORST moved to util.h, next to html_esc, so the host tests pin
+// the exact macro these buffers use (see its comment there for the +2).
 
 // --- GET / (status, no auth) -------------------------------------------------
 

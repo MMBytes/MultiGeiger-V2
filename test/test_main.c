@@ -1,18 +1,23 @@
-// Host-side unit tests for the pure, header-only helpers under main/.
+// Host-side unit tests for the pure helpers under main/, plus (V2.8.8+)
+// firmware .c files compiled unchanged through test/shim/.
 //
 // Run on a regular host C compiler (gcc on Linux/CI, MSYS2/MinGW or
 // WSL on Windows) — no ESP-IDF, no FreeRTOS, no hardware needed.
 //
-// Build + run locally: `_test.cmd` from the repo root (Windows) or
-// `gcc -I main -Wall -Wextra -Werror -o test/run test/test_main.c &&
-// ./test/run` (Linux/macOS). CI runs it in `.github/workflows/build.yml`
-// via the `host-test` job.
+// Build + run locally: `_test.cmd [filter]` from the repo root (Windows) or
+// `gcc -I test/shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11
+// -o test/run test/test_main.c main/history.c && ./test/run [filter]`
+// (Linux/macOS) — the flags and sources are HOST_TEST_CFLAGS / HOST_TEST_SRCS
+// in .github/workflows/_host-test.yml, which CI runs four ways (native,
+// valgrind, ASan+UBSan, -m32) for both build.yml and release.yml.
 //
 // Scope: the pure, header-only modules — main/util.h, main/tube_logic.h,
-// main/lorawan_codec.h, (V2.7.3+) main/env_api.h and (V2.8.0+) main/tls_logic.h.
-// Anything that depends on IDF / FreeRTOS / hardware (NVS, HTTP handlers, sensor
-// drivers, transmission orchestrator) is out of scope — would need on-target Unity
-// or QEMU. Note the boundary this draws for env_api.h: it covers the wire
+// main/lorawan_codec.h, (V2.7.3+) main/env_api.h and (V2.8.0+) main/tls_logic.h —
+// and (V2.8.8+) main/history.c, whose FreeRTOS / esp_log includes resolve to
+// test/shim/ and whose tube counters are faked in this file.
+// Anything else that depends on IDF / FreeRTOS / hardware (NVS, HTTP handlers,
+// sensor drivers, transmission orchestrator) is out of scope — would need
+// on-target Unity or QEMU, or a shim of its own. Note the boundary this draws for env_api.h: it covers the wire
 // format on both sides (format, parse, round-trip), but NEVER the handler
 // that fills the struct from main_status_t, so a unit mix-up there is
 // bench-caught, not test-caught.
@@ -33,23 +38,45 @@
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
 #include "tls_logic.h"       // fingerprint_hex, https_redirect_location, civil_to_epoch (V2.8.0 HTTPS)
+#include "history.h"         // V2.8.8: history.c compiled in unchanged (test/shim + fakes below)
+#include "tube.h"            // V2.8.8: real prototypes, so the fakes below must match them
+#include "tube_pcnt.h"
 
 static int g_failures = 0;
 
+// V2.8.8 (review 2.1 A): every failure message names the source line and the
+// expression that failed, so a FAIL in a long test points at the exact check
+// instead of only the test function. EXPECT_INT compares as long long (was
+// long): on the ILP32 -m32 leg and on 64-bit Windows `long` is 32 bits, and a
+// uint32_t value above INT32_MAX must not wrap negative before the compare.
 #define EXPECT_STREQ(actual, expected)                                       \
     do {                                                                     \
         if (strcmp((actual), (expected)) != 0) {                             \
-            printf("    expected '%s', got '%s'\n", (expected), (actual));   \
+            printf("    line %d: EXPECT_STREQ(%s, %s)\n"                     \
+                   "      expected '%s', got '%s'\n",                        \
+                   __LINE__, #actual, #expected, (expected), (actual));      \
             return 0;                                                        \
         }                                                                    \
     } while (0)
 
 #define EXPECT_INT(actual, expected)                                         \
     do {                                                                     \
-        long _a = (long)(actual);                                            \
-        long _e = (long)(expected);                                          \
+        long long _a = (long long)(actual);                                  \
+        long long _e = (long long)(expected);                                \
         if (_a != _e) {                                                      \
-            printf("    expected %ld, got %ld\n", _e, _a);                   \
+            printf("    line %d: EXPECT_INT(%s, %s)\n"                       \
+                   "      expected %lld, got %lld\n",                        \
+                   __LINE__, #actual, #expected, _e, _a);                    \
+            return 0;                                                        \
+        }                                                                    \
+    } while (0)
+
+// V2.8.8: boolean check with the same line/expression report, for conditions
+// that are not a value compare (e.g. "no raw '<' in the output").
+#define EXPECT_TRUE(cond)                                                    \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            printf("    line %d: EXPECT_TRUE(%s) failed\n", __LINE__, #cond);\
             return 0;                                                        \
         }                                                                    \
     } while (0)
@@ -57,17 +84,19 @@ static int g_failures = 0;
 // V2.7.3: float compare for the env_api wire values. Absolute tolerance, not
 // relative — the payload carries 2-dp fixed-point, so the error budget is a
 // constant half-centi-unit regardless of magnitude.
-#define EXPECT_FLOAT_NEAR(actual, expected, tol)             \
-    do {                                                     \
-        double _a = (double)(actual);                        \
-        double _e = (double)(expected);                      \
-        double _d = _a - _e;                                 \
-        if (_d < 0) _d = -_d;                                \
-        if (_d > (double)(tol)) {                            \
-            printf("    expected %.4f +/- %.4f, got %.4f\n", \
-                   _e, (double)(tol), _a);                   \
-            return 0;                                        \
-        }                                                    \
+#define EXPECT_FLOAT_NEAR(actual, expected, tol)                          \
+    do {                                                                  \
+        double _a = (double)(actual);                                     \
+        double _e = (double)(expected);                                   \
+        double _d = _a - _e;                                              \
+        if (_d < 0) _d = -_d;                                             \
+        if (_d > (double)(tol)) {                                         \
+            printf("    line %d: EXPECT_FLOAT_NEAR(%s, %s, %s)\n"         \
+                   "      expected %.4f +/- %.4f, got %.4f\n",            \
+                   __LINE__, #actual, #expected, #tol,                    \
+                   _e, (double)(tol), _a);                                \
+            return 0;                                                     \
+        }                                                                 \
     } while (0)
 
 // V2.7.3: format into `buf` and fail the calling test if the formatter
@@ -82,7 +111,8 @@ static int g_failures = 0;
     do {                                                                     \
         int _n = env_api_format((buf), sizeof(buf), &(e));                   \
         if (_n < 0) {                                                        \
-            printf("    env_api_format rejected the input (returned -1)\n"); \
+            printf("    line %d: env_api_format rejected the input "         \
+                   "(returned -1)\n", __LINE__);                             \
             return 0;                                                        \
         }                                                                    \
     } while (0)
@@ -543,15 +573,19 @@ static int test_urlenc_zero_dstsz(void) {
 // clamp_u32  (V2.5.31 — saturating uint64->uint32 µs-delta cast, tube_logic.h)
 // ----------------------------------------------------------------------------
 
+// V2.8.8: expected values are plain UINT32_MAX, no longer (long)UINT32_MAX —
+// where `long` is 32 bits (64-bit Windows, the ILP32 -m32 leg, the target)
+// that cast wrapped to -1, and the old long-typed EXPECT_INT wrapped the
+// actual value identically, so the compare only matched by accident.
 static int test_clamp_u32_below_max(void) {
     EXPECT_INT(clamp_u32(0), 0);
     EXPECT_INT(clamp_u32(190), 190);
-    EXPECT_INT(clamp_u32(UINT32_MAX - 1), (long)(UINT32_MAX - 1));
+    EXPECT_INT(clamp_u32(UINT32_MAX - 1), UINT32_MAX - 1);
     return 1;
 }
 
 static int test_clamp_u32_at_max(void) {
-    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX), (long)UINT32_MAX);
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX), UINT32_MAX);
     return 1;
 }
 
@@ -559,9 +593,9 @@ static int test_clamp_u32_above_max_saturates(void) {
     // The >71.6-min wrap case: a bare (uint32_t) cast would wrap to a small
     // value; clamp_u32 must saturate to UINT32_MAX so the edge reads as
     // "maximally separated" and never spuriously trips the dead-time guard.
-    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1), (long)UINT32_MAX);
-    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1000000), (long)UINT32_MAX);
-    EXPECT_INT(clamp_u32(0xFFFFFFFFFFFFFFFFull), (long)UINT32_MAX);
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1), UINT32_MAX);
+    EXPECT_INT(clamp_u32((uint64_t)UINT32_MAX + 1000000), UINT32_MAX);
+    EXPECT_INT(clamp_u32(0xFFFFFFFFFFFFFFFFull), UINT32_MAX);
     return 1;
 }
 
@@ -1702,8 +1736,478 @@ static int test_html_esc_zero_bufsz_writes_nothing(void) {
 // Runner
 // ----------------------------------------------------------------------------
 
+// ----------------------------------------------------------------------------
+// html_esc contract  (V2.8.8, review 2.1 C1)
+// ----------------------------------------------------------------------------
+// ESC_WORST(n) (util.h) is how every /status and /config escape buffer is
+// sized. These pin the two halves of its contract — n all-quote chars fit in
+// ESC_WORST(n) bytes, one byte less drops exactly the last char — and fuzz the
+// general promise: never write past bufsz, always terminate, never emit a raw
+// metacharacter, and only ever stop BETWEEN input chars (no half entity).
+
+#define ESC_CANARY 0x5A
+
+// Reverse html_esc for the checks below. Returns the decoded length, or -1 if
+// `s` holds a raw metacharacter or an '&' that starts none of the 4 entities.
+static int html_unesc(const char *s, char *out, size_t outsz) {
+    static const struct { const char *ent; char c; } map[] = {
+        { "&amp;", '&' }, { "&quot;", '"' }, { "&lt;", '<' }, { "&gt;", '>' },
+    };
+    size_t o = 0;
+    while (*s) {
+        if (*s == '<' || *s == '>' || *s == '"') return -1;
+        if (*s == '&') {
+            size_t k;
+            for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+                size_t len = strlen(map[k].ent);
+                if (strncmp(s, map[k].ent, len) == 0) { s += len; break; }
+            }
+            if (k == sizeof(map) / sizeof(map[0])) return -1;
+            if (o + 1 >= outsz) return -1;
+            out[o++] = map[k].c;
+            continue;
+        }
+        if (o + 1 >= outsz) return -1;
+        out[o++] = *s++;
+    }
+    out[o] = 0;
+    return (int)o;
+}
+
+static int test_html_esc_worst_case_fits(void) {
+    for (size_t n = 1; n <= 64; n++) {
+        char in[65];
+        char out[ESC_WORST(64) + 8];
+        memset(in, '"', n);
+        in[n] = 0;
+        memset(out, ESC_CANARY, sizeof(out));
+        html_esc(in, out, ESC_WORST(n));
+        EXPECT_INT(strlen(out), 6 * n);                       // every quote kept
+        for (size_t i = 0; i < n; i++) EXPECT_TRUE(strncmp(out + 6 * i, "&quot;", 6) == 0);
+        for (size_t i = ESC_WORST(n); i < sizeof(out); i++)   // nothing past bufsz
+            EXPECT_INT((unsigned char)out[i], ESC_CANARY);
+    }
+    return 1;
+}
+
+static int test_html_esc_one_byte_short_drops_last_char(void) {
+    // ESC_WORST(n) - 1 = 6n+1: the documented reason for the "+2". The last
+    // quote no longer fits; the output is the first n-1, cleanly terminated.
+    for (size_t n = 1; n <= 64; n++) {
+        char in[65];
+        char out[ESC_WORST(64) + 8];
+        memset(in, '"', n);
+        in[n] = 0;
+        memset(out, ESC_CANARY, sizeof(out));
+        html_esc(in, out, ESC_WORST(n) - 1);
+        EXPECT_INT(strlen(out), 6 * (n - 1));
+        for (size_t i = ESC_WORST(n) - 1; i < sizeof(out); i++)
+            EXPECT_INT((unsigned char)out[i], ESC_CANARY);
+    }
+    return 1;
+}
+
+static int test_html_esc_fuzz_contract(void) {
+    // Deterministic LCG so a failure reproduces. Alphabet: the 4 metas, plain
+    // ASCII, control chars and high bytes (UTF-8 lead/continuation bytes).
+    static const char alpha[] = "&\"<>aZ9 =;'/\t\x01\x7f\x80\xc3\xa9\xff";
+    uint32_t seed = 0x2B992DDFu;
+    for (int iter = 0; iter < 20000; iter++) {
+        char in[81], out[600], dec[90];
+        seed = seed * 1664525u + 1013904223u;
+        size_t len = (seed >> 8) % 81;
+        for (size_t i = 0; i < len; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            in[i] = alpha[(seed >> 16) % (sizeof(alpha) - 1)];
+        }
+        in[len] = 0;
+        seed = seed * 1664525u + 1013904223u;
+        size_t bufsz = 1 + (seed >> 8) % (sizeof(out) - 16);
+        memset(out, ESC_CANARY, sizeof(out));
+        html_esc(in, out, bufsz);
+        for (size_t i = bufsz; i < sizeof(out); i++)          // no write past bufsz
+            EXPECT_INT((unsigned char)out[i], ESC_CANARY);
+        EXPECT_TRUE(memchr(out, 0, bufsz) != NULL);           // terminated inside
+        int d = html_unesc(out, dec, sizeof(dec));
+        EXPECT_TRUE(d >= 0);                                  // no raw meta, no half entity
+        EXPECT_TRUE(strncmp(dec, in, (size_t)d) == 0);        // a prefix of the input
+        if (bufsz >= ESC_WORST(len)) EXPECT_INT(d, len);      // ...and all of it when sized
+    }
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// history.c  (V2.8.8, review 2.1 C2)
+// ----------------------------------------------------------------------------
+// main/history.c is compiled into this binary unchanged. Its FreeRTOS/esp_log
+// includes resolve to test/shim/; the four tube.h / tube_pcnt.h functions it
+// reads are faked here, so each test drives the monotonic counters and the ms
+// clock directly. Filtered source = pcnt total - wide-blanked total, exactly
+// as source_total() composes it.
+
+#include "freertos/semphr.h"   // the shim's declaration, so the definition below is type-checked
+int shim_mutex_create_fails = 0;
+
+static bool     g_fake_tube_on = true;
+static uint32_t g_fake_raw     = 0;   // tube_get_total_counts()
+static uint32_t g_fake_pcnt    = 0;   // tube_pcnt_filtered_total()
+static uint32_t g_fake_bw      = 0;   // tube_get_blanked_wide_total()
+
+bool     tube_is_enabled(void)             { return g_fake_tube_on; }
+uint32_t tube_get_total_counts(void)       { return g_fake_raw; }
+uint32_t tube_pcnt_filtered_total(void)    { return g_fake_pcnt; }
+uint32_t tube_get_blanked_wide_total(void) { return g_fake_bw; }
+
+static void hist_fresh(void) {
+    g_fake_tube_on = true;
+    g_fake_raw = g_fake_pcnt = g_fake_bw = 0;
+    shim_mutex_create_fails = 0;
+    history_init();
+}
+
+// One 60 s sample on the raw source: `cpm` counts arrive, the clock advances.
+static void hist_minute(uint32_t *t, uint32_t cpm) {
+    g_fake_raw += cpm;
+    *t += 60000u;
+    history_tick(*t, false);
+}
+
+static int test_history_first_tick_only_primes(void) {
+    history_snapshot_t s;
+    uint32_t t = 1000;
+    hist_fresh();
+    g_fake_raw = 5000;                    // counts since boot: not a minute's worth
+    history_tick(t, false);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 0);
+    hist_minute(&t, 42);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 1);
+    EXPECT_INT(s.cpm_now, 42);            // the delta, not the 5042 total
+    EXPECT_INT(s.cpm_min[1], HIST_EMPTY); // unfilled slots carry the sentinel
+    return 1;
+}
+
+static int test_history_samples_every_60s_not_sooner(void) {
+    history_snapshot_t s;
+    hist_fresh();
+    history_tick(0, false);
+    g_fake_raw = 30;
+    history_tick(59999, false);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 0);
+    history_tick(60000, false);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 1);
+    EXPECT_INT(s.cpm_now, 30);
+    return 1;
+}
+
+static int test_history_cpm5_cpm15_ramp(void) {
+    history_snapshot_t s;
+    uint32_t t = 0;
+    hist_fresh();
+    history_tick(t, false);
+    for (uint32_t m = 1; m <= 15; m++) hist_minute(&t, m * 10);   // 10, 20 … 150
+    history_get(&s);
+    EXPECT_INT(s.cpm_now, 150);
+    EXPECT_INT(s.cpm5, (110 + 120 + 130 + 140 + 150) / 5);       // newest 5
+    EXPECT_INT(s.cpm15, (10 + 150) * 15 / 2 / 15);               // all 15
+    hist_fresh();                                                // fewer than 5 held:
+    t = 0;                                                       // mean of what exists
+    history_tick(t, false);
+    hist_minute(&t, 10);
+    hist_minute(&t, 21);
+    history_get(&s);
+    EXPECT_INT(s.cpm5, 15);                                      // (10+21)/2, floor
+    EXPECT_INT(s.cpm15, 15);
+    return 1;
+}
+
+static int test_history_clamps_huge_minute(void) {
+    history_snapshot_t s;
+    uint32_t t = 0;
+    hist_fresh();
+    history_tick(t, false);
+    hist_minute(&t, 70000);
+    history_get(&s);
+    EXPECT_INT(s.cpm_now, 0xFFFE);        // clamped below the 0xFFFF sentinel
+    return 1;
+}
+
+static int test_history_top_bit_delta_reads_zero(void) {
+    // V2.6.29/V2.6.31: the composed filtered total can fall within a minute
+    // (the wide-phantom subtrahend lands as a lump). The unsigned delta then
+    // wraps to a top-bit value, which must read as 0, never as 65534.
+    history_snapshot_t s;
+    hist_fresh();
+    g_fake_pcnt = 1000;
+    history_tick(0, true);
+    g_fake_pcnt = 1010;                   // +10 counts...
+    g_fake_bw   = 18;                     // ...but an 18-count lump subtracted
+    history_tick(60000, true);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 1);
+    EXPECT_INT(s.cpm_now, 0);
+    return 1;
+}
+
+static int test_history_source_switch_reprimes(void) {
+    history_snapshot_t s;
+    uint32_t t = 0;
+    hist_fresh();
+    history_tick(t, false);
+    hist_minute(&t, 50);
+    g_fake_pcnt = 9;                      // filtered total: a different magnitude
+    t += 60000u;
+    history_tick(t, true);                // switch: re-prime, no garbage minute
+    history_get(&s);
+    EXPECT_INT(s.min_count, 1);
+    g_fake_pcnt += 33;
+    t += 60000u;
+    history_tick(t, true);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 2);
+    EXPECT_INT(s.cpm_now, 33);
+    return 1;
+}
+
+static int test_history_hourly_rollup(void) {
+    history_snapshot_t s;
+    uint32_t t = 0;
+    hist_fresh();
+    history_tick(t, false);
+    for (int m = 0; m < 59; m++) hist_minute(&t, (m % 2) ? 40 : 20);
+    history_get(&s);
+    EXPECT_INT(s.hour_count, 0);          // 59 samples: no hour yet
+    hist_minute(&t, 40);
+    history_get(&s);
+    EXPECT_INT(s.hour_count, 1);
+    EXPECT_INT(s.cpm_hour[0], 30);        // mean of 30 × 20 and 30 × 40
+    for (int m = 0; m < 60; m++) hist_minute(&t, 7);
+    history_get(&s);
+    EXPECT_INT(s.hour_count, 2);
+    EXPECT_INT(s.cpm_hour[1], 7);         // oldest..newest order
+    return 1;
+}
+
+static int test_history_minute_ring_wraps_oldest_first(void) {
+    history_snapshot_t s;
+    uint32_t t = 0;
+    hist_fresh();
+    history_tick(t, false);
+    for (uint32_t m = 1; m <= HIST_MIN_DEPTH + 5; m++) hist_minute(&t, m);
+    history_get(&s);
+    EXPECT_INT(s.min_count, HIST_MIN_DEPTH);
+    EXPECT_INT(s.cpm_min[0], 6);                       // 1..5 overwritten
+    EXPECT_INT(s.cpm_min[HIST_MIN_DEPTH - 1], HIST_MIN_DEPTH + 5);
+    return 1;
+}
+
+static int test_history_ms_clock_wrap(void) {
+    // 49.7-day uint32 ms rollover: the 60 s gate is an unsigned difference.
+    history_snapshot_t s;
+    uint32_t t = 0xFFFFFFFFu - 20000u;
+    hist_fresh();
+    history_tick(t, false);
+    hist_minute(&t, 12);                  // t wraps past 0 here
+    history_get(&s);
+    EXPECT_INT(s.min_count, 1);
+    EXPECT_INT(s.cpm_now, 12);
+    return 1;
+}
+
+static int test_history_inert_when_disabled(void) {
+    history_snapshot_t s;
+    uint32_t t = 0, cpm = 777;
+    hist_fresh();
+    g_fake_tube_on = false;
+    history_tick(t, false);
+    hist_minute(&t, 99);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 0);
+    EXPECT_TRUE(!history_live_cpm(t, false, &cpm));
+    EXPECT_INT(cpm, 777);                 // untouched on false
+    hist_fresh();
+    shim_mutex_create_fails = 1;          // "mutex alloc failed — history disabled"
+    history_init();
+    shim_mutex_create_fails = 0;
+    t = 0;
+    history_tick(t, false);
+    hist_minute(&t, 99);
+    history_get(&s);
+    EXPECT_INT(s.min_count, 0);
+    EXPECT_INT(s.cpm_min[0], HIST_EMPTY);
+    return 1;
+}
+
+// --- live 60 s window (history_live_cpm, V2.8.3) ---
+
+// Call the live window once per second from `*t` for `secs` seconds, adding
+// `per_s` counts to the given source each second. Returns the last result.
+static bool live_run(uint32_t *t, uint32_t secs, uint32_t per_s, bool filt, uint32_t *cpm) {
+    bool ok = false;
+    for (uint32_t i = 0; i < secs; i++) {
+        *t += 1000u;
+        if (filt) g_fake_pcnt += per_s; else g_fake_raw += per_s;
+        ok = history_live_cpm(*t, filt, cpm);
+    }
+    return ok;
+}
+
+static int test_live_needs_10s_span(void) {
+    uint32_t t = 0, cpm = 777;
+    hist_fresh();
+    EXPECT_TRUE(!history_live_cpm(t, false, &cpm));          // first sample
+    EXPECT_TRUE(!live_run(&t, 9, 2, false, &cpm));           // 9 s span
+    EXPECT_INT(cpm, 777);
+    EXPECT_TRUE(live_run(&t, 1, 2, false, &cpm));            // 10 s span
+    EXPECT_INT(cpm, 120);                                     // 2 counts/s
+    return 1;
+}
+
+static int test_live_window_is_60s(void) {
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    live_run(&t, 60, 1, false, &cpm);                         // 60 CPM for a minute
+    EXPECT_TRUE(live_run(&t, 60, 3, false, &cpm));            // then 180 CPM
+    EXPECT_INT(cpm, 180);                                     // only the last 60 s
+    return 1;
+}
+
+static int test_live_stall_keeps_prestall_base(void) {
+    // Main-task stall > 60 s (daily FTPS upload): the window must stretch back
+    // to the last pre-stall sample, not blank or shrink to a seconds-old base.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    live_run(&t, 100, 1, false, &cpm);
+    t += 100000u;                                             // 100 s, no calls
+    g_fake_raw += 100;                                        // counts kept coming
+    EXPECT_TRUE(history_live_cpm(t, false, &cpm));
+    EXPECT_INT(cpm, 60);                                      // 100 counts / 100 s
+    EXPECT_TRUE(live_run(&t, 1, 1, false, &cpm));             // still the old base
+    EXPECT_INT(cpm, 60);
+    return 1;
+}
+
+static int test_live_high_rate_no_overflow(void) {
+    // The rate is d * 60000 / span in 64 bits. At 2000 counts/s the 60 s
+    // window holds d = 120000, and d * 60000 = 7.2e9 > 2^32: a 32-bit
+    // intermediate (e.g. `unsigned long` on the ILP32 target / -m32 leg)
+    // wraps to 2905032704 and reads 48417 CPM instead of 120000. Pins the
+    // 64-bit maths; on an LP64 host only the -m32 leg can see the difference.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    EXPECT_TRUE(live_run(&t, 60, 2000, false, &cpm));
+    EXPECT_INT(cpm, 120000);
+    return 1;
+}
+
+static int test_live_ring_holds_60s_at_900ms_cadence(void) {
+    // LIVE_SLOTS (72) must exceed 60 s / LIVE_SAMPLE_MS (67 samples) so the
+    // sample ~60 s back is still in the ring at the fastest legal cadence.
+    // 80 calls of +10 counts every 900 ms, then 66 silent calls (59.4 s):
+    // the 72-slot ring still holds the sample 60.3 s back (the second-last
+    // counting call), so the window spans only the last counting call's +10
+    // and reads 9 CPM. A ring of 67 or fewer samples spans < 60 s here and
+    // would read 0.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    for (int i = 0; i < 80; i++) { t += 900u; g_fake_raw += 10; history_live_cpm(t, false, &cpm); }
+    bool ok = false;
+    for (int i = 0; i < 66; i++) { t += 900u; ok = history_live_cpm(t, false, &cpm); }
+    EXPECT_TRUE(ok);
+    EXPECT_INT(cpm, 9);
+    return 1;
+}
+
+static int test_live_sample_gate_900ms(void) {
+    // Calls every 500 ms append at most one sample per >= 900 ms (one per
+    // 1000 ms here), so the 72 slots still reach 60 s back. Silent for
+    // 100 s, then 1 count per call (120 CPM) for 20 s: the true 60 s
+    // window holds 40 counts -> 40 CPM. Without the gate every call would
+    // append, 72 slots would span only 36 s, and the rate would read ~67.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    for (int i = 0; i < 200; i++) { t += 500u; history_live_cpm(t, false, &cpm); }
+    bool ok = false;
+    for (int i = 0; i < 40; i++) { t += 500u; g_fake_raw += 1; ok = history_live_cpm(t, false, &cpm); }
+    EXPECT_TRUE(ok);
+    EXPECT_INT(cpm, 40);
+    return 1;
+}
+
+static int test_live_ms_clock_wrap(void) {
+    uint32_t t = 0xFFFFFFFFu - 4500u, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    EXPECT_TRUE(live_run(&t, 20, 1, false, &cpm));            // spans the wrap
+    EXPECT_INT(cpm, 60);
+    return 1;
+}
+
+static int test_live_source_switch_and_reset_restart(void) {
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, false, &cpm);
+    EXPECT_TRUE(live_run(&t, 20, 1, false, &cpm));
+    EXPECT_TRUE(!live_run(&t, 1, 1, true, &cpm));             // switch: window emptied,
+    EXPECT_TRUE(!live_run(&t, 9, 1, true, &cpm));             // restarted at that call
+    EXPECT_TRUE(live_run(&t, 1, 1, true, &cpm));              // 10 s on the new source
+    history_live_reset();                                     // display off/on: the next
+    EXPECT_TRUE(!live_run(&t, 10, 1, true, &cpm));            // call is the first sample
+    EXPECT_TRUE(live_run(&t, 1, 1, true, &cpm));
+    EXPECT_INT(cpm, 60);
+    return 1;
+}
+
+static int test_live_subtrahend_step_restarts(void) {
+    // PCNT subtract mode: the per-cycle wide-phantom lump changes bw in one
+    // step; a window spanning it would read low, so it restarts instead.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    history_live_cpm(t, true, &cpm);
+    EXPECT_TRUE(live_run(&t, 30, 2, true, &cpm));
+    EXPECT_INT(cpm, 120);
+    g_fake_bw += 18;
+    EXPECT_TRUE(!live_run(&t, 1, 2, true, &cpm));             // restarted at this call
+    EXPECT_TRUE(!live_run(&t, 9, 2, true, &cpm));
+    EXPECT_TRUE(live_run(&t, 1, 2, true, &cpm));
+    EXPECT_INT(cpm, 120);                                     // no low reading
+    return 1;
+}
+
+static int test_live_falling_total_restarts(void) {
+    // Backstop: a total below the window base (top-bit delta) restarts the
+    // window rather than painting 0 CPM for a live tube.
+    uint32_t t = 0, cpm = 0;
+    hist_fresh();
+    g_fake_pcnt = 500;
+    history_live_cpm(t, true, &cpm);
+    EXPECT_TRUE(live_run(&t, 15, 1, true, &cpm));
+    g_fake_pcnt = 100;                                        // fell, bw unchanged
+    EXPECT_TRUE(!live_run(&t, 1, 0, true, &cpm));
+    EXPECT_TRUE(live_run(&t, 10, 1, true, &cpm));
+    EXPECT_INT(cpm, 60);
+    return 1;
+}
+
+// V2.8.8 (review 2.1 A): optional name filter. `run [substring]` runs only the
+// tests whose function name contains the substring (e.g. `run history_`),
+// for iterating on one area. A filter that matches nothing exits 2, so a typo
+// can never look like a green run. g_ran counts what actually executed.
+static const char *g_filter = NULL;
+static int g_ran = 0;
+
 #define RUN(test_fn)                                                         \
     do {                                                                     \
+        if (g_filter && !strstr(#test_fn, g_filter)) break;                  \
+        g_ran++;                                                             \
         if (test_fn()) {                                                     \
             printf("  PASS  %s\n", #test_fn);                                \
         } else {                                                             \
@@ -1712,7 +2216,13 @@ static int test_html_esc_zero_bufsz_writes_nothing(void) {
         }                                                                    \
     } while (0)
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 2) {
+        printf("usage: %s [test-name-substring]\n", argv[0]);
+        return 2;
+    }
+    if (argc == 2) g_filter = argv[1];
+
     printf("== safe_strcpy ==\n");
     RUN(test_safe_strcpy_basic);
     RUN(test_safe_strcpy_truncates);
@@ -1898,11 +2408,42 @@ int main(void) {
     RUN(test_tz_offset_add_colon_refuses_unsafe);
     RUN(test_html_esc_zero_bufsz_writes_nothing);
 
+    printf("== html_esc contract (V2.8.8) ==\n");
+    RUN(test_html_esc_worst_case_fits);
+    RUN(test_html_esc_one_byte_short_drops_last_char);
+    RUN(test_html_esc_fuzz_contract);
+
+    printf("== history.c (V2.8.8) ==\n");
+    RUN(test_history_first_tick_only_primes);
+    RUN(test_history_samples_every_60s_not_sooner);
+    RUN(test_history_cpm5_cpm15_ramp);
+    RUN(test_history_clamps_huge_minute);
+    RUN(test_history_top_bit_delta_reads_zero);
+    RUN(test_history_source_switch_reprimes);
+    RUN(test_history_hourly_rollup);
+    RUN(test_history_minute_ring_wraps_oldest_first);
+    RUN(test_history_ms_clock_wrap);
+    RUN(test_history_inert_when_disabled);
+    RUN(test_live_needs_10s_span);
+    RUN(test_live_window_is_60s);
+    RUN(test_live_stall_keeps_prestall_base);
+    RUN(test_live_high_rate_no_overflow);
+    RUN(test_live_ring_holds_60s_at_900ms_cadence);
+    RUN(test_live_sample_gate_900ms);
+    RUN(test_live_ms_clock_wrap);
+    RUN(test_live_source_switch_and_reset_restart);
+    RUN(test_live_subtrahend_step_restarts);
+    RUN(test_live_falling_total_restarts);
+
     printf("\n");
+    if (g_ran == 0) {
+        printf("NO TESTS MATCHED FILTER '%s'\n", g_filter ? g_filter : "");
+        return 2;
+    }
     if (g_failures == 0) {
-        printf("ALL TESTS PASS\n");
+        printf("ALL %d TESTS PASS\n", g_ran);
         return 0;
     }
-    printf("%d TEST(S) FAILED\n", g_failures);
+    printf("%d OF %d TEST(S) FAILED\n", g_failures, g_ran);
     return 1;
 }

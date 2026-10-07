@@ -67,3 +67,13 @@ claude_sessions.local.md
 docs/superpowers/
 docs/scripts/
 docs/rainfall_data/
+
+# Host-test binaries (V2.8.8): _test.cmd builds test/run.exe and deletes it
+# after the run; CI builds test/run, test/run_san and test/run32. None of
+# them belong in the repository if a run is interrupted or done by hand.
+/test/run
+/test/run.exe
+/test/run_san
+/test/run_san.exe
+/test/run32
+/test/run32.exe

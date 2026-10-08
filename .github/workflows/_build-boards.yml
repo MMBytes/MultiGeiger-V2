@@ -190,6 +190,12 @@ jobs:
           fi
           echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
 
+      - name: Verify OTA page board label
+        # A new board port that misses the UPLOAD_PROMPT_BOARD chain in
+        # http_server.c still builds and shows "(unknown board)" on /update.
+        # See the script header for why this matters and what it checks.
+        run: .github/scripts/check_ota_label.sh "${{ matrix.board }}" "build_${{ matrix.board }}/geiger_v2.bin"
+
       - name: Stage board-suffixed artefacts
         if: ${{ inputs.release }}
         run: |

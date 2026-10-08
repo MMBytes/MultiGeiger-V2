@@ -14,7 +14,10 @@
 // Scope: the pure, header-only modules — main/util.h, main/tube_logic.h,
 // main/lorawan_codec.h, (V2.7.3+) main/env_api.h and (V2.8.0+) main/tls_logic.h —
 // and (V2.8.8+) main/history.c, whose FreeRTOS / esp_log includes resolve to
-// test/shim/ and whose tube counters are faked in this file.
+// test/shim/ and whose tube counters are faked in this file. The settings
+// schema main/config_fields.def is checked as data (review 2.1 C3a): NVS key
+// rules, bounds, defaults, and its match with the /config form in
+// main/http_server.c, read as text (so run from the repo root).
 // Anything else that depends on IDF / FreeRTOS / hardware (NVS, HTTP handlers,
 // sensor drivers, transmission orchestrator) is out of scope — would need
 // on-target Unity or QEMU, or a shim of its own. Note the boundary this draws for env_api.h: it covers the wire
@@ -26,6 +29,7 @@
 // prints PASS/FAIL with the test name and tallies the failures. Non-
 // zero exit code if any test failed (so CI marks the job red).
 
+#include <ctype.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1837,6 +1841,244 @@ static int test_html_esc_fuzz_contract(void) {
 }
 
 // ----------------------------------------------------------------------------
+// config schema  (review 2.1 C3a)
+// ----------------------------------------------------------------------------
+// main/config_fields.def is the single list of runtime settings: config.h and
+// config.c expand it with their own X_* macros into the struct, the defaults,
+// the NVS load/save loops and the POST pre-clear + per-field dispatch that
+// http_server.c's config_post() calls. Nothing
+// checked the list itself, so a mistake in a new line (a 16-char key, a
+// duplicate, a default outside its own bounds) compiled cleanly and surfaced
+// on a node: NVS rejects the key, or the setting can never be saved. The rows
+// below are expanded from the same file, so these tests follow every edit.
+// The /config form side is checked against the source text of http_server.c:
+// the form is one big format string there, not something the host can render.
+
+#include "config.h"   // config_t + CFG_*_MAX; its esp_err.h resolves to test/shim/
+
+/** @brief One X_* line of config_fields.def, as data. */
+typedef struct {
+    const char *key;      ///< NVS key, which is also the HTML form field name
+    char        type;     ///< 'S' string, 'B' bool, 'U' u32, 'F' f32, '8' u8
+    size_t      size;     ///< declared buffer size (strings only)
+    size_t      member;   ///< sizeof the generated config_t member (strings only)
+    const char *sdef;     ///< string default (strings only)
+    double      def;      ///< numeric / bool default
+    double      lo, hi;   ///< validation bounds the POST dispatch applies
+} schema_row_t;
+
+static const schema_row_t k_schema[] = {
+#define X_STR(name, size, key, def) \
+    { key, 'S', (size), sizeof(((config_t *)0)->name), def, 0, 0, 0 },
+#define X_BOOL(name, key, def)        { key, 'B', 0, 0, NULL, (def), 0, 1 },
+#define X_U32(name, key, def, lo, hi) { key, 'U', 0, 0, NULL, (def), (lo), (hi) },
+#define X_F32(name, key, def, lo, hi) { key, 'F', 0, 0, NULL, (def), (lo), (hi) },
+#define X_U8(name, key, def, lo, hi)  { key, '8', 0, 0, NULL, (def), (lo), (hi) },
+#include "config_fields.def"
+#undef X_STR
+#undef X_BOOL
+#undef X_U32
+#undef X_F32
+#undef X_U8
+};
+#define SCHEMA_N (sizeof(k_schema) / sizeof(k_schema[0]))
+
+// Form keys POSTed by the /config page (and its LoRa re-join form) that are
+// deliberately NOT settings: the two submit buttons config_post() reads, and
+// the DevNonce wipe checkbox of the separate re-join POST.
+static const char *const k_form_control_keys[] = { "save", "save_restart", "wipe_nonces" };
+
+static bool schema_has_key(const char *k) {
+    for (size_t i = 0; i < SCHEMA_N; i++)
+        if (strcmp(k_schema[i].key, k) == 0) return true;
+    return false;
+}
+
+/** @brief Read a whole text file into a malloc'd NUL-terminated buffer, or NULL. */
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = NULL;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long len = ftell(f);
+        if (len > 0 && fseek(f, 0, SEEK_SET) == 0) {
+            buf = malloc((size_t)len + 1);
+            if (buf && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+                free(buf);
+                buf = NULL;
+            }
+            if (buf) buf[len] = '\0';
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
+// The tests run from the repo root (CI checkout, _test.cmd cd's there).
+#define HTTP_SERVER_SRC "main/http_server.c"
+
+static int test_schema_expands(void) {
+    // A broken expansion (an X_* macro swallowing lines) would make every
+    // per-row test below pass vacuously. 91 fields today; the bound is loose
+    // so removing a setting does not need a test edit.
+    EXPECT_TRUE(SCHEMA_N > 50);
+    return 1;
+}
+
+static int test_schema_keys_fit_nvs_and_form(void) {
+    // NVS_KEY_NAME_MAX_SIZE is 16 including the NUL, so 15 characters at most;
+    // a longer key fails every nvs_set_* at runtime and the setting never
+    // persists. The key is also the form field name, and config_post() does
+    // not URL-decode keys, so only characters a browser sends unencoded work;
+    // the house convention is lowercase, digits and '_'.
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        const char *k = k_schema[i].key;
+        size_t len = strlen(k);
+        if (len == 0 || len > 15) {
+            printf("    key '%s': %u chars, NVS allows 1..15\n", k, (unsigned)len);
+            return 0;
+        }
+        for (const char *c = k; *c; c++) {
+            if (!((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_')) {
+                printf("    key '%s': character '%c' outside [a-z0-9_]\n", k, *c);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int test_schema_keys_unique(void) {
+    // Two fields on one key would share one NVS slot (last save wins on both)
+    // and the POST dispatch would only ever reach the first.
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        for (size_t j = i + 1; j < SCHEMA_N; j++) {
+            if (strcmp(k_schema[i].key, k_schema[j].key) == 0) {
+                printf("    key '%s' used by rows %u and %u\n", k_schema[i].key,
+                       (unsigned)i, (unsigned)j);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int test_schema_numeric_defaults_within_bounds(void) {
+    // The POST dispatch rejects values outside [lo, hi]. A default outside
+    // them is a setting the user cannot save back unchanged: the untouched
+    // form re-POSTs it and /config reports it as rejected.
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        const schema_row_t *r = &k_schema[i];
+        if (r->type == 'S' || r->type == 'B') continue;
+        if (!(isfinite(r->def) && isfinite(r->lo) && isfinite(r->hi)) ||
+            r->lo > r->hi || r->def < r->lo || r->def > r->hi) {
+            printf("    key '%s': default %g outside [%g, %g]\n", r->key, r->def, r->lo, r->hi);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int test_schema_integer_bounds_fit_target_types(void) {
+    // The integer dispatch parses into a `long` and compares with (long)lo /
+    // (long)hi. On the target `long` is 32 bits, so a bound above INT32_MAX
+    // wraps negative and rejects every value; a negative lo would let a
+    // negative number through to a uint32_t / uint8_t store, where it wraps
+    // huge. U8 fields must also fit their uint8_t.
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        const schema_row_t *r = &k_schema[i];
+        if (r->type != 'U' && r->type != '8') continue;
+        double top = (r->type == '8') ? 255.0 : 2147483647.0;
+        if (r->lo < 0 || r->hi > top) {
+            printf("    key '%s': bounds [%g, %g] do not fit %s on a 32-bit target\n",
+                   r->key, r->lo, r->hi, r->type == '8' ? "uint8_t" : "uint32_t via long");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int test_schema_string_defaults_fit(void) {
+    // config_defaults() copies the default with safe_strcpy(.., size), which
+    // truncates silently, so an over-long default would ship cut short.
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        const schema_row_t *r = &k_schema[i];
+        if (r->type != 'S') continue;
+        EXPECT_INT(r->member, r->size);   // struct member generated at the declared size
+        if (strlen(r->sdef) >= r->size) {
+            printf("    key '%s': default is %u chars, buffer holds %u\n", r->key,
+                   (unsigned)strlen(r->sdef), (unsigned)(r->size - 1));
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int test_schema_every_key_on_config_form(void) {
+    // A setting with no form field cannot be changed from /config, and the
+    // pre-clear in config_post() turns every bool absent from the POST off on
+    // each save, so a missing checkbox silently resets its setting.
+    char *src = read_text_file(HTTP_SERVER_SRC);
+    if (!src) {
+        printf("    cannot read %s (run the tests from the repo root)\n", HTTP_SERVER_SRC);
+        return 0;
+    }
+    int ok = 1;
+    for (size_t i = 0; i < SCHEMA_N; i++) {   // report every missing key, not just the first
+        char needle[64];
+        // In the C source the attribute is written name=\"key\".
+        snprintf(needle, sizeof(needle), "name=\\\"%s\\\"", k_schema[i].key);
+        if (!strstr(src, needle)) {
+            printf("    key '%s' has no form field (%s) in %s\n", k_schema[i].key, needle,
+                   HTTP_SERVER_SRC);
+            ok = 0;
+        }
+    }
+    free(src);
+    return ok;
+}
+
+static int test_config_form_fields_are_schema_keys(void) {
+    // The reverse direction: a form field whose name is not a schema key is
+    // ignored by config_post(), so the user's input is dropped without a
+    // message. Only the control keys listed above are allowed to be extra.
+    char *src = read_text_file(HTTP_SERVER_SRC);
+    if (!src) {
+        printf("    cannot read %s (run the tests from the repo root)\n", HTTP_SERVER_SRC);
+        return 0;
+    }
+    int ok = 1, seen = 0;
+    const char *open = "name=\\\"";
+    for (const char *p = strstr(src, open); p; p = strstr(p, open)) {   // report all
+        // Whole attribute only: skip the tail of e.g. filename=\"..\" (the
+        // coredump download's Content-Disposition header). Any non-identifier
+        // character before it counts, so a field at the start of a string
+        // literal ("name=\"..) is still scanned.
+        char before = (p == src) ? ' ' : p[-1];
+        bool attr = !(isalnum((unsigned char)before) || before == '_' || before == '-');
+        p += strlen(open);
+        if (!attr) continue;
+        const char *end = strstr(p, "\\\"");
+        if (!end || end - p == 0 || end - p > 31) continue;   // not a field name
+        char name[32];
+        memcpy(name, p, (size_t)(end - p));
+        name[end - p] = '\0';
+        seen++;
+        bool control = false;
+        for (size_t c = 0; c < sizeof(k_form_control_keys) / sizeof(k_form_control_keys[0]); c++)
+            if (strcmp(name, k_form_control_keys[c]) == 0) control = true;
+        if (!control && !schema_has_key(name)) {
+            printf("    form field '%s' in %s is not in config_fields.def\n", name,
+                   HTTP_SERVER_SRC);
+            ok = 0;
+        }
+    }
+    free(src);
+    EXPECT_TRUE(seen > 50);   // the scan really found the form, not nothing
+    return ok;
+}
+
+// ----------------------------------------------------------------------------
 // history.c  (V2.8.8, review 2.1 C2)
 // ----------------------------------------------------------------------------
 // main/history.c is compiled into this binary unchanged. Its FreeRTOS/esp_log
@@ -2434,6 +2676,16 @@ int main(int argc, char **argv) {
     RUN(test_live_source_switch_and_reset_restart);
     RUN(test_live_subtrahend_step_restarts);
     RUN(test_live_falling_total_restarts);
+
+    printf("== config schema (review 2.1 C3a) ==\n");
+    RUN(test_schema_expands);
+    RUN(test_schema_keys_fit_nvs_and_form);
+    RUN(test_schema_keys_unique);
+    RUN(test_schema_numeric_defaults_within_bounds);
+    RUN(test_schema_integer_bounds_fit_target_types);
+    RUN(test_schema_string_defaults_fit);
+    RUN(test_schema_every_key_on_config_form);
+    RUN(test_config_form_fields_are_schema_keys);
 
     printf("\n");
     if (g_ran == 0) {

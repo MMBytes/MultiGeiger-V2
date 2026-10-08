@@ -2516,6 +2516,12 @@ static esp_err_t config_get(httpd_req_t *req) {
 //   * Cross-field invariants applied after the dispatch (wifi_11bg → ht20,
 //     antenna force-clear on boards lacking hardware, ftp_ps preserve when
 //     global PS is off)
+//
+// Planned (review 2.1 C3b): the next time a setting or invariant is added
+// here, move the parse loop + invariants into a pure config_apply_form(next,
+// prev, ...) in an NVS-free file and host-test each invariant. Keep cfg_next
+// caller-owned (see V2.6.4 below), pass the saved config in explicitly, and
+// keep the live-apply calls in this handler after config_save().
 
 static esp_err_t config_post(httpd_req_t *req) {
     log_access(req, "POST /config");
@@ -2975,6 +2981,10 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
 // only guard against flashing a swapped-pin build onto original hardware.
 // heltec_v2 (both flash variants) had no hardware change — no macro, no
 // warning paragraph.
+// A missing branch fails CI (.github/scripts/check_ota_label.sh). Planned
+// (review 2.9): at the next board port, move these labels into each hal.h
+// board block as HAL_BOARD_LABEL / HAL_HW_REV_NOTE (the 4 MB Heltec needs a
+// nested check inside the BOARD_HELTEC_V2 block, as here).
 #if BOARD_HELTEC_V2_4MB
     #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (4MB)</b>"
 #elif BOARD_HELTEC_V2

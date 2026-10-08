@@ -344,6 +344,12 @@ static esp_http_client_handle_t open_push_client(const char *url, bool use_insec
 // http_server.c::append_safe / mqtt.c::APPEND: once full, further calls
 // no-op and the body comes out truncated-but-in-bounds (the server rejects
 // invalid JSON — safe failure, no memory corruption).
+//
+// Planned (review 2.1 C4): before the next new sensor, upload target or
+// payload field, capture golden bodies/URLs from these builders as they are,
+// then move tx_append and the build_* functions to a host-testable
+// tx_payload.c and check the goldens before and after. Most receiving
+// servers answer 200/201 even for a misnamed field, so only a test sees it.
 __attribute__((format(printf, 4, 5)))
 static int tx_append(char *buf, size_t cap, int n, const char *fmt, ...) {
     if (n < 0 || (size_t)n >= cap) return (int)cap;

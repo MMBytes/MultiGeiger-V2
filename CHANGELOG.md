@@ -9,6 +9,32 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.9 — NTP sync log names the server that answered
+
+The `ntp: sync OK` line showed only the new time, so the log never said which
+of the up to three configured NTP servers had answered. It now names that
+server and, if it was configured by name, the address that name resolved to:
+
+`ntp: sync OK: 2026-10-15T18:20:00 CEST via pool.example (203.0.113.7) [reach FF/00/00]`
+
+1. **`via …`** is the server whose latest request was answered. The SNTP
+   client offers no way to ask which server it is using, so this is worked
+   out from its per-server reachability record (next item). If that record
+   does not point to exactly one server, the line says `via ?` rather than
+   guess.
+2. **`[reach …]`** is that record for each configured server, in `/config`
+   order with empty entries skipped: 8 bits per server, one per request, the
+   lowest bit the latest (`FF` = the last 8 requests all answered, `00` = no
+   answers, or no requests yet). The client keeps asking whichever server
+   last answered, so a server that stops answering gets a trailing 0 and then
+   stops changing, while the server it fell back to shows its bits filling
+   in. A server whose name could not be looked up is not counted as the
+   source, even if its last request before that was answered.
+3. Nothing else changes: the same servers are queried, at the same times,
+   in the same order.
+
+---
+
 ## V2.8.8 — Host tests: history maths, HTML escaping, sanitizer and 32-bit runs
 
 A test-only release: the firmware behaves exactly as V2.8.7. The host tests

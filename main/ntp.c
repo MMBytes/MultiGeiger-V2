@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_timer.h"
+#include "lwip/ip_addr.h" // ipaddr_ntoa_r, IPADDR_STRLEN_MAX (V2.8.9 sync source)
 #include "util.h"        // tz_offset_add_colon (V2.8.5)
 
 static const char *TAG = "ntp";
@@ -28,6 +29,13 @@ static volatile uint32_t sync_tv_sec_off = 0;
 // 0 means "not yet captured". Refreshed on every SNTP sync (hourly) so a
 // bad first-sync timestamp self-corrects and crystal drift stays < 1 s/sync.
 static volatile uint32_t s_boot_epoch_off = 0;
+
+// Number of SNTP server slots ntp_setup() actually filled (0..3), clamped to
+// CONFIG_LWIP_SNTP_MAX_SERVERS because lwIP silently drops any slot index at
+// or above it (a no-op while every board sets it to 3; it only matters if the
+// Kconfig is ever lowered). Written once per ntp_setup() and read by
+// ntp_poll(), both on the main task.
+static uint8_t s_slots = 0;
 
 // Signature is dictated by IDF's `sntp_set_time_sync_notification_cb_t`,
 // which uses non-const `struct timeval *`. We don't mutate *tv.
@@ -72,6 +80,8 @@ void ntp_setup(const char *s1, const char *s2, const char *s3, const char *tz_po
             esp_sntp_setservername(slot++, servers[i]);
         }
     }
+    s_slots = (slot > CONFIG_LWIP_SNTP_MAX_SERVERS)
+              ? (uint8_t)CONFIG_LWIP_SNTP_MAX_SERVERS : slot;
     sntp_set_time_sync_notification_cb(sync_cb);
     esp_sntp_init();
     ESP_LOGI(TAG, "SNTP started (%u server(s): %s | %s | %s; TZ=%s)",
@@ -92,9 +102,78 @@ bool ntp_time_valid(void) {
     return now > EPOCH_2026;
 }
 
+// --- Sync source -------------------------------------------------------------
+
+// Describe which configured server answered the sync, e.g.
+// "via pool.example (203.0.113.7) [reach FF/00/00]".
+//
+// lwIP keeps an RFC 5905 reachability shift register per server slot: shifted
+// left when a request is SENT to that slot, bit 0 set when a valid reply
+// ARRIVES. A receive timeout or Kiss-of-Death moves lwIP to the next slot
+// after the send already shifted a 0 into the failing one. A slot whose name
+// fails to resolve is abandoned WITHOUT a send, so it keeps a stale bit 0 —
+// but sntp_request() zeroed its address before the lookup and nothing
+// restores it, so "bit 0 set AND address resolved" leaves exactly the slot
+// that answered. lwIP exposes no "current server" getter
+// (sntp_current_server is file-static in sntp.c), so this is the only public
+// way to name the source. lwIP itself credits any accepted reply to the
+// current slot (SNTP_CHECK_RESPONSE = 0), so a late reply from a slot it just
+// left is attributed to the new one (or prints "?" if the new slot's lookup
+// is still in flight) — that is lwIP's view, reported as is.
+//
+// Must run AFTER sntp_recv() has returned: it calls the sync callback (via
+// sntp_process) BEFORE it sets bit 0, so asking from sync_cb would see the
+// answering slot as unanswered. ntp_poll() on the main task is always later.
+// If zero or several slots show bit 0 (e.g. the main task raced the tcpip
+// task on a dual-core chip), print "?" rather than guess; the register
+// bytes are always printed so the reader can judge.
+//
+// Reads lwIP state without the tcpip lock (CONFIG_LWIP_TCPIP_CORE_LOCKING is
+// off): the u8 registers are single-byte loads, and the resolved address is
+// only rewritten when the next request goes out (an hour later in POLL mode).
+static void describe_source(char *out, size_t outsz) {
+    char   reach[16];          // "FF/FF/FF" worst case for 3 slots
+    size_t rn  = 0;
+    int    src = -1;
+    int    hits = 0;
+    reach[0] = '\0';
+    for (uint8_t i = 0; i < s_slots; i++) {
+        uint8_t r = esp_sntp_getreachability(i);
+        int w = snprintf(reach + rn, sizeof(reach) - rn, "%s%02X", i ? "/" : "", r);
+        if (w > 0) rn += (size_t)w;
+        if (rn >= sizeof(reach)) rn = sizeof(reach) - 1;   // clamp on truncation
+        // Unresolved address = stale bit 0 left by a DNS-failure failover.
+        if ((r & 0x01) && !ip_addr_isany(esp_sntp_getserver(i))) {
+            if (src < 0) src = i;
+            hits++;
+        }
+    }
+
+    if (hits != 1) {
+        snprintf(out, outsz, "via ? [reach %s]", reach);
+        return;
+    }
+
+    const char *name = esp_sntp_getservername((uint8_t)src);
+    char ip[IPADDR_STRLEN_MAX];
+    if (!ipaddr_ntoa_r(esp_sntp_getserver((uint8_t)src), ip, sizeof(ip))) ip[0] = '\0';
+    // A server configured as an IP literal would print the same text twice.
+    if (name && name[0] && ip[0] && strcmp(name, ip) != 0) {
+        snprintf(out, outsz, "via %s (%s) [reach %s]", name, ip, reach);
+    } else {
+        snprintf(out, outsz, "via %s [reach %s]",
+                 (name && name[0]) ? name : (ip[0] ? ip : "?"), reach);
+    }
+}
+
 void ntp_poll(void) {
     if (!sync_pending) return;
     sync_pending = false;
+    // Sized for a 63-char server name (CFG_NTP_HOST_MAX) + IPv6 text
+    // (IPADDR_STRLEN_MAX = 46; every board enables IPv6) + the reach field:
+    // 133 bytes worst case. snprintf truncates rather than overflows.
+    char src[160];
+    describe_source(src, sizeof(src));
     char buf[32];
     uint32_t off = sync_tv_sec_off;
     time_t t = off ? (EPOCH_2026 + (time_t)off) : (time_t)time(NULL);
@@ -104,7 +183,7 @@ void ntp_poll(void) {
     struct tm tm_local;
     localtime_r(&t, &tm_local);
     strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S %Z", &tm_local);
-    ESP_LOGI(TAG, "sync OK: %s", buf);
+    ESP_LOGI(TAG, "sync OK: %s %s", buf, src);
 }
 
 const char *ntp_localtime_str(char *buf, size_t bufsz) {

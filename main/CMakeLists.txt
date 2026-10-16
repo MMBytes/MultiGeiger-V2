@@ -11,6 +11,7 @@ idf_component_register(
     SRCS
         "main.c"
         "config.c"
+        "config_form.c"
         "http_server.c"
         "tls_cert.c"
         "tube.c"

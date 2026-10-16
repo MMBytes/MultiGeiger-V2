@@ -9,6 +9,51 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.10 — Rev C V3 carrier setting; /config parsing host-tested
+
+The Adafruit QT Py ESP32-PICO and Seeed XIAO ESP32-S3 builds can now count
+from either Rev C carrier revision. The Rev C V3 carrier moves the Geiger
+pulse input from socket pad 9 (SCK) to pad 8 (RX), which frees pads 9 to 11
+(SCK / MISO / MOSI) for an SPI add-on such as the Wio-SX1262 LoRa board for
+the XIAO ESP32-S3. A new `/config` setting selects the carrier; nothing
+changes for existing nodes.
+
+1. **New `/config` setting "Rev C carrier"** (Hardware section, restart
+   required), on the QT Py ESP32-PICO and XIAO ESP32-S3 only:
+   - **V2** (default): pulse input on pad 9 / SCK, as before — QT Py GPIO14,
+     XIAO GPIO7.
+   - **V3**: pulse input on pad 8 / RX — QT Py GPIO7, XIAO GPIO44.
+
+   Only the pulse input moves; the HV pins are the same on both carriers.
+   Only the selected pin is set up at boot, and the other pad is not touched.
+   The boot log names the choice
+   (`tube setup: GMC pin 44 (neg, Rev C V3), ...`), and the boot config dump
+   has a `carrier:` line. On every other board the setting is greyed out and
+   always stored as V2, and their boot log lines are unchanged. A node
+   updated from an earlier release starts on V2, so a V2 carrier keeps
+   counting without any change.
+
+   **The setting must match the carrier.** After changing it, check the
+   `tube setup: GMC pin` line in `/log`.
+2. **The `/config` form parser moved into its own file, `config_form.c`,
+   with host tests.** It parses a submitted form and applies the rules that
+   keep a stored configuration consistent: unticked boxes read as off,
+   strict number checks, 802.11b/g implies 20 MHz, board-dependent options
+   forced off where the hardware is missing, FTP power save kept when global
+   power save is off, the tube-off and pulse-width-filter rules, and the MQTT
+   Mode B CA check. It was moved without changing behaviour, and 17 new tests
+   now check each of those rules, both sides of every board-dependent rule,
+   the rejected-value report, and that re-saving an unchanged form stores
+   exactly what was saved. The LoRaWAN DevEUI / JoinEUI / AppKey checks moved
+   with it and are now tested too.
+3. **Board definitions are checked at build time.** `main/hal.h` already
+   required every board to define each `HAL_HAS_*` feature flag, but nothing
+   enforced it: a board that forgot one built normally and silently lost the
+   feature. A missing flag or buffer size now stops the build with an error
+   naming it.
+
+---
+
 ## V2.8.9 — NTP sync log names the server that answered
 
 The `ntp: sync OK` line showed only the new time, so the log never said which

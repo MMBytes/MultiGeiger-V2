@@ -26,6 +26,13 @@ static const char *TAG = "tube";
 // it through every caller so the disabled state is invisible to consumers.
 static bool s_enabled = false;
 
+// V2.8.10: GPIO of the Geiger pulse input. The Rev C socket boards
+// (HAL_HAS_CARRIER_REV_SWITCH) can sit in a V2 carrier (pulse on pad 9) or a V3
+// carrier (pad 8), chosen by `revc_carrier`; tube_setup() fixes it once at
+// boot, before any GPIO work, and nothing changes it afterwards. Every other
+// board keeps its one compile-time pin.
+static int s_gmc_pin = PIN_GMC_COUNT_INPUT;
+
 // --- Pulse counter state ---
 static volatile uint32_t isr_gmc_counts     = 0;
 // V2.5.6: monotonic pulse total since boot — NEVER reset by tube_read(). The
@@ -468,8 +475,21 @@ static void IRAM_ATTR cap_full_isr(void *arg) {
     portEXIT_CRITICAL_ISR(&mux_cap);
 }
 
-void tube_setup(bool enabled) {
+int tube_count_pin(void) {
+    return s_gmc_pin;
+}
+
+void tube_setup(bool enabled, uint8_t carrier_rev) {
     s_enabled = enabled;
+
+    // V2.8.10: pick the count pin first. Only this one pin is configured below;
+    // the other carrier's pad is left untouched, because on the XIAO ESP32-S3 +
+    // Wio-SX1262 the V2 pad (GPIO7) is the LoRa SPI clock.
+#if HAL_HAS_CARRIER_REV_SWITCH
+    s_gmc_pin = tube_count_pin_for(carrier_rev, PIN_GMC_COUNT_INPUT, PIN_GMC_COUNT_INPUT_V3);
+#else
+    (void)carrier_rev;   // single fixed pin on this board
+#endif
 
     // Always configure HV_FET as a static LOW output, even when disabled.
     // The boost MOSFET gate must be held at a known potential — leaving it
@@ -504,7 +524,7 @@ void tube_setup(bool enabled) {
 
     // GMC count: FALLING edge
     gpio_config_t count_cfg = {
-        .pin_bit_mask = 1ULL << PIN_GMC_COUNT_INPUT,
+        .pin_bit_mask = 1ULL << s_gmc_pin,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -514,7 +534,7 @@ void tube_setup(bool enabled) {
 
     ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_HV_CAP_FULL_INPUT, cap_full_isr, NULL));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_GMC_COUNT_INPUT,   gmc_count_isr, NULL));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(s_gmc_pin,             gmc_count_isr, NULL));
 
     // 100 µs periodic timer for HV recharge state machine.
     gptimer_config_t tcfg = {
@@ -535,8 +555,16 @@ void tube_setup(bool enabled) {
     ESP_ERROR_CHECK(gptimer_start(recharge_timer));
 
     last_read_us = esp_timer_get_time();
+#if HAL_HAS_CARRIER_REV_SWITCH
+    // V2.8.10: name the carrier revision so a boot log shows which pad counts.
+    ESP_LOGI(TAG, "tube setup: GMC pin %d (neg, Rev C V%u), HV FET %d, cap %d (pos)",
+             s_gmc_pin, (unsigned)(s_gmc_pin == PIN_GMC_COUNT_INPUT ? 2 : 3),
+             PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT);
+#else
+    // Byte-identical to <= V2.8.9 on every board without the carrier select.
     ESP_LOGI(TAG, "tube setup: GMC pin %d (neg), HV FET %d, cap %d (pos)",
-             PIN_GMC_COUNT_INPUT, PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT);
+             s_gmc_pin, PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT);
+#endif
 }
 
 void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,

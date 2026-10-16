@@ -67,11 +67,8 @@
 #if HAL_HAS_HTTPS
 #include "esp_https_server.h"  // V2.8.0: httpd_ssl_start — same httpd underneath, TLS on top
 #endif
-#if HAL_HAS_LORAWAN
-#include "lorawan_codec.h"     // V2.6.23 (T8): lw_hex_decode() — /config POST EUI/key length
-                               // validation, V4-R2 only. Ringfenced per the brief: other boards
-                               // must not gain even this glue.
-#endif
+#include "config_form.h"       // V2.8.10 (C3b): /config POST parser + cross-field rules
+                               // (the LoRa EUI/key checks moved there with it)
 
 static const char *TAG = "http";
 
@@ -1994,6 +1991,16 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "id=\"i2c_pinout\" %s %s> Route I&sup2;C to the pin-out pads "
                      "(QT Py: SDA/SCL pads IO4/IO33 instead of the STEMMA QT connector) "
                      "<span class=\"r\">*</span>%s</label></div>"
+                     // V2.8.10: Rev C carrier revision — which socket pad carries the Geiger
+                     // pulse. Board-gated like i2c_pinout above (greyed on boards without
+                     // HAL_HAS_CARRIER_REV_SWITCH; config_apply_form forces 2 there). 4 slots:
+                     // disabled-attr, selected-on-V2, selected-on-V3, trailing note.
+                     "<label>Rev C carrier <span class=\"r\">*</span>"
+                     "<select name=\"revc_carrier\" %s>"
+                     "<option value=\"2\"%s>V2 &mdash; Geiger pulse on the SCK pad</option>"
+                     "<option value=\"3\"%s>V3 &mdash; Geiger pulse on the RX pad (frees SCK/MISO/MOSI, "
+                     "e.g. for the Wio-SX1262 LoRa board)</option>"
+                     "</select>%s</label>"
                      // V2.6.6: battery-attached toggle. Board-gated like the antenna switch
                      // and i2c_pinout above (greyed + force-off on boards without
                      // HAL_HAS_FUEL_GAUGE). 3 %s slots: disabled-attr, checked-attr,
@@ -2385,6 +2392,18 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "",           // never checked on this board
                      " <small>(not available on this board)</small>",
 #endif
+#if HAL_HAS_CARRIER_REV_SWITCH
+                     "",                                               // V2.8.10: not disabled here
+                     s_cfg->revc_carrier == 2 ? " selected" : "",      // V2 carrier (pad 9 / SCK)
+                     s_cfg->revc_carrier == 3 ? " selected" : "",      // V3 carrier (pad 8 / RX)
+                     " <small>Must match the carrier the module sits in. After changing "
+                     "it, check the <code>tube setup: GMC pin</code> line in /log.</small>",
+#else
+                     "disabled",   // greyed out
+                     " selected",  // always shows V2, the only value this board can store
+                     "",
+                     " <small>(not available on this board)</small>",
+#endif
 #if HAL_HAS_FUEL_GAUGE
                      "",                                     // not disabled on this board
                      s_cfg->batt_present ? "checked" : "",   // current state
@@ -2507,21 +2526,13 @@ static esp_err_t config_get(httpd_req_t *req) {
 
 // --- POST /config (parse form, save, flag restart) --------------------------
 //
-// V2.4.1: the per-field plumbing (pre-clear bools + dispatch) is now
-// generated from the schema in config_fields.def via the helpers
-// config_post_preclear_bools() and config_post_apply_field() in config.c.
-// This handler owns only the parts that DON'T fit the schema:
-//   * HTTP body slurp + URL-form parsing
-//   * Special-case key handling (`save_restart`, `oled_bright` step check)
-//   * Cross-field invariants applied after the dispatch (wifi_11bg → ht20,
-//     antenna force-clear on boards lacking hardware, ftp_ps preserve when
-//     global PS is off)
-//
-// Planned (review 2.1 C3b): the next time a setting or invariant is added
-// here, move the parse loop + invariants into a pure config_apply_form(next,
-// prev, ...) in an NVS-free file and host-test each invariant. Keep cfg_next
-// caller-owned (see V2.6.4 below), pass the saved config in explicitly, and
-// keep the live-apply calls in this handler after config_save().
+// V2.8.10 (review 2.1 C3b): parsing the form and applying the cross-field
+// rules is config_apply_form() in config_form.c (NVS-free, host-tested in
+// test/test_main.c). This handler owns the HTTP side and the side effects:
+//   * auth / same-origin checks and the HTTP body slurp
+//   * config_save(), then committing to s_cfg only once NVS has it
+//   * the live-apply calls (display brightness, battery flag, MQTT, tube
+//     guard + blanking) and the result page
 
 static esp_err_t config_post(httpd_req_t *req) {
     log_access(req, "POST /config");
@@ -2536,8 +2547,9 @@ static esp_err_t config_post(httpd_req_t *req) {
     // V2.4.6: cap raised from 4096 to 12288 to fit the URL-encoded MQTT
     // TLS CA cert (PEM up to CFG_MQTT_CA_CERT_MAX ≈ 2400 raw, ~5 KB
     // URL-encoded) plus all other form fields (~5-6 KB). 12 KB sits well
-    // under both the 16 KB Heltec form buffer and the 32 KB PSRAM-board
-    // form buffer — POST and GET are separate transient allocations.
+    // under both the 24 KB Heltec form buffer (16 KB until V2.5.29) and the
+    // 32 KB PSRAM-board form buffer — POST and GET are separate transient
+    // allocations.
     size_t total = req->content_len;
     if (total == 0 || total > 12288) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body size out of range");
@@ -2560,27 +2572,6 @@ static esp_err_t config_post(httpd_req_t *req) {
     }
     buf[total] = 0;
 
-    // V2.3.24: which submit button was clicked? "save_restart" key only
-    // appears when the user clicked "Save and restart"; plain "save" appears
-    // when they clicked "Save" (NVS persists, no reboot triggered). Default
-    // is no-restart so a hand-crafted POST that omits both keys also stays
-    // running.
-    bool restart_after_save = false;
-
-    // V2.5.34: collect the form keys of fields that matched but whose value was
-    // out of range (so the prior value was kept). Reported on the result page +
-    // logged, instead of the prior silent no-save that made an out-of-range entry
-    // (e.g. ftp_int > its max) look like nothing happened. Only known field keys
-    // ever land here (set inside the schema dispatch), so the contents are a fixed
-    // allowlist — safe to echo into the result HTML without escaping.
-    char rejected[160];
-    rejected[0] = 0;
-    int rej_n = 0;
-
-    // Start from the current config; pre-clear every bool (forms only POST
-    // ticked checkboxes, so an absent key means "unticked"). Schema-derived
-    // — see config.c::config_post_preclear_bools.
-    //
     // V2.6.4: static instead of stack — config_t is ~4 KB (dominated by
     // mqtt_tls_ca[2401]) and putting that on the 8 KB httpd stack caused a stack
     // overflow on POST (confirmed via coredump). Static is safe: httpd runs all
@@ -2589,166 +2580,17 @@ static esp_err_t config_post(httpd_req_t *req) {
     // read. Follows the same pattern as config_get's e_* + br_opts (V2.4.22).
     static config_t cfg_next;
     cfg_next = *s_cfg;
-    config_post_preclear_bools(&cfg_next);
 
-    char *p = buf;
-    while (*p) {
-        char *eq = strchr(p, '=');
-        if (!eq) break;
-        *eq = 0;
-        char *val = eq + 1;
-        char *amp = strchr(val, '&');
-        if (amp) *amp = 0;
-        url_decode(val);
-
-        // V2.3.30: oled_bright needs a STEP validator (0 or 10..100 step 10)
-        // that's tighter than the schema's generic [0,100] envelope. Handle
-        // it FIRST so the generic dispatch never sees this key.
-        // V2.3.32: 0 (OFF) accepted — display_set_contrast interprets as
-        // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
-        bool oor = false;   // matched a known field but value out of range/step
-        if (strcmp(p, "oled_bright") == 0) {
-            // V2.8.5: strict parse — "abc" used to read as 0, i.e. panel OFF.
-            long v = -1;
-            if (parse_long_strict(val, &v) &&
-                (v == 0 || (v >= 10 && v <= 100 && (v % 10) == 0))) {
-                cfg_next.oled_brightness_pct = (uint8_t)v;
-            } else {
-                oor = true;   // V2.5.34: out-of-step value kept prior — report it
-            }
-        }
-#if HAL_HAS_LORAWAN
-        // V2.6.23 (T8): DevEUI/JoinEUI/AppKey need strict hex-length
-        // validation the schema's plain X_STR copy doesn't do — same
-        // "intercept before the generic dispatch" pattern as oled_bright
-        // above. Empty is always accepted (clears the field back to
-        // "not configured"); a non-empty value must decode as exactly
-        // the required hex length via lw_hex_decode() or the whole POST
-        // value is rejected (prior stored value kept, reported below).
-        else if (strcmp(p, "lora_deveui") == 0) {
-            uint8_t scratch[8];
-            if (val[0] == '\0') {
-                cfg_next.lorawan_deveui[0] = 0;
-            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
-                safe_strcpy(cfg_next.lorawan_deveui, val, sizeof(cfg_next.lorawan_deveui));
-            } else {
-                oor = true;
-            }
-        }
-        else if (strcmp(p, "lora_joineui") == 0) {
-            uint8_t scratch[8];
-            if (val[0] == '\0') {
-                cfg_next.lorawan_joineui[0] = 0;
-            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
-                safe_strcpy(cfg_next.lorawan_joineui, val, sizeof(cfg_next.lorawan_joineui));
-            } else {
-                oor = true;
-            }
-        }
-        else if (strcmp(p, "lora_appkey") == 0) {
-            uint8_t scratch[16];
-            if (val[0] == '\0') {
-                cfg_next.lorawan_appkey[0] = 0;
-            } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
-                safe_strcpy(cfg_next.lorawan_appkey, val, sizeof(cfg_next.lorawan_appkey));
-            } else {
-                oor = true;
-            }
-        }
-#endif
-        // Generic schema dispatch. Returns true if `p` matched a known
-        // field; out-of-range numerics keep prior value and set `oor`.
-        else if (!config_post_apply_field(&cfg_next, p, val, &oor)) {
-            // Non-schema control keys.
-            if (strcmp(p, "save_restart") == 0) restart_after_save = true;
-            // Plain "save" and any unknown keys are silently ignored.
-        }
-
-        // V2.5.34: accumulate any rejected field's key (comma-separated).
-        if (oor) {
-            rej_n = append_safe(rejected, sizeof(rejected), rej_n,
-                                "%s%s", rej_n ? ", " : "", p);
-        }
-
-        if (!amp) break;
-        p = amp + 1;
-    }
+    // V2.8.10 (C3b): parse + cross-field rules live in config_form.c. It starts
+    // from this copy of the saved config, pre-clears the bools, applies each
+    // field, and reports the "Save and restart" button and any rejected values.
+    // `buf` is decoded in place, so it is freed only afterwards.
+    config_form_result_t form_res;   // ~164 B: same stack cost as the old rejected[160]
+    const config_form_caps_t caps = config_form_caps_from_hal();
+    config_apply_form(&cfg_next, s_cfg, buf, &caps, &form_res);
     free(buf);
-
-    // --- Cross-field invariants — applied after dispatch ----------------
-
-    // 802.11b/g channels are always 20 MHz — HT40 only exists under 11n.
-    // A disabled checkbox doesn't POST, so the form may send wifi_ht20=0
-    // even while the UI showed it ticked; enforce the invariant here so
-    // the stored state matches what the user saw.
-    if (cfg_next.wifi_11bg_only) cfg_next.wifi_ht20_only = true;
-
-    // External-antenna switch: silently force-disable on boards without the
-    // hardware. Defence-in-depth — the UI already greys the checkbox, but a
-    // hand-crafted POST could still set it.
-#if !HAL_HAS_ANTENNA_SWITCH
-    cfg_next.use_external_antenna = false;
-#endif
-
-    // V2.5.19: same defence-in-depth for the I²C pin-out route — force-disable
-    // on boards without the alternate pads (UI already greys it).
-#if !HAL_HAS_I2C_PINOUT_SWITCH
-    cfg_next.i2c_pinout = false;
-#endif
-
-    // V2.6.6: same defence-in-depth for the battery-attached checkbox —
-    // force-disable on boards without the MAX17048 (UI already greys it).
-#if !HAL_HAS_FUEL_GAUGE
-    cfg_next.batt_present = false;
-#endif
-
-    // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
-    // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the
-    // previously saved value rather than clobbering it to false — that way
-    // the user's preference survives a round-trip through "global PS off".
-    if (cfg_next.wifi_ps_disabled) cfg_next.ftp_ps_disabled = s_cfg->ftp_ps_disabled;
-
-    // V2.5.4: the radiation-only upload targets (Radmon, GMCMap, ThingSpeak)
-    // are meaningless without the Geiger tube. The UI greys + force-unchecks
-    // them when "Enable Geiger tube" is off (syncTube()); enforce the same
-    // invariant here so a hand-crafted POST can't enable them, and so the
-    // stored config stays honest. Unlike ftp_ps_dis we do NOT preserve the
-    // prior choice — "tube off" genuinely turns these off, not just hides them.
-    if (!cfg_next.tube_enabled) {
-        cfg_next.send_radmon = false;
-        cfg_next.send_gmc = false;
-        cfg_next.send_thingspeak = false;
-        cfg_next.pcnt_filter = false;   // V2.5.16: width filter needs count pulses
-        cfg_next.deadtime_guard = false; // V2.5.30: dead-time guard needs count pulses
-        cfg_next.hv_blank        = false;   // V2.6.29: HV blanking needs count pulses
-    }
-
-    // V2.5.30: dead-time guard is mutually exclusive with pcnt_filter — the guard
-    // runs in the GMC ISR but pcnt_filter makes the PCNT hardware path (which the
-    // guard can't reach) authoritative for the uploaded count. pcnt_filter WINS;
-    // mirror the UI's syncGuard() greying so a hand-crafted POST can't set both.
-    // (V2.6.29: hv_blank deliberately NOT cleared here — it COMPOSES with
-    // pcnt_filter via the subtract mode; see config_fields.def hv_blank.)
-    if (cfg_next.pcnt_filter) {
-        cfg_next.deadtime_guard = false;
-    }
-
-    // V2.8.5: MQTT TLS Mode B (custom CA) with an empty CA certificate is
-    // refused. mqtt_init() will not connect with it (it used to fall back to
-    // an UNVERIFIED connection), so storing it would only produce a node that
-    // silently stops publishing. Keep the previous mode + CA and report the
-    // field like an out-of-range value; Mode D remains the explicit way to
-    // connect without verification.
-    if (cfg_next.mqtt_tls_enable && cfg_next.mqtt_tls_mode == 1 &&
-        cfg_next.mqtt_tls_ca[0] == '\0') {
-        cfg_next.mqtt_tls_mode = s_cfg->mqtt_tls_mode;
-        safe_strcpy(cfg_next.mqtt_tls_ca, s_cfg->mqtt_tls_ca,
-                    sizeof(cfg_next.mqtt_tls_ca));
-        // Last writer of `rejected`, so the returned length is not kept.
-        (void)append_safe(rejected, sizeof(rejected), rej_n, "%s%s",
-                          rej_n ? ", " : "",
-                          "mqtt_tls_m (Mode B needs a CA certificate)");
-    }
+    const bool restart_after_save = form_res.restart_requested;
+    const char *rejected = form_res.rejected;
 
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
     // stays unchanged so the device continues on the old in-memory config
@@ -2783,7 +2625,7 @@ static esp_err_t config_post(httpd_req_t *req) {
     // window (a volatile uint32) on every edge, so a /config change takes effect
     // immediately — no reboot, unlike the hardware-latched pcnt_filter. No-op when
     // the tube wasn't started at boot (the count ISR isn't installed). When tube
-    // is off, the value was already force-cleared to 0 above.
+    // is off, config_apply_form() has already cleared the guard + blank enables.
     if (tube_is_enabled()) {
         tube_set_guard_us(config_effective_guard_us(s_cfg));
         // V2.6.29: live-apply the HV blanking window the same way — the count

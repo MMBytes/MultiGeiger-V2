@@ -34,6 +34,12 @@ the authoritative statement of this rule.
   **≤ V2.6.33**. Flashing a newer build onto an original carrier drives the
   HV FET PWM into the tube pickup and reads "counts" off the FET gate trace.
   Those layouts are superseded and not tracked.
+- **Rev C V3 layout** (not yet published here) moves the Geiger count signal
+  from socket pad 9 (SCK) to pad 8 (RX), so that pads 9 to 11 are free for an
+  SPI add-on such as the Wio-SX1262 LoRa board on the XIAO ESP32-S3. It needs
+  firmware **≥ V2.8.10** with `/config` → **Rev C carrier = V3**. The setting
+  defaults to V2, so a Rev C V2 carrier needs no change. It must match the
+  carrier.
 - **V1.10 mainboard (Revision A)** needs firmware **≥ V2.7.1**. V2.6.34 was
   written against a pre-fabrication pad assignment that was never
   manufactured, so for this target V2.6.34 matches no physical board.
@@ -41,7 +47,8 @@ the authoritative statement of this rule.
   tracked) stays on **≤ V2.6.33**.
 
 The browser flasher always installs the latest release, so it is only
-suitable for boards in the first and third groups.
+suitable for the Rev B V2 / Rev C V2 layouts, the Rev C V3 layout and the
+V1.10 mainboard.
 
 ## Provenance
 

@@ -11,7 +11,7 @@
  *  The production count path (tube.c gmc_count_isr) measures pulse SPACING
  *  (the 190 µs dead-time gate + the V2.5.12 edge-spacing histogram). It has
  *  never measured pulse WIDTH. This module taps the SAME pad
- *  (PIN_GMC_COUNT_INPUT) with up to TUBE_PCNT_NWIDTHS hardware PCNT units,
+ *  (tube_count_pin(), V2.8.10) with up to TUBE_PCNT_NWIDTHS hardware PCNT units,
  *  each running the peripheral glitch filter at a different width. Unit 0 is
  *  unfiltered; units 1..N reject pulses narrower than their threshold. The
  *  difference between adjacent teeth is the count of pulses in that width band
@@ -60,10 +60,10 @@ extern const uint32_t TUBE_PCNT_WIDTHS_NS[TUBE_PCNT_NWIDTHS];
  *  comb is inactive or @p i is out of range). Tooth N-1 = the filter width. */
 uint32_t tube_pcnt_width_ns(int i);
 
-/** @brief Bring up the PCNT width-comb on PIN_GMC_COUNT_INPUT.
+/** @brief Bring up the PCNT width-comb on the count pin (tube_count_pin()).
  *
- *  Call AFTER tube_setup() so the count pin is already configured as an input
- *  with the GMC ISR installed (this only adds matrix taps; it does not touch
+ *  Call AFTER tube_setup() so the count pin is already chosen and configured
+ *  as an input with the GMC ISR installed (this only adds matrix taps; it does not touch
  *  the pad's pull or interrupt config). Safe to call once; idempotent.
  *
  *  @param filter_width_ns  Glitch-filter width (ns) for the widest tooth = the

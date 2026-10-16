@@ -9,7 +9,7 @@
  *
  *  V2.4.1: the struct and the NVS/POST plumbing are now generated from a
  *  single schema in `config_fields.def` via X-macros. The previous design
- *  had the field list duplicated across:
+ *  had the field list duplicated across (V2.4.1 locations):
  *    - the struct here in config.h
  *    - `config_defaults()` in config.c
  *    - the NVS load loop in config.c
@@ -17,6 +17,9 @@
  *    - the POST pre-clear-bools loop in http_server.c
  *    - the POST per-field dispatch in http_server.c
  *  Adding one field used to touch ~6 places; now it's one line in the .def.
+ *
+ *  V2.8.10: config_defaults() and the two POST loops moved to config_form.c
+ *  (NVS-free, host-tested); config.c keeps the NVS load/save and the dump.
  */
 
 #include <stdbool.h>
@@ -90,7 +93,10 @@ typedef struct {
  */
 extern config_t g_cfg;
 
-/** @brief Fill cfg with compile-time defaults. Always safe to call. */
+/** @brief Fill cfg with compile-time defaults. Always safe to call.
+ *
+ *  Defined in config_form.c (V2.8.10) so the host tests can link it.
+ */
 void config_defaults(config_t *cfg);
 
 /** @brief Load from NVS, falling back to defaults for missing keys.
@@ -134,30 +140,5 @@ uint32_t config_effective_guard_us(const config_t *cfg);
  */
 uint32_t config_effective_blank_us(const config_t *cfg);
 
-/** @brief Pre-clear all bool fields in `next`.
- *
- *  Helper for the HTTP POST handler: form submissions only include
- *  ticked checkboxes, so every bool must be set false before parsing
- *  and re-enabled on key match. Generated from the schema so adding
- *  a new bool needs no parallel edit here.
- */
-void config_post_preclear_bools(config_t *next);
-
-/** @brief Try to apply one form field to `next`.
- *
- *  Returns true if `key` matched a known schema field (regardless of
- *  whether the value passed validation — out-of-range numerics keep
- *  their prior value). Returns false if `key` is unknown — caller can
- *  then check for non-schema keys (e.g. `save`, `save_restart`) or ignore.
- *
- *  V2.5.34: when the key matched but the numeric value was out of range
- *  (so the prior value was kept), `*out_rejected` is set true — lets the
- *  caller surface "field not saved" feedback instead of a silent no-op.
- *  Untouched on a clean apply or an unknown key. Pass NULL to ignore.
- *
- *  Specialised validators (e.g. OLED brightness step constraint) are
- *  applied by the caller BEFORE calling this — if the special handler
- *  consumed the key, don't call here.
- */
-bool config_post_apply_field(config_t *next, const char *key, const char *val,
-                             bool *out_rejected);
+// The /config POST parser (bool pre-clear, per-field dispatch, cross-field
+// rules) lives in config_form.h / config_form.c since V2.8.10.

@@ -10,7 +10,7 @@
  *  compiler, with no ESP-IDF toolchain involved.
  *
  *  V2.6.23-dev (T3, LoRaWAN port): consumed by `lorawan.cpp` (C++, RadioLib
- *  EUI/session setup) and `http_server.c` (C, hex parsing for the
+ *  EUI/session setup) and `config_form.c` (C, hex parsing for the
  *  LoRaWAN `/config` fields). `lw_build_port1`/`lw_build_port2` must stay
  *  byte-identical to the V1.9 Arduino firmware's TTN uplinks
  *  (Multigeiger_V1.9/.../transmission.cpp `send_ttn_geiger`/`send_ttn_thp`)

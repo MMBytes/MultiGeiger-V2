@@ -1,5 +1,6 @@
 @echo off
-REM Host-side test runner. Compiles test/test_main.c and main/history.c
+REM Host-side test runner. Compiles test/test_main.c, main/history.c and
+REM main/config_form.c
 REM (through the test/shim stand-in headers) with a regular host C compiler
 REM and runs the result. No ESP-IDF involvement.
 REM
@@ -32,8 +33,9 @@ if errorlevel 1 (
 cd /d "%~dp0"
 REM V2.8.8: same flags and sources as .github/workflows/_host-test.yml
 REM (HOST_TEST_CFLAGS / HOST_TEST_SRCS) - keep the two in step. test\shim
-REM stands in for the ESP-IDF headers that main\history.c includes.
-gcc -I test\shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1 -o test\run.exe test\test_main.c main\history.c
+REM stands in for the ESP-IDF headers that main\history.c includes. V2.8.10:
+REM main\config_form.c (the /config form parser) needs no shim.
+gcc -I test\shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1 -o test\run.exe test\test_main.c main\history.c main\config_form.c
 if errorlevel 1 (
     echo Build failed.
     exit /b 1

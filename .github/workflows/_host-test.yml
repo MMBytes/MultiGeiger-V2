@@ -7,7 +7,7 @@
 #
 # What runs: test/test_main.c compiled with the host gcc against the pure
 # helpers in main/ (util.h, tube_logic.h, ...) plus firmware units compiled
-# unchanged through test/shim/ (V2.8.8: history.c). Four legs, one source and
+# unchanged through test/shim/ (V2.8.8: history.c; V2.8.10: config_form.c). Four legs, one source and
 # flag set: native, valgrind, AddressSanitizer + UBSan, and -m32. ~1 min. No
 # ESP-IDF involved. See test/test_main.c for the cases and _test.cmd for the
 # equivalent local run.
@@ -41,7 +41,7 @@ env:
   # include; BOARD_HELTEC_V2 only lets hal.h resolve (pin/capability macros,
   # unused by the tested code). Keep in step with _test.cmd.
   HOST_TEST_CFLAGS: "-I test/shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1"
-  HOST_TEST_SRCS: "test/test_main.c main/history.c"
+  HOST_TEST_SRCS: "test/test_main.c main/history.c main/config_form.c"
 
 # Read-only token: this workflow only checks out and runs a binary.
 permissions:

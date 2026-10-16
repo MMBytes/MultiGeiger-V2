@@ -168,3 +168,21 @@ __attribute__((always_inline)) static inline bool
 hv_blank_hit(uint32_t off_gap, uint32_t blank_us) {
     return (blank_us != 0) && (off_gap <= blank_us);
 }
+
+/** @brief GPIO for the Geiger pulse input on a Rev C carrier revision (V2.8.10).
+ *
+ *  The Rev C V3 carrier moved GMZ_COUNT from socket pad 9 (SCK) to pad 8 (RX)
+ *  so pads 9-11 can carry the Wio-SX1262's LoRa SPI bus. tube_setup() calls
+ *  this once at boot with the stored `revc_carrier`. Only exactly 3 selects the
+ *  V3 pin: any other value, including a corrupted NVS byte, keeps the V2 pin
+ *  every carrier shipped before V3 uses, so an unexpected value can never move
+ *  the input onto a pin nothing is wired to.
+ *
+ *  @param carrier_rev  stored `revc_carrier` (2 = V2, 3 = V3)
+ *  @param pin_v2       PIN_GMC_COUNT_INPUT
+ *  @param pin_v3       PIN_GMC_COUNT_INPUT_V3, or -1 if the board has none
+ *  @return the GPIO number to configure as the pulse input
+ */
+static inline int tube_count_pin_for(uint8_t carrier_rev, int pin_v2, int pin_v3) {
+    return (carrier_rev == 3 && pin_v3 >= 0) ? pin_v3 : pin_v2;
+}

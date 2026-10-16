@@ -5,7 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"   // V2.8.5: vTaskDelay in tube_pcnt_stop()
 #include "freertos/task.h"
-#include "hal.h"   // PIN_GMC_COUNT_INPUT
+#include "tube.h"  // tube_count_pin() — the pad the GMC ISR uses (V2.8.10)
 
 static const char *TAG = "tube_pcnt";
 
@@ -110,7 +110,7 @@ bool tube_pcnt_init(uint32_t filter_width_ns) {
         // Tap the SAME pad as the GMC ISR. The GPIO matrix fans the input out
         // to this PCNT unit without disturbing the CPU-interrupt path.
         pcnt_chan_config_t ccfg = {
-            .edge_gpio_num  = PIN_GMC_COUNT_INPUT,
+            .edge_gpio_num  = tube_count_pin(),
             .level_gpio_num = -1,
         };
         err = pcnt_new_channel(s_units[i], &ccfg, &s_chans[i]);
@@ -156,7 +156,7 @@ bool tube_pcnt_init(uint32_t filter_width_ns) {
     s_active = true;
     ESP_LOGI(TAG, "PCNT width-comb up on GMC pin %d: widths_ns=%lu/%lu/%lu/%lu "
              "(widest = filter width; parallel to ISR)",
-             PIN_GMC_COUNT_INPUT,
+             tube_count_pin(),
              (unsigned long)s_widths[0], (unsigned long)s_widths[1],
              (unsigned long)s_widths[2], (unsigned long)s_widths[3]);
     return true;

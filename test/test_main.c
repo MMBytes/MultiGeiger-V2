@@ -700,6 +700,23 @@ static int test_blank_no_hv_pulse_yet_never_hits(void) {
     return 1;
 }
 
+// ----------------------------------------------------------------------------
+// tube_count_pin_for  (V2.8.10 Rev C V2/V3 carrier select)
+// ----------------------------------------------------------------------------
+
+static int test_count_pin_for_carrier(void) {
+    // 3 selects the V3 pad; every other value, including garbage that could
+    // only come from a corrupted NVS byte, keeps the V2 pin every deployed
+    // carrier uses. A board without a V3 pin (-1) never moves.
+    EXPECT_INT(tube_count_pin_for(2, 14, 7), 14);
+    EXPECT_INT(tube_count_pin_for(3, 14, 7), 7);
+    EXPECT_INT(tube_count_pin_for(3, 14, -1), 14);
+    EXPECT_INT(tube_count_pin_for(0, 14, 7), 14);
+    EXPECT_INT(tube_count_pin_for(255, 14, 7), 14);
+    EXPECT_INT(tube_count_pin_for(3, 7, 44), 44);   // XIAO ESP32-S3 pair
+    return 1;
+}
+
 static int test_blank_eff_disabled_is_zero(void) {
     EXPECT_INT(blank_effective_us(false, false, 30), 0);
     EXPECT_INT(blank_effective_us(false, true, 30), 0);
@@ -2079,6 +2096,300 @@ static int test_config_form_fields_are_schema_keys(void) {
 }
 
 // ----------------------------------------------------------------------------
+// config_form.c  (V2.8.10, review 2.1 C3b)
+// ----------------------------------------------------------------------------
+// main/config_form.c is the /config POST parser and its cross-field rules,
+// moved out of http_server.c::config_post() so it runs here unchanged. Each
+// test starts from the compiled-in defaults as the "saved" config (prev), hands
+// the parser a copy of it (next, exactly what config_post() does) plus a form
+// body, and checks what would be stored. Board capabilities come in as a
+// struct, so both sides of every board-dependent rule run on the host even
+// though this binary is built as a Heltec V2.
+
+#include "config_form.h"
+
+static config_t g_form_prev, g_form_next;
+static config_form_result_t g_form_res;
+
+/** @brief Defaults into prev, next = prev — the state config_post() starts from. */
+static void form_reset(void) {
+    // memset first so struct padding is identical in both copies and the
+    // round-trip memcmp below compares only fields.
+    memset(&g_form_prev, 0, sizeof g_form_prev);
+    config_defaults(&g_form_prev);
+    memcpy(&g_form_next, &g_form_prev, sizeof g_form_next);
+    memset(&g_form_res, 0xA5, sizeof g_form_res);   // the parser must set every field
+}
+
+/** @brief Capabilities with every board-dependent feature off (a bare board). */
+static config_form_caps_t form_caps_none(void) {
+    config_form_caps_t c;
+    memset(&c, 0, sizeof c);
+    return c;
+}
+
+/** @brief Run the parser on a copy of `body` (it is decoded in place). */
+static void form_apply(const char *body, const config_form_caps_t *caps) {
+    char buf[1024];
+    safe_strcpy(buf, body, sizeof buf);
+    config_apply_form(&g_form_next, &g_form_prev, buf, caps, &g_form_res);
+}
+
+/** @brief True if `key` appears in the result's rejected list. */
+static bool form_rejected_has(const char *key) {
+    return strstr(g_form_res.rejected, key) != NULL;
+}
+
+static int test_form_roundtrip_unchanged(void) {
+    // The page POSTs every ticked box and every value. Re-submitting the
+    // defaults (default-true bools ticked, nothing else) must store exactly
+    // what was saved: no rule may move a field that the user did not touch.
+    form_reset();
+    char body[1024];
+    int n = 0;
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        if (k_schema[i].type == 'B' && k_schema[i].def != 0)
+            n += snprintf(body + n, sizeof body - (size_t)n, "%s=on&", k_schema[i].key);
+    }
+    snprintf(body + n, sizeof body - (size_t)n, "save=1");
+    config_form_caps_t caps = form_caps_none();
+    form_apply(body, &caps);
+    EXPECT_TRUE(memcmp(&g_form_next, &g_form_prev, sizeof g_form_next) == 0);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    EXPECT_TRUE(!g_form_res.restart_requested);
+    return 1;
+}
+
+static int test_form_preclears_bools(void) {
+    // An unticked checkbox is simply absent from the body, so absent = false.
+    form_reset();
+    g_form_prev.send_madavi = true;
+    g_form_next.send_madavi = true;
+    config_form_caps_t caps = form_caps_none();
+    form_apply("save=1", &caps);
+    EXPECT_TRUE(!g_form_next.send_madavi);
+    return 1;
+}
+
+static int test_form_url_decodes(void) {
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("wifi_ssid=a%20b", &caps);
+    EXPECT_STREQ(g_form_next.wifi_ssid, "a b");
+    return 1;
+}
+
+static int test_form_oled_step(void) {
+    // oled_bright accepts 0 (off) or 10..100 in steps of 10, tighter than the
+    // schema's generic [0,100]; an off-step value keeps the saved one.
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("oled_bright=55", &caps);
+    EXPECT_INT(g_form_next.oled_brightness_pct, g_form_prev.oled_brightness_pct);
+    EXPECT_TRUE(form_rejected_has("oled_bright"));
+    form_reset();
+    form_apply("oled_bright=50", &caps);
+    EXPECT_INT(g_form_next.oled_brightness_pct, 50);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    form_reset();
+    form_apply("oled_bright=0", &caps);
+    EXPECT_INT(g_form_next.oled_brightness_pct, 0);
+    return 1;
+}
+
+static int test_form_strict_numeric(void) {
+    // "abc" must not be read as 0 (V2.8.5 strict parse): rejected, value kept.
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("ftp_int=abc", &caps);
+    EXPECT_INT(g_form_next.ftp_interval_min, g_form_prev.ftp_interval_min);
+    EXPECT_TRUE(form_rejected_has("ftp_int"));
+    return 1;
+}
+
+static int test_form_save_restart(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("save_restart=1", &caps);
+    EXPECT_TRUE(g_form_res.restart_requested);
+    form_reset();
+    form_apply("save=1", &caps);
+    EXPECT_TRUE(!g_form_res.restart_requested);
+    return 1;
+}
+
+static int test_form_11bg_forces_ht20(void) {
+    // 802.11b/g has no HT40, so 11bg-only implies 20 MHz even when the
+    // (disabled, therefore not POSTed) ht20 box is absent.
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("wifi_11bg=on", &caps);
+    EXPECT_TRUE(g_form_next.wifi_ht20_only);
+    return 1;
+}
+
+static int test_form_caps_force_off(void) {
+    // Each board-dependent checkbox is forced off where the hardware is
+    // missing and kept where it exists: both sides of each rule.
+    const char *body = "wifi_ext_a=on&i2c_pinout=on&batt_present=on";
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply(body, &caps);
+    EXPECT_TRUE(!g_form_next.use_external_antenna);
+    EXPECT_TRUE(!g_form_next.i2c_pinout);
+    EXPECT_TRUE(!g_form_next.batt_present);
+    caps.has_antenna_switch = true;
+    caps.has_i2c_pinout_switch = true;
+    caps.has_fuel_gauge = true;
+    form_reset();
+    form_apply(body, &caps);
+    EXPECT_TRUE(g_form_next.use_external_antenna);
+    EXPECT_TRUE(g_form_next.i2c_pinout);
+    EXPECT_TRUE(g_form_next.batt_present);
+    return 1;
+}
+
+static int test_form_ftp_ps_preserved(void) {
+    // With global power save off, the greyed FTP box is not POSTed; the
+    // saved choice must survive instead of being cleared.
+    form_reset();
+    g_form_prev.ftp_ps_disabled = true;
+    g_form_next.ftp_ps_disabled = true;
+    config_form_caps_t caps = form_caps_none();
+    form_apply("wifi_ps_dis=on", &caps);
+    EXPECT_TRUE(g_form_next.ftp_ps_disabled);
+    return 1;
+}
+
+static int test_form_tube_off_clears(void) {
+    // No tube: the radiation-only targets and the count-path filters go off.
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("send_rad=on&send_gmc=on&send_ts=on&pcnt_filt=on&dt_guard=on&hv_blank=on",
+               &caps);
+    EXPECT_TRUE(!g_form_next.tube_enabled);
+    EXPECT_TRUE(!g_form_next.send_radmon);
+    EXPECT_TRUE(!g_form_next.send_gmc);
+    EXPECT_TRUE(!g_form_next.send_thingspeak);
+    EXPECT_TRUE(!g_form_next.pcnt_filter);
+    EXPECT_TRUE(!g_form_next.deadtime_guard);
+    EXPECT_TRUE(!g_form_next.hv_blank);
+    return 1;
+}
+
+static int test_form_pcnt_beats_guard(void) {
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("tube_en=on&pcnt_filt=on&dt_guard=on", &caps);
+    EXPECT_TRUE(g_form_next.pcnt_filter);
+    EXPECT_TRUE(!g_form_next.deadtime_guard);
+    return 1;
+}
+
+static int test_form_mqtt_mode_b_needs_ca(void) {
+    // Mode B (custom CA) with an empty CA is refused: previous mode and CA
+    // kept, and the reason reported.
+    form_reset();
+    // Saved mode 2 (not the default 0), so restoring "the saved mode" is told
+    // apart from merely resetting to 0.
+    g_form_prev.mqtt_tls_mode = 2;
+    safe_strcpy(g_form_prev.mqtt_tls_ca, "OLD-CA", sizeof g_form_prev.mqtt_tls_ca);
+    memcpy(&g_form_next, &g_form_prev, sizeof g_form_next);
+    config_form_caps_t caps = form_caps_none();
+    form_apply("mqtt_tls=on&mqtt_tls_m=1&mqtt_tls_ca=", &caps);
+    EXPECT_INT(g_form_next.mqtt_tls_mode, 2);
+    EXPECT_STREQ(g_form_next.mqtt_tls_ca, "OLD-CA");
+    EXPECT_TRUE(form_rejected_has("mqtt_tls_m (Mode B needs a CA certificate)"));
+    return 1;
+}
+
+static int test_form_rejected_list_truncates(void) {
+    // Thirty bad values: the report is cut at its buffer, never past it
+    // (the ASan leg turns an overrun into a failure).
+    form_reset();
+    char body[1024];
+    int n = 0;
+    for (int i = 0; i < 30; i++)
+        n += snprintf(body + n, sizeof body - (size_t)n, "ftp_int=x&");
+    snprintf(body + n, sizeof body - (size_t)n, "save=1");
+    config_form_caps_t caps = form_caps_none();
+    form_apply(body, &caps);
+    // Thirty keys joined with ", " would be 268 characters: the list must stop at exactly 159
+    // characters + NUL, starting with the first keys in order.
+    EXPECT_INT((int)strlen(g_form_res.rejected), (int)sizeof g_form_res.rejected - 1);
+    EXPECT_TRUE(strncmp(g_form_res.rejected, "ftp_int, ftp_int", 16) == 0);
+    return 1;
+}
+
+static int test_form_lora_hex(void) {
+    // LoRaWAN boards validate the EUIs/key as exact-length hex; other boards
+    // take the generic string copy (the fields exist in every build).
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan = true;
+    form_reset();
+    form_apply("lora_deveui=0011223344556677", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_deveui, "0011223344556677");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    form_reset();
+    safe_strcpy(g_form_prev.lorawan_deveui, "AAAAAAAAAAAAAAAA", sizeof g_form_prev.lorawan_deveui);
+    memcpy(&g_form_next, &g_form_prev, sizeof g_form_next);
+    form_apply("lora_deveui=xyz", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_deveui, "AAAAAAAAAAAAAAAA");
+    EXPECT_TRUE(form_rejected_has("lora_deveui"));
+    form_apply("lora_deveui=", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_deveui, "");
+    form_reset();
+    form_apply("lora_appkey=0123456789abcdef0123456789abcde", &caps);   // 31 hex chars
+    EXPECT_TRUE(form_rejected_has("lora_appkey"));
+    caps.has_lorawan = false;
+    form_reset();
+    form_apply("lora_deveui=xyz", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_deveui, "xyz");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+static int test_form_revc_forced_v2_without_switch(void) {
+    // Only the Rev C socket boards may move the pulse input; a hand-crafted
+    // POST on any other board must still store V2.
+    form_reset();
+    config_form_caps_t caps = form_caps_none();
+    form_apply("revc_carrier=3", &caps);
+    EXPECT_INT(g_form_next.revc_carrier, 2);
+    return 1;
+}
+
+static int test_form_revc_v3_with_switch(void) {
+    config_form_caps_t caps = form_caps_none();
+    caps.has_carrier_rev_switch = true;
+    form_reset();
+    EXPECT_INT(g_form_prev.revc_carrier, 2);   // default = V2, every deployed carrier
+    form_apply("revc_carrier=3", &caps);
+    EXPECT_INT(g_form_next.revc_carrier, 3);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    form_apply("revc_carrier=2", &caps);
+    EXPECT_INT(g_form_next.revc_carrier, 2);
+    return 1;
+}
+
+static int test_form_revc_out_of_range_rejected(void) {
+    // Only 2 and 3 exist; anything else keeps the saved value and is reported.
+    static const char *const bad[] = { "revc_carrier=0", "revc_carrier=1",
+                                       "revc_carrier=4", "revc_carrier=abc" };
+    config_form_caps_t caps = form_caps_none();
+    caps.has_carrier_rev_switch = true;
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        form_reset();
+        g_form_prev.revc_carrier = 3;
+        g_form_next.revc_carrier = 3;
+        form_apply(bad[i], &caps);
+        EXPECT_INT(g_form_next.revc_carrier, 3);
+        EXPECT_TRUE(form_rejected_has("revc_carrier"));
+    }
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
 // history.c  (V2.8.8, review 2.1 C2)
 // ----------------------------------------------------------------------------
 // main/history.c is compiled into this binary unchanged. Its FreeRTOS/esp_log
@@ -2542,6 +2853,9 @@ int main(int argc, char **argv) {
     RUN(test_blank_misses_outside_window);
     RUN(test_blank_no_hv_pulse_yet_never_hits);
 
+    printf("== tube_count_pin_for ==\n");
+    RUN(test_count_pin_for_carrier);
+
     printf("== blank_effective_us ==\n");
     RUN(test_blank_eff_disabled_is_zero);
     RUN(test_blank_eff_pcnt_composes);
@@ -2686,6 +3000,25 @@ int main(int argc, char **argv) {
     RUN(test_schema_string_defaults_fit);
     RUN(test_schema_every_key_on_config_form);
     RUN(test_config_form_fields_are_schema_keys);
+
+    printf("== config_form (review 2.1 C3b) ==\n");
+    RUN(test_form_roundtrip_unchanged);
+    RUN(test_form_preclears_bools);
+    RUN(test_form_url_decodes);
+    RUN(test_form_oled_step);
+    RUN(test_form_strict_numeric);
+    RUN(test_form_save_restart);
+    RUN(test_form_11bg_forces_ht20);
+    RUN(test_form_caps_force_off);
+    RUN(test_form_ftp_ps_preserved);
+    RUN(test_form_tube_off_clears);
+    RUN(test_form_pcnt_beats_guard);
+    RUN(test_form_mqtt_mode_b_needs_ca);
+    RUN(test_form_rejected_list_truncates);
+    RUN(test_form_lora_hex);
+    RUN(test_form_revc_forced_v2_without_switch);
+    RUN(test_form_revc_v3_with_switch);
+    RUN(test_form_revc_out_of_range_rejected);
 
     printf("\n");
     if (g_ran == 0) {

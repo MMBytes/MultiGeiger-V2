@@ -59,8 +59,16 @@
  *                            /config offers an `i2c_pinout` toggle to move the
  *                            primary bus there (QT Py ESP32-PICO: STEMMA IO22/IO19
  *                            ↔ SDA/SCL pads IO4/IO33). 0 elsewhere = no toggle.
+ *    HAL_HAS_CARRIER_REV_SWITCH  V2.8.10: 1 = the board fits the shared Rev C
+ *                            carrier socket (QT Py ESP32-PICO, XIAO ESP32-S3), so
+ *                            /config offers `revc_carrier`: V2 keeps the pulse
+ *                            input on PIN_GMC_COUNT_INPUT (pad 9 / SCK), V3 moves
+ *                            it to PIN_GMC_COUNT_INPUT_V3 (pad 8 / RX), read once
+ *                            at boot. Only that INPUT ever moves. 0 elsewhere.
  *    HAL_HAS_SPEAKER         speaker.c stubs out when 0 (small-board path)
  *    HAL_HAS_NEOPIXEL        neopixel.c init + tube-pulse hook gated on this
+ *    HAL_HAS_SD_CARD         1 = onboard microSD slot (sd_card.c / sd_logger.c
+ *                            active). 0 elsewhere stubs both out.
  *    HAL_HAS_ALS             V2.3.29: 1 = onboard ALS-PT19 ambient-light sensor
  *                            on PIN_ALS (FeatherS3-D's IO4); als.c is active
  *                            and /status renders an ambient-light row. 0 elsewhere
@@ -82,6 +90,12 @@
  *    HAL_LOG_SNAP_SCRATCH_BYTES  snapshot scratch for the wrap-corruption fix —
  *                            small (6 KB) on internal-DRAM-only boards, larger
  *                            (16 KB) when scratch lives in PSRAM (V2.3.24)
+ *    HAL_CFG_FORM_BUF_SIZE   /config page render buffer (V2.4.6) — 24 KB on
+ *                            internal-DRAM boards, 32 KB where PSRAM backs it
+ *
+ *  V2.8.10: these are now ENFORCED — the block right after the board chain's
+ *  #endif stops the build with #error if a branch forgets one. (`#if FLAG` on an
+ *  undefined FLAG is silently `#if 0`, so a missed define used to compile.)
  */
 
 #if defined(BOARD_HELTEC_V2)
@@ -102,6 +116,7 @@
     #define HAL_HAS_VEXT_GATE       1   // GPIO 21 = active-LOW MOSFET on V2+ Heltec carriers
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER         1   // Onboard piezo wired to PIN_SPEAKER_P/N
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
@@ -179,6 +194,7 @@
     #define HAL_HAS_VEXT_GATE       0   // No Vext gate — sensors powered via Qwiic 3V3
     #define HAL_HAS_ANTENNA_SWITCH  1   // u.FL external antenna + onboard SPDT RF switch
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (STEMMA1 + STEMMA2 are separate buses, not a pinout toggle)
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER         1   // Piezo wired to A3/A4 of the Feather harness
     #define HAL_HAS_NEOPIXEL        0   // FeatherS3-D has an RGB LED on IO40 but we don't drive it
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
@@ -323,6 +339,7 @@
     #define HAL_HAS_VEXT_GATE       0   // No power gate — STEMMA QT bus always powered
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
+    #define HAL_HAS_CARRIER_REV_SWITCH 1 // V2.8.10: Rev C V2/V3 carrier select (`revc_carrier`) — see PIN_GMC_COUNT_INPUT_V3
     #define HAL_HAS_SPEAKER         0   // Dropped — pin budget + small-board context
     #define HAL_HAS_NEOPIXEL        1   // Onboard WS2812 — flashes blue on Geiger pulse (V2.6.22, was red)
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
@@ -361,6 +378,18 @@
     // SCK         GPIO 14             ADC2, touch — interrupt-capable, non-strap
     #define PIN_HV_CAP_FULL_INPUT   26   // A0  — comparator interrupt (digital)
     #define PIN_GMC_COUNT_INPUT     14   // SCK — Geiger pulse interrupt (≤V2.6.33: IO25/A1)
+
+    // V2.8.10 — Rev C V3 carrier: GMZ_COUNT moves from U1 pad 9 (SCK) to pad 8
+    // (RX), because on the XIAO ESP32-S3 + Wio-SX1262 kit pads 9-11 are the
+    // LoRa SPI bus. Selected at boot by /config `revc_carrier` = 3; the V2 pin
+    // above is then never configured. IO7 is a plain GPIO on the PICO-V3-02
+    // (datasheet v1.4 Table 5: its in-package flash/PSRAM use IO6/9/10/11 only;
+    // Table 7 lists IO7 and IO8 as "can be used freely" on this variant — on
+    // the older PICO-D4 they were flash pins, as were IO16/17),
+    // not a strap pin, and not in the reserved list below; it sits in the
+    // VDD_SDIO domain like the NeoPixel power pin IO8, which is harmless for an
+    // input while the flash keeps that rail at 3.3 V. Console is UART0 on IO1/3.
+    #define PIN_GMC_COUNT_INPUT_V3   7   // RX pad — Rev C V3 Geiger pulse interrupt
     #define PIN_HV_FET_OUTPUT       25   // A1  — HV MOSFET gate (LEDC PWM via gptimer; ≤V2.6.33: IO14/SCK)
 
     // No piezo — HAL_HAS_SPEAKER=0 above stubs the entire speaker path.
@@ -429,6 +458,7 @@
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on standard XIAO ESP32-S3)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
+    #define HAL_HAS_CARRIER_REV_SWITCH 1 // V2.8.10: Rev C V2/V3 carrier select (`revc_carrier`) — see PIN_GMC_COUNT_INPUT_V3
     #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
@@ -463,6 +493,16 @@
     // SCK         D8          7       ADC1_CH6, TOUCH7, interrupt-capable
     #define PIN_HV_CAP_FULL_INPUT    1   // D0  ≡ A0 — comparator interrupt
     #define PIN_GMC_COUNT_INPUT      7   // D8  ≡ SCK — Geiger pulse interrupt (≤V2.6.33: IO2/D1)
+
+    // V2.8.10 — Rev C V3 carrier: GMZ_COUNT moves from U1 pad 9 (D8/SCK) to
+    // pad 8 (D7/RX). On the Wio-SX1262 kit D8/D9/D10 (GPIO7/8/9) are the LoRa
+    // SPI bus — the same nets reach the module's B2B socket — so the V2 pin
+    // above is the SPI clock there and must never be configured when V3 is
+    // selected (/config `revc_carrier` = 3, read once at boot). GPIO44 is
+    // U0RXD: an input during boot that idles HIGH like the carrier's pull-up,
+    // not a strap pin, and free because the console is USB-Serial-JTAG
+    // (CONFIG_ESP_CONSOLE_UART_NUM = -1; see the D6/D7 note below).
+    #define PIN_GMC_COUNT_INPUT_V3  44   // D7 ≡ RX — Rev C V3 Geiger pulse interrupt
     #define PIN_HV_FET_OUTPUT        2   // D1  ≡ A1 — HV MOSFET gate (LEDC PWM; ≤V2.6.33: IO7/D8)
 
     // No piezo, no NeoPixel — those stubs above. But the XIAO ESP32-S3 DOES
@@ -540,6 +580,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed route per bus
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     // V2.6.7: disabled. PIN_SPEAKER_P (GPIO26) is the ESP32-S3R2/RH2's
     // internal PSRAM chip-select (SPICS1) per Espressif's ESP32-S3 datasheet
     // v2.2 §2.3.5 Table 2-9 (Priority 4, "SPI0/1 interface connected to the
@@ -861,6 +902,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER           1   // Piezo via PCB harness, same as FeatherS3-D — see pin table below
     // Onboard WS2812 (D6, DIN=GPIO46). Schematic confirms VDD ties to
     // "3.3V_P", the same peripheral rail as the Qwiic connector (J4) and
@@ -1012,6 +1054,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     // R7/GPIO26 and R8/GPIO27 are the only two candidate speaker-position
     // header pads on this board, and both are hard-committed to
     // board-specific functions: R7/GPIO26 is the peripheral-rail enable
@@ -1154,6 +1197,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness — pins verified §2
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO34) — reuses neopixel.c unchanged
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
@@ -1264,6 +1308,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route (header SDA/SCL)
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER           1   // Piezo via PCB harness — pin assignment user-confirmed, see block comment above
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812, PIN_NEOPIXEL_POWER=GPIO2 (NEOPIXEL_I2C_POWER) required before use
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
@@ -1358,6 +1403,7 @@
     #define HAL_HAS_VEXT_GATE         0
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
     #define HAL_HAS_SPEAKER           1   // Piezo via shared-carrier PCB harness (P=GPIO10, N=GPIO9)
     #define HAL_HAS_NEOPIXEL          1   // Onboard WS2812 (GPIO33, power-gated via GPIO21) — reuses neopixel.c unchanged
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
@@ -1422,6 +1468,66 @@
 
 #else
     #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
+#endif
+
+// --- Per-board definitions are mandatory ---------------------------------------
+// V2.8.10 (review group 4, enforcement part): every board branch above must
+// define each of these. The preprocessor reads an undefined name in `#if X` as
+// 0, so a branch that forgot e.g. HAL_HAS_CARRIER_REV_SWITCH would build and
+// silently lose the feature; this turns that into a build error naming the
+// macro. The derived gates below (HAL_HAS_HTTPS) are computed here, not per
+// board, so they are deliberately not in this list. Board-specific extras
+// (HAL_LED_ACTIVE_LOW, PIN_GMC_COUNT_INPUT_V3, ...) are not either.
+#ifndef HAL_HAS_OLED
+#error "hal.h: this board branch does not define HAL_HAS_OLED"
+#endif
+#ifndef HAL_HAS_TFT
+#error "hal.h: this board branch does not define HAL_HAS_TFT"
+#endif
+#ifndef HAL_HAS_PSRAM
+#error "hal.h: this board branch does not define HAL_HAS_PSRAM"
+#endif
+#ifndef HAL_HAS_NATIVE_USB
+#error "hal.h: this board branch does not define HAL_HAS_NATIVE_USB"
+#endif
+#ifndef HAL_HAS_VEXT_GATE
+#error "hal.h: this board branch does not define HAL_HAS_VEXT_GATE"
+#endif
+#ifndef HAL_HAS_ANTENNA_SWITCH
+#error "hal.h: this board branch does not define HAL_HAS_ANTENNA_SWITCH"
+#endif
+#ifndef HAL_HAS_I2C_PINOUT_SWITCH
+#error "hal.h: this board branch does not define HAL_HAS_I2C_PINOUT_SWITCH"
+#endif
+#ifndef HAL_HAS_CARRIER_REV_SWITCH
+#error "hal.h: this board branch does not define HAL_HAS_CARRIER_REV_SWITCH"
+#endif
+#ifndef HAL_HAS_SPEAKER
+#error "hal.h: this board branch does not define HAL_HAS_SPEAKER"
+#endif
+#ifndef HAL_HAS_NEOPIXEL
+#error "hal.h: this board branch does not define HAL_HAS_NEOPIXEL"
+#endif
+#ifndef HAL_HAS_SD_CARD
+#error "hal.h: this board branch does not define HAL_HAS_SD_CARD"
+#endif
+#ifndef HAL_HAS_LORAWAN
+#error "hal.h: this board branch does not define HAL_HAS_LORAWAN"
+#endif
+#ifndef HAL_HAS_ALS
+#error "hal.h: this board branch does not define HAL_HAS_ALS"
+#endif
+#ifndef HAL_HAS_FUEL_GAUGE
+#error "hal.h: this board branch does not define HAL_HAS_FUEL_GAUGE"
+#endif
+#ifndef HAL_LOG_RING_BYTES
+#error "hal.h: this board branch does not define HAL_LOG_RING_BYTES"
+#endif
+#ifndef HAL_LOG_SNAP_SCRATCH_BYTES
+#error "hal.h: this board branch does not define HAL_LOG_SNAP_SCRATCH_BYTES"
+#endif
+#ifndef HAL_CFG_FORM_BUF_SIZE
+#error "hal.h: this board branch does not define HAL_CFG_FORM_BUF_SIZE"
 #endif
 
 // --- Derived feature gates ----------------------------------------------------

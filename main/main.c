@@ -1683,7 +1683,9 @@ void app_main(void) {
     // When tube_enabled is false the call still configures HV_FET as a static
     // LOW output but skips ISR install + HV gptimer; speaker pulse callback
     // can still be registered (it just never fires without ISR pulses).
-    tube_setup(g_cfg.tube_enabled);
+    // V2.8.10: revc_carrier picks the count pad on the Rev C socket boards
+    // (V2 = pad 9, V3 = pad 8); reboot-required, so it is read only here.
+    tube_setup(g_cfg.tube_enabled, g_cfg.revc_carrier);
     // V2.8.3: seed the radiation screen's HV glyph. The 1 Hz screen appears
     // ~10 s after boot, but do_tx_cycle sets DSP_STATUS_HV only at the first
     // cycle (one tx_interval, 150 s by default) — until then it would read

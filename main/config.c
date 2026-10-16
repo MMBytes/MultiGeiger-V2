@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"   // vTaskDelay — pace the config dump (see config_log_summary)
 #include "freertos/task.h"
 
-#include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH — gate the i2c-route dump line
+#include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH / _CARRIER_REV_SWITCH — gate their dump lines
 #include "tube_types.h"   // V2.6.1: tube_type_name() for the boot config dump
 #include "util.h"
 #include "tube_logic.h"   // guard_effective_us() — single-source guard on/off policy
@@ -18,30 +18,9 @@ static const char *NS  = "geiger";
 
 // --- Compile-time defaults ---------------------------------------------------
 //
-// V2.4.1: all field defaults are declared INLINE in `config_fields.def`
-// as the third (or fourth) argument of each X_* macro. Adding a new
-// field's default = same line as the field declaration. The previous
-// DEF_* macro tier (~50 #define lines) is gone — one source of truth.
-
-void config_defaults(config_t *cfg) {
-    memset(cfg, 0, sizeof(*cfg));
-
-    // Generated default assignments — see config_fields.def. String fields
-    // use the bounded-copy safe_strcpy helper. Numeric / bool fields use
-    // direct assign.
-    #define X_STR(name, size, key, def)         \
-        safe_strcpy(cfg->name, (def), (size));
-    #define X_BOOL(name, key, def)              cfg->name = (def);
-    #define X_U32(name, key, def, lo, hi)       cfg->name = (def);
-    #define X_F32(name, key, def, lo, hi)       cfg->name = (def);
-    #define X_U8(name, key, def, lo, hi)        cfg->name = (def);
-    #include "config_fields.def"
-    #undef X_STR
-    #undef X_BOOL
-    #undef X_U32
-    #undef X_F32
-    #undef X_U8
-}
+// config_defaults() moved to config_form.c in V2.8.10 (it touches no NVS, and
+// the host tests need it to build a saved config). config_load() below still
+// starts from it.
 
 // NVS has no float type. Store the IEEE-754 bit pattern in a u32 so we keep
 // the full 32-bit precision without the round-trip lossiness of snprintf/atof.
@@ -235,6 +214,12 @@ void config_log_summary(const config_t *cfg) {
     LOG_PACED("  i2c:              pinout=%d (0=onboard/STEMMA)",
              cfg->i2c_pinout);
 #endif
+    // V2.8.10: same reasoning — the carrier select only exists on the two Rev C
+    // socket boards, so the other boards keep a byte-identical dump.
+#if HAL_HAS_CARRIER_REV_SWITCH
+    LOG_PACED("  carrier:          Rev C V%u (GMC pad %s)",
+             (unsigned)cfg->revc_carrier, cfg->revc_carrier == 3 ? "8/RX" : "9/SCK");
+#endif
     LOG_PACED("  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");
     LOG_PACED("  openSenseMap:     access_token=%s",
@@ -379,86 +364,4 @@ out:
         ESP_LOGE(TAG, "config_save failed: %s", esp_err_to_name(err));
     }
     return err;
-}
-
-// --- HTTP POST helpers (consumed by http_server.c::config_post) ------------
-//
-// V2.4.1: the per-field POST dispatch is also derived from the schema.
-// Keeping the helpers HERE (in config.c) rather than http_server.c keeps
-// schema-touching code in one translation unit — http_server.c just calls
-// `config_post_preclear_bools()` then loops over the form body calling
-// `config_post_apply_field()` for each k=v.
-
-void config_post_preclear_bools(config_t *next) {
-    // Form submissions only include ticked checkboxes — every bool must
-    // be reset to false before parsing so unticked boxes apply.
-    #define X_STR(name, size, key, def)         /* string — not pre-cleared */
-    #define X_BOOL(name, key, def)              next->name = false;
-    #define X_U32(name, key, def, lo, hi)       /* numeric — kept */
-    #define X_F32(name, key, def, lo, hi)       /* numeric — kept */
-    #define X_U8(name, key, def, lo, hi)        /* numeric — kept */
-    #include "config_fields.def"
-    #undef X_STR
-    #undef X_BOOL
-    #undef X_U32
-    #undef X_F32
-    #undef X_U8
-}
-
-bool config_post_apply_field(config_t *next, const char *key, const char *val,
-                             bool *out_rejected) {
-    // Generated per-field dispatch. Each branch returns true when the
-    // key matches, regardless of whether the value passed validation —
-    // out-of-range numerics keep the prior field value. V2.5.34: a
-    // matched-but-out-of-range numeric sets *out_rejected (if non-NULL)
-    // so the caller can report the silent no-save instead of hiding it.
-    // V2.8.5: numerics parse with parse_long_strict / parse_float_strict
-    // (util.h). strtol(val, NULL, 10) turned "abc" into 0 and "12abc" into
-    // 12 and stored them; a value that is not entirely a number is now
-    // reported as rejected like an out-of-range one, prior value kept.
-    #define X_STR(name, size, k, def)                            \
-        if (strcmp(key, k) == 0) {                               \
-            safe_strcpy(next->name, val, (size));                \
-            return true;                                         \
-        }
-    #define X_BOOL(name, k, def)                                 \
-        if (strcmp(key, k) == 0) {                               \
-            next->name = true;                                   \
-            return true;                                         \
-        }
-    #define X_U32(name, k, def, lo, hi)                          \
-        if (strcmp(key, k) == 0) {                               \
-            long _v = 0;                                         \
-            if (parse_long_strict(val, &_v) &&                   \
-                _v >= (long)(lo) && _v <= (long)(hi))            \
-                next->name = (uint32_t)_v;                       \
-            else if (out_rejected) *out_rejected = true;         \
-            return true;                                         \
-        }
-    #define X_F32(name, k, def, lo, hi)                          \
-        if (strcmp(key, k) == 0) {                               \
-            float _v = 0.0f;                                     \
-            if (parse_float_strict(val, &_v) &&                  \
-                _v >= (lo) && _v <= (hi))                        \
-                next->name = _v;                                 \
-            else if (out_rejected) *out_rejected = true;         \
-            return true;                                         \
-        }
-    #define X_U8(name, k, def, lo, hi)                           \
-        if (strcmp(key, k) == 0) {                               \
-            long _v = 0;                                         \
-            if (parse_long_strict(val, &_v) &&                   \
-                _v >= (long)(lo) && _v <= (long)(hi))            \
-                next->name = (uint8_t)_v;                        \
-            else if (out_rejected) *out_rejected = true;         \
-            return true;                                         \
-        }
-    #include "config_fields.def"
-    #undef X_STR
-    #undef X_BOOL
-    #undef X_U32
-    #undef X_F32
-    #undef X_U8
-
-    return false;   // no schema field matched
 }

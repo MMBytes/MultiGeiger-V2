@@ -1,13 +1,14 @@
 // Single-source-of-truth schema for the runtime configuration.
 //
-// Included multiple times by config.h / config.c / http_server.c with
+// Included multiple times by config.h / config.c / config_form.c with
 // different X_* macro expansions to derive in one go:
 //   * the `config_t` struct in config.h
-//   * `config_defaults()` in config.c
+//   * `config_defaults()` in config_form.c (V2.8.10; was config.c)
 //   * `config_load()`     NVS-read loop in config.c
 //   * `config_save()`     NVS-write loop in config.c
-//   * the POST pre-clear-bools loop in http_server.c
-//   * the POST per-field dispatch in http_server.c
+//   * the POST pre-clear-bools loop in config_form.c (V2.8.10; was http_server.c)
+//   * the POST per-field dispatch in config_form.c (V2.8.10; was http_server.c)
+// test/test_main.c also expands it, to check the schema itself (review 2.1 C3a).
 //
 // Adding a field = ONE new line below. Removing or renaming = ONE edit.
 // All previous duplication (struct + 3 NVS sites + 2 POST sites) is gone.
@@ -238,6 +239,23 @@ X_U32 (display_mode,           "disp_mode",   0,        0,       2)
 // the bus is created once at first sensor probe.
 
 X_BOOL(i2c_pinout,             "i2c_pinout",  false)
+
+// --- Rev C carrier revision (V2.8.10, QT Py ESP32-PICO + XIAO ESP32-S3) ------
+//
+// Which Rev C carrier the module sits in, i.e. which socket pad carries the
+// Geiger pulse (GMZ_COUNT):
+//   2 (default) = Rev C V2 — pad 9 / SCK  (PIN_GMC_COUNT_INPUT)
+//   3           = Rev C V3 — pad 8 / RX   (PIN_GMC_COUNT_INPUT_V3)
+// V3 frees pads 9-11, which are the LoRa SPI bus on the XIAO ESP32-S3 +
+// Wio-SX1262 kit. Only the pulse INPUT moves; HV_CAP_FULL and HV_FET are the
+// same on both, so a wrong setting drives nothing it should not.
+// Only consumed where HAL_HAS_CARRIER_REV_SWITCH==1;
+// forced to 2 on every other board by config_apply_form(). Reboot-required —
+// tube_setup() configures the pin once at boot. An NVS without this key (any
+// node updated from <=V2.8.9) reads the default 2, so deployed V2 carriers
+// keep counting unchanged.
+
+X_U8  (revc_carrier,           "revc_carrier", 2,      2,       3)
 
 // --- Battery presence (V2.6.6, FeatherS3-D only) -----------------------------
 //

@@ -6,7 +6,7 @@
  *  Runs two interrupt-driven paths (pin map per `hal.h`):
  *    - A 100 µs gptimer drives the HV charge-pump state machine (pulse the
  *      FET until the cap-full comparator fires, then idle until next charge).
- *    - A GPIO edge ISR on PIN_GMC_COUNT_INPUT tallies tube pulses, rejecting
+ *    - A GPIO edge ISR on the count pin tallies tube pulses, rejecting
  *      double-counts inside GMC_DEAD_TIME_US. Whether the pin sees a Schmitt
  *      input is BOARD-DEPENDENT: most carriers drive a bare CMOS pad, where the
  *      count node's RC recovery ramp re-crosses the switching threshold and
@@ -15,6 +15,10 @@
  *      b1 exactly 0.000 % over 277 k counts, and the accepted-pair floor moved
  *      191 -> 280 µs). Do not assume either front end when reading this driver.
  *
+ *  The count pin is PIN_GMC_COUNT_INPUT, except on a Rev C V3 carrier (V2.8.10,
+ *  boards with HAL_HAS_CARRIER_REV_SWITCH) where it is PIN_GMC_COUNT_INPUT_V3;
+ *  tube_setup() picks it once at boot and tube_count_pin() reports the choice.
+ *
  *  Consumers poll tube_read() to snapshot and reset the window accumulators.
  *  An optional per-pulse callback fires from ISR context for speaker/LED tick.
  */
@@ -22,7 +26,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT
+#include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT(_V3)
 
 // Fixed dead-time gate (µs): an edge becomes a count only if it follows the
 // last COUNTED pulse by more than this. Rejects contact/threshold noise and
@@ -164,8 +168,20 @@ typedef struct {
  *                  gptimer setup entirely. tube_read() then returns zeros.
  *                  Lets the firmware run as a non-Geiger node without the
  *                  HV charge pump cycling.
+ *  @param carrier_rev  Stored `revc_carrier` (V2.8.10): 3 puts the count input
+ *                  on PIN_GMC_COUNT_INPUT_V3 (Rev C V3 carrier, pad 8), anything
+ *                  else on PIN_GMC_COUNT_INPUT. Ignored on boards without
+ *                  HAL_HAS_CARRIER_REV_SWITCH. Only the chosen pin is ever
+ *                  configured — on the XIAO + Wio-SX1262 the other one is the
+ *                  LoRa SPI clock.
  */
-void tube_setup(bool enabled);
+void tube_setup(bool enabled, uint8_t carrier_rev);
+
+/** @brief GPIO the count ISR (and the PCNT comb) uses — fixed by tube_setup().
+ *
+ *  Before tube_setup() runs this is the board's V2 pin, PIN_GMC_COUNT_INPUT.
+ */
+int tube_count_pin(void);
 
 /** @brief Snapshot and reset the accumulators.
  *  @param counts_delta  Out: new pulses since the last call.

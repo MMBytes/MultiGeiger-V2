@@ -1,5 +1,5 @@
-# Release workflow — fire on tag push, build all 11 boards, create the GitHub
-# Release with all 67 artefacts attached (11 boards × 5 .bin + 1 elf .zip,
+# Release workflow — fire on tag push, build all 12 boards, create the GitHub
+# Release with all 73 artefacts attached (12 boards × 5 .bin + 1 elf .zip,
 # plus SHA256SUMS), and publish the web flasher to Pages.
 #
 # Trigger:
@@ -139,7 +139,7 @@ jobs:
           # symbols for coredump forensics). Independent guard on the count.
           # (The per-board count of 6 is unrelated to and does not need to
           # change with the number of boards — see EXPECTED_BOARDS below.)
-          EXPECTED_BOARDS=11
+          EXPECTED_BOARDS=12
           EXPECTED=$(( EXPECTED_BOARDS * 6 ))
           COUNT=$(find artefacts -maxdepth 1 -type f \( -name '*.bin' -o -name '*.zip' \) | wc -l)
           if [ "$COUNT" != "$EXPECTED" ]; then

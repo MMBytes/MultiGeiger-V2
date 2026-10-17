@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include "sdkconfig.h"          // V2.8.11: CONFIG_FREERTOS_UNICORE (tx_setup)
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
 #include "syslog.h"             // V2.5.29: syslog_get_stats (per-cycle UDP drop report)
 #include "fuel_gauge.h"         // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
@@ -253,7 +254,10 @@ void tx_setup(void) {
     // on a chip with only core 0. The FTPS-on-main/HTTPS-on-worker
     // core-isolation design this pinning exists for has no bearing on a
     // single-core chip, so this board just gets a plain, unpinned task.
-#if defined(BOARD_SPARKFUN_THING_PLUS_ESP32C5)
+    // V2.8.11 (review 2.9): keyed on what the code needs — one core — rather
+    // than on the board. IDF sets CONFIG_FREERTOS_UNICORE on single-core chips;
+    // today that is the ESP32-C5 build only.
+#if CONFIG_FREERTOS_UNICORE
     BaseType_t ok = xTaskCreate(
         tx_task, "tx", TX_TASK_STACK_BYTES, NULL, TX_TASK_PRIO, NULL);
     configASSERT(ok == pdPASS);

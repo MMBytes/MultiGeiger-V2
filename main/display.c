@@ -194,13 +194,8 @@ static char s_backend_desc[24] = "none";
 // Per-board chip identifier for boot log accuracy. Both controllers respond
 // to the SSD1306 init sequence (register-compatible), but the silicon
 // actually present differs and the log should reflect that.
-#if defined(BOARD_FEATHERS3_D)
-    #define OLED_CHIP_NAME  "SSD1309"
-#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
-    #define OLED_CHIP_NAME  "SSD1315"
-#else
-    #define OLED_CHIP_NAME  "SSD1306"
-#endif
+// V2.8.11: the name comes from each hal.h board block (HAL_OLED_CHIP_NAME).
+#define OLED_CHIP_NAME  HAL_OLED_CHIP_NAME
 // External SSD1309 breakouts (e.g. Core Electronics CE09964) are 4-pin I²C
 // only — no dedicated reset line. PIN_OLED_RESET stays undefined on those
 // boards (see hal.h); the reset-pulse block below is then skipped and the

@@ -219,6 +219,11 @@ void config_log_summary(const config_t *cfg) {
 #if HAL_HAS_CARRIER_REV_SWITCH
     LOG_PACED("  carrier:          Rev C V%u (GMC pad %s)",
              (unsigned)cfg->revc_carrier, cfg->revc_carrier == 3 ? "8/RX" : "9/SCK");
+#elif defined(HAL_REVC_CARRIER_FIXED)
+    // V2.8.11: fixed at build time (XIAO + Wio) — name the hardware, not the
+    // stored value.
+    LOG_PACED("  carrier:          Rev C V%u (fixed, GMC pad %s)",
+             (unsigned)HAL_REVC_CARRIER_FIXED, HAL_REVC_CARRIER_FIXED == 3 ? "8/RX" : "9/SCK");
 #endif
     LOG_PACED("  openSenseMap:     enabled=%d box_id=%s",
              cfg->send_osm, cfg->osm_box_id[0] ? cfg->osm_box_id : "<empty>");

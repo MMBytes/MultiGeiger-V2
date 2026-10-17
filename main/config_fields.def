@@ -250,7 +250,8 @@ X_BOOL(i2c_pinout,             "i2c_pinout",  false)
 // Wio-SX1262 kit. Only the pulse INPUT moves; HV_CAP_FULL and HV_FET are the
 // same on both, so a wrong setting drives nothing it should not.
 // Only consumed where HAL_HAS_CARRIER_REV_SWITCH==1;
-// forced to 2 on every other board by config_apply_form(). Reboot-required —
+// forced to 2 on every other board by config_apply_form() — V2.8.11: or to
+// HAL_REVC_CARRIER_FIXED on a board built for one carrier (XIAO + Wio: 3). Reboot-required —
 // tube_setup() configures the pin once at boot. An NVS without this key (any
 // node updated from <=V2.8.9) reads the default 2, so deployed V2 carriers
 // keep counting unchanged.
@@ -622,15 +623,15 @@ X_U32 (hv_blank_us,            "hv_blank_us", 30,       5,       1000)
 X_BOOL(standalone_sd,          "sd_stand",   false)
 X_BOOL(standalone_ap_on,       "sd_ap_on",   false)
 
-// --- LoRaWAN (BOARD_HELTEC_WIFI_LORA32_V4_R2 only at runtime) ---------------
+// --- LoRaWAN (HAL_HAS_LORAWAN boards only at runtime) -----------------------
 //
 // V2.6.23: fields exist in config_t on EVERY board (a few bytes — the
 // ringfence is on code, not config storage; same portability convention as
-// standalone_ap_on above). Only the V4 board renders them in /config and
-// acts on them. deveui/joineui/appkey hold the TTN-console hex strings
+// standalone_ap_on above). Only the LoRaWAN boards (Heltec V4; V2.8.11: XIAO
+// + Wio) render them in /config and act on them. deveui/joineui/appkey hold the TTN-console hex strings
 // verbatim; parsing/endianness happens in lorawan.cpp at use time.
-// lorawan_high_power drives the GC1109 FEM 28 dBm gain-stage select
-// (GPIO46) — a regulatory/power choice, kept opt-in (see hal.h
+// lorawan_high_power drives the Heltec V4's GC1109 FEM 28 dBm gain-stage select
+// (GPIO46; V2.8.11: forced off where HAL_HAS_LORA_FEM is 0) — a regulatory/power choice, kept opt-in (see hal.h
 // PIN_LORA_FEM_PA). The former lorawan_fem_en flag was removed in
 // V2.6.34: the GC1109 front end is required for LoRa RX, so lorawan.cpp
 // now always drives FEM_EN (GPIO2) when LoRaWAN is on — a config option

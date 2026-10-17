@@ -110,7 +110,7 @@ static uint32_t           s_drop_count = 0;
 // Flash bus mode / clock chosen in menuconfig. Not CONFIG_ESPTOOLPY_FLASHMODE
 // / _FLASHFREQ: those are the esptool image-HEADER strings, which IDF folds
 // on purpose (QIO and QOUT are written as "dio", 120M as "80m") — so they
-// would keep reading "dio 80m" after a switch to QIO. Today all 11 boards
+// would keep reading "dio 80m" after a switch to QIO. Today all 12 boards
 // are DIO at 40 or 80 MHz.
 #if CONFIG_ESPTOOLPY_FLASHMODE_QIO
 #define BANNER_FLASH_MODE "qio"

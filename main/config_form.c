@@ -315,7 +315,14 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
     // V2.8.10: same defence-in-depth for the Rev C carrier select — only the
     // Rev C socket boards have a second pulse-input pad, so everywhere else the
     // stored value stays at its V2 default whatever a hand-crafted POST says.
-    if (!caps->has_carrier_rev_switch) next->revc_carrier = 2;
+    // V2.8.11: a board built for one carrier (XIAO + Wio: V3 only) stores that
+    // one instead, so the saved value never contradicts the hardware.
+    if (!caps->has_carrier_rev_switch)
+        next->revc_carrier = caps->carrier_rev_fixed ? caps->carrier_rev_fixed : 2;
+
+    // V2.8.11: 28 dBm mode drives the Heltec V4's GC1109 amplifier; on a LoRa
+    // board without one (XIAO + Wio) it is greyed and forced off.
+    if (!caps->has_lora_fem) next->lorawan_high_power = false;
 
     // ftp_ps_dis is greyed out (and force-unchecked) in the UI when the
     // global wifi_ps_dis is ticked, so the form won't POST it. Preserve the

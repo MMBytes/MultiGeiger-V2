@@ -34,7 +34,7 @@
 #include "display.h"
 #include "http_server.h"
 #include "log_ftp.h"
-#include "lorawan.h"            // V2.6.23: SX1262 LoRaWAN uplink (Heltec V4-R2 only)
+#include "lorawan.h"            // V2.6.23: SX1262 LoRaWAN uplink (Heltec V4-R2; V2.8.11: + XIAO + Wio)
 #include "main_status.h"
 #include "mqtt.h"
 #include "neopixel.h"
@@ -1324,7 +1324,7 @@ static void do_tx_cycle(void) {
     // down and with no NTP sync (the payload carries counts+dt, no wall
     // time). Only the WiFi TX pipeline below is gated on connectivity. (The
     // one earlier return this still sits after is the standalone-SD branch,
-    // unreachable on the only LoRaWAN board — no SD slot — but a future
+    // unreachable on the LoRaWAN boards — none has an SD slot — but a future
     // SD+LoRa board would need this enqueue lifted above that branch too.)
     if (g_cfg.lorawan_enabled) {
         lorawan_snapshot_t lsnap = {
@@ -2026,7 +2026,7 @@ void app_main(void) {
         // in-flight upload). PSRAM boards start MQTT as soon as IP+clock are ready.
         if (!mqtt_is_initialized() && !main_services_suspended() &&
             n_got_ip > 0 && ntp_time_valid() && !log_ftp_imminent()
-#ifdef BOARD_HELTEC_V2
+#if !HAL_HAS_PSRAM   // V2.8.11: was BOARD_HELTEC_V2 — the only PSRAM-less board
             && tx_cycles >= 1 && tx_is_idle()
 #endif
            ) {

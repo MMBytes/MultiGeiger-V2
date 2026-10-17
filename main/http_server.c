@@ -59,7 +59,7 @@
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
 #include "env_api.h"           // V2.7.3: /api/env wire contract (format + parse)
 #include "lorawan.h"           // V2.6.23 (T8): lorawan_get_status()/_state_name()/_region_name()
-                               // for /status; no-op stubs on the ten non-V4-R2 boards (see
+                               // for /status; no-op stubs on the boards without LoRaWAN (see
                                // lorawan.h) so this include is unconditional like gnss.h/sgp41.h.
 #include "tls_cert.h"          // V2.8.0: PEM pointers + fingerprint for HTTPS
 #include "tls_logic.h"         // V2.8.0: https_redirect_location (Task 5)
@@ -1312,9 +1312,9 @@ static void format_uploads(char *out, size_t sz) {
     append_safe(out, sz, n, "</div>");
 }
 
-// --- LoRaWAN block (V2.6.23, T8; BOARD_HELTEC_WIFI_LORA32_V4_R2 only) --------
+// --- LoRaWAN block (V2.6.23, T8; HAL_HAS_LORAWAN boards only) ----------------
 //
-// HAL_HAS_LORAWAN-gated so the ten other boards' /status pages stay byte-
+// HAL_HAS_LORAWAN-gated so the other boards' /status pages stay byte-
 // identical (lorawan_get_status()'s no-op stub would otherwise render a
 // "disabled" card everywhere there's no radio to disable). Modeled on the
 // adjacent format_mqtt() — a single target's state, not a multi-row table
@@ -1993,7 +1993,8 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<span class=\"r\">*</span>%s</label></div>"
                      // V2.8.10: Rev C carrier revision — which socket pad carries the Geiger
                      // pulse. Board-gated like i2c_pinout above (greyed on boards without
-                     // HAL_HAS_CARRIER_REV_SWITCH; config_apply_form forces 2 there). 4 slots:
+                     // HAL_HAS_CARRIER_REV_SWITCH; config_apply_form forces 2 there, or the
+                     // HAL_REVC_CARRIER_FIXED value on a one-carrier board, V2.8.11). 4 slots:
                      // disabled-attr, selected-on-V2, selected-on-V3, trailing note.
                      "<label>Rev C carrier <span class=\"r\">*</span>"
                      "<select name=\"revc_carrier\" %s>"
@@ -2039,7 +2040,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "logging starts at first fix). <span class=\"r\">*</span></label></div>"
 #endif
 #if HAL_HAS_LORAWAN
-                     // V2.6.23 (T8): LoRaWAN /config section — BOARD_HELTEC_WIFI_LORA32_V4_R2
+                     // V2.6.23 (T8): LoRaWAN /config section — HAL_HAS_LORAWAN boards
                      // only. All fields are reboot-required: the worker task (lorawan_setup())
                      // reads config_t once at boot, so a plain Save persists to NVS but the
                      // already-running worker keeps its latched values until restart — same
@@ -2069,11 +2070,20 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // the GC1109 front end is required for LoRa RX, so lorawan.cpp
                      // now always enables it. High power stays a choice: 28 dBm is
                      // a regulatory/EIRP decision, not a hardware gate (GPIO46 is
-                     // free on the V1.10 mainboard).
+                     // free on the V1.10 mainboard). V2.8.11: on a board without the
+                     // front end (HAL_HAS_LORA_FEM 0) it is greyed and forced off.
+#if HAL_HAS_LORA_FEM
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
                      "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
                      "<small>Check your region's EIRP / duty-cycle limits before "
                      "enabling.</small></label></div>"
+#else
+                     // V2.8.11: bare SX1262 (XIAO + Wio) — greyed like the other
+                     // hardware-gated options; config_apply_form() forces it off.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s "
+                     "disabled> 28 dBm high-power mode "
+                     "<small>(no power amplifier on this board)</small></label></div>"
+#endif
                      "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
                      "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
                      "(TTN Fair Use Policy).</p>"
@@ -2398,6 +2408,12 @@ static esp_err_t config_get(httpd_req_t *req) {
                      s_cfg->revc_carrier == 3 ? " selected" : "",      // V3 carrier (pad 8 / RX)
                      " <small>Must match the carrier the module sits in. After changing "
                      "it, check the <code>tube setup: GMC pin</code> line in /log.</small>",
+#elif defined(HAL_REVC_CARRIER_FIXED)
+                     // V2.8.11: board built for one carrier (XIAO + Wio: V3 only).
+                     "disabled",
+                     HAL_REVC_CARRIER_FIXED == 2 ? " selected" : "",
+                     HAL_REVC_CARRIER_FIXED == 3 ? " selected" : "",
+                     " <small>(fixed: this board needs the matching Rev C carrier)</small>",
 #else
                      "disabled",   // greyed out
                      " selected",  // always shows V2, the only value this board can store
@@ -2433,7 +2449,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      e->lora_deveui,
                      e->lora_joineui,
                      e->lora_appkey,
+#if HAL_HAS_LORA_FEM
                      s_cfg->lorawan_high_power ? "checked" : "",
+#else
+                     "",   // V2.8.11: no PA — never ticked, even with a carried-over NVS true
+#endif
 #endif
                      (unsigned long)s_cfg->tx_interval_ms,   // V2.5.30: top of Transmission targets
                      s_cfg->send_madavi ? "checked" : "",
@@ -2807,69 +2827,24 @@ static esp_err_t coredump_erase_post(httpd_req_t *req) {
 // Uses XHR to POST the raw .bin as the request body (Content-Type:
 // application/octet-stream). Avoids multipart parsing on the device.
 
-// V2.3.14: board-specific upload-form prompt. V2.3.16-pre2: distinguish 4 MB
-// (knock-off) vs 8 MB (genuine) Heltec since the binaries are NOT inter-
-// changeable (4 MB image asserts at boot on 8 MB hardware and vice versa).
-// CMakeLists.txt defines BOARD_HELTEC_V2_4MB IN ADDITION TO BOARD_HELTEC_V2
-// for the 4 MB variant — order the #if chain so the more-specific 4MB check
-// fires first. Literal-string concatenation resolves at compile time, zero
-// runtime cost. Bold red styling inline so we don't add a CSS rule for one
-// element.
-// V2.6.34: UPLOAD_PROMPT_HW names the hardware revision this build's pin
-// map requires (Rev B/C V2 carrier update, V1.10 mainboard rework — see
-// hal.h's cutover note). The OTA page is the last human checkpoint before
-// firmware lands on a device, and there is no runtime hardware-revision
-// detect, so the warning paragraph built from this macro below is the
-// only guard against flashing a swapped-pin build onto original hardware.
-// heltec_v2 (both flash variants) had no hardware change — no macro, no
-// warning paragraph.
-// A missing branch fails CI (.github/scripts/check_ota_label.sh). Planned
-// (review 2.9): at the next board port, move these labels into each hal.h
-// board block as HAL_BOARD_LABEL / HAL_HW_REV_NOTE (the 4 MB Heltec needs a
-// nested check inside the BOARD_HELTEC_V2 block, as here).
-#if BOARD_HELTEC_V2_4MB
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (4MB)</b>"
-#elif BOARD_HELTEC_V2
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi Kit 32 (8MB)</b>"
-#elif BOARD_FEATHERS3_D
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">FeatherS3</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#elif BOARD_ADAFRUIT_QTPY_ESP32_PICO
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit QT Py ESP32-PICO</b>"
-    #define UPLOAD_PROMPT_HW    "Rev C V2 carrier"
-#elif BOARD_SEEED_XIAO_ESP32S3
-    // V2.5.19: the XIAO target shipped in V2.4.25 but was never given a label
-    // branch here, so it fell through to "(unknown board)" on the OTA page —
-    // which, by elimination, was the only way to identify a XIAO build.
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Seeed XIAO ESP32-S3</b>"
-    #define UPLOAD_PROMPT_HW    "Rev C V2 carrier"
-#elif BOARD_HELTEC_WIFI_LORA32_V4_R2
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Heltec WiFi LoRa 32 V4 (R2)</b>"
-    #define UPLOAD_PROMPT_HW    "V1.10 mainboard"
-#elif BOARD_SPARKFUN_THING_PLUS_ESP32S3
-    // V2.6.10: same miss as the XIAO note above — shipped in V2.6.8 without
-    // a label branch here, so it fell through to "(unknown board)" too.
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">SparkFun Thing Plus ESP32-S3</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#elif BOARD_SPARKFUN_THING_PLUS_ESP32C5
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">SparkFun Thing Plus ESP32-C5</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#elif BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER
-    // V2.6.12: same miss as the XIAO/SparkFun-S3 notes above — shipped in
-    // V2.6.11 without a label branch here, so it fell through to
-    // "(unknown board)" too.
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 TFT Feather</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#elif BOARD_ADAFRUIT_ESP32_FEATHER_V2
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32 Feather V2</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#elif BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM
-    // Added at port time (unlike the 3 boards above) — see the OTA-label
-    // checklist item in the board-port process.
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">Adafruit ESP32-S3 Feather (4MB/2MB PSRAM)</b>"
-    #define UPLOAD_PROMPT_HW    "Rev B V2 carrier"
-#else
-    #define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">(unknown board)</b>"
+// V2.3.14: board-specific upload-form prompt — the /update page names the
+// board this build is for, as the last human check before an image lands (the
+// 4 MB and 8 MB Heltec images are not interchangeable either way). Literal-
+// string concatenation resolves at compile time. Bold red inline so we don't
+// add a CSS rule for one element.
+// V2.6.34: UPLOAD_PROMPT_HW names the hardware revision this build's pin map
+// requires (Rev B/C V2 carrier, V1.10 mainboard rework — see hal.h's cutover
+// note). There is no runtime hardware-revision detect, so the warning
+// paragraph built from it below is the only guard against flashing a
+// swapped-pin build onto original hardware.
+// V2.8.11 (review 2.9): both texts now come from each hal.h board block
+// (HAL_BOARD_LABEL, optional HAL_HW_REV_NOTE). The old #if chain here missed
+// three ports, which then showed "(unknown board)"; hal.h now refuses to build
+// a board without a label. .github/scripts/check_ota_label.sh checks that this
+// line still uses HAL_BOARD_LABEL — keep it on one line.
+#define UPLOAD_PROMPT_BOARD "<b style=\"color:red\">" HAL_BOARD_LABEL "</b>"
+#ifdef HAL_HW_REV_NOTE
+    #define UPLOAD_PROMPT_HW    HAL_HW_REV_NOTE
 #endif
 
 // Hardware-cutover warning paragraph, empty on boards without one.

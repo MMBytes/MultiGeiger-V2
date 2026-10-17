@@ -7,7 +7,7 @@
 #                  private-network data. See .github/scripts/pii_check.sh for
 #                  the patterns and why they are generic. The same script is
 #                  the optional local pre-commit hook (.githooks/pre-commit).
-#   board-lists  — the eleven board names agree across the nine places they
+#   board-lists  — the board names agree across the nine places they
 #                  are spelled out. See .github/scripts/check_board_lists.sh.
 
 name: repo-checks

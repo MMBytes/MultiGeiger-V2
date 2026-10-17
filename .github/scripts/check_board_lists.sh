@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Board-list consistency check.
 #
-# The eleven build targets are named in nine places that nothing ties
+# The build targets (twelve since V2.8.11) are named in nine places that nothing ties
 # together: the CMake selector, both reusable workflow matrices, the release
 # artefact count, the per-board sdkconfig overlays, the web-flasher manifests
 # and its <select>, the README board table and the .gitignore list of

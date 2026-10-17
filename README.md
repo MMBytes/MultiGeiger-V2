@@ -1,6 +1,6 @@
 # MultiGeiger V2 (ESP-IDF native)
 
-A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **eleven** ESP32 / ESP32-S3 / ESP32-C5 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
+A ground-up C rewrite of the [MultiGeiger](https://github.com/ecocurious2/MultiGeiger) radiation sensor firmware, ported from Arduino / PlatformIO to **native ESP-IDF 6.0**. Runs on **twelve** ESP32 / ESP32-S3 / ESP32-C5 board variants with a wide selection of optional environmental, particulate, noise, and ambient-light sensors. Uploads to **nine** public back-ends and publishes to MQTT (with Home Assistant Discovery) and remote syslog.
 
 See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for the latest build and per-release notes.
 
@@ -28,7 +28,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 
 ## Supported hardware
 
-### Boards (eleven build targets)
+### Boards (twelve build targets)
 
 | Build target | MCU / module | Flash | Notes |
 |---|---|---|---|
@@ -37,6 +37,7 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 | `feathers3_d` | Unexpected Maker FeatherS3 with display (ESP32-S3) | 8 MB | Two STEMMA QT connectors (STEMMA1 on IO8/IO9, STEMMA2 LDO-gated on IO15/IO16). External I²C OLED via STEMMA. PSRAM — WiFi/lwIP/mbedTLS offloaded to PSRAM for sustained heap headroom. |
 | `adafruit_qtpy_esp32_pico` | Adafruit QT Py ESP32-PICO | 8 MB | Compact form factor. Optional NeoPixel tick on pulse. PSRAM. |
 | `seeed_xiao_esp32s3` | Seeed Studio XIAO ESP32-S3 | 8 MB | Tiny 21×17.5 mm — shares QT Py form factor + Geiger pin map (A0 / A1 / SCK), so one PCB design works for both. Onboard user LED blinks per pulse. PSRAM. |
+| `seeed_xiao_esp32s3_wio` | Seeed Studio XIAO ESP32-S3 + Wio-SX1262 kit | 8 MB | The XIAO on Seeed's Wio-SX1262 LoRa board. **Rev C V3 carrier only** (Geiger pulse on the RX pad, since the LoRa SPI bus uses the SCK pad). **LoRaWAN uplink** (V2.8.11+), see below. The XIAO's user LED is not used (its pin is the Wio's button). PSRAM. |
 | `heltec_wifi_lora32_v4_r2` | Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2) | 16 MB | Third-party PCB: the standard Multigeiger V2 mainboard populated with this module instead of the Heltec V2. Onboard SSD1315 OLED on a dedicated, always-on I²C bus separate from the env-sensor bus. 2 MB in-package PSRAM. **LoRaWAN uplink** (V2.6.23+) via an onboard SX1262 (RadioLib 7.2.1, OTAA/Class A) — see the LoRaWAN section below. |
 | `sparkfun_thing_plus_esp32s3` | SparkFun Thing Plus ESP32-S3, WRL-24408 (ESP32-S3-MINI-1) | 4 MB | Second-source MCU for the FeatherS3-D-format carrier PCB — same Feather footprint, drop-in alternative to `feathers3_d` on the same board. External I²C OLED via Qwiic, onboard MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail, no power-gate GPIO). 2 MB in-package PSRAM. |
 | `sparkfun_thing_plus_esp32c5` | SparkFun Thing Plus ESP32-C5, WRL-30678 (ESP32-C5-WROOM-1) | 8 MB | First single-core/RISC-V target. Its own Thing Plus carrier (not a drop-in for the FeatherS3-D board). External I2C OLED via Qwiic, onboard MAX17048 fuel gauge, onboard WS2812 NeoPixel (always-on rail via pull-up, no power-gate GPIO). 8 MB in-package PSRAM. |
@@ -46,9 +47,9 @@ See the [releases page](https://github.com/MMBytes/MultiGeiger-V2/releases) for 
 
 Every build takes a `-DBOARD=<target>` argument — see [Build from source](#build-from-source). All boards share the same `main/` source tree; differences are isolated in per-board `sdkconfig.defaults.<board>` and HAL pin map. PSRAM boards additionally include `sdkconfig.defaults.psram` (WiFi roaming app + PSRAM offload knobs).
 
-### LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
+### LoRaWAN uplink (heltec_wifi_lora32_v4_r2 and seeed_xiao_esp32s3_wio)
 
-OTAA/Class A uplink over an onboard SX1262 (RadioLib 7.2.1), configured in a dedicated **`/config` LoRaWAN section** (all-region frequency-plan dropdown, DevEUI/JoinEUI/AppKey entry, join status; session keys persist in NVS across reboots). Ports 1 and 2 are byte-identical to the Multigeiger V1.9 Arduino firmware's TTN uplinks — paste `docs/ttn_payload_formatter.js` into TTN Console as a Custom Javascript payload formatter to decode them. Respect the LoRaWAN Fair Use Policy: keep the transmission interval at **5 minutes or longer** when LoRaWAN is enabled.
+OTAA/Class A uplink over an SX1262 (RadioLib 7.2.1; onboard on the Heltec V4, the Wio-SX1262 board on the XIAO ESP32-S3 kit), configured in a dedicated **`/config` LoRaWAN section** (all-region frequency-plan dropdown, DevEUI/JoinEUI/AppKey entry, join status; session keys persist in NVS across reboots). Ports 1 and 2 are byte-identical to the Multigeiger V1.9 Arduino firmware's TTN uplinks — paste `docs/ttn_payload_formatter.js` into TTN Console as a Custom Javascript payload formatter to decode them. Respect the LoRaWAN Fair Use Policy: keep the transmission interval at **5 minutes or longer** when LoRaWAN is enabled. The region defaults to AU915 — pick yours (e.g. EU868 in Europe) before enabling. The firmware does not enforce a duty-cycle limit itself. At a 5-minute interval the two uplinks use about 0.9 % airtime at the slowest data rate (SF12), just under the EU868 limit of 1 %; at the faster rates ADR normally selects it is far less, so do not go below 5 minutes.
 
 ### Geiger tube
 
@@ -218,7 +219,7 @@ idf.py -B build_heltec_v2 -DBOARD=heltec_v2 -p <PORT> flash monitor
 idf.py -B build_heltec_v2 -DBOARD=heltec_v2 merge-bin -o geiger_v2_merged_heltec_v2.bin   # single-file factory image
 ```
 
-`-DBOARD=` selects the chip target, the board macros and the per-board `sdkconfig.defaults.<board>` overlay in one go — do not pass `SDKCONFIG_DEFAULTS` yourself. Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, `adafruit_esp32s3_tft_feather`, `adafruit_esp32_feather_v2`, or `adafruit_esp32s3_feather_4mb_2mbpsram` for other boards, and use a matching `-B build_<board>` directory: the generated `sdkconfig.<board>` cache is per board, so boards never pollute each other.
+`-DBOARD=` selects the chip target, the board macros and the per-board `sdkconfig.defaults.<board>` overlay in one go — do not pass `SDKCONFIG_DEFAULTS` yourself. Substitute `heltec_v2_4mb`, `feathers3_d`, `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3`, `seeed_xiao_esp32s3_wio`, `heltec_wifi_lora32_v4_r2`, `sparkfun_thing_plus_esp32s3`, `sparkfun_thing_plus_esp32c5`, `adafruit_esp32s3_tft_feather`, `adafruit_esp32_feather_v2`, or `adafruit_esp32s3_feather_4mb_2mbpsram` for other boards, and use a matching `-B build_<board>` directory: the generated `sdkconfig.<board>` cache is per board, so boards never pollute each other.
 
 Host-side unit tests for the pure helpers need only a C compiler:
 
@@ -232,7 +233,7 @@ Optional: `git config core.hooksPath .githooks` enables a pre-commit scan that r
 
 ### Release workflow
 
-`git tag -a V2.X.Y && git push --tags` is the release ceremony. GitHub Actions `release.yml` first runs the cheap gates (host tests, cppcheck on every board, a `## V2.X.Y` section present in `CHANGELOG.md`), then builds all eleven boards (each build also verifies that `VERSION_STR` equals the tag and that the image fits its OTA slot), creates the GitHub Release with the artefacts, `SHA256SUMS` and the CHANGELOG section as body, and finally publishes the web flasher — only if the tag is the newest release, so re-running an old tag never rolls the flasher back.
+`git tag -a V2.X.Y && git push --tags` is the release ceremony. GitHub Actions `release.yml` first runs the cheap gates (host tests, cppcheck on every board, a `## V2.X.Y` section present in `CHANGELOG.md`), then builds all twelve boards (each build also verifies that `VERSION_STR` equals the tag and that the image fits its OTA slot), creates the GitHub Release with the artefacts, `SHA256SUMS` and the CHANGELOG section as body, and finally publishes the web flasher — only if the tag is the newest release, so re-running an old tag never rolls the flasher back.
 
 ## Repository layout
 
@@ -266,7 +267,7 @@ main/                       firmware C sources
   fuel_gauge.c              MAX17048 battery fuel gauge
   sd_card.c sd_logger.c     microSD mount + standalone CSV logger
   lorawan.cpp lorawan_codec.h
-                            LoRaWAN uplink (heltec_wifi_lora32_v4_r2 only)
+                            LoRaWAN uplink (heltec_wifi_lora32_v4_r2, seeed_xiao_esp32s3_wio)
   telemetry.c / .h          sensor-reading registry shared by SD logger and status
   env_api.h                 /api/env JSON contract (served by http_server.c)
   tls_cert.c / tls_logic.h  per-device HTTPS certificate (generation, NVS storage)

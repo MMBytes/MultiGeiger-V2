@@ -560,6 +560,11 @@ void tube_setup(bool enabled, uint8_t carrier_rev) {
     ESP_LOGI(TAG, "tube setup: GMC pin %d (neg, Rev C V%u), HV FET %d, cap %d (pos)",
              s_gmc_pin, (unsigned)(s_gmc_pin == PIN_GMC_COUNT_INPUT ? 2 : 3),
              PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT);
+#elif defined(HAL_REVC_CARRIER_FIXED)
+    // V2.8.11: board built for one carrier (XIAO + Wio: V3, GMC pin 44).
+    ESP_LOGI(TAG, "tube setup: GMC pin %d (neg, Rev C V%u), HV FET %d, cap %d (pos)",
+             s_gmc_pin, (unsigned)HAL_REVC_CARRIER_FIXED,
+             PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT);
 #else
     // Byte-identical to <= V2.8.9 on every board without the carrier select.
     ESP_LOGI(TAG, "tube setup: GMC pin %d (neg), HV FET %d, cap %d (pos)",

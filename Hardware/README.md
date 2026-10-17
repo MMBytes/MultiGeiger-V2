@@ -11,7 +11,7 @@ CSV, BOM, schematic PDF and 3D renderings.
 |---|---|---|---|---|---|
 | `Revision_A/` | MultiGeiger mainboard **V1.10** | Heltec WiFi LoRa 32 V4, base/R2 variant | `heltec_wifi_lora32_v4_r2` | **V2.7.1** | Eagle (`geiger-v2.sch` / `.brd`) |
 | `Revision_B/` | FeatherS3-D-format carrier, **V2 layout** | Unexpected Maker FeatherS3-D, SparkFun Thing Plus ESP32-S3, Adafruit ESP32-S3 TFT Feather, Adafruit ESP32 Feather V2, Adafruit ESP32-S3 Feather #5477 | `feathers3_d`, `sparkfun_thing_plus_esp32s3`, `adafruit_esp32s3_tft_feather`, `adafruit_esp32_feather_v2`, `adafruit_esp32s3_feather_4mb_2mbpsram` | **V2.6.34** | KiCad 8 |
-| `Revision_C/` | Shared-footprint carrier, **V2 layout** | Adafruit QT Py ESP32-PICO **or** Seeed XIAO ESP32-S3 in the same U1 socket | `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3` | **V2.6.34** | KiCad 8 |
+| `Revision_C/` | Shared-footprint carrier, **V2 layout** | Adafruit QT Py ESP32-PICO **or** Seeed XIAO ESP32-S3 in the same U1 socket (the XIAO ESP32-S3 + Wio-SX1262 kit needs the V3 layout, see below) | `adafruit_qtpy_esp32_pico`, `seeed_xiao_esp32s3` (V3 layout: also `seeed_xiao_esp32s3_wio`) | **V2.6.34** | KiCad 8 |
 
 Not in this directory:
 
@@ -39,7 +39,9 @@ the authoritative statement of this rule.
   SPI add-on such as the Wio-SX1262 LoRa board on the XIAO ESP32-S3. It needs
   firmware **≥ V2.8.10** with `/config` → **Rev C carrier = V3**. The setting
   defaults to V2, so a Rev C V2 carrier needs no change. It must match the
-  carrier.
+  carrier. The XIAO ESP32-S3 + Wio-SX1262 kit has its own firmware target,
+  `seeed_xiao_esp32s3_wio` (≥ **V2.8.11**), which is built for the V3 layout
+  only and has no carrier setting.
 - **V1.10 mainboard (Revision A)** needs firmware **≥ V2.7.1**. V2.6.34 was
   written against a pre-fabrication pad assignment that was never
   manufactured, so for this target V2.6.34 matches no physical board.

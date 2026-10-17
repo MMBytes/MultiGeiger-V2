@@ -1,0 +1,44 @@
+# ============================================================================
+# Seeed Studio XIAO ESP32-S3 + Wio-SX1262 kit overlay (V2.8.11) — the XIAO
+# ESP32-S3 module (8 MB QSPI flash + 8 MB OPI PSRAM, native USB-C) plugged onto
+# the Wio-SX1262 LoRa board through its B2B socket.
+#
+# Identical to sdkconfig.defaults.seeed_xiao_esp32s3 apart from comments and
+# CONFIG_GEIGER_LORAWAN at the end — keep the two in step. Pin map and feature
+# flags live in main/hal.h under BOARD_SEEED_XIAO_ESP32S3_WIO (Rev C V3 carrier
+# only).
+#
+# PSRAM is OCTAL mode (CONFIG_SPIRAM_MODE_OCT=y), as on the plain XIAO; the
+# wrong mode crashes during PSRAM init at boot. (IDF v6 name: SPIRAM_MODE_OCT.)
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 8 MB flash. Standard partitions.csv (factory + ota_0 + ota_1, 2 MB each)
+# fits trivially.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# OPI PSRAM at 80 MHz. Per the XIAO ESP32-S3 datasheet, the in-package
+# 8 MB PSRAM uses octal interface (not quad like FeatherS3-D). The other
+# SPIRAM_* knobs mirror the FeatherS3-D overlay — same heap-spill policy.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# Heap-spill policy (ALWAYSINTERNAL/RESERVE_INTERNAL) and the V2.5.33 network/TLS
+# PSRAM-offload knobs are identical across all PSRAM boards and live in the
+# shared sdkconfig.defaults ("PSRAM heap policy" section).
+
+# Console / flashing path: USB-Serial-JTAG (S3 built-in, no TinyUSB needed).
+# `printf` and `ESP_LOGx` go to USB-C; `idf.py flash` uses the same port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# UART0 (GPIO43/44 = D6/D7 on header) left disabled as a console — GPIO44
+# (D7/RX) is the Geiger pulse input on the Rev C V3 carrier.
+
+# Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
+# (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).
+
+# LoRaWAN uplink (RadioLib + main/lorawan.cpp) on the Wio-SX1262.
+CONFIG_GEIGER_LORAWAN=y

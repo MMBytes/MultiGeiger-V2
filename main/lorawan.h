@@ -53,7 +53,7 @@ typedef struct {
 
 #if !HAL_HAS_LORAWAN
 // No-op stubs: call sites in main.c / http_server.c stay guard-free on the
-// ten boards without the radio. Mirrors how HAL feature flags keep other
+// boards without the radio. Mirrors how HAL feature flags keep other
 // optional drivers' call sites clean.
 static inline void lorawan_setup(void) {}
 static inline void lorawan_transmit(const lorawan_snapshot_t *snap) { (void)snap; }

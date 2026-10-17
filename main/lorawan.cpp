@@ -1,6 +1,8 @@
-// LoRaWAN uplink for BOARD_HELTEC_WIFI_LORA32_V4_R2 — the tree's ONLY C++
-// translation unit, kept behind the plain-C API in lorawan.h. Whole file is
-// gated on CONFIG_GEIGER_LORAWAN (set only in that board's sdkconfig): the
+// LoRaWAN uplink for the SX1262 boards (Heltec WiFi LoRa 32 V4; V2.8.11: XIAO
+// ESP32-S3 + Wio-SX1262) — the tree's ONLY C++ translation unit, kept behind
+// the plain-C API in lorawan.h. Per-board radio differences come from hal.h
+// (HAL_HAS_LORA_FEM, HAL_LORA_TCXO_V, PIN_LORA_RF_SW_RX). Whole file is
+// gated on CONFIG_GEIGER_LORAWAN (set only in those boards' sdkconfig): the
 // CMake SRCS conditional keeps it out of other boards' builds, and this
 // guard additionally yields an empty TU for the cppcheck gate's other-board
 // define sets (_build.cmd scans all of main/ for every board).
@@ -186,6 +188,7 @@ static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 // in LORAWAN_ST_HW_FAIL — never retried until reboot; the Geiger core is
 // never hostage to the radio).
 static bool radio_init(void) {
+#if HAL_HAS_LORA_FEM
     // VFEM: power to the LoRa front end, BEFORE any SPI traffic (V1.9
     // precedent on the V4; ~100 ms settle).
     gpio_config_t vfem = {};
@@ -217,17 +220,30 @@ static bool radio_init(void) {
         gpio_set_level((gpio_num_t)PIN_LORA_FEM_PA, 1);   // 28 dBm gain stage
         ESP_LOGW(TAG, "FEM_PA (GPIO46) driven HIGH — 28 dBm mode");
     }
+#endif  // HAL_HAS_LORA_FEM — boards without it have a bare SX1262 (no power-up step)
 
     // Let RadioLib own ALL SX1262 configuration (lesson from RadioLib
     // discussion #1665: mixing manual raw commands with RadioLib breaks the
-    // radio state). begin() defaults include DIO3-as-TCXO at 1.6 V, which
-    // bench-worked on the V4 there. LoRaWANNode reconfigures freq/DR later.
-    int16_t st = s_radio.begin();
+    // radio state). begin() also sets DIO2 as the RF switch and DIO3 as the
+    // TCXO supply. V2.8.11: the TCXO voltage comes from hal.h (Heltec V4 1.6 V
+    // = RadioLib's default, bench-proven there; Wio-SX1262 1.8 V); the other
+    // arguments are RadioLib 7.2.1's own defaults (SX1262.h), so the Heltec
+    // call is unchanged. LoRaWANNode reconfigures freq/DR later.
+    int16_t st = s_radio.begin(434.0, 125.0, 9, 7, RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
+                               10, 8, HAL_LORA_TCXO_V);
     if (st != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "SX1262 begin failed: %d — LoRaWAN parked (HW_FAIL)", st);
         return false;
     }
     ESP_LOGI(TAG, "SX1262 init OK");
+#ifdef PIN_LORA_RF_SW_RX
+    // V2.8.11 (XIAO + Wio): the module's RF_SW1 input wants HIGH to receive.
+    // RadioLib drives this pin HIGH in RX and LOW in TX / idle (Module.cpp
+    // setRfSwitchPins), alongside DIO2. Same wiring as Meshtastic's
+    // seeed_xiao_s3 variant (SX126X_RXEN 38).
+    s_radio.setRfSwitchPins(PIN_LORA_RF_SW_RX, RADIOLIB_NC);
+    ESP_LOGI(TAG, "RF switch: DIO2 + GPIO%d (RX high)", PIN_LORA_RF_SW_RX);
+#endif
     return true;
 }
 
@@ -783,9 +799,8 @@ void lorawan_setup(void) {
     // Same worker-task convention as transmission.c's tx_setup(): pinned to
     // CPU1 so a multi-second join/uplink RadioLib call (blocking SPI polls +
     // RX-window waits) never starves CPU0's idle task / task watchdog.
-    // BOARD_HELTEC_WIFI_LORA32_V4_R2 is ESP32-S3 (dual-core) — always the
-    // pinned branch here, unlike tx_setup()'s single-core ESP32-C5 carve-out
-    // (LoRaWAN is this one board only; see file header).
+    // Both LoRaWAN boards (Heltec V4, XIAO + Wio) are ESP32-S3 (dual-core) —
+    // always the pinned branch here, unlike tx_setup()'s single-core carve-out.
     BaseType_t ok = xTaskCreatePinnedToCore(
         lorawan_task, "lorawan", 8192, NULL, (tskIDLE_PRIORITY + 1), NULL, 1);
     configASSERT(ok == pdPASS);

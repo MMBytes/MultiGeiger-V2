@@ -18,6 +18,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "config.h"
 #include "hal.h"   // HAL_HAS_* — read only by config_form_caps_from_hal()
 
@@ -28,6 +29,8 @@ typedef struct {
     bool has_fuel_gauge;          ///< HAL_HAS_FUEL_GAUGE: MAX17048 battery gauge on board
     bool has_lorawan;             ///< HAL_HAS_LORAWAN: lora_* keys get strict hex checks
     bool has_carrier_rev_switch;  ///< HAL_HAS_CARRIER_REV_SWITCH: revc_carrier may be 3
+    bool has_lora_fem;            ///< HAL_HAS_LORA_FEM: Heltec GC1109 front end (28 dBm mode)
+    uint8_t carrier_rev_fixed;    ///< HAL_REVC_CARRIER_FIXED, 0 = none: carrier stored on non-switch boards
 } config_form_caps_t;
 
 /** @brief What the parser found besides the field values. */
@@ -47,6 +50,12 @@ static inline config_form_caps_t config_form_caps_from_hal(void) {
         .has_fuel_gauge        = HAL_HAS_FUEL_GAUGE,
         .has_lorawan           = HAL_HAS_LORAWAN,
         .has_carrier_rev_switch = HAL_HAS_CARRIER_REV_SWITCH,
+        .has_lora_fem          = HAL_HAS_LORA_FEM,
+#ifdef HAL_REVC_CARRIER_FIXED
+        .carrier_rev_fixed     = HAL_REVC_CARRIER_FIXED,
+#else
+        .carrier_rev_fixed     = 0,
+#endif
     };
     return c;
 }

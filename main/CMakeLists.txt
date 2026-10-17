@@ -1,4 +1,4 @@
-# V2.6.23: LoRaWAN (heltec_wifi_lora32_v4_r2 only). Deliberately NOT the
+# V2.6.23: LoRaWAN (heltec_wifi_lora32_v4_r2; V2.8.11: + seeed_xiao_esp32s3_wio). Deliberately NOT the
 # speaker.c always-compile-stub pattern: compiling lorawan.cpp requires the
 # RadioLib managed component, which only exists when CONFIG_GEIGER_LORAWAN
 # pulled it (see idf_component.yml rules). Keyed off the same single symbol.

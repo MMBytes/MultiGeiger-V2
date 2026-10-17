@@ -59,6 +59,7 @@ jobs:
           - feathers3_d
           - adafruit_qtpy_esp32_pico
           - seeed_xiao_esp32s3
+          - seeed_xiao_esp32s3_wio
           - heltec_wifi_lora32_v4_r2
           - sparkfun_thing_plus_esp32s3
           - sparkfun_thing_plus_esp32c5
@@ -92,11 +93,11 @@ jobs:
           esp_idf_version: v6.0.3
           # Mirrors CMakeLists.txt's IDF_TARGET selection (kept in sync manually):
           # ESP32-C5 for sparkfun_thing_plus_esp32c5, ESP32-S3 for feathers3_d +
-          # seeed_xiao_esp32s3 + heltec_wifi_lora32_v4_r2 + sparkfun_thing_plus_esp32s3 +
+          # seeed_xiao_esp32s3 + seeed_xiao_esp32s3_wio + heltec_wifi_lora32_v4_r2 + sparkfun_thing_plus_esp32s3 +
           # adafruit_esp32s3_tft_feather + adafruit_esp32s3_feather_4mb_2mbpsram,
           # esp32 for the rest.
           target: ${{ matrix.board == 'sparkfun_thing_plus_esp32c5' && 'esp32c5' ||
-            ((matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'heltec_wifi_lora32_v4_r2' || matrix.board == 'sparkfun_thing_plus_esp32s3' || matrix.board == 'adafruit_esp32s3_tft_feather' || matrix.board == 'adafruit_esp32s3_feather_4mb_2mbpsram') && 'esp32s3' || 'esp32') }}
+            ((matrix.board == 'feathers3_d' || matrix.board == 'seeed_xiao_esp32s3' || matrix.board == 'seeed_xiao_esp32s3_wio' || matrix.board == 'heltec_wifi_lora32_v4_r2' || matrix.board == 'sparkfun_thing_plus_esp32s3' || matrix.board == 'adafruit_esp32s3_tft_feather' || matrix.board == 'adafruit_esp32s3_feather_4mb_2mbpsram') && 'esp32s3' || 'esp32') }}
           path: '.'
           # Forward ccache config into the build container. CCACHE_DIR is a path
           # inside the mounted workspace so writes persist to the host for caching.
@@ -191,8 +192,8 @@ jobs:
           echo "::notice::${{ matrix.board }} binary contains VERSION_STR=$VER"
 
       - name: Verify OTA page board label
-        # A new board port that misses the UPLOAD_PROMPT_BOARD chain in
-        # http_server.c still builds and shows "(unknown board)" on /update.
+        # Tripwire for the board label on /update: hal.h must still refuse a
+        # board without HAL_BOARD_LABEL, and the binary must carry the label.
         # See the script header for why this matters and what it checks.
         run: .github/scripts/check_ota_label.sh "${{ matrix.board }}" "build_${{ matrix.board }}/geiger_v2.bin"
 

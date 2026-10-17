@@ -37,5 +37,5 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram
 # (added to this board's SDKCONFIG_DEFAULTS in CMakeLists.txt).
 
-# V2.6.23: LoRaWAN uplink (RadioLib + main/lorawan.cpp). This board only.
+# V2.6.23: LoRaWAN uplink (RadioLib + main/lorawan.cpp). Also set by the XIAO + Wio overlay (V2.8.11).
 CONFIG_GEIGER_LORAWAN=y

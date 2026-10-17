@@ -22,7 +22,7 @@ cmake_minimum_required(VERSION 3.16)
 # (BOARD_HELTEC_V2 macro) — the only deltas are flash size + partition table.
 # ----------------------------------------------------------------------------
 if(NOT DEFINED BOARD)
-    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram)")
+    set(BOARD "heltec_v2" CACHE STRING "Target board (heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | seeed_xiao_esp32s3_wio | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram)")
 endif()
 
 if(BOARD STREQUAL "heltec_v2")
@@ -58,6 +58,15 @@ elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
     add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3")
+elseif(BOARD STREQUAL "seeed_xiao_esp32s3_wio")
+    # V2.8.11: Seeed XIAO ESP32-S3 + Wio-SX1262 kit (SX1262 LoRa on the XIAO's
+    # B2B socket). Same module as seeed_xiao_esp32s3, Rev C V3 carrier only
+    # (Geiger pulse on pad 8 / GPIO44, because the LoRa SPI bus uses the V2
+    # pulse pad), LoRaWAN via lorawan.cpp. See hal.h under
+    # BOARD_SEEED_XIAO_ESP32S3_WIO.
+    set(IDF_TARGET "esp32s3" CACHE STRING "")
+    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3_WIO=1 MQTT_RICH_STATE=1)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3_wio")
 elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")
     # Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2, 2 MB in-package
     # PSRAM). NOT the V4-R8 variant (ESP32-S3R8, 8 MB PSRAM, different
@@ -134,7 +143,7 @@ elseif(BOARD STREQUAL "adafruit_esp32s3_feather_4mb_2mbpsram")
     add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 MQTT_RICH_STATE=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_esp32s3_feather_4mb_2mbpsram")
 else()
-    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram")
+    message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | seeed_xiao_esp32s3_wio | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram")
 endif()
 
 # Per-board sdkconfig cache file. Without this, both builds share a single

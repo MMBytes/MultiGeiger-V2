@@ -2389,6 +2389,50 @@ static int test_form_revc_out_of_range_rejected(void) {
     return 1;
 }
 
+static int test_form_revc_fixed_board_stores_3(void) {
+    // V2.8.11: a board built for one carrier (XIAO + Wio, V3 only) has no
+    // switch, but must store the carrier it really uses, not V2.
+    config_form_caps_t caps = form_caps_none();
+    caps.carrier_rev_fixed = 3;
+    form_reset();
+    form_apply("revc_carrier=2", &caps);
+    EXPECT_INT(g_form_next.revc_carrier, 3);
+    form_reset();
+    form_apply("save=1", &caps);
+    EXPECT_INT(g_form_next.revc_carrier, 3);
+    return 1;
+}
+
+static int test_form_lora_hp_forced_off_without_fem(void) {
+    // V2.8.11: 28 dBm mode drives the Heltec's GC1109 amplifier. A LoRa board
+    // without one (XIAO + Wio) must never store it, even from a ticked box or
+    // a config saved on a Heltec.
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan = true;
+    form_reset();
+    g_form_prev.lorawan_high_power = true;
+    g_form_next.lorawan_high_power = true;
+    form_apply("lora_en=on&lora_hp=on", &caps);
+    EXPECT_TRUE(!g_form_next.lorawan_high_power);
+    EXPECT_TRUE(g_form_next.lorawan_enabled);
+    return 1;
+}
+
+static int test_form_lora_hp_kept_with_fem(void) {
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan  = true;
+    caps.has_lora_fem = true;
+    form_reset();
+    form_apply("lora_hp=on", &caps);
+    EXPECT_TRUE(g_form_next.lorawan_high_power);
+    form_reset();
+    g_form_prev.lorawan_high_power = true;
+    g_form_next.lorawan_high_power = true;
+    form_apply("save=1", &caps);   // unticked box = off, as for every bool
+    EXPECT_TRUE(!g_form_next.lorawan_high_power);
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // history.c  (V2.8.8, review 2.1 C2)
 // ----------------------------------------------------------------------------
@@ -3019,6 +3063,9 @@ int main(int argc, char **argv) {
     RUN(test_form_revc_forced_v2_without_switch);
     RUN(test_form_revc_v3_with_switch);
     RUN(test_form_revc_out_of_range_rejected);
+    RUN(test_form_revc_fixed_board_stores_3);
+    RUN(test_form_lora_hp_forced_off_without_fem);
+    RUN(test_form_lora_hp_kept_with_fem);
 
     printf("\n");
     if (g_ran == 0) {

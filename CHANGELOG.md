@@ -9,6 +9,44 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.11 — XIAO ESP32-S3 + Wio-SX1262 board with LoRaWAN
+
+A twelfth build target, `seeed_xiao_esp32s3_wio`, for Seeed's XIAO ESP32-S3 +
+Wio-SX1262 kit: the XIAO plugged onto the Wio-SX1262 LoRa board. It counts on
+the Rev C V3 carrier and sends LoRaWAN uplinks with the same code as the
+Heltec WiFi LoRa 32 V4. Board names also move into one place per board.
+Nothing changes for existing nodes.
+
+1. **New board: XIAO ESP32-S3 + Wio-SX1262** (`seeed_xiao_esp32s3_wio`, also in
+   the web flasher):
+   - **Rev C V3 carrier only.** The Wio's SPI bus uses the pad that carries
+     the Geiger pulse on a Rev C V2 carrier, so this build always counts on
+     pad 8 (RX, GPIO44). There is no carrier setting: `/config` shows the
+     carrier as V3, greyed out, and the boot log says
+     `tube setup: GMC pin 44 (neg, Rev C V3), ...` and `carrier: Rev C V3 (fixed, ...)`.
+   - **LoRaWAN** (OTAA, Class A) through the existing `/config` LoRaWAN
+     section. The region defaults to AU915; choose EU868 (or your region)
+     before enabling. The 28 dBm option is greyed out: the Wio has no power
+     amplifier.
+   - Not used on this board: the XIAO's user LED (its pin is also the Wio's
+     button, so the firmware never drives it), the Wio's button and its
+     green LED.
+   - OTA from a plain XIAO ESP32-S3 build works; settings carry over.
+2. **LoRaWAN code shared by both radio boards.** What differs between the
+   Heltec V4 and the Wio now comes from each board's definition: whether
+   there is a front-end amplifier to power up, the TCXO voltage (1.6 V on the
+   Heltec, as before; 1.8 V on the Wio) and the Wio's extra receive-switch
+   line. The Heltec V4 does exactly what it did before.
+3. **Board names in one place.** The board name on the `/update` page, its
+   hardware-check note and the OLED chip name in the boot log now come from
+   each board's block in `main/hal.h` instead of three separate lists. A
+   board without a name no longer builds; before, it built and showed
+   "(unknown board)" on `/update`, which happened three times. Two checks
+   that named a board now test the property they need (single-core chip,
+   no PSRAM). The text every existing board shows is unchanged.
+
+---
+
 ## V2.8.10 — Rev C V3 carrier setting; /config parsing host-tested
 
 The Adafruit QT Py ESP32-PICO and Seeed XIAO ESP32-S3 builds can now count

@@ -5,6 +5,7 @@
  *
  *  One of `BOARD_HELTEC_V2`, `BOARD_FEATHERS3_D`,
  *  `BOARD_ADAFRUIT_QTPY_ESP32_PICO`, `BOARD_SEEED_XIAO_ESP32S3`,
+ *  `BOARD_SEEED_XIAO_ESP32S3_WIO`,
  *  `BOARD_HELTEC_WIFI_LORA32_V4_R2`, `BOARD_SPARKFUN_THING_PLUS_ESP32S3`,
  *  `BOARD_SPARKFUN_THING_PLUS_ESP32C5`,
  *  `BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER`,
@@ -92,6 +93,21 @@
  *                            (16 KB) when scratch lives in PSRAM (V2.3.24)
  *    HAL_CFG_FORM_BUF_SIZE   /config page render buffer (V2.4.6) — 24 KB on
  *                            internal-DRAM boards, 32 KB where PSRAM backs it
+ *    HAL_BOARD_LABEL         V2.8.11: human board name, plain text — the /update
+ *                            page shows it as the last check before an image
+ *                            lands (http_server.c UPLOAD_PROMPT_BOARD)
+ *    HAL_OLED_CHIP_NAME      V2.8.11: OLED controller named in the boot log
+ *                            ("SSD1306" / "SSD1309" / "SSD1315")
+ *
+ *  Required where HAL_HAS_LORAWAN is 1 (V2.8.11, see "LoRa radio values"
+ *  after the board chain): HAL_HAS_LORA_FEM, HAL_LORA_TCXO_V.
+ *
+ *  Optional per board:
+ *    HAL_HW_REV_NOTE         V2.8.11: carrier / mainboard revision whose pin map
+ *                            this build needs; adds the /update "Hardware check"
+ *                            paragraph (V2.6.34 cutover). Undefined = no paragraph.
+ *    PIN_LORA_RF_SW_RX       V2.8.11: extra RF-switch line, HIGH in receive
+ *    HAL_REVC_CARRIER_FIXED  V2.8.11: the one Rev C carrier a board is built for
  *
  *  V2.8.10: these are now ENFORCED — the block right after the board chain's
  *  #endif stops the build with #error if a branch forgets one. (`#if FLAG` on an
@@ -106,9 +122,13 @@
     // different name strings depending on flash variant.
     #if BOARD_HELTEC_V2_4MB
         #define BOARD_NAME          "heltec_v2_4mb"
+        #define HAL_BOARD_LABEL     "Heltec WiFi Kit 32 (4MB)"
     #else
         #define BOARD_NAME          "heltec_v2"
+        #define HAL_BOARD_LABEL     "Heltec WiFi Kit 32 (8MB)"
     #endif
+    // No HAL_HW_REV_NOTE: the upstream V1.4 mainboard had no pin cutover.
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED            1   // SSD1306 on shared I2C bus
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           0
@@ -179,6 +199,9 @@
 #elif defined(BOARD_FEATHERS3_D)
 
     #define BOARD_NAME              "feathers3_d"
+    #define HAL_BOARD_LABEL         "FeatherS3"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1309"   // OLED controller named in the boot log
     // V2.3.28: SSD1309 2.42" external OLED on STEMMA1 or STEMMA2 at 0x3C
     // (Core Electronics CE09964 — 4-pin I²C, no dedicated reset line;
     // relies on chip POR). V2.3.29 added auto-detect across both buses
@@ -327,6 +350,9 @@
     // GPIO numbers verified against
     // github.com/espressif/arduino-esp32 variants/adafruit_qtpy_esp32/pins_arduino.h
     #define BOARD_NAME              "adafruit_qtpy_esp32_pico"
+    #define HAL_BOARD_LABEL         "Adafruit QT Py ESP32-PICO"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev C V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     // V2.3.29: like FeatherS3-D, no onboard display BUT supports an external
     // SSD1306/SSD1309 OLED or SparkFun SerLCD via the STEMMA QT connector
     // (auto-detected at boot). Display lives on the SAME I²C bus as the env
@@ -451,6 +477,9 @@
     // GPIO numbers verified against the official Seeed wiki:
     //   https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/
     #define BOARD_NAME              "seeed_xiao_esp32s3"
+    #define HAL_BOARD_LABEL         "Seeed XIAO ESP32-S3"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev C V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
@@ -532,6 +561,83 @@
     //              post-boot but UART0 console is disabled in our sdkconfig
     //              in favour of USB-Serial-JTAG, so they're free)
 
+#elif defined(BOARD_SEEED_XIAO_ESP32S3_WIO)
+
+    // V2.8.11: Seeed XIAO ESP32-S3 + Wio-SX1262 kit (the XIAO plugged onto the
+    // Wio-SX1262 LoRa board through its 30-pin B2B socket). Same module and
+    // castellated pads as BOARD_SEEED_XIAO_ESP32S3 above, plus an SX1262 for
+    // LoRaWAN (lorawan.cpp, shared with the Heltec V4).
+    //
+    // Rev C **V3 carrier only**, fixed at build time: the Wio's SPI bus is
+    // D8/D9/D10 (GPIO7/8/9), which on a Rev C V2 carrier is the Geiger pulse pad
+    // (pad 9 = SCK). So this build counts on pad 8 (D7/RX = GPIO44) and has no
+    // /config carrier switch (HAL_REVC_CARRIER_FIXED 3 just labels it).
+    //
+    // Pin sources: Seeed schematic "Wio-SX1262 for XIAO V1.0" and Meshtastic's
+    // seeed_xiao_s3 variant (field-proven with this kit). GPIO1/2/44 (HV and
+    // count) are not on the B2B socket, so the Wio does not load them.
+    #define BOARD_NAME              "seeed_xiao_esp32s3_wio"
+    #define HAL_BOARD_LABEL         "Seeed XIAO ESP32-S3 + Wio-SX1262 (Rev C V3 carrier)"   // /update page board name
+    // No HAL_HW_REV_NOTE: new in V2.8.11, there is no older pin map to warn about.
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
+    #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
+    #define HAL_HAS_TFT             0
+    #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
+    #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
+    #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
+    #define HAL_HAS_ANTENNA_SWITCH  0   // WiFi: PCB antenna only (the u.FL on the Wio is the LoRa antenna)
+    #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
+    #define HAL_HAS_CARRIER_REV_SWITCH 0 // Fixed to Rev C V3 — see HAL_REVC_CARRIER_FIXED
+    #define HAL_REVC_CARRIER_FIXED  3   // Labels /config + boot log, stored as revc_carrier
+    #define HAL_HAS_SPEAKER         0   // Not wired — no spare pad on the shared-PCB footprint
+    #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
+    #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
+    #define HAL_HAS_LORAWAN         1   // Wio-SX1262 — see PIN_LORA_* below
+    #define HAL_HAS_LORA_FEM        0   // Bare SX1262, no PA / front-end module (28 dBm greyed)
+    #define HAL_LORA_TCXO_V      1.8f   // Wio-SX1262 TCXO supply on DIO3 (Meshtastic: SX126X_DIO3_TCXO_VOLTAGE 1.8)
+    #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
+    #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
+    #define HAL_LOG_RING_BYTES      (4 * 1024 * 1024)   // 4 MB of 8 MB PSRAM (as the plain XIAO)
+    #define HAL_LOG_SNAP_SCRATCH_BYTES  (16 * 1024)     // PSRAM-backed, as the plain XIAO
+    #define HAL_CFG_FORM_BUF_SIZE   (32 * 1024)         // PSRAM-backed board
+
+    // Geiger / HV pins — Rev C V3 carrier. HV pins as the plain XIAO (pads 1/2).
+    // Position    XIAO pad    GPIO    Notes
+    // --------    --------    ----    -----------------------------------
+    // A0          D0          1       HV_CAP_FULL — comparator interrupt
+    // A1          D1          2       HV_FET — LEDC PWM gate drive
+    // RX          D7          44      GMZ_COUNT — U0RXD: input at boot, idles HIGH
+    //                                 like the carrier's pull-up, not a strap; free
+    //                                 because the console is USB-Serial-JTAG
+    #define PIN_HV_CAP_FULL_INPUT    1   // D0  ≡ A0
+    #define PIN_GMC_COUNT_INPUT     44   // D7  ≡ RX (Rev C V3 pad 8)
+    #define PIN_HV_FET_OUTPUT        2   // D1  ≡ A1
+
+    // No PIN_LED_BUILTIN on purpose: the XIAO's user LED shares GPIO21 with
+    // the Wio's button K1 (10 k pull-up to 3V3, K1 to GND). Driving the pin
+    // would short against a pressed button, so led.c compiles its stub and
+    // GPIO21 is never configured. The Wio's green LED (GPIO48) is unused too.
+
+    // I²C bus — D4 = SDA = GPIO5, D5 = SCL = GPIO6 (Rev C pads 5 / 6).
+    #define PIN_I2C_SDA              5
+    #define PIN_I2C_SCL              6
+
+    // Wio-SX1262 on the B2B socket (net names from the Seeed schematic).
+    #define PIN_LORA_SCK             7   // LORA_SPI_SCK  (D8)
+    #define PIN_LORA_MISO            8   // LORA_SPI_MISO (D9)
+    #define PIN_LORA_MOSI            9   // LORA_SPI_MOSI (D10)
+    #define PIN_LORA_NSS            41   // LORA_SPI_NSS
+    #define PIN_LORA_RST            42   // LORA_RST (10 k pull-up on the Wio)
+    #define PIN_LORA_BUSY           40   // LORA_BUSY
+    #define PIN_LORA_DIO1           39   // LORA_DIO1 — RadioLib IRQ
+    #define PIN_LORA_RF_SW_RX       38   // LORA_RF_SW1 — HIGH = receive (Meshtastic SX126X_RXEN 38)
+
+    // RESERVED — never repurpose:
+    //   GPIO0 / 45 / 46  straps        GPIO19/20  native USB
+    //   GPIO26-37        flash / PSRAM GPIO7/8/9, 38-42  Wio-SX1262 (above)
+    //   GPIO21           Wio K1 button (= XIAO LED)    GPIO48  Wio green LED
+    //   GPIO43           U0TXD, free (console is USB-Serial-JTAG)
+
 #elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
 
     // Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2 chip, 2 MB
@@ -552,6 +658,9 @@
     // non-conflict analysis and the future-LoRaWAN pin reservations) is
     // captured in the per-pin comments throughout this block below.
     #define BOARD_NAME              "heltec_wifi_lora32_v4_r2"
+    #define HAL_BOARD_LABEL         "Heltec WiFi LoRa 32 V4 (R2)"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "V1.10 mainboard"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1315"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              1   // SSD1315 on a dedicated I2C_NUM_1 bus (GPIO17/18) — see PIN_OLED_SDA/SCL below
     #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // No onboard ambient-light sensor
@@ -622,6 +731,8 @@
     #define HAL_HAS_NEOPIXEL          0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD           0   // No microSD slot on this board
     #define HAL_HAS_LORAWAN           1   // Onboard SX1262 LoRa radio — see PIN_LORA_* below
+    #define HAL_HAS_LORA_FEM          1   // V2.8.11: GC1109 front end (PIN_LORA_VFEM/FEM_EN/FEM_PA)
+    #define HAL_LORA_TCXO_V        1.6f   // V2.8.11: DIO3 TCXO supply — RadioLib's default, run here since V2.6.23
 
     // Ring/scratch/form-buffer sizes modeled on BOARD_ADAFRUIT_QTPY_ESP32_PICO
     // (closest analog: 2 MB in-package PSRAM, not FeatherS3-D's 8 MB external).
@@ -888,6 +999,9 @@
     // here) and the strapping-pin review, is in
     // docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32s3-board-port-design.md §2.
     #define BOARD_NAME              "sparkfun_thing_plus_esp32s3"
+    #define HAL_BOARD_LABEL         "SparkFun Thing Plus ESP32-S3"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              1   // External SSD1309/SSD1306 on Qwiic, probe-detected — same as FeatherS3-D
     #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // ALS-PT19 is onboard the FeatherS3-D module itself (GPIO4, not header-routed) — the shared carrier PCB carries no ALS, and this board has no onboard equivalent. Confirmed by user (PCB designer).
@@ -1037,6 +1151,9 @@
     // and the strapping-pin review) in
     // docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md §2.
     #define BOARD_NAME              "sparkfun_thing_plus_esp32c5"
+    #define HAL_BOARD_LABEL         "SparkFun Thing Plus ESP32-C5"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              1   // External SSD1306/SSD1309 on Qwiic, probe-detected — same as S3/FeatherS3-D
     #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // No onboard ALS on this board
@@ -1176,6 +1293,9 @@
     // parameter derivation, and the I2C/TFT power-gate rationale in
     // docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md §2/§4.
     #define BOARD_NAME              "adafruit_esp32s3_tft_feather"
+    #define HAL_BOARD_LABEL         "Adafruit ESP32-S3 TFT Feather"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              0   // No I2C OLED path — the onboard TFT is the display (HAL_HAS_TFT)
     #define HAL_HAS_TFT               1   // Onboard 240x135 ST7789 SPI color TFT — see display_tft.c
     #define HAL_HAS_ALS               0   // No onboard ALS on this board
@@ -1293,6 +1413,9 @@
     // resolutions in
     // docs/superpowers/specs/2026-07-10-adafruit-esp32-feather-v2-board-port-design.md §2/§9.
     #define BOARD_NAME              "adafruit_esp32_feather_v2"
+    #define HAL_BOARD_LABEL         "Adafruit ESP32 Feather V2"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              1   // External SSD1309/SSD1306 on Qwiic/header I2C, probe-detected — same as feathers3_d/sparkfun_thing_plus_esp32s3
     #define HAL_HAS_TFT               0
     #define HAL_HAS_ALS               0   // No onboard ALS-PT19, carrier PCB carries none
@@ -1385,6 +1508,9 @@
     // agree. Full pin table and design rationale in
     // docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md §2/§4.
     #define BOARD_NAME              "adafruit_esp32s3_feather_4mb_2mbpsram"
+    #define HAL_BOARD_LABEL         "Adafruit ESP32-S3 Feather (4MB/2MB PSRAM)"   // /update page board name (V2.8.11)
+    #define HAL_HW_REV_NOTE         "Rev B V2 carrier"   // /update hardware-check paragraph
+    #define HAL_OLED_CHIP_NAME      "SSD1306"   // OLED controller named in the boot log
     #define HAL_HAS_OLED              1   // External SSD1306/SSD1309 via STEMMA QT, probe-detected
     #define HAL_HAS_TFT               0   // No onboard display on this variant
     #define HAL_HAS_ALS               0   // No onboard ALS
@@ -1467,7 +1593,7 @@
     //                 Not used — console is USB-C (HAL_HAS_NATIVE_USB=1).
 
 #else
-    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
+    #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_SEEED_XIAO_ESP32S3_WIO=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
 #endif
 
 // --- Per-board definitions are mandatory ---------------------------------------
@@ -1528,6 +1654,46 @@
 #endif
 #ifndef HAL_CFG_FORM_BUF_SIZE
 #error "hal.h: this board branch does not define HAL_CFG_FORM_BUF_SIZE"
+#endif
+// V2.8.11: board identity. A port without its label used to build and show
+// "(unknown board)" on /update (missed three times); now it does not build.
+// .github/scripts/check_ota_label.sh checks that this #error is still here.
+#ifndef HAL_BOARD_LABEL
+#error "hal.h: this board branch does not define HAL_BOARD_LABEL"
+#endif
+#ifndef HAL_OLED_CHIP_NAME
+#error "hal.h: this board branch does not define HAL_OLED_CHIP_NAME"
+#endif
+
+// V2.8.11: LoRa radio values, needed only where HAL_HAS_LORAWAN is 1.
+//   HAL_HAS_LORA_FEM   1 = Heltec-style GC1109 front end: lorawan.cpp powers
+//                      it (PIN_LORA_VFEM / FEM_EN) and offers 28 dBm mode
+//                      (PIN_LORA_FEM_PA); 0 = bare SX1262, 28 dBm greyed out.
+//   HAL_LORA_TCXO_V    TCXO supply the SX1262 puts on DIO3, in volts.
+//   PIN_LORA_RF_SW_RX  optional: an extra RF-switch line RadioLib drives HIGH
+//                      in receive and LOW otherwise (XIAO + Wio: GPIO38).
+// Boards without LoRaWAN get HAL_HAS_LORA_FEM 0 here, so config_form.h can read
+// it on every board.
+#if HAL_HAS_LORAWAN
+    #ifndef HAL_HAS_LORA_FEM
+    #error "hal.h: a HAL_HAS_LORAWAN board must define HAL_HAS_LORA_FEM"
+    #endif
+    #ifndef HAL_LORA_TCXO_V
+    #error "hal.h: a HAL_HAS_LORAWAN board must define HAL_LORA_TCXO_V"
+    #endif
+#else
+    #ifdef HAL_HAS_LORA_FEM
+    #error "hal.h: HAL_HAS_LORA_FEM is only meaningful with HAL_HAS_LORAWAN 1"
+    #endif
+    #define HAL_HAS_LORA_FEM 0
+#endif
+
+// V2.8.11: HAL_REVC_CARRIER_FIXED (optional) = the one Rev C carrier revision a
+// board's pin map is built for (XIAO + Wio: 3). It only labels /config and the
+// boot log and sets the stored revc_carrier; it cannot coexist with the
+// runtime switch.
+#if defined(HAL_REVC_CARRIER_FIXED) && HAL_HAS_CARRIER_REV_SWITCH
+#error "hal.h: HAL_REVC_CARRIER_FIXED and HAL_HAS_CARRIER_REV_SWITCH 1 are mutually exclusive"
 #endif
 
 // --- Derived feature gates ----------------------------------------------------

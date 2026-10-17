@@ -627,6 +627,10 @@ void mqtt_publish_state(const main_status_t *st,
     // Mirror of the /status page's Uploads block — same accessors, same
     // gating on cfg.send_*. Per-target keys use the same short names used
     // by HA Discovery so val_tpl resolves trivially.
+    // openSenseMap staging (TX_TARGET_OSM_STAGING) is left out on purpose: it
+    // is a short-lived test target for checking uploads before going live, not
+    // something to watch in Home Assistant, and a row here would also need
+    // matching discovery entities in mqtt_discovery.c.
     static const struct {
         tx_target_id_t  id;
         const bool     *enabled;

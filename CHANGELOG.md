@@ -9,6 +9,47 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.13 — LoRaWAN library update (RadioLib 7.8.1)
+
+The LoRaWAN radio library, RadioLib, moves from 7.2.1 to 7.8.1. This applies
+to the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the XIAO ESP32-S3 +
+Wio-SX1262; all other boards are unchanged.
+
+**Read before updating a LoRaWAN node:** RadioLib 7.3 changed the format in
+which it stores the join state, so after this update a node cannot use its
+saved session or its saved join counter (DevNonce). It joins again with the
+counter starting over, and under LoRaWAN 1.0.4 the network refuses those
+joins as replays. Before updating, use "Reset used DevNonces" for the device
+in the network console (TTN: the device's General settings); the node then
+joins on its own after the update.
+
+1. **Library fixes.** Among others, RadioLib 7.7.1 fixes an out-of-bounds
+   read while parsing downlinks. This matters on weak links: downlinks carry
+   no payload checksum, so corrupted ones reach the parser.
+2. **The radio sleeps between an uplink and its receive windows** instead of
+   waiting in standby, which saves a little power on every uplink.
+3. **The network time is far more accurate.** A node that sets its clock
+   from the network now also counts the time that passed between the end of
+   its uplink and the moment it sets the clock, which the old library left
+   out (a lag of about 5-6 s). For a frame sent once, the clock is now right
+   to well under a second. When the network asks for repeated frames, it can
+   still be early by up to one repeat period, because the library counts from
+   the last repeat while the network's time refers to the repeat it heard.
+4. **The join step-down from V2.8.12 is unchanged.** It now sets the join
+   data rate with the library's `setDatarate()` call, which RadioLib allows
+   before a join since version 7.5.
+5. **The second receive window keeps the network's settings.** When a node
+   goes many uplinks without hearing from the network, the library falls
+   back step by step to safer settings. In the old library, the last step
+   also reset the second receive window (RX2) to the region default, so on
+   TTN EU868 it listened at SF12 while the network answered at SF9. The new
+   library no longer touches RX2 there.
+6. **V2.8.12's receive-window fix, diagnostics and OTA protection carry
+   over.** The firmware still stops the receive timer as soon as a preamble
+   is detected; the new library does not do that itself either.
+
+---
+
 ## V2.8.12 — LoRaWAN: late downlinks, join step-down, link diagnostics
 
 LoRaWAN fixes and diagnostics for both radio boards, the Heltec WiFi LoRa 32 V4

@@ -198,3 +198,14 @@ endif()
 # other -D's that future contributors add via this same property.
 # ----------------------------------------------------------------------------
 idf_build_set_property(COMPILE_DEFINITIONS "MBEDTLS_PSA_KEY_SLOT_COUNT=128" APPEND)
+
+# ----------------------------------------------------------------------------
+# V2.8.13: RadioLib 7.8.x ships its own ESP-IDF HAL (src/hal/ESP-IDF/EspHal.cpp)
+# and compiles it on every ESP-IDF build, where it stops with #error unless
+# CONFIG_FREERTOS_HZ is 1000. The firmware does not use that HAL — lorawan.cpp
+# brings its own GeigerLoRaHal, whose delay() splits whole ticks from a
+# busy-waited remainder so 100 Hz is enough — so the check is relaxed with the
+# switch RadioLib provides for it instead of raising the tick rate for the
+# whole system. Only RadioLib reads this define.
+# ----------------------------------------------------------------------------
+idf_build_set_property(COMPILE_DEFINITIONS "RADIOLIB_RELAX_RTOS_TICK=1" APPEND)

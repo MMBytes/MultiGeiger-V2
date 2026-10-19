@@ -20,6 +20,6 @@ dependencies:
   # dependencies.lock). Conditional on the GEIGER_LORAWAN kconfig symbol so
   # the non-LoRa boards never even download/compile the component.
   jgromes/radiolib:
-    version: "==7.2.1"
+    version: "==7.8.1"
     rules:
       - if: "$CONFIG{GEIGER_LORAWAN} == True"

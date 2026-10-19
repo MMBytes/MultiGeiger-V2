@@ -177,12 +177,13 @@ static void rxobs_note(const uint8_t *out, size_t len, const uint8_t *in) {
         s_obs.n_win = 0;
         break;
     case OBS_CMD_SET_RX:
-        // Timeout 0xFFFFFF = continuous RX: that is RadioLib's random()
-        // sampling wideband RSSI (channel pick, NbTrans repeat delay — seen as
-        // bursts of SetRx 262144 ms ~18 ms apart right after RX2 in the sf12j
-        // trace), never a Class A window. Without this filter, an exchange
-        // whose RX1 received a frame (RX2 skipped) could book an RNG burst as
-        // "RX2".
+        // Timeout 0xFFFFFF = continuous RX: that is the radio's random()
+        // sampling wideband RSSI, never a Class A window. RadioLib 7.2.1 did
+        // that per channel pick / NbTrans repeat delay (bursts of SetRx
+        // 262144 ms ~18 ms apart right after RX2 in the sf12j trace); 7.8.1
+        // only seeds rand() from it once per session (createSession()), but
+        // the filter stays. Without it, an exchange whose RX1 received a
+        // frame (RX2 skipped) could book an RNG burst as "RX2".
         if (len >= 4 && out[1] == 0xFF && out[2] == 0xFF && out[3] == 0xFF) break;
         if (len >= 4 && s_obs.tx_us != 0 && s_obs.n_win < 2) {
             rxobs_win_t *w = &s_obs.win[s_obs.n_win++];
@@ -330,10 +331,12 @@ static void rxobs_format(char *buf, size_t sz) {
 // multi-second RX-window waits), sub-tick remainder busy-waited on esp_timer
 // so LoRaWAN's ms-scale window timing holds without a global tick-rate bump.
 //
-// Reconciled against the fetched RadioLib 7.2.1 headers
-// (managed_components/jgromes__radiolib/src/Hal.h): base-class constructor
-// arity/order (input, output, low, high, rising, falling) and the full
-// pure-virtual list match this class exactly — no adaptation needed.
+// Reconciled against the fetched RadioLib headers (7.2.1, re-checked for
+// 7.8.1 in V2.8.13; managed_components/jgromes__radiolib/src/Hal.h):
+// base-class constructor arity/order (input, output, low, high, rising,
+// falling) and the full pure-virtual list match this class exactly. RadioLib
+// 7.8 also ships an EspHal of its own; it is not used (see CMakeLists.txt,
+// RADIOLIB_RELAX_RTOS_TICK).
 class GeigerLoRaHal : public RadioLibHal {
 public:
     GeigerLoRaHal()
@@ -400,7 +403,7 @@ public:
         // Candidate full fix, not done yet: an ISR-free HAL — attachInterrupt()
         // only stores pin + callback and yield() polls DIO1 and calls it from
         // task context (RadioLib only reads its downlink flag inside
-        // `while (...) hal->yield()` loops, LoRaWAN.cpp ~1515/1536). Defining
+        // `while (...) hal->yield()` loops, 7.8.1 LoRaWAN.cpp ~1640/1663/1671). Defining
         // ESP32 to get RadioLib's IRAM_ATTR is NOT an option: BuildOpt.h would
         // switch RadioLib to its Arduino-ESP32 platform branch.
         gpio_isr_handler_add((gpio_num_t)interruptNum,
@@ -488,10 +491,10 @@ static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 //
 // SetStopRxTimerOnPreambleDetect(1) (opcode 0x9F, datasheet §13.4.8). The
 // SX126x default (0) stops the RX timeout only once the LoRa HEADER is
-// decoded. RadioLib 7.2.1 opens each Class A window for ToA(0 B) + scanGuard
+// decoded. RadioLib (7.2.1 and 7.8.1) opens each Class A window for ToA(0 B) + scanGuard
 // (LoRaWAN.cpp receiveClassA) and then assumes "RxTimeout not set => something
 // is being received, keep listening" — an assumption that only holds with
-// stop-on-preamble, which RadioLib never configures. At SF12 the header ends
+// stop-on-preamble, which RadioLib never configures (still true in 7.8.1). At SF12 the header ends
 // ~663 ms into a downlink, against a window timeout of ToA(0 B) + scanGuard
 // (~673 ms with RadioLib's default scanGuard = 10 ms; 713 ms measured in the
 // scanGuard = 50 test image) opened only a few ms early, so a downlink
@@ -499,12 +502,14 @@ static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 // its preamble: IRQ 0x0204 = PREAMBLE + TIMEOUT, caught on the XIAO/Wio EU868
 // bench 2026-10-18 on two TTN-sent join accepts. With 1, the timer stops at
 // the preamble and the frame completes; a false preamble costs at most
-// RadioLib's own tMax wait (LoRaWAN.cpp ~1534), then standby.
+// RadioLib's own tMax wait (7.8.1 LoRaWAN.cpp ~1663), then standby.
 //
-// Sent before every join attempt and every uplink, not just once: RadioLib
-// 7.2.1 only ever puts the chip in standby (setting retained), but a later
-// RadioLib that sleeps the chip between windows, or a re-begin(), would
-// silently drop it. One 2-byte SPI command per exchange.
+// Sent before every join attempt and every uplink, not just once: since
+// RadioLib 7.3 the chip SLEEPS between the end of the uplink and each RX
+// window (LoRaWAN.cpp sleepDelay() -> SX126x::sleep(), warm start = the
+// configuration is kept in retention memory, datasheet §13.1.1). The
+// setting is expected to survive that; re-sending it per exchange also
+// covers a cold start or a re-begin(). One 2-byte SPI command per exchange.
 static void stop_timer_on_preamble(void) {
     const uint8_t on = 0x01;
     int16_t st = s_mod.SPIwriteStream(RADIOLIB_SX126X_CMD_STOP_TIMER_ON_PREAMBLE, &on, 1);
@@ -594,11 +599,18 @@ static bool radio_init(void) {
     // discussion #1665: mixing manual raw commands with RadioLib breaks the
     // radio state). begin() also sets DIO2 as the RF switch and DIO3 as the
     // TCXO supply. V2.8.11: the TCXO voltage comes from hal.h (Heltec V4 1.6 V
-    // = RadioLib's default, bench-proven there; Wio-SX1262 1.8 V); the other
-    // arguments are RadioLib 7.2.1's own defaults (SX1262.h), so the Heltec
-    // call is unchanged. LoRaWANNode reconfigures freq/DR later.
-    int16_t st = s_radio.begin(434.0, 125.0, 9, 7, RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
-                               10, 8, HAL_LORA_TCXO_V);
+    // = RadioLib's default, bench-proven there; Wio-SX1262 1.8 V).
+    // V2.8.13 (RadioLib 7.8.1): the configuration-structure begin(). The
+    // parameter-list begin() is deprecated (removed in RadioLib 8.0); TCXO
+    // voltage and regulator are now public members set BEFORE begin() — the
+    // old begin() does exactly this internally (SX1262.cpp), so the radio
+    // ends up configured identically. ConfigLoRa_t's defaults are the old
+    // begin()'s defaults (434 MHz, 125 kHz, SF9, CR 4/7, private sync word,
+    // 10 dBm, 8-symbol preamble); LoRaWANNode reconfigures freq/DR later.
+    s_radio.tcxoVoltage = HAL_LORA_TCXO_V;
+    s_radio.useRegulatorLDO = false;          // DC-DC, as before
+    ConfigLoRa_t lora_cfg;                    // all fields at their documented defaults
+    int16_t st = s_radio.begin(lora_cfg);
     if (st != RADIOLIB_ERR_NONE) {
         ESP_LOGE(TAG, "SX1262 begin failed: %d — LoRaWAN parked (HW_FAIL)", st);
         return false;
@@ -634,8 +646,8 @@ const char *lorawan_region_name(uint8_t region_idx) {
 // Names for logging reuse REGION_NAMES above (lorawan_region_name()) rather
 // than a second parallel string table.
 //
-// Verified against the fetched RadioLib 7.2.1 headers
-// (managed_components/jgromes__radiolib/src/protocols/LoRaWAN/LoRaWAN.h:495-505):
+// Verified against the fetched RadioLib headers (7.2.1; re-checked for 7.8.1,
+// managed_components/jgromes__radiolib/src/protocols/LoRaWAN/LoRaWAN.h:453-463):
 // all eight plain band objects (EU868, US915, EU433, AU915, CN470, AS923,
 // KR920, IN865) exist with these exact names — no adaptation needed. AS923
 // also has AS923_2/_3/_4 sub-region-frequency variants; per the task brief
@@ -996,15 +1008,12 @@ static uint32_t timesync_now_s(void) {
 static uint32_t s_timesync_last_s   = 0;   // uptime s at last DeviceTimeAns (or give-up); 0 = never
 static uint32_t s_timesync_attempts = 0;   // consecutive unanswered requests in the current window
 
-// Stale-answer guard: RadioLib's DeviceTimeAns store is NON-consuming —
-// getMacDeviceTimeAns() re-reads the same stored answer until the next
-// Class A downlink overwrites fOptsDown. Without this, a leftover answer
-// heard hours ago (asymmetric link flapping across a give-up window) would
-// be read by a later window's poll and step a previously-correct clock
-// back. Real network time never repeats byte-identically, so an exact
-// repeat of the previous answer can only be a stale copy.
-static uint32_t s_timesync_prev_unix = 0;
-static uint8_t  s_timesync_prev_frac = 0;
+// (V2.8.13: the "stale answer" guard is gone. RadioLib 7.2.1 kept the last
+// downlink's MAC answers until the next Class A downlink, so an identical
+// re-read had to be filtered; since 7.4.0 sendReceive() clears that store
+// before every uplink — LoRaWAN.cpp "clear the MAC downlink buffer as we are
+// going to transmit a new uplink" — so an answer read right after the port-1
+// exchange can only belong to that exchange.)
 
 // Shared give-up path: stamp the window as if answered so the next request
 // waits the full daily interval, WARN once per window (not per cycle).
@@ -1031,7 +1040,16 @@ static void timesync_give_up(void) {
 // ntp_time_valid() — that is a clock-plausibility check (past 2026-01-01)
 // that turns true the moment WE set the clock, which would kill the daily
 // re-sync after the first apply.
-static void timesync_apply(uint32_t unix_s, uint8_t frac256) {
+//
+// V2.8.13: RadioLib 7.8.1 returns the answer already advanced by the time
+// elapsed since the end of the uplink that carried the request
+// (getMacDeviceTimeAns(): `ms += millis() - tUplinkEnd`), with the fraction
+// in milliseconds — the ~5-6 s lag RadioLib 7.2.1 left (RX1 delay + air
+// time) is gone for a frame sent once. With NbTrans > 1, tUplinkEnd is the
+// end of the LAST repeat while the network's time refers to the repeat it
+// heard, so the clock can be early by up to one repeat period (~6-7 s at
+// EU868); the daily re-sync keeps that bounded.
+static void timesync_apply(uint32_t unix_s, uint16_t ms) {
     if (ntp_boot_epoch() != 0) {
         ESP_LOGI(TAG, "DeviceTimeAns received but NTP has synced meanwhile — ignored");
         return;
@@ -1044,7 +1062,7 @@ static void timesync_apply(uint32_t unix_s, uint8_t frac256) {
     }
     struct timeval tv;
     tv.tv_sec  = (time_t)unix_s;
-    tv.tv_usec = (suseconds_t)((uint32_t)frac256 * 1000000UL / 256UL);  // DeviceTimeAns fraction = 1/256 s units
+    tv.tv_usec = (suseconds_t)((uint32_t)ms * 1000UL);   // RadioLib 7.8.1: fraction in ms
     settimeofday(&tv, NULL);
     time_t t = (time_t)unix_s;
     struct tm lt;
@@ -1170,9 +1188,13 @@ static void lorawan_task(void *arg) {
         int16_t st = node.setBufferNonces(buf);
         if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "nonces restore rejected: %d", st);
     }
+    // True while setBufferSession() has staged a session that the first
+    // activateOTAA() will activate without a join (see the join loop).
+    bool session_pending = false;
     if (nvs_load_blob("session", buf, RADIOLIB_LORAWAN_SESSION_BUF_SIZE)) {
         int16_t st = node.setBufferSession(buf);
         if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "session restore rejected: %d", st);
+        session_pending = (st == RADIOLIB_ERR_NONE);
     }
 
     // Join with exponential backoff: 1,2,4,... min, about an hour at most (spec §4;
@@ -1188,8 +1210,13 @@ static void lorawan_task(void *arg) {
     // link still joins fast on little air time, a weak one ends at SF12.
     // Floor DR0, or DR2 on dwell-time-limited plans (AS923: 400 ms dwell, an
     // SF11/SF12 join request exceeds it). Fixed plans (US915, AU915, CN470)
-    // take the join DR from the channel (RadioLib createSession ignores
-    // initialDr there), so they are called exactly as before.
+    // take the join DR from the channel, so no DR is set for them.
+    // V2.8.13 (RadioLib 7.8.1): activateOTAA() lost its initialDr parameter;
+    // the join DR is now set with setDatarate() right before each attempt
+    // (supported before a join since RadioLib 7.5.0 — setDatarate() creates
+    // the pre-join session itself). Skipped while a restored session is
+    // pending: activateOTAA() then just activates it, without a TX, and its
+    // data rate must stay the one the network set.
     //
     // KNOWN GAP, accepted for V2.8.12 (user decision 2026-10-18): the join DR
     // also becomes the session's DATA DR (createSession applies it as a
@@ -1202,7 +1229,7 @@ static void lorawan_task(void *arg) {
     // port 2 (sent ~6 s after port 1) at almost every DR. This predates the
     // step-down (network ADR can choose DR0 too); the step-down only makes
     // SF12 data likelier. Proper fix: the LoRa uplink interval / air-time
-    // budget planned for V2.8.13. Until then the status line's air24h shows it.
+    // budget planned for V2.8.14. Until then the status line's air24h shows it.
     set_state(LORAWAN_ST_JOINING);
     uint32_t backoff_s = 60;
     const LoRaWANBand_t *band = k_bands[region];
@@ -1215,7 +1242,12 @@ static void lorawan_task(void *arg) {
         stop_timer_on_preamble();
         rxobs_begin();
         const RadioLibTime_t air0 = node.getLastToA();   // not reset by joins — take the delta
-        int16_t st = join_dr_steps ? node.activateOTAA(join_dr) : node.activateOTAA();
+        if (join_dr_steps && !session_pending) {
+            const int16_t dst = node.setDatarate(join_dr);
+            if (dst != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "join DR%u not set: %d", (unsigned)join_dr, dst);
+        }
+        int16_t st = node.activateOTAA();
+        session_pending = false;   // a pending session is consumed by the first activateOTAA()
         s_obs.on = false;
         const bool sent = (s_obs.tx_us != 0);   // false for a restored session (no TX)
         const uint32_t join_air_ms = sent ? (uint32_t)(node.getLastToA() - air0) : 0;
@@ -1314,11 +1346,12 @@ static void lorawan_task(void *arg) {
         // deliver: sendReceive()'s dataDown parameter has NO size argument and
         // RadioLib writes the decrypted payload straight in (no clamp to the
         // caller's buffer), setting *dl_len afterward. A network-scheduled
-        // application downlink can be up to RADIOLIB_LORAWAN_MAX_DOWNLINK_SIZE
-        // (250 B) at higher data rates; a smaller buffer here would let a
-        // (MIC-valid) oversized downlink smash this task's stack. 250 B on the
-        // 8 KB worker stack is fine.
-        uint8_t dl[RADIOLIB_LORAWAN_MAX_DOWNLINK_SIZE]; size_t dl_len = 0;
+        // application downlink can be up to RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE
+        // (242 B; RadioLib 7.8.1 — 7.2.1 called it MAX_DOWNLINK_SIZE, 250) at
+        // higher data rates; a smaller buffer here would let a (MIC-valid)
+        // oversized downlink smash this task's stack. Sized like RadioLib's
+        // own sendReceive() wrappers (+1). ~243 B on the 8 KB worker stack is fine.
+        uint8_t dl[RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE + 1]; size_t dl_len = 0;
         char what[64];
         snprintf(what, sizeof(what), "port 1 (counts=%lu dt=%lu ms)",
                  (unsigned long)snap.gm_counts, (unsigned long)snap.dt_ms);
@@ -1329,29 +1362,18 @@ static void lorawan_task(void *arg) {
         // END of the uplink that carried the request and TTN serves it in
         // that uplink's RX1, so polling here (a) avoids adding the port-2
         // exchange's ~3-8 s to the apply latency and (b) can't lose the
-        // stored answer to a port-2 downlink overwriting fOptsDown. A
-        // ~5-6 s residual lag (RX1 delay + air time) is NOT recoverable
-        // through RadioLib's API and is accepted: this feature rescues
-        // standalone nodes from 1970-era timestamps, it is not NTP — and
-        // since the lag is roughly constant, later daily syncs see a ~0
-        // delta and take the no-step path rather than oscillating.
+        // stored answer to a port-2 uplink clearing fOptsDown (RadioLib
+        // 7.8.1 clears it before every uplink). Since 7.8.1 the returned time
+        // is advanced to "now" by RadioLib itself (see timesync_apply(); up
+        // to one repeat period early with NbTrans > 1) — this feature still only rescues
+        // standalone nodes from 1970-era timestamps; it is not NTP.
         if (want_time) {
             uint32_t unix_s = 0;
-            uint8_t  frac   = 0;
-            bool     fresh  = false;
-            if (node.getMacDeviceTimeAns(&unix_s, &frac, true) == RADIOLIB_ERR_NONE && unix_s != 0) {
-                if (unix_s == s_timesync_prev_unix && frac == s_timesync_prev_frac) {
-                    // See s_timesync_prev_* comment: non-consuming store, a
-                    // byte-identical repeat can only be a stale leftover.
-                    ESP_LOGI(TAG, "DeviceTimeAns identical to previous answer — stale, ignored");
-                } else {
-                    s_timesync_prev_unix = unix_s;
-                    s_timesync_prev_frac = frac;
-                    fresh = true;
-                }
-            }
+            uint16_t ms     = 0;
+            const bool fresh =
+                node.getMacDeviceTimeAns(&unix_s, &ms, true) == RADIOLIB_ERR_NONE && unix_s != 0;
             if (fresh) {
-                timesync_apply(unix_s, frac);
+                timesync_apply(unix_s, ms);
                 s_timesync_last_s   = timesync_now_s();
                 s_timesync_attempts = 0;
             } else if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) {

@@ -1360,10 +1360,26 @@ static void format_lorawan(char *out, size_t sz) {
     n = append_safe(out, sz, n, "<br><b>Last uplink:</b> %s", ago);
 
     // last_dl_rssi == 0 means no downlink has ever been seen (lorawan.h).
+    // V2.8.12: MAC-only downlinks count too; age is uptime-based, so it is
+    // right even on a LoRaWAN-only node whose clock still reads 1970.
     if (st.last_dl_rssi != 0) {
+        uint32_t ago_min = 0;
+        if (st.last_dl_uptime_s != 0) {
+            const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+            ago_min = (up_s - st.last_dl_uptime_s) / 60u;
+        }
         n = append_safe(out, sz, n,
-            "<br><b>Last downlink:</b> RSSI %.0f dBm, SNR %.1f dB",
-            (double)st.last_dl_rssi, (double)st.last_dl_snr);
+            "<br><b>Last downlink:</b> RSSI %.0f dBm, SNR %.1f dB, %lu min ago",
+            (double)st.last_dl_rssi, (double)st.last_dl_snr, (unsigned long)ago_min);
+    }
+    if (st.state == LORAWAN_ST_JOINED) {
+        // 64 = the node starts asking "do you hear me?" (ADRACKReq); RadioLib's
+        // ADR backoff then (from 96) restores max TX power if it was lowered,
+        // and lowers the data rate one step every 32 further uplinks.
+        n = append_safe(out, sz, n,
+            "<br><b>Uplinks since last downlink:</b> %lu"
+            "<br><b>Air time (24 h):</b> %.1f s (TTN Fair Use: 30 s)",
+            (unsigned long)st.uplinks_since_dl, (double)st.airtime_24h_ms / 1000.0);
     }
 
     append_safe(out, sz, n, "</div>");
@@ -3052,6 +3068,14 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     while (!tx_is_idle() && spins++ < 600) vTaskDelay(pdMS_TO_TICKS(100));
     if (spins >= 600) {
         ESP_LOGW(TAG, "OTA prep: TX still busy after 60s — proceeding anyway");
+    }
+    // V2.8.12: stop the LoRaWAN worker too and let a running exchange finish.
+    // An RX-window DIO1 interrupt during the flash writes below (cache off,
+    // RadioLib's callback in flash) hung the XIAO into an interrupt-watchdog
+    // reset on 2026-10-18 — the OTA had started mid port-2 exchange. The stub
+    // returns true at once on boards without the radio / with LoRaWAN off.
+    if (!lorawan_suspend(60000)) {
+        ESP_LOGW(TAG, "OTA prep: LoRaWAN exchange still running after 60s — proceeding anyway");
     }
     // V2.8.5 (review 1.8): suspend FIRST. The main loop polls every ~1 s and
     // re-inits MQTT whenever it is down and services are not suspended; with

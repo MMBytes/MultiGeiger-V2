@@ -9,6 +9,116 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.12 — LoRaWAN: late downlinks, join step-down, link diagnostics
+
+LoRaWAN fixes and diagnostics for both radio boards, the Heltec WiFi LoRa 32 V4
+and the XIAO ESP32-S3 + Wio-SX1262. Nodes in AU915 and other fixed-channel regions join and send as before;
+like EU868 nodes, they get the OTA fix, the per-uplink session save and the
+new log lines.
+
+1. **Downlinks that start late are no longer cut off.** The SX1262 closes a
+   receive window on its own timer, and by default stops that timer only once
+   the LoRa header has arrived. At SF12 the header ends about 663 ms into a
+   downlink, while RadioLib keeps the window open for only about 10 ms longer,
+   so a join accept or network command from a gateway that transmits slightly
+   late was dropped after its preamble. The radio now stops the timer as soon
+   as it detects a preamble (SX126x command `SetStopRxTimerOnPreambleDetect`),
+   which is what RadioLib's receive code already assumes. The setting is made
+   after radio start-up and again before every join attempt and every uplink.
+2. **EU868-type regions: joins step down to slower data rates.** RadioLib
+   always sent the join request at the first channel's default rate (EU868:
+   DR3 / SF9) and never tried a slower one, so a node with a weak link could
+   retry for ever. The first attempt still uses that rate; each failed attempt
+   that went on air then goes one data rate lower, down to DR0 / SF12, and
+   stays there. On
+   AS923 the lowest is DR2, because an SF11 or SF12 join request would exceed
+   its 400 ms dwell limit. The retry back-off (60 s, doubling, up to about an hour) is
+   unchanged. In AU915, US915 and CN470 the channel sets the join rate, so
+   nothing changes there. The step-down has not yet been tested with a real
+   join; it was reviewed but the test node's location could not complete one.
+
+   **Known gap:** a node that joined at SF12 also sends its data at SF12 until
+   the network's ADR raises the rate. In EU868 the frames of a 2-minute cycle
+   can then exceed the 1 % duty-cycle limit, and the firmware does not enforce
+   that limit yet. This could already happen before, whenever the network's
+   ADR chose SF12. The new `air24h` status field shows the air time; a
+   LoRaWAN uplink interval with an air-time budget is planned for the next
+   release.
+3. **An OTA started during a LoRaWAN exchange no longer crashes the node.** An
+   interrupt from a receive window while the OTA wrote to flash could hang the
+   chip until the watchdog reset it, and the update was lost. The longer the
+   radio is busy — for example when the network asks for every frame to be
+   sent several times — the likelier this was. The OTA preparation now stops
+   the LoRaWAN worker and waits up to 60 s for a running join attempt or
+   uplink to finish (`OTA: waited 6.3 s for the running LoRaWAN exchange —
+   radio quiet now`). LoRaWAN then stays off until the OTA reboots the node.
+4. **The LoRaWAN session is saved after every uplink**, not once per cycle. A
+   reset between the port-1 and port-2 frames restarted the frame counter at
+   the start of the cycle, so the port-1 counter went out twice and the
+   network dropped the second one.
+5. **Downlinks are counted correctly.**
+   - **Downlinks that carry only network commands now count**, and are
+     logged: `downlink (RX2): MAC commands only, FCntDown=55, RSSI -120 dBm
+     SNR -14.2 dB`. Before, only downlinks with an application payload were
+     seen, so for example a data-rate change from the network left no trace.
+     The `/status` "Last downlink" figures include them now too.
+   - **A received frame that cannot be used no longer counts as a failed
+     uplink.** When the uplink went out but the receive side failed — a frame
+     for another node or a corrupted one (error -1102), a second window that
+     could no longer be opened, most likely because a preamble held the first
+     one open (-1105), or a frame that failed its integrity check (-1112) — the node logs
+     `downlink unusable (...) — uplink itself was sent`, and the `fail=`
+     counter stays unchanged. Before, these showed as `uplink failed`, kept
+     `last_err=` set for hours, and skipped the port-2 frame of that cycle.
+6. **New LoRaWAN log lines** in `/log` and syslog:
+   - The `uplink OK` line ends with the number of transmissions, the air time
+     of all of them and the downlink result: `... 16 dBm TX=2 air=2964 ms |
+     DL: RX2` (or `DL: none`, `DL: unusable (see rx windows)`). `TX=` replaces
+     the old `(retransmitted)` suffix, which could not tell one transmission
+     from two, and shows directly when the network asks for repeated frames.
+   - An `rx windows:` line after every uplink (for join attempts the same
+     summary ends the `join attempt` line) says what each receive window saw, when it opened after the end of the transmission and
+     how long its timeout was:
+     `rx windows: RX1 868.100 SF9 @+4989 ms to=113 ms timeout, no preamble |
+     RX2 869.525 SF9 @+5988 ms to=113 ms RX_DONE (data down for 26011234
+     (ours), 13 B)`. When a frame was sent several times, the line starts with
+     `2 TX |`, and each window shows the most informative result of all
+     repeats (`x2`), because the network answers whichever repeat the gateway
+     heard. The results:
+     - `timeout, no preamble`: the window closed on its timer without
+       detecting a preamble. This is what the radio saw, not why: usually the
+       gateway sent nothing, but the signal may also have been too weak or
+       arrived at another time or data rate.
+     - `no timeout (preamble?)`: a preamble stopped the timer, but no valid
+       frame followed.
+     - `HDR_ERR` / `CRC_ERR`: a damaged header / frame. Rarely seen: the
+       radio drops a damaged header without notice, so it usually shows as
+       `no timeout (preamble?)`.
+     - `RX_DONE`: a frame arrived. The line also says what it was, from its
+       first bytes: `(join accept, 17 B)`, `(data down for ... (ours), ...)`,
+       `(... (not ours) ...)`, or `(... (likely ours, corrupted) ...)` when the
+       address differs from this node's in at most 4 bits. LoRaWAN downlinks
+       carry no radio checksum, so on a weak link a node's own downlink can
+       arrive as garbage.
+
+     The line is built only from the radio commands RadioLib already sends;
+     nothing is added to them.
+   - Data-rate and transmit-power changes between uplinks, with their likely
+     cause: `ADR: DR3 -> DR2, 16 -> 16 dBm (ADR backoff — no downlink heard)`
+     or `(network, after downlink)`. After 64 uplinks since boot without a
+     downlink, a warning explains that the node is now asking the network for
+     an answer and lowers its data rate step by step if none comes.
+   - One line per join attempt: `join attempt 3 (DR1): SF11 868.300 MHz
+     air=741 ms -> no accept (-1116) | RX1 ... | RX2 ...`, then
+     `joined (OTAA) via RX2 — DevAddr ...`.
+   - The `LORA:` status line gains `dl_ago=` (minutes since the last
+     downlink), `ul_since_dl=` (uplinks since then) and `air24h=` (air time in
+     the last 24 hours; TTN's Fair Use Policy allows 30 s). `/status` shows the
+     same. They are counted from uptime, so they are right even when the clock
+     has not been set yet.
+
+---
+
 ## V2.8.11 — XIAO ESP32-S3 + Wio-SX1262 board with LoRaWAN
 
 A twelfth build target, `seeed_xiao_esp32s3_wio`, for Seeed's XIAO ESP32-S3 +

@@ -1055,10 +1055,24 @@ static void do_tx_cycle(void) {
     if (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) {
         lorawan_status_t lst;
         lorawan_get_status(&lst);
-        ESP_LOGI(TAG, "LORA: state=%s up=%lu fail=%lu duty_skip=%lu joins=%lu last_err=%d",
+        // V2.8.12 link-health tail: minutes since the last downlink (uptime
+        // based — valid with a 1970 clock), uplinks sent without one (64 =
+        // ADRACKReq, then ADR backoff), and ~24 h air time vs TTN Fair Use (30 s).
+        char dl_ago[16];
+        if (lst.last_dl_uptime_s == 0) {
+            snprintf(dl_ago, sizeof(dl_ago), "never");
+        } else {
+            const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+            snprintf(dl_ago, sizeof(dl_ago), "%lumin",
+                     (unsigned long)((up_s - lst.last_dl_uptime_s) / 60u));
+        }
+        ESP_LOGI(TAG, "LORA: state=%s up=%lu fail=%lu duty_skip=%lu joins=%lu last_err=%d "
+                 "dl_ago=%s ul_since_dl=%lu air24h=%.1fs",
                  lorawan_state_name(lst.state), (unsigned long)lst.uplinks_sent,
                  (unsigned long)lst.failed, (unsigned long)lst.duty_skipped,
-                 (unsigned long)lst.join_attempts, (int)lst.last_error);
+                 (unsigned long)lst.join_attempts, (int)lst.last_error,
+                 dl_ago, (unsigned long)lst.uplinks_since_dl,
+                 (double)lst.airtime_24h_ms / 1000.0);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.

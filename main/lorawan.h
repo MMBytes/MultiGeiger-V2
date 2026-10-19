@@ -3,9 +3,10 @@
 /** @file
  *  @brief Public C API for the LoRaWAN uplink task (OTAA join + port-1/2 TX).
  *
- *  Real implementation is `lorawan.cpp` (C++, RadioLib) on
- *  `BOARD_HELTEC_WIFI_LORA32_V4_R2` only (`HAL_HAS_LORAWAN==1`). On the ten
- *  other boards this header instead defines `static inline` no-op stubs, so
+ *  Real implementation is `lorawan.cpp` (C++, RadioLib) on the SX1262 boards
+ *  (`HAL_HAS_LORAWAN==1`): `BOARD_HELTEC_WIFI_LORA32_V4_R2` and, since
+ *  V2.8.11, `BOARD_SEEED_XIAO_ESP32S3_WIO`. On the other boards this header
+ *  instead defines `static inline` no-op stubs, so
  *  call sites in main.c / http_server.c stay guard-free everywhere — the
  *  same convention other optional-driver HAL feature flags use.
  */
@@ -42,13 +43,18 @@ typedef struct {
     uint8_t  subband;
     uint32_t dev_addr;         // 0 until joined
     uint32_t join_attempts;
-    uint32_t uplinks_sent;     // successful sendReceive calls (port-1 frames)
+    uint32_t uplinks_sent;     // successful sendReceive calls (port-1 AND port-2 frames)
     uint32_t duty_skipped;     // cycles dropped by duty-cycle/dwell guard
     uint32_t failed;           // sendReceive hard errors
     int16_t  last_error;       // last RadioLib status code (0 = none)
     int64_t  last_uplink_at;   // unix epoch, 0 = never
-    float    last_dl_rssi;     // last downlink RSSI dBm (0 = none seen)
+    float    last_dl_rssi;     // last downlink RSSI dBm (0 = none seen) — V2.8.12: MAC-only downlinks count too
     float    last_dl_snr;
+    // V2.8.12 link-health telemetry. Uptime-based (not wall time) so it stays
+    // meaningful on LoRaWAN-only nodes whose clock may still read 1970.
+    uint32_t last_dl_uptime_s; // uptime s of the last received downlink (any window, MAC-only too); 0 = none this boot
+    uint32_t uplinks_since_dl; // uplinks sent without a downlink since the last one (this boot only)
+    uint32_t airtime_24h_ms;   // rolling ~24 h sum of uplink + join-request air time, as of the last TX
 } lorawan_status_t;
 
 #if !HAL_HAS_LORAWAN
@@ -58,6 +64,7 @@ typedef struct {
 static inline void lorawan_setup(void) {}
 static inline void lorawan_transmit(const lorawan_snapshot_t *snap) { (void)snap; }
 static inline bool lorawan_is_idle(void) { return true; }
+static inline bool lorawan_suspend(uint32_t timeout_ms) { (void)timeout_ms; return true; }
 static inline void lorawan_get_status(lorawan_status_t *out) {
     if (out) {
         *out = (lorawan_status_t){0};
@@ -79,6 +86,20 @@ void lorawan_transmit(const lorawan_snapshot_t *snap);
 
 /** @brief True when the LoRaWAN task is idle (safe to hand it new work). */
 bool lorawan_is_idle(void);
+
+/** @brief OTA prep (V2.8.12): stop all further LoRaWAN radio activity until
+ *         reboot and wait for an exchange already on air to finish.
+ *
+ *  An RX-window DIO1 interrupt while the OTA's flash writes have the cache
+ *  disabled hangs the chip into an interrupt-watchdog reset (lorawan.cpp,
+ *  OTA-suspension block). One-way: never resumed — the OTA reboots, and a
+ *  failed OTA staying radio-silent until the next reboot is the safe side.
+ *  @param timeout_ms  maximum wait for the running exchange (join attempt or
+ *                     uplink incl. RX windows; ~30 s worst case at SF12 with
+ *                     NbTrans=3 — ~10 s per transmission incl. RX2 + tMax).
+ *  @return true = radio quiet; false = still busy after timeout_ms.
+ */
+bool lorawan_suspend(uint32_t timeout_ms);
 
 /** @brief Read the current join/uplink status snapshot. Safe from any task. */
 void lorawan_get_status(lorawan_status_t *out);

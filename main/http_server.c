@@ -771,12 +771,29 @@ static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
     format_wallclock(st.last_cycle_at, wall, sizeof(wall));
     format_ago((int64_t)time(NULL), st.last_cycle_at, ago, sizeof(ago));
 
-    // Next cycle = last + tx_interval. If we haven't run yet, "—".
+    // V2.8.14: with LoRaWAN running, the cycle follows the LoRaWAN schedule
+    // (main.c), not the configured tx_interval_ms — show the one in use.
+    const uint32_t lw_ms = lorawan_cycle_interval_ms();
+    // cppcheck-suppress knownConditionTrueFalse ; always 0 only on boards without LoRaWAN (lorawan.h stub)
+    const uint32_t interval_ms = lw_ms ? lw_ms : s_cfg->tx_interval_ms;
+    char interval[96];
+    // cppcheck-suppress knownConditionTrueFalse ; as above — real on the LoRaWAN boards
+    if (lw_ms) {
+        lorawan_status_t lw;
+        lorawan_get_status(&lw);
+        snprintf(interval, sizeof(interval),
+                 "%lu min &mdash; LoRaWAN schedule for SF%u (limits air time, TTN Fair Use)",
+                 (unsigned long)(lw_ms / 60000u), (unsigned)lw.cycle_sf);
+    } else {
+        snprintf(interval, sizeof(interval), "%lu ms", (unsigned long)interval_ms);
+    }
+
+    // Next cycle = last + interval. If we haven't run yet, "—".
     char next_line[64];
     if (st.last_cycle_ms == 0) {
         snprintf(next_line, sizeof(next_line), "—");
     } else {
-        long remaining_ms = (long)(st.last_cycle_ms + s_cfg->tx_interval_ms) - (long)uptime_ms;
+        long remaining_ms = (long)(st.last_cycle_ms + interval_ms) - (long)uptime_ms;
         if (remaining_ms < 0) remaining_ms = 0;
         snprintf(next_line, sizeof(next_line), "in %lds", remaining_ms / 1000);
     }
@@ -785,13 +802,13 @@ static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
         "<div class=\"info\"><h3>Cycle</h3>"
         "<b>Cycle #:</b> %lu<br>"
         "<b>Last dt:</b> %lu ms<br>"
-        "<b>Interval:</b> %lu ms<br>"
+        "<b>Interval:</b> %s<br>"
         "<b>Last cycle:</b> %s &nbsp; (%s)<br>"
         "<b>Next cycle:</b> %s"
         "</div>",
         (unsigned long)st.cycles,
         (unsigned long)st.last_dt_ms,
-        (unsigned long)s_cfg->tx_interval_ms,
+        interval,
         wall, ago,
         next_line);
 }
@@ -1381,6 +1398,14 @@ static void format_lorawan(char *out, size_t sz) {
             "<br><b>Air time (24 h):</b> %.1f s (TTN Fair Use: 30 s)",
             (unsigned long)st.uplinks_since_dl, (double)st.airtime_24h_ms / 1000.0);
     }
+    // V2.8.14: the TX-cycle interval LoRaWAN imposes (0 = it imposes none).
+    if (st.cycle_interval_ms != 0) {
+        char dr_mode[24] = "ADR";
+        if (st.fixed_dr) snprintf(dr_mode, sizeof(dr_mode), "fixed DR%u", (unsigned)st.fixed_dr_value);
+        n = append_safe(out, sz, n,
+            "<br><b>Uplink interval:</b> %lu min (SF%u, %s)",
+            (unsigned long)(st.cycle_interval_ms / 60000u), (unsigned)st.cycle_sf, dr_mode);
+    }
 
     append_safe(out, sz, n, "</div>");
 }
@@ -1820,7 +1845,36 @@ static esp_err_t config_get(httpd_req_t *req) {
                                  k_lora_region_names[r]);
         }
     }
+    // V2.8.14: uplink data rate <option> list — 0 = ADR (default), 1..6 =
+    // fixed DR0..DR5 (config_fields.def lorawan_dr; lorawan_sched.h decodes it).
+    static char lora_dr_opts[400];
+    {
+        int lora_dn = append_safe(lora_dr_opts, sizeof(lora_dr_opts), 0,
+                                  "<option value=\"0\"%s>ADR &mdash; set by the network (recommended)</option>",
+                                  (s_cfg->lorawan_dr == 0) ? " selected" : "");
+        for (uint8_t d = 1; d <= 6; d++) {
+            lora_dn = append_safe(lora_dr_opts, sizeof(lora_dr_opts), lora_dn,
+                                  "<option value=\"%u\"%s>Fixed DR%u</option>",
+                                  (unsigned)d, (s_cfg->lorawan_dr == d) ? " selected" : "",
+                                  (unsigned)(d - 1));
+        }
+    }
 #endif
+    // V2.8.14: with LoRaWAN on, the upload interval field is read-only — every
+    // TX round follows the LoRaWAN schedule (lorawan_cycle_interval_ms()).
+    // Keyed on the SAVED setting; empty strings on boards without the radio.
+#if HAL_HAS_LORAWAN
+    const bool tx_int_locked = s_cfg->lorawan_enabled;
+#else
+    const bool tx_int_locked = false;
+#endif
+    const char *tx_int_attr = tx_int_locked ? " readonly style=\"background:#eee\"" : "";
+    const char *tx_int_note = tx_int_locked
+        ? "<p class=\"r\" style=\"font-size:0.85em;margin:.3em 0 0\">LoRaWAN is enabled: this "
+          "interval is not used while LoRaWAN runs (if the radio or credentials fail, it applies "
+          "again). All uploads follow the LoRaWAN schedule, set by the spreading "
+          "factor: SF7 4 min, SF8 7 min, SF9 12 min, SF10 22 min, SF11 and SF12 30 min.</p>"
+        : "";
 
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
                      "<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -2067,10 +2121,17 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<span class=\"r\">*</span></label></div>"
                      "<label>Region <span class=\"r\">*</span>"
                      "<select name=\"lora_region\">%s</select></label>"
-                     "<label>Sub-band (0 = all channels; TTN typically uses a single sub-band) "
-                     "<span class=\"r\">*</span>"
+                     "<label>Sub-band (US915/AU915/CN470 only; 0 = all channels; TTN typically "
+                     "uses a single sub-band) <span class=\"r\">*</span>"
                      "<input type=\"text\" inputmode=\"numeric\" name=\"lora_subband\" "
                      "value=\"%u\" min=\"0\" max=\"8\"></label>"
+                     // V2.8.14: ADR or a fixed uplink data rate.
+                     "<label>Uplink data rate <span class=\"r\">*</span>"
+                     "<select name=\"lora_dr\">%s</select>"
+                     "<small>Fixed DR only for a stationary node with a known link: the network "
+                     "then no longer adapts it, and a rate that is too fast is not heard. The "
+                     "upload interval follows the data rate's spreading factor either way. A DR "
+                     "the region can't use falls back to ADR.</small></label>"
                      "<label>DevEUI (16 hex chars) <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"lora_deveui\" value=\"%s\" maxlength=\"16\" "
                      "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
@@ -2101,8 +2162,12 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<small>(no power amplifier on this board)</small></label></div>"
 #endif
                      "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
-                     "enabled, a 'Sensor data upload interval' of 5 min or more is recommended "
-                     "(TTN Fair Use Policy).</p>"
+                     "enabled, the 'Sensor data upload interval' is not used: every upload "
+                     "(LoRaWAN, WiFi targets, MQTT) follows the LoRaWAN schedule, set by the "
+                     "data rate's spreading factor (SF7 4 min ... SF12 30 min; up to SF10 the "
+                     "counts frame stays within TTN's Fair Use Policy). Without a Geiger tube no counts frame is "
+                     "sent; with tube and environment sensor, the environment frame goes out "
+                     "at most once an hour.</p>"
 #endif
                      // V2.5.10: GNSS receiver is auto-detected at boot (no toggle) — a
                      // MAX-M10S (0x42) or PA1010D (0x10) is found automatically; nothing to
@@ -2115,7 +2180,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // V2.5.30: TX interval moved here to the TOP of Transmission targets
                      // (was in "Other").
                      "<label>Sensor data upload interval (ms) <span class=\"r\">*</span>"
-                     "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"></label>"
+                     "<input type=\"text\" inputmode=\"numeric\" name=\"tx_int_ms\" value=\"%lu\"%s></label>%s"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_mad\" %s> Madavi</label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mad_https\" %s> HTTPS</label></div><br>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_sc\" %s> sensor.community</label></div>"
@@ -2416,6 +2481,9 @@ static esp_err_t config_get(httpd_req_t *req) {
 #else
                      "disabled",   // greyed out
                      "",           // never checked on this board
+                     // cppcheck-suppress sprintfOverlappingData ; false positive (cppcheck 2.22,
+                     // V2.8.14): body is a malloc'd buffer no argument aliases; the finding
+                     // moves between these "not available" args with the argument count.
                      " <small>(not available on this board)</small>",
 #endif
 #if HAL_HAS_CARRIER_REV_SWITCH
@@ -2434,6 +2502,9 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "disabled",   // greyed out
                      " selected",  // always shows V2, the only value this board can store
                      "",
+                     // cppcheck-suppress sprintfOverlappingData ; false positive (cppcheck 2.22,
+                     // V2.8.14): body is a malloc'd buffer no argument aliases; the finding
+                     // moves between these "not available" args with the argument count.
                      " <small>(not available on this board)</small>",
 #endif
 #if HAL_HAS_FUEL_GAUGE
@@ -2443,6 +2514,9 @@ static esp_err_t config_get(httpd_req_t *req) {
 #else
                      "disabled",   // greyed out
                      "",           // never checked on this board
+                     // cppcheck-suppress sprintfOverlappingData ; false positive (cppcheck 2.22,
+                     // V2.8.14): body is a malloc'd buffer no argument aliases; the finding
+                     // moves between these "not available" args with the argument count.
                      " <small>(not available on this board)</small>",
 #endif
                      (unsigned long)s_cfg->heap_guard_floor_kb,         // moved above keep-AP-on (user request)
@@ -2452,16 +2526,18 @@ static esp_err_t config_get(httpd_req_t *req) {
                      s_cfg->standalone_sd ? "checked" : "",   // V2.6.19: standalone SD-logging
 #endif
 #if HAL_HAS_LORAWAN
-                     // V2.6.23 (T8): LoRaWAN section args — 7 in order: enable, region
+                     // V2.6.23 (T8): LoRaWAN section args — 8 in order: enable, region
                      // <option> list (table-driven, see lora_region_opts above — collapses
                      // what would otherwise be 8 per-option "selected" args into one %s,
-                     // same convention as tube_opts/br_opts), sub-band, DevEUI, JoinEUI,
-                     // AppKey, high-power enable. Must match the 7 "%s"/"%u" slots in the
-                     // "LoRaWAN (TTN)" HTML block above 1:1 (V2.6.34: FEM-enable arg
-                     // removed with its checkbox).
+                     // same convention as tube_opts/br_opts), sub-band, data-rate <option>
+                     // list (V2.8.14, lora_dr_opts), DevEUI, JoinEUI, AppKey, high-power
+                     // enable. Must match the 8 "%s"/"%u" slots in the "LoRaWAN (TTN)"
+                     // HTML block above 1:1 (V2.6.34: FEM-enable arg removed with its
+                     // checkbox).
                      s_cfg->lorawan_enabled ? "checked" : "",
                      lora_region_opts,
                      (unsigned)s_cfg->lorawan_subband,
+                     lora_dr_opts,   // V2.8.14: uplink data rate <option> list
                      e->lora_deveui,
                      e->lora_joineui,
                      e->lora_appkey,
@@ -2472,6 +2548,7 @@ static esp_err_t config_get(httpd_req_t *req) {
 #endif
 #endif
                      (unsigned long)s_cfg->tx_interval_ms,   // V2.5.30: top of Transmission targets
+                     tx_int_attr, tx_int_note,               // V2.8.14: read-only + note with LoRaWAN on
                      s_cfg->send_madavi ? "checked" : "",
                      s_cfg->madavi_https ? "checked" : "",
                      s_cfg->send_sensorc ? "checked" : "",

@@ -39,6 +39,7 @@
 #include "util.h"
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
+#include "lorawan_sched.h"   // V2.8.14: lw_sched_interval_ms / _port2_due / _fixed_dr / _frame_is_ours
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
 #include "tls_logic.h"       // fingerprint_hex, https_redirect_location, civil_to_epoch (V2.8.0 HTTPS)
@@ -849,6 +850,85 @@ static int test_lw_build_port2(void) {
     // -> 70000 > 65535).
     if (!lw_build_port2(p, 0.0f, 0.0f, 700000.0f)) return 0;
     if (p[3] != 0xFF || p[4] != 0xFF) return 0;
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// lorawan_sched  (V2.8.14 — SF interval table, port-2 cadence, fixed DR,
+// Class A frame filter)
+// ----------------------------------------------------------------------------
+
+static int test_lw_sched_interval(void) {
+    // The user's table: SF7 4, SF8 7, SF9 12, SF10 22, SF11/SF12 30 min.
+    EXPECT_INT(lw_sched_interval_ms(7),  240000);
+    EXPECT_INT(lw_sched_interval_ms(8),  420000);
+    EXPECT_INT(lw_sched_interval_ms(9),  720000);
+    EXPECT_INT(lw_sched_interval_ms(10), 1320000);
+    EXPECT_INT(lw_sched_interval_ms(11), 1800000);
+    EXPECT_INT(lw_sched_interval_ms(12), 1800000);
+    // Edges: no SF (FSK, 0) -> SF7 row; above 12 -> SF12 row.
+    EXPECT_INT(lw_sched_interval_ms(0),  240000);
+    EXPECT_INT(lw_sched_interval_ms(5),  240000);
+    EXPECT_INT(lw_sched_interval_ms(13), 1800000);
+    // Every row stays inside the 24-bit dt field of the port-1 frame.
+    for (unsigned sf = 0; sf < 16; sf++) {
+        EXPECT_TRUE(lw_sched_interval_ms((uint8_t)sf) < 0xFFFFFFu);
+    }
+    return 1;
+}
+
+static int test_lw_sched_port2_due(void) {
+    // Environment-only node: every cycle, whatever the gap.
+    EXPECT_TRUE(lw_sched_port2_due(false, true, 100, 99));
+    EXPECT_TRUE(lw_sched_port2_due(false, false, 0, 0));
+    // Geiger + environment: the first one is due ...
+    EXPECT_TRUE(lw_sched_port2_due(true, false, 50, 0));
+    // ... then at most once per hour (with 2 min of slack).
+    EXPECT_TRUE(!lw_sched_port2_due(true, true, 1000 + 1800, 1000));   // 30 min: no
+    EXPECT_TRUE(!lw_sched_port2_due(true, true, 1000 + 3479, 1000));   // 58 min - 1 s: no
+    EXPECT_TRUE(lw_sched_port2_due(true, true, 1000 + 3480, 1000));    // 58 min: yes
+    EXPECT_TRUE(lw_sched_port2_due(true, true, 1000 + 3599, 1000));    // a 30-min cycle a few s early
+    // Across the 32-bit uptime wrap (unsigned difference).
+    EXPECT_TRUE(lw_sched_port2_due(true, true, 3000u, 0xFFFFFFFFu - 1000u));
+    EXPECT_TRUE(!lw_sched_port2_due(true, true, 100u, 0xFFFFFFFFu - 100u));
+    return 1;
+}
+
+static int test_lw_sched_fixed_dr(void) {
+    uint8_t dr = 99;
+    EXPECT_TRUE(!lw_sched_fixed_dr(0, &dr));   // ADR
+    EXPECT_INT(dr, 99);                        // untouched
+    EXPECT_TRUE(lw_sched_fixed_dr(1, &dr));
+    EXPECT_INT(dr, 0);                         // setting 1 = DR0
+    EXPECT_TRUE(lw_sched_fixed_dr(6, &dr));
+    EXPECT_INT(dr, 5);                         // setting 6 = DR5
+    EXPECT_TRUE(!lw_sched_fixed_dr(7, &dr));   // out of range (corrupt NVS) -> ADR
+    EXPECT_TRUE(!lw_sched_fixed_dr(255, &dr));
+    EXPECT_TRUE(!lw_sched_fixed_dr(3, NULL));
+    return 1;
+}
+
+static int test_lw_sched_frame_is_ours(void) {
+    // Unconfirmed data down (MHDR 0x60) for DevAddr 0x0A0B0C0D (made up), 12 B minimum frame.
+    uint8_t f[33] = { 0x60, 0x0D, 0x0C, 0x0B, 0x0A, 0x00, 0x01, 0x00, 0, 0, 0, 0 };
+    EXPECT_TRUE(lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    f[0] = 0xA0;                                                     // confirmed data down
+    EXPECT_TRUE(lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Cu, f, 12));  // one bit off: not ours
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 11));  // shorter than any data frame
+    f[0] = 0x40;                                                     // unconfirmed data UP
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    f[0] = 0x61;                                                     // Major != 0
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    // While joining: only a join accept (MHDR 0x20) of 17 or 33 B.
+    f[0] = 0x20;
+    EXPECT_TRUE(lw_sched_frame_is_ours(false, 0, f, 17));
+    EXPECT_TRUE(lw_sched_frame_is_ours(false, 0, f, 33));
+    EXPECT_TRUE(!lw_sched_frame_is_ours(false, 0, f, 18));
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 17));  // joined: no join accepts
+    f[0] = 0x60;
+    EXPECT_TRUE(!lw_sched_frame_is_ours(false, 0x0A0B0C0Du, f, 12)); // joining: no data frames
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, NULL, 12));
     return 1;
 }
 
@@ -2919,6 +2999,10 @@ int main(int argc, char **argv) {
     RUN(test_lw_pack_version);
     RUN(test_lw_build_port1);
     RUN(test_lw_build_port2);
+    RUN(test_lw_sched_interval);
+    RUN(test_lw_sched_port2_due);
+    RUN(test_lw_sched_fixed_dr);
+    RUN(test_lw_sched_frame_is_ours);
 
     printf("== env_api_format ==\n");
     RUN(test_env_api_format_typical);

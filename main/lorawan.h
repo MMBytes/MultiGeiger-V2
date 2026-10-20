@@ -30,6 +30,8 @@ typedef struct {
     uint32_t gm_counts;        // per-window GM pulse count
     uint32_t dt_ms;            // window length (clamped to 24 bit in codec)
     uint8_t  tube_nbr;         // tube_type_t index — same 0-3 numbering V1.9/ttn2luft uses
+    bool     tube_valid;       // V2.8.14: gate for the port-1 frame (tube_enabled) — an
+                               //   environment-only node sends no counts frame
     bool     env_valid;        // gate for the port-2 frame
     float    temperature_c;
     float    humidity_pct;
@@ -55,6 +57,12 @@ typedef struct {
     uint32_t last_dl_uptime_s; // uptime s of the last received downlink (any window, MAC-only too); 0 = none this boot
     uint32_t uplinks_since_dl; // uplinks sent without a downlink since the last one (this boot only)
     uint32_t airtime_24h_ms;   // rolling ~24 h sum of uplink + join-request air time, as of the last TX
+    // V2.8.14 schedule: the TX-cycle interval LoRaWAN imposes (0 = none, the
+    // configured upload interval applies), the SF it follows, and the data-rate mode.
+    uint32_t cycle_interval_ms;
+    uint8_t  cycle_sf;
+    bool     fixed_dr;         // true = fixed data rate from /config (ADR off)
+    uint8_t  fixed_dr_value;   // that DR, valid if fixed_dr
 } lorawan_status_t;
 
 #if !HAL_HAS_LORAWAN
@@ -65,6 +73,7 @@ static inline void lorawan_setup(void) {}
 static inline void lorawan_transmit(const lorawan_snapshot_t *snap) { (void)snap; }
 static inline bool lorawan_is_idle(void) { return true; }
 static inline bool lorawan_suspend(uint32_t timeout_ms) { (void)timeout_ms; return true; }
+static inline uint32_t lorawan_cycle_interval_ms(void) { return 0; }
 static inline void lorawan_get_status(lorawan_status_t *out) {
     if (out) {
         *out = (lorawan_status_t){0};
@@ -100,6 +109,18 @@ bool lorawan_is_idle(void);
  *  @return true = radio quiet; false = still busy after timeout_ms.
  */
 bool lorawan_suspend(uint32_t timeout_ms);
+
+/** @brief TX-cycle interval LoRaWAN imposes (V2.8.14), in ms; 0 = none.
+ *
+ *  With LoRaWAN running (joining or joined), every TX round follows the
+ *  LoRaWAN schedule instead of the configured upload interval: the interval
+ *  for the spreading factor of the current uplink data rate
+ *  (lw_sched_interval_ms(); before the join, the join data rate). 0 when
+ *  LoRaWAN is disabled, unconfigured or the radio failed — the configured
+ *  interval then applies. Safe from any task (a short critical section plus
+ *  one atomic read).
+ */
+uint32_t lorawan_cycle_interval_ms(void);
 
 /** @brief Read the current join/uplink status snapshot. Safe from any task. */
 void lorawan_get_status(lorawan_status_t *out);

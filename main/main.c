@@ -1066,13 +1066,18 @@ static void do_tx_cycle(void) {
             snprintf(dl_ago, sizeof(dl_ago), "%lumin",
                      (unsigned long)((up_s - lst.last_dl_uptime_s) / 60u));
         }
+        // V2.8.14: cycle = the TX-cycle interval LoRaWAN imposes and the SF it
+        // follows; dr = ADR or the fixed DR from /config.
+        char dr_mode[8] = "ADR";
+        if (lst.fixed_dr) snprintf(dr_mode, sizeof(dr_mode), "DR%u", (unsigned)lst.fixed_dr_value);
         ESP_LOGI(TAG, "LORA: state=%s up=%lu fail=%lu duty_skip=%lu joins=%lu last_err=%d "
-                 "dl_ago=%s ul_since_dl=%lu air24h=%.1fs",
+                 "dl_ago=%s ul_since_dl=%lu air24h=%.1fs cycle=%lus@SF%u dr=%s",
                  lorawan_state_name(lst.state), (unsigned long)lst.uplinks_sent,
                  (unsigned long)lst.failed, (unsigned long)lst.duty_skipped,
                  (unsigned long)lst.join_attempts, (int)lst.last_error,
                  dl_ago, (unsigned long)lst.uplinks_since_dl,
-                 (double)lst.airtime_24h_ms / 1000.0);
+                 (double)lst.airtime_24h_ms / 1000.0,
+                 (unsigned long)(lst.cycle_interval_ms / 1000), (unsigned)lst.cycle_sf, dr_mode);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.
@@ -1345,6 +1350,7 @@ static void do_tx_cycle(void) {
             .gm_counts     = counts,
             .dt_ms         = dt_ms,
             .tube_nbr      = (uint8_t)g_cfg.tube_type,   // same 0-3 table V1.9/ttn2luft uses
+            .tube_valid    = g_cfg.tube_enabled,   // V2.8.14: no tube -> no port-1 frame
             .env_valid     = bme_valid,
             .temperature_c = bme_t,
             .humidity_pct  = bme_h,
@@ -1702,7 +1708,8 @@ void app_main(void) {
     tube_setup(g_cfg.tube_enabled, g_cfg.revc_carrier);
     // V2.8.3: seed the radiation screen's HV glyph. The 1 Hz screen appears
     // ~10 s after boot, but do_tx_cycle sets DSP_STATUS_HV only at the first
-    // cycle (one tx_interval, 150 s by default) — until then it would read
+    // cycle (one tx_interval, 150 s by default; the LoRaWAN schedule's
+    // interval with LoRaWAN on, V2.8.14) — until then it would read
     // '.' (NODISPLAY). OK is the same value do_tx_cycle uses for a disabled
     // tube, and an HV fault can't be known before the first cycle anyway.
     display_set_status(DSP_STATUS_HV, DSP_HV_OK);
@@ -1877,7 +1884,14 @@ void app_main(void) {
     // before the wrap compares true, firing do_tx_cycle back to back for up
     // to one interval. util.h's tick_interval_* use unsigned elapsed-time
     // arithmetic, which is wrap-safe (host-tested across the wrap).
-    const TickType_t tx_interval = pdMS_TO_TICKS(g_cfg.tx_interval_ms);
+    // V2.8.14: with LoRaWAN running, every TX round follows the LoRaWAN
+    // schedule instead (lorawan_cycle_interval_ms(): the interval for the
+    // spreading factor of the next uplink — one schedule, so each LoRaWAN
+    // frame carries exactly one cycle's counts). Re-read every loop pass:
+    // the network's ADR changes the data rate, and with it the interval.
+    // 0 = LoRaWAN off / unconfigured / radio failed: the configured interval.
+    const uint32_t tx_interval_cfg_ms = g_cfg.tx_interval_ms;
+    TickType_t tx_interval = pdMS_TO_TICKS(tx_interval_cfg_ms);
     TickType_t last_tx = xTaskGetTickCount();
 
 #if CONFIG_ESP_WIFI_ENABLE_ROAMING_APP
@@ -1888,6 +1902,10 @@ void app_main(void) {
 #endif
 
     while (1) {
+        {
+            const uint32_t lw_ms = lorawan_cycle_interval_ms();
+            tx_interval = pdMS_TO_TICKS(lw_ms ? lw_ms : tx_interval_cfg_ms);
+        }
         TickType_t now = xTaskGetTickCount();
         TickType_t wait = tick_interval_remaining(now, last_tx, tx_interval);
         if (wait == 0) wait = 1;   // due now: poll on the next tick (was `: 1`)

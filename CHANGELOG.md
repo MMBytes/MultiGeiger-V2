@@ -9,6 +9,78 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.14 — LoRaWAN: one schedule by data rate, fixed data rate, cleaner receive windows
+
+LoRaWAN changes for the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the
+XIAO ESP32-S3 + Wio-SX1262. All other boards are unchanged.
+
+1. **One schedule, set by the data rate.** With LoRaWAN enabled, the "Sensor
+   data upload interval" is no longer used: every round of uploads — LoRaWAN,
+   the WiFi targets, MQTT, and the per-cycle values on the display — follows
+   the LoRaWAN uplink interval, which depends on the spreading factor of the
+   current data rate:
+
+   | SF | 7 | 8 | 9 | 10 | 11 | 12 |
+   |---|---|---|---|---|---|---|
+   | Interval (min) | 4 | 7 | 12 | 22 | 30 | 30 |
+
+   Up to SF10 this keeps the counts frame within TTN's Fair Use Policy (30 s
+   air time per day) when each frame is sent once; the hourly environment
+   frame of a node with both adds a few seconds. SF11 and SF12 trade that for
+   a data point every 30 minutes and stay far inside the EU868 duty-cycle
+   limit. When the network's ADR changes the data rate, the interval follows
+   from the next cycle on. Before the join, the node measures at the interval
+   of its join data rate. On /config the interval field is read-only while
+   LoRaWAN is enabled, with a note in red.
+2. **Frames by sensor setup.** A node without a Geiger tube (tube disabled in
+   /config) no longer sends a counts frame (port 1) — before, it sent zero
+   counts every cycle. An environment-only node sends its environment frame
+   (port 2) every cycle. A node with both sends counts every cycle and the
+   environment at most once an hour. A node with neither sends nothing and
+   says so once in the log.
+3. **Fixed data rate option.** A new "Uplink data rate" setting: ADR (the
+   default — the network picks data rate and power) or a fixed DR0 to DR5 with
+   ADR off, meant for stationary nodes with a known link. The fixed rate is
+   kept even when a network command changes it, and a node in a region that
+   cannot use the chosen rate (for example SF11/SF12 under AU915's 400 ms
+   dwell limit) falls back to ADR and logs why. On EU868-type regions the node
+   also joins at the fixed rate (not below the region's dwell-time floor)
+   instead of stepping down.
+4. **Duty-cycle backstop.** The library's duty-cycle limiter is on (about
+   28 s per hour on EU868-type regions, the library's default of 1/128; none
+   in US915/AU915/CN470/KR920/IN865). On EU868-type regions the environment
+   frame right after a counts frame waits for it (up to about 3 minutes at
+   SF12), as do frames with very high repeat counts. The node waits instead of
+   losing the frame and skips it only if the wait would exceed 10 minutes.
+   Join retries wait for it too.
+5. **Someone else's downlink no longer costs us our repeats.** The library
+   ended an uplink as soon as anything arrived in the first receive window: it
+   cancelled the remaining copies the network had asked for and did not open
+   the second window. On a shared channel that is often another device's
+   downlink, or our own with bit errors (downlinks carry no checksum). The
+   firmware now checks a received frame first: only a downlink addressed to
+   exactly this node (or, while joining, a join accept) counts. Anything else
+   is ignored, the copies continue and the second window still opens. A
+   second window that had already passed now also counts as "nothing
+   received" instead of an error.
+6. **More detail in logs and status.** The LORA status line shows the cycle
+   interval, its SF and the data-rate mode (`cycle=720s@SF9 dr=ADR`). /status
+   shows "Uplink interval", and its "Cycle" block shows the interval and next
+   cycle actually in use (the LoRaWAN schedule, not the configured value). An
+   ignored frame is marked `ignored` in the "rx windows" line, duty-cycle
+   waits and skips are logged, and the boot config dump shows `dr=`.
+7. **No stall at slow data rates.** At the smallest frame sizes (AU915 and
+   AS923 DR2, US915 DR0: 11 bytes) a counts frame plus the node's answers to
+   network commands could exceed the size limit or the 400 ms dwell limit;
+   the library then refused that uplink and every later one, because only a
+   sent frame clears the answers. The node now sends the answers on their own
+   first, then the frame, and holds back its own time request while it would
+   not fit.
+8. The /config sub-band field says which regions use it (US915, AU915,
+   CN470).
+
+---
+
 ## V2.8.13 — LoRaWAN library update (RadioLib 7.8.1)
 
 The LoRaWAN radio library, RadioLib, moves from 7.2.1 to 7.8.1. This applies

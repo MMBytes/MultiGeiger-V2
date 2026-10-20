@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <stdio.h>    // snprintf — V2.8.14 lorawan dr= field of the boot dump
 #include <string.h>
 #include <stdlib.h>
 #include "esp_log.h"
@@ -255,9 +256,12 @@ void config_log_summary(const config_t *cfg) {
     // root secret → MASK()ed. No FEM-enable field: FEM_EN is always driven
     // when LoRaWAN is on (see lorawan.cpp), so there is nothing to configure.
 #if HAL_HAS_LORAWAN
-    LOG_PACED("  lorawan:          enabled=%d region=%u subband=%u high_power=%d",
+    // V2.8.14: dr=ADR or dr=DR<n> (fixed, see config_fields.def lorawan_dr).
+    char lora_dr[8] = "ADR";
+    if (cfg->lorawan_dr) snprintf(lora_dr, sizeof(lora_dr), "DR%u", (unsigned)(cfg->lorawan_dr - 1));
+    LOG_PACED("  lorawan:          enabled=%d region=%u subband=%u high_power=%d dr=%s",
              cfg->lorawan_enabled, (unsigned)cfg->lorawan_region,
-             (unsigned)cfg->lorawan_subband, cfg->lorawan_high_power);
+             (unsigned)cfg->lorawan_subband, cfg->lorawan_high_power, lora_dr);
     LOG_PACED("  lorawan:          deveui=%s joineui=%s appkey=%s",
              cfg->lorawan_deveui[0]  ? cfg->lorawan_deveui  : "<empty>",
              cfg->lorawan_joineui[0] ? cfg->lorawan_joineui : "<empty>",

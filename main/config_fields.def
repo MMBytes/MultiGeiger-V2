@@ -646,3 +646,9 @@ X_STR (lorawan_deveui,         CFG_LORA_EUI_MAX + 1, "lora_deveui",  "")
 X_STR (lorawan_joineui,        CFG_LORA_EUI_MAX + 1, "lora_joineui", "")
 X_STR (lorawan_appkey,         CFG_LORA_KEY_MAX + 1, "lora_appkey",  "")
 X_BOOL(lorawan_high_power,     "lora_hp",      false)
+// V2.8.14: uplink data rate. 0 = ADR (the network picks DR and TX power —
+// default, right for most nodes); 1..6 = fixed DR0..DR5, ADR off (stationary
+// nodes with a known link). The uplink interval follows the DR's spreading
+// factor either way (lorawan_sched.h). lorawan.cpp falls back to ADR if the
+// region can't send a port-1 frame at that DR (unknown DR, dwell limit).
+X_U8  (lorawan_dr,             "lora_dr",      0, 0, 6)

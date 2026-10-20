@@ -28,6 +28,7 @@ extern "C" {
 #include "hal.h"
 #include "lorawan.h"
 #include "lorawan_codec.h"
+#include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR, frame filter
 #include "config.h"
 #include "applog.h"
 #include "ntp.h"       // ntp_boot_epoch() — "has SNTP ever synced" gate for time sync
@@ -86,6 +87,7 @@ typedef struct {
     uint32_t rx_addr;        // little-endian on air (LoRaWAN FHDR)
     uint8_t  n_open;         // how many repeats opened this window (RX2 is skipped
                              // after a repeat whose RX1 received a frame)
+    bool     ignored;        // V2.8.14: frame not ours or unreadable, dropped by GeigerNode::receiveDownlink()
 } rxobs_win_t;
 
 typedef struct {
@@ -210,8 +212,10 @@ static void rxobs_note(const uint8_t *out, size_t len, const uint8_t *in) {
         }
         break;
     case OBS_CMD_READ_BUFFER:
-        // RadioLib's parseDownlink() reads the whole frame once, after the
-        // window that received it closed — so it belongs to win[n_win - 1].
+        // The frame is read after the window that received it closed — so it
+        // belongs to win[n_win - 1]. V2.8.14: read twice for a frame that is
+        // ours (GeigerNode::receiveDownlink()'s check, then RadioLib's
+        // parseDownlink()), once for one that is not; same bytes either way.
         // 3 header bytes (cmd, offset, status) + at least MHDR + DevAddr.
         if (len >= 3 + 5 && in && s_obs.n_win > 0) {
             rxobs_win_t *w = &s_obs.win[s_obs.n_win - 1];
@@ -320,9 +324,10 @@ static void rxobs_format(char *buf, size_t sz) {
         if (w->n_open > 1) snprintf(reps, sizeof(reps), " x%u", (unsigned)w->n_open);
         char frame[72] = "";
         if (w->rx_seen) rxobs_frame(w, frame, sizeof(frame));
-        n += snprintf(buf + n, sz - n, "%sRX%d %.3f SF%u %s to=%lu ms%s %s%s", i ? " | " : "", i + 1,
+        n += snprintf(buf + n, sz - n, "%sRX%d %.3f SF%u %s to=%lu ms%s %s%s%s", i ? " | " : "", i + 1,
                       rxobs_mhz(w->freq_raw), (unsigned)w->sf, when,
-                      (unsigned long)(w->timeout_us / 1000), reps, rxobs_result(rxobs_final(w)), frame);
+                      (unsigned long)(w->timeout_us / 1000), reps, rxobs_result(rxobs_final(w)), frame,
+                      w->ignored ? " ignored" : "");
     }
 }
 
@@ -486,6 +491,15 @@ static Module  s_mod(&s_hal, PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA
 static SX1262  s_radio(&s_mod);
 static lorawan_status_t s_status;
 static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// V2.8.14 uplink schedule state — see the "Uplink schedule" block further down.
+static uint8_t s_cycle_sf = 0;                // SF the TX-cycle interval follows; 0 = not set yet
+static const LoRaWANBand_t *s_band = NULL;    // the region's band plan, set in lorawan_setup()
+// Fixed data rate from /config (lorawan_dr != 0). Set in lorawan_setup()
+// before the worker starts; the worker clears s_fixed_dr (atomic) if the
+// region can't use that DR, falling back to ADR.
+static bool    s_fixed_dr = false;
+static uint8_t s_fixed_dr_value = 0;
 
 // --- SX126x RX timer: stop on preamble (V2.8.12) -----------------------------
 //
@@ -672,6 +686,11 @@ void lorawan_get_status(lorawan_status_t *out) {
     portENTER_CRITICAL(&s_status_mux);
     *out = s_status;
     portEXIT_CRITICAL(&s_status_mux);
+    // V2.8.14 schedule fields: derived on read, not stored in s_status.
+    out->cycle_interval_ms = lorawan_cycle_interval_ms();
+    out->cycle_sf          = __atomic_load_n(&s_cycle_sf, __ATOMIC_RELAXED);
+    out->fixed_dr          = __atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED);
+    out->fixed_dr_value    = s_fixed_dr_value;
 }
 
 // --- Credential parsing ------------------------------------------------------
@@ -759,6 +778,159 @@ void lorawan_forget_session(bool wipe_nonces) {
 static QueueHandle_t s_q;
 static LoRaWANNode  *s_node = NULL;
 
+// --- Class A receive: only our own frames end the exchange (V2.8.14) ----------
+//
+// RadioLib 7.8.1 receiveDownlink() opens RX1 and returns as soon as RX1
+// received ANY frame (RX2 is then skipped), and sendReceive() stops the
+// remaining NbTrans repeats on any non-zero result (LoRaWAN.cpp ~215: "if an
+// error occured or a downlink was received, stop retransmission") — all
+// before parseDownlink() has looked at the frame. On a shared channel that
+// frame is often someone else's downlink, or ours with bit errors (no PHY CRC
+// on downlinks): XIAO 2026-10-19, FCnt 857 and 862 sent once or twice instead
+// of NbTrans=3 because of foreign frames, and a corrupted own frame in RX1
+// hid RX2. The override below reads the frame first (lw_sched_frame_is_ours())
+// and treats anything that can't be ours as "nothing received": RX2 still
+// opens, the repeats continue, and the ADR backoff counts it as no downlink.
+// A NO_RX_WINDOW (-1105, RX2 already passed because a preamble or frame held
+// RX1 open) is likewise "nothing received" instead of an error that ended
+// the exchange — the frame did go on air.
+//
+// Not fixed here (upstream report planned): RX1 held open past the RX2 start
+// by a false preamble still loses a real RX2 downlink — the SX126x header-
+// error IRQ is not routed to DIO1 (RADIOLIB_IRQ_RX_DEFAULT_MASK = RX_DONE),
+// so receiveClassA() waits for the longest possible frame.
+//
+// Class A only: this firmware never enables Class B/C or multicast, so
+// RadioLib's receiveClassC() calls (no-ops for Class A) are left out. Uses
+// protected RadioLib members (receiveClassA, channels, rxDelays, tUplinkEnd,
+// devAddr, phyLayer) — re-check against LoRaWAN.cpp receiveDownlink() on
+// every RadioLib update.
+class GeigerNode : public LoRaWANNode {
+public:
+    GeigerNode(PhysicalLayer *phy, const LoRaWANBand_t *band, uint8_t subBand)
+        : LoRaWANNode(phy, band, subBand) {}
+
+    /** @brief Data rate the NEXT uplink will use (the session's current DR). */
+    uint8_t uplinkDr() const { return this->channels[RADIOLIB_LORAWAN_UPLINK].dr; }
+
+    /** @brief True if a `len`-byte application payload can go out at the
+     *         current DR: the band's size limit and, on dwell-time plans
+     *         (AU915/AS923: 400 ms), the air time of the whole frame (+13 B
+     *         MHDR/FHDR/FPort/MIC) — the same ToA-vs-dwell arithmetic
+     *         RadioLib's adrBackoff() uses. Not getMaxPayloadLen(): with dwell time it subtracts 13
+     *         from a uint8_t that can be below 13 (SF11/SF12 under 400 ms)
+     *         and wraps to ~243, and it also subtracts queued MAC answers. */
+    bool payloadFits(uint8_t len) { return this->frameFits(len, 0); }
+
+    /** @brief As payloadFits(), for `payload` bytes plus `fopts` bytes of
+     *         MAC answers in the FOpts field. Same wrap-free arithmetic. */
+    bool frameFits(size_t payload, size_t fopts) {
+        const uint8_t dr = this->uplinkDr();
+        if (dr >= RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES) return false;
+        if (payload + fopts > this->band->payloadLenMax[dr]) return false;
+        if (!this->dwellTimeUp) return true;
+        const LoRaWANDataRate_t *d = &this->band->dataRates[dr];
+        return this->phyLayer->calculateTimeOnAir(d->modem, d->dr, d->pc, payload + fopts + 13) / 1000 <=
+               this->dwellTimeUp;
+    }
+
+    /** @brief Make the duty-cycle limiter see only the LAST join request:
+     *         RadioLib resets lastToA at the start of sendReceive() but not
+     *         in activateOTAA(), so join requests add up and
+     *         timeUntilUplink() (EU868: ~128 x lastToA) grows with every
+     *         attempt — up to a skipped first uplink after a long join. */
+    void setLastToA(RadioLibTime_t ms) { this->lastToA = ms; }
+
+protected:
+    int16_t receiveDownlink() override {
+        int16_t st = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, &this->channels[RADIOLIB_LORAWAN_RX1],
+                                         RADIOLIB_LORAWAN_RX1, this->rxDelays[RADIOLIB_LORAWAN_RX1],
+                                         this->tUplinkEnd);
+        if (st > 0 && this->keep_frame()) return st;
+        if (st < 0 && st != RADIOLIB_ERR_NO_RX_WINDOW) return st;   // radio/HAL error
+        st = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, &this->channels[RADIOLIB_LORAWAN_RX2],
+                                 RADIOLIB_LORAWAN_RX2, this->rxDelays[RADIOLIB_LORAWAN_RX2],
+                                 this->tUplinkEnd);
+        if (st > 0 && this->keep_frame()) return st;
+        if (st < 0 && st != RADIOLIB_ERR_NO_RX_WINDOW) return st;
+        return 0;   // nothing (usable) received in either window
+    }
+
+private:
+    // Read the frame the last window received and decide. The SX126x keeps
+    // the frame in its buffer, so parseDownlink() reads the same bytes again
+    // for a kept frame. Static buffer: runs deep inside sendReceive() on the
+    // worker task (the only RadioLib caller), so no stack frame for 256 B.
+    bool keep_frame() {
+        static uint8_t frame[256];
+        const size_t len = this->phyLayer->getPacketLength();
+        bool keep = len > 0 && len <= sizeof(frame) &&
+                    this->phyLayer->readData(frame, len) == RADIOLIB_ERR_NONE &&
+                    lw_sched_frame_is_ours(this->isActivated(), this->devAddr, frame, len);
+        if (!keep && s_obs.on && s_obs.n_win > 0) s_obs.win[s_obs.n_win - 1].ignored = true;
+        return keep;
+    }
+};
+
+// --- Uplink schedule (V2.8.14) -------------------------------------------------
+//
+// One schedule per node (lorawan_sched.h): while LoRaWAN runs, main.c's TX
+// rounds follow lorawan_cycle_interval_ms(), i.e. the interval for the
+// spreading factor of the NEXT uplink's data rate. s_cycle_sf is written by
+// lorawan_setup() (main task, before the worker exists: the join DR) and then
+// only by the worker (after every join attempt and exchange); read by any task.
+// (State variables s_cycle_sf / s_band / s_fixed_dr* are defined next to
+// s_status above, because lorawan_get_status() reads them.)
+
+// The LoRa spreading factor of a band's data rate. FSK / LR-FHSS rates have
+// none and are fast: the SF7 row. An unused DR slot: the slowest row.
+static uint8_t sf_of_dr(const LoRaWANBand_t *band, uint8_t dr) {
+    if (dr >= RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES) return 12;
+    const LoRaWANDataRate_t *d = &band->dataRates[dr];
+    if (d->modem == RADIOLIB_MODEM_LORA) return d->dr.lora.spreadingFactor;
+    if (d->modem == RADIOLIB_MODEM_NONE) return 12;
+    return 7;
+}
+
+static void set_cycle_sf(uint8_t sf) { __atomic_store_n(&s_cycle_sf, sf, __ATOMIC_RELAXED); }
+
+uint32_t lorawan_cycle_interval_ms(void) {
+    portENTER_CRITICAL(&s_status_mux);
+    const lorawan_state_t st = s_status.state;
+    portEXIT_CRITICAL(&s_status_mux);
+    if (st != LORAWAN_ST_JOINING && st != LORAWAN_ST_JOINED) return 0;
+    const uint8_t sf = __atomic_load_n(&s_cycle_sf, __ATOMIC_RELAXED);
+    return sf ? lw_sched_interval_ms(sf) : 0;
+}
+
+// Apply the fixed data rate (ADR off), after a join or session resume and
+// whenever a network command moved the DR: RadioLib's LinkADRReq handler sets
+// the DR even with ADR disabled (LoRaWAN.cpp, MAC_LINK_ADR — only the channel
+// mask rule depends on adrEnabled). Falls back to ADR, once and for good, if
+// the region has no channel for that DR or a 10-byte port-1 frame wouldn't fit
+// (dwell-time-limited plans: SF11/SF12 exceed AU915's / AS923's 400 ms).
+static void apply_fixed_dr(GeigerNode &node) {
+    if (!__atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) return;
+    const uint8_t want = s_fixed_dr_value;
+    const uint8_t was  = node.uplinkDr();
+    node.setADR(false);   // RAM-only flag: set again after every boot / resume
+    int16_t st = (was == want) ? RADIOLIB_ERR_NONE : node.setDatarate(want);
+    if (st == RADIOLIB_ERR_NONE && !node.payloadFits(10)) st = RADIOLIB_ERR_DWELL_TIME_EXCEEDED;
+    if (st != RADIOLIB_ERR_NONE) {
+        ESP_LOGW(TAG, "fixed DR%u not usable in this region (%d) — falling back to ADR",
+                 (unsigned)want, (int)st);
+        __atomic_store_n(&s_fixed_dr, false, __ATOMIC_RELAXED);
+        // Only the size/dwell branch gets here with the DR moved (a refused
+        // setDatarate() leaves it unchanged).
+        if (node.uplinkDr() != was) (void)node.setDatarate(was);
+        node.setADR(true);
+        return;
+    }
+    if (was != want) {
+        ESP_LOGI(TAG, "data rate fixed at DR%u (was DR%u), ADR off", (unsigned)want, (unsigned)was);
+    }
+}
+
 // s_version_packed: set once in lorawan_setup() (main task, at boot) via
 // lw_pack_version(VERSION_STR); read (never written) by the worker task
 // thereafter — a plain uint16_t load/store pair needs no locking either way.
@@ -817,16 +989,15 @@ static bool    s_prev_had_dl = false;   // previous exchange received a downlink
 //    parseDownlink's checks — usually a DevAddr mismatch: someone else's
 //    downlink on a shared channel, or (no PHY CRC on downlinks) our own frame
 //    with bit errors on a marginal link.
-//  - NO_RX_WINDOW (-1105): RadioLib found the RX2 opening already passed —
-//    with stop-on-preamble most likely because a preamble stopped the RX1
-//    timer, no frame followed, and RadioLib's tMax wait ran past RX2.
 //  - MIC_MISMATCH (-1112): a frame addressed to us that failed its MIC —
 //    corrupted on the way (same no-CRC reason).
 // Counting these as "uplink failed" inflated fail=/last_err= with events that
 // say nothing about the uplink. Only used when a TX was actually seen.
+// (V2.8.12 also listed NO_RX_WINDOW, -1105 "RX2 opening already passed";
+// since V2.8.14 GeigerNode::receiveDownlink() turns that into "nothing
+// received", so it no longer reaches here.)
 static bool downlink_unusable(int16_t st) {
-    return st == RADIOLIB_ERR_DOWNLINK_MALFORMED || st == RADIOLIB_ERR_NO_RX_WINDOW ||
-           st == RADIOLIB_ERR_MIC_MISMATCH;
+    return st == RADIOLIB_ERR_DOWNLINK_MALFORMED || st == RADIOLIB_ERR_MIC_MISMATCH;
 }
 
 // Classify one sendReceive() outcome under s_status_mux. House rule (memory:
@@ -868,21 +1039,27 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
     if (rx_only) {
         ESP_LOGI(TAG, "downlink unusable (%d: %s) — uplink itself was sent", (int)st,
                  st == RADIOLIB_ERR_DOWNLINK_MALFORMED ? "frame not for us or corrupted" :
-                 st == RADIOLIB_ERR_NO_RX_WINDOW ? "RX2 window too late, most likely RX1 held open by a preamble" :
                  "MIC mismatch, corrupted");
     }
     if (sent_ok) {
         if (have_dl) {
             s_ul_since_dl = 0;
-        } else if (++s_ul_since_dl == ADR_ACK_LIMIT) {
+        } else if (++s_ul_since_dl == ADR_ACK_LIMIT && __atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
+            // Fixed DR = ADR off: RadioLib sets neither the ADR bit nor
+            // ADRACKReq and skips adrBackoff() (LoRaWAN.cpp composeUplink /
+            // sendReceive), so nothing changes on the node's side.
+            ESP_LOGW(TAG, "no downlink for %u uplinks since boot (fixed data rate, ADR off: "
+                     "no ADRACKReq, no backoff)", (unsigned)ADR_ACK_LIMIT);
+        } else if (s_ul_since_dl == ADR_ACK_LIMIT) {
             // Worded for THIS boot's count: RadioLib's own counter lives in the
             // NVS session and survives reboots, so after a reboot it may be well
             // past 64 already (2026-10-18: this line came 2 h after RadioLib's
             // ADRACKReq started, with two backoff steps already taken).
             ESP_LOGW(TAG, "no downlink for %u uplinks since boot — the node is asking the "
                      "network for an answer (ADRACKReq; RadioLib's count survives reboots "
-                     "and may be higher); ADR backoff (TX power to max, then DR-1 every "
-                     "32 uplinks) continues while the network stays silent",
+                     "and may be higher); ADR backoff (one step every 32 uplinks: TX power "
+                     "to max, then DR-1, last the default channels with one transmission "
+                     "per frame) continues while the network stays silent",
                      (unsigned)ADR_ACK_LIMIT);
         }
     }
@@ -902,14 +1079,22 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
             s_status.last_dl_uptime_s = up_s ? up_s : 1;   // 0 is reserved for "none"
         }
         portEXIT_CRITICAL(&s_status_mux);
-    } else if (st == RADIOLIB_ERR_UPLINK_UNAVAILABLE || st == RADIOLIB_ERR_NO_CHANNEL_AVAILABLE) {
-        // Duty-cycle / dwell-time guard: RadioLib itself blocked the send
-        // (regulatory, not a radio/network failure) — expected occasionally
-        // under AS923/EU868 duty-cycle limits, not logged as a failure.
+    } else if (st == RADIOLIB_ERR_UPLINK_UNAVAILABLE || st == RADIOLIB_ERR_NO_CHANNEL_AVAILABLE ||
+               st == RADIOLIB_ERR_DWELL_TIME_EXCEEDED) {
+        // Regulatory guard: RadioLib itself refused the send before TX (duty
+        // cycle, no enabled channel, or a frame over the 400 ms dwell limit),
+        // not a radio/network failure — counted as skipped, not as failed.
+        // A dwell refusal that send_app_frame() then recovers (MAC answers
+        // alone, then the frame) is counted here too: duty_skip= counts
+        // refused attempts, not lost frames.
         portENTER_CRITICAL(&s_status_mux);
         s_status.duty_skipped++;
         portEXIT_CRITICAL(&s_status_mux);
-        ESP_LOGI(TAG, "duty-cycle guard: cycle skipped (%d)", st);
+        ESP_LOGI(TAG, "regulatory guard (duty cycle / channel / dwell time): frame skipped (%d)", st);
+    } else if (st == RADIOLIB_ERR_PACKET_TOO_LONG) {
+        // Refused before TX: payload + queued MAC answers over the DR's limit.
+        // send_app_frame() recovers (MAC answers alone, then the frame), so
+        // neither failed= nor last_err= is touched; logged there.
     } else {
         portENTER_CRITICAL(&s_status_mux);
         s_status.failed++;
@@ -1083,14 +1268,48 @@ static void timesync_apply(uint32_t unix_s, uint16_t ms) {
 // between port 1 and port 2 used to rewind FCntUp to the cycle start, so the
 // already-sent port-1 counter went out again and the network dropped it as a
 // replay (XIAO 2026-10-18: FCnt 91 at 19:25:35 and again at 19:28:16 after an
-// OTA-time watchdog reset). Wear: ~300 B per exchange, 2 per cycle — still
-// decades on the wear-levelled NVS partition (see nvs_save_blob()).
+// OTA-time watchdog reset). Wear: one ~300 B write per frame, and the V2.8.14
+// schedule caps the frame rate (at most one port-1 frame per 4 min, port 2
+// hourly on Geiger + environment nodes, every cycle on environment-only
+// ones) — decades on the wear-levelled NVS
+// partition (see nvs_save_blob()).
+//
+// V2.8.14 duty-cycle backstop: RadioLib's limiter is on (setDutyCycle(true)
+// in lorawan_task(); none on US915/AU915/CN470/KR920/IN865). On EU868-type
+// plans the effective limit is RadioLib's session default, 1/128 = ~28 s/h:
+// createSession() applies a synthetic DutyCycleReq (MaxDCycle 7) over the
+// band's 36 s/h, and session restores replay it. sendReceive() would REFUSE
+// a frame that comes too early (RADIOLIB_ERR_UPLINK_UNAVAILABLE). The SF
+// schedule normally keeps well clear of it; the limiter bites at very high
+// NbTrans and for the port-2 frame right after port 1, which waits ~128 x
+// the port-1 exchange's air time (up to ~3 min at SF12). So wait here
+// instead of losing the frame — outside exchange_begin(), so an OTA can
+// still suspend the worker meanwhile — unless the wait would exceed
+// DUTY_WAIT_MAX_MS, then skip it (counted as duty_skipped).
 //
 // `what` is the payload summary for the "uplink OK" line. Returns
 // sendReceive()'s status (<0 error, 0 no downlink, 1/2 downlink window),
 // except that a receive-side-only error after a real TX returns 0.
-static int16_t uplink_exchange(LoRaWANNode &node, const uint8_t *data, size_t len, uint8_t port,
+#define DUTY_WAIT_MAX_MS (10UL * 60UL * 1000UL)
+// Worker-task-private: did the last uplink_exchange() put a frame on air?
+// Read by poll_device_time(), so a skipped frame isn't counted as an
+// unanswered DeviceTimeReq.
+static bool s_last_exchange_sent = false;
+static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len, uint8_t port,
                                const char *what, uint8_t *dl, size_t *dl_len) {
+    s_last_exchange_sent = false;
+    const RadioLibTime_t wait_ms = node.timeUntilUplink();
+    if (wait_ms > DUTY_WAIT_MAX_MS) {
+        ESP_LOGW(TAG, "duty cycle: port %u frame skipped, next uplink allowed in %lu s",
+                 (unsigned)port, (unsigned long)(wait_ms / 1000));
+        portENTER_CRITICAL(&s_status_mux); s_status.duty_skipped++; portEXIT_CRITICAL(&s_status_mux);
+        return RADIOLIB_ERR_UPLINK_UNAVAILABLE;
+    }
+    if (wait_ms > 0) {
+        ESP_LOGI(TAG, "duty cycle: waiting %.1f s before the port %u frame",
+                 (double)wait_ms / 1000.0, (unsigned)port);
+        vTaskDelay(pdMS_TO_TICKS(wait_ms) + 1);
+    }
     if (!exchange_begin()) park_for_ota();
     stop_timer_on_preamble();
     LoRaWANEvent_t ev_up = {}, ev_dn = {};
@@ -1106,6 +1325,7 @@ static int16_t uplink_exchange(LoRaWANNode &node, const uint8_t *data, size_t le
     // on RADIOLIB_ERR_TX_TIMEOUT RadioLib returns before adding the repeat's
     // ToA (LoRaWAN.cpp transmitUplink), so that rare frame counts 0 ms.
     const bool sent = (s_obs.tx_us != 0);
+    s_last_exchange_sent = sent;
     const uint32_t air_ms = sent ? (uint32_t)node.getLastToA() : 0;
     record_uplink_result(st, *dl_len, &ev_dn, air_ms);
     // Receive-side-only errors after a real TX count as "sent, no usable
@@ -1125,14 +1345,98 @@ static int16_t uplink_exchange(LoRaWANNode &node, const uint8_t *data, size_t le
     }
     // Same s_forget_pending gate as every other session save — see
     // lorawan_forget_session().
-    if (!s_forget_pending) {
+    // PACKET_TOO_LONG is refused in isValidUplink(), before RadioLib changes
+    // any state: nothing to save.
+    if (!s_forget_pending && st != RADIOLIB_ERR_PACKET_TOO_LONG) {
         nvs_save_blob("session", node.getBufferSession(), RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
     }
     exchange_end();
+    // A downlink may have moved the DR (LinkADRReq; with ADR off RadioLib
+    // skips the backoff, so that is the only way): undo that in fixed-DR
+    // mode, then let the next cycle's interval follow the DR the next
+    // uplink will actually use.
+    apply_fixed_dr(node);
+    set_cycle_sf(sf_of_dr(s_band, node.uplinkDr()));
     // Callers treat an rx-only error like "no downlink": the uplink went out,
     // so e.g. the port-2 frame of the same cycle must still be sent.
     return rx_only ? 0 : st;
 }
+
+// Poll for the DeviceTimeAns right after the exchange that carried the
+// request — the cycle's first frame (port 1, or port 2 on an environment-only
+// node), not at end of cycle: the answer's time field is captured at the END
+// of the uplink that carried the request and TTN serves it in that uplink's
+// RX1, so polling here (a) avoids adding a second exchange's ~3-8 s to the
+// apply latency and (b) can't lose the stored answer to the next uplink
+// clearing fOptsDown (RadioLib 7.8.1 clears it before every uplink). Since
+// 7.8.1 the returned time is advanced to "now" by RadioLib itself (see
+// timesync_apply(); up to one repeat period early with NbTrans > 1) — this
+// feature still only rescues standalone nodes from 1970-era timestamps; it
+// is not NTP. Clears *want, so a second call in the same cycle is a no-op.
+// If the frame never went on air (duty-cycle skip, dwell refusal), the
+// attempt is not counted against TIMESYNC_MAX_ATTEMPTS; the request stays
+// queued in RadioLib for the next uplink (not after a dwell refusal of a
+// MAC-only frame, whose queue RadioLib has already consumed — the next
+// cycle simply queues it again).
+static void poll_device_time(GeigerNode &node, bool *want) {
+    if (!*want) return;
+    *want = false;
+    if (!s_last_exchange_sent) {
+        if (s_timesync_attempts > 0) s_timesync_attempts--;
+        return;
+    }
+    uint32_t unix_s = 0;
+    uint16_t ms     = 0;
+    const bool fresh = node.getMacDeviceTimeAns(&unix_s, &ms, true) == RADIOLIB_ERR_NONE && unix_s != 0;
+    if (fresh) {
+        timesync_apply(unix_s, ms);
+        s_timesync_last_s   = timesync_now_s();
+        s_timesync_attempts = 0;
+    } else if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) {
+        timesync_give_up();
+    }
+}
+
+// Send one application frame, then poll for the DeviceTimeAns.
+//
+// Small-DR stall guard (V2.8.14): RadioLib refuses a frame before TX with
+// RADIOLIB_ERR_PACKET_TOO_LONG (-4) when payload + queued MAC answers
+// exceed the DR's limit (isValidUplink() vs getMaxPayloadLen(), which
+// subtracts fOptsUpLen). At AU915/AS923 DR2 (400 ms dwell: 11 B) or US915
+// DR0 (11 B) a 10 B port-1 frame plus a 2 B LinkADRAns or 3 B DevStatusAns
+// no longer fits. The answers are only cleared by a TX, and RadioLib's own
+// MAC-only fallback checks the answers alone, so every later cycle was
+// refused too. With 12+ B of answers on a dwell plan the same stall shows
+// up as RADIOLIB_ERR_DWELL_TIME_EXCEEDED instead (getMaxPayloadLen() wraps,
+// isValidUplink() passes, transmitUplink() refuses the 400 ms+ frame); the
+// uplink loop keeps its own DeviceTimeReq from pushing the queue that far.
+// Here: send the answers alone (port 0, RadioLib moves them into
+// FRMPayload), poll for a DeviceTimeAns right after that frame (the retry
+// would clear it), then send the frame once more. One retry only: if the
+// port-0 exchange's downlink queued new answers that don't fit either,
+// they go out alone again next cycle.
+static int16_t send_app_frame(GeigerNode &node, const uint8_t *data, size_t len, uint8_t port,
+                              const char *what, uint8_t *dl, size_t *dl_len, bool *want_time) {
+    int16_t st = uplink_exchange(node, data, len, port, what, dl, dl_len);
+    if (st == RADIOLIB_ERR_PACKET_TOO_LONG ||
+        (st == RADIOLIB_ERR_DWELL_TIME_EXCEEDED && node.getMacUplinkLen() > 0)) {
+        ESP_LOGW(TAG, "port %u frame (%u B) and queued MAC answers do not fit at DR%u — "
+                      "sending the MAC answers alone first", (unsigned)port, (unsigned)len,
+                 (unsigned)node.uplinkDr());
+        st = uplink_exchange(node, NULL, 0, 0, "MAC answers only (port 0)", dl, dl_len);
+        poll_device_time(node, want_time);
+        if (st >= RADIOLIB_ERR_NONE) st = uplink_exchange(node, data, len, port, what, dl, dl_len);
+    }
+    poll_device_time(node, want_time);   // no-op if already polled
+    return st;
+}
+
+// Worker-task-private frame-plan state (V2.8.14): when the last port-2 frame
+// went on air (for the hourly cadence next to port 1), and a one-shot flag
+// for the "nothing to send" warning.
+static bool     s_p2_sent_once   = false;
+static uint32_t s_p2_last_s      = 0;
+static bool     s_nothing_logged = false;
 
 static void lorawan_task(void *arg) {
     (void)arg;
@@ -1175,9 +1479,14 @@ static void lorawan_task(void *arg) {
     // static: LoRaWANNode has no default constructor and must outlive this
     // function's stack frame (this loop never returns in practice, but a
     // static also keeps the object off an 8 KB task stack).
-    static LoRaWANNode node(&s_radio, k_bands[region], subband);
+    static GeigerNode node(&s_radio, k_bands[region], subband);
     s_node = &node;
     node.beginOTAA(creds.join_eui, creds.dev_eui, NULL, creds.app_key); // NULL nwkKey = LoRaWAN 1.0.x
+    // V2.8.14 duty-cycle backstop (see uplink_exchange()): on EU868-type
+    // plans effectively 1/128 = ~28 s/h (RadioLib's session default), none on
+    // US915/AU915/CN470/KR920/IN865. The enable flag is RAM-only in RadioLib,
+    // so set on every boot; a network DutyCycleReq may change the limit.
+    node.setDutyCycle(true);
 
     // Restore persisted state. Nonces first (join replay protection), then
     // session (rejoin-free resume). A rejected restore is self-healing: log,
@@ -1218,26 +1527,35 @@ static void lorawan_task(void *arg) {
     // pending: activateOTAA() then just activates it, without a TX, and its
     // data rate must stay the one the network set.
     //
-    // KNOWN GAP, accepted for V2.8.12 (user decision 2026-10-18): the join DR
-    // also becomes the session's DATA DR (createSession applies it as a
-    // synthetic LinkADRReq; the JoinAccept doesn't change it), so a node that
-    // joined at DR0 sends its port-1/2 frames at SF12 (~2.8 s air per cycle,
-    // x NbTrans) until the network's ADR raises the DR. Nothing enforces the
-    // EU868 1 % duty cycle meanwhile: RadioLib's limiter is off by default
-    // (dutyCycleEnabled = false) and can't simply be switched on — it blocks
-    // the next uplink for 100 x the last one's air time, which would drop
-    // port 2 (sent ~6 s after port 1) at almost every DR. This predates the
-    // step-down (network ADR can choose DR0 too); the step-down only makes
-    // SF12 data likelier. Proper fix: the LoRa uplink interval / air-time
-    // budget planned for V2.8.14. Until then the status line's air24h shows it.
+    // The join DR also becomes the session's DATA DR (createSession applies it
+    // as a synthetic LinkADRReq; the JoinAccept doesn't change it), so a node
+    // that joined at DR0 sends at SF12 until the network's ADR raises the DR.
+    // V2.8.12 accepted that with no air-time limit (known gap); since V2.8.14
+    // the uplink interval follows the SF (lorawan_sched.h) and RadioLib's
+    // duty-cycle limiter is on as a backstop (uplink_exchange()).
+    //
+    // V2.8.14 fixed DR (/config lorawan_dr): dynamic plans join at that DR
+    // (not below the dwell floor), with no step-down — the user chose the
+    // link's DR; apply_fixed_dr() then pins it for the data frames.
     set_state(LORAWAN_ST_JOINING);
     uint32_t backoff_s = 60;
     const LoRaWANBand_t *band = k_bands[region];
-    const bool join_dr_steps = (band->bandType == RADIOLIB_LORAWAN_BAND_DYNAMIC);
+    const bool dynamic_band = (band->bandType == RADIOLIB_LORAWAN_BAND_DYNAMIC);
     uint8_t join_dr = band->txFreqs[0].dr;
     uint8_t join_dr_floor = band->dwellTimeUp ? 2 : 0;
     if (join_dr_floor > join_dr) join_dr_floor = join_dr;
+    if (dynamic_band && __atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
+        join_dr = (s_fixed_dr_value < join_dr_floor) ? join_dr_floor : s_fixed_dr_value;
+        join_dr_floor = join_dr;   // no step-down below the chosen DR
+    }
+    const bool join_dr_steps = dynamic_band;   // a DR is set before each attempt
     for (;;) {
+        // Duty-cycle backstop for join requests too: a retry 60 s after an
+        // SF12 request (~1.5 s on air) would otherwise be refused by RadioLib
+        // and wasted as a "failed" attempt that never went on air.
+        const RadioLibTime_t jwait_ms = node.timeUntilUplink();
+        if (jwait_ms > 0) vTaskDelay(pdMS_TO_TICKS(jwait_ms) + 1);
+        if (join_dr_steps && !session_pending) set_cycle_sf(sf_of_dr(band, join_dr));
         if (!exchange_begin()) park_for_ota();
         stop_timer_on_preamble();
         rxobs_begin();
@@ -1251,6 +1569,7 @@ static void lorawan_task(void *arg) {
         s_obs.on = false;
         const bool sent = (s_obs.tx_us != 0);   // false for a restored session (no TX)
         const uint32_t join_air_ms = sent ? (uint32_t)(node.getLastToA() - air0) : 0;
+        if (sent) node.setLastToA(join_air_ms);   // duty cycle: this request only (setLastToA())
         // Same s_forget_pending gate as the uplink loop's session save (the
         // full save-site class, not just one instance): a join attempt
         // completing between an operator's "wipe DevNonce history" and the
@@ -1272,7 +1591,8 @@ static void lorawan_task(void *arg) {
         if (sent) {
             const uint32_t air_24h = airtime_add(join_air_ms);
             for (int i = 0; i < s_obs.n_win; i++) {
-                if (rxobs_rank(rxobs_final(&s_obs.win[i])) == 6) {   // clean RX_DONE
+                if (rxobs_rank(rxobs_final(&s_obs.win[i])) == 6 &&   // clean RX_DONE ...
+                    !s_obs.win[i].ignored) {                          // ... handed to RadioLib
                     accept_win = i + 1;
                 }
             }
@@ -1300,15 +1620,18 @@ static void lorawan_task(void *arg) {
             s_status.dev_addr = dev_addr;
             s_obs_own_addr = dev_addr;   // worker task, like the observer itself
             portEXIT_CRITICAL(&s_status_mux);
+            apply_fixed_dr(node);   // ADR off + the fixed DR (no-op in ADR mode)
+            set_cycle_sf(sf_of_dr(band, node.uplinkDr()));
             set_state(LORAWAN_ST_JOINED);
             break;
         }
         portENTER_CRITICAL(&s_status_mux); s_status.last_error = st; portEXIT_CRITICAL(&s_status_mux);
         // Step the join DR down only after an attempt that actually went on air
         // (a duty-cycle-blocked attempt says nothing about the link).
-        if (join_dr_steps && sent && join_dr > join_dr_floor) join_dr--;
+        const bool step = join_dr_steps && sent && join_dr > join_dr_floor;
+        if (step) join_dr--;
         ESP_LOGW(TAG, "join failed: %d — retry in %lus%s", st, (unsigned long)backoff_s,
-                 join_dr_steps ? " (next attempt at a lower DR unless at the floor)" : "");
+                 step ? " (next attempt one DR lower)" : "");
         vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
         if (backoff_s < 3600) backoff_s *= 2;
     }
@@ -1322,14 +1645,43 @@ static void lorawan_task(void *arg) {
         // (V2.8.12: s_busy is now raised per radio exchange inside
         // uplink_exchange(), together with the OTA-suspension check.)
 
+        // V2.8.14 frame plan (lorawan_sched.h): port 1 only with a tube;
+        // port 2 every cycle on an environment-only node, at most hourly
+        // next to port 1. Built first, so a cycle with nothing to send
+        // queues no MAC request either.
+        const bool send_p1 = snap.tube_valid;
+        uint8_t p2[5];
+        const bool have_p2 = snap.env_valid &&
+                             lw_build_port2(p2, snap.temperature_c, snap.humidity_pct, snap.pressure_pa);
+        const bool send_p2 = have_p2 && lw_sched_port2_due(send_p1, s_p2_sent_once, lw_uptime_s(),
+                                                           s_p2_last_s);
+        if (!send_p1 && !send_p2) {
+            if (!s_nothing_logged) {
+                ESP_LOGW(TAG, "nothing to send: no Geiger tube enabled and no environment reading "
+                              "(logged once until a frame goes out again)");
+                s_nothing_logged = true;
+            }
+            continue;
+        }
+        s_nothing_logged = false;
+
         // DeviceTimeReq piggyback — see the timesync block above for the
-        // full cadence/authority rationale. Queued BEFORE the port-1 frame
-        // is built so it rides in that uplink's FOpts; duplicate requests
-        // are discarded by RadioLib, so re-arming every cycle until an
-        // answer lands is safe.
+        // full cadence/authority rationale. Queued BEFORE the cycle's first
+        // frame is built so it rides in that uplink's FOpts; duplicate
+        // requests are discarded by RadioLib, so re-arming every cycle until
+        // an answer lands is safe.
         bool want_time = (ntp_boot_epoch() == 0) &&
                          (s_timesync_last_s == 0 ||
                           (timesync_now_s() - s_timesync_last_s) >= TIMESYNC_INTERVAL_S);
+        // V2.8.14: not while the request (1 B) would push the cycle's first
+        // frame plus the queued MAC answers over the DR's limit (AU915/AS923
+        // DR2, US915 DR0: 11 B) — the answers go first, the request rides a
+        // later cycle; no attempt is counted (see send_app_frame()). The +1
+        // is conservative after a skipped exchange: a request still queued
+        // from it is already in getMacUplinkLen() (at worst one answer lost).
+        if (want_time && !node.frameFits(send_p1 ? 10 : 5, (size_t)node.getMacUplinkLen() + 1)) {
+            want_time = false;
+        }
         if (want_time) {
             int16_t tst = node.sendMacCommandReq(RADIOLIB_LORAWAN_MAC_DEVICE_TIME);
             s_timesync_attempts++;   // queue failures count too — see timesync_give_up()
@@ -1340,8 +1692,6 @@ static void lorawan_task(void *arg) {
             }
         }
 
-        uint8_t p1[10];
-        lw_build_port1(p1, snap.gm_counts, snap.dt_ms, s_version_packed, snap.tube_nbr);
         // Downlink scratch. MUST be sized for the largest frame RadioLib can
         // deliver: sendReceive()'s dataDown parameter has NO size argument and
         // RadioLib writes the decrypted payload straight in (no clamp to the
@@ -1353,51 +1703,35 @@ static void lorawan_task(void *arg) {
         // own sendReceive() wrappers (+1). ~243 B on the 8 KB worker stack is fine.
         uint8_t dl[RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE + 1]; size_t dl_len = 0;
         char what[64];
-        snprintf(what, sizeof(what), "port 1 (counts=%lu dt=%lu ms)",
-                 (unsigned long)snap.gm_counts, (unsigned long)snap.dt_ms);
-        int16_t st = uplink_exchange(node, p1, sizeof(p1), 1, what, dl, &dl_len);
-
-        // Poll for the DeviceTimeAns immediately after the PORT-1 exchange,
-        // not at end of cycle: the answer's time field is captured at the
-        // END of the uplink that carried the request and TTN serves it in
-        // that uplink's RX1, so polling here (a) avoids adding the port-2
-        // exchange's ~3-8 s to the apply latency and (b) can't lose the
-        // stored answer to a port-2 uplink clearing fOptsDown (RadioLib
-        // 7.8.1 clears it before every uplink). Since 7.8.1 the returned time
-        // is advanced to "now" by RadioLib itself (see timesync_apply(); up
-        // to one repeat period early with NbTrans > 1) — this feature still only rescues
-        // standalone nodes from 1970-era timestamps; it is not NTP.
-        if (want_time) {
-            uint32_t unix_s = 0;
-            uint16_t ms     = 0;
-            const bool fresh =
-                node.getMacDeviceTimeAns(&unix_s, &ms, true) == RADIOLIB_ERR_NONE && unix_s != 0;
-            if (fresh) {
-                timesync_apply(unix_s, ms);
-                s_timesync_last_s   = timesync_now_s();
-                s_timesync_attempts = 0;
-            } else if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) {
-                timesync_give_up();
-            }
+        int16_t st = RADIOLIB_ERR_NONE;
+        if (send_p1) {
+            uint8_t p1[10];
+            lw_build_port1(p1, snap.gm_counts, snap.dt_ms, s_version_packed, snap.tube_nbr);
+            snprintf(what, sizeof(what), "port 1 (counts=%lu dt=%lu ms)",
+                     (unsigned long)snap.gm_counts, (unsigned long)snap.dt_ms);
+            st = send_app_frame(node, p1, sizeof(p1), 1, what, dl, &dl_len, &want_time);
         }
 
-        if (st >= RADIOLIB_ERR_NONE && snap.env_valid) {
-            uint8_t p2[5];
-            if (lw_build_port2(p2, snap.temperature_c, snap.humidity_pct, snap.pressure_pa)) {
-                // Log the values DECODED BACK from the wire bytes, not the
-                // raw snapshot floats: the V1.9-frozen codec TRUNCATES
-                // (temp*10, hum*2, Pa/10 — all toward zero) while a
-                // printf %.1f of the raw float ROUNDS, so e.g. T=16.89
-                // went on air as 16.8 but logged as 16.9 (user-caught
-                // 2026-07-27 comparing /log against TTN's decoded
-                // payload). Decoding p2 makes this line match TTN's
-                // formatter output digit-for-digit, always.
-                int16_t  traw = (int16_t)(((uint16_t)p2[0] << 8) | p2[1]);
-                uint16_t praw = (uint16_t)(((uint16_t)p2[3] << 8) | p2[4]);
-                snprintf(what, sizeof(what), "port 2 (T=%.1f°C H=%.1f%% P=%.1f hPa)",
-                         (double)traw / 10.0, (double)p2[2] / 2.0, (double)praw / 10.0);
-                // Result fully handled inside (counters, logs, session save).
-                (void)uplink_exchange(node, p2, sizeof(p2), 2, what, dl, &dl_len);
+        // Port 2 after a port-1 hard error is skipped (radio/HAL trouble, or
+        // the duty-cycle backstop refused the cycle). An rx-only error is no
+        // hard error — uplink_exchange() returns 0 for it.
+        if (send_p2 && st >= RADIOLIB_ERR_NONE) {
+            // Log the values DECODED BACK from the wire bytes, not the
+            // raw snapshot floats: the V1.9-frozen codec TRUNCATES
+            // (temp*10, hum*2, Pa/10 — all toward zero) while a
+            // printf %.1f of the raw float ROUNDS, so e.g. T=16.89
+            // went on air as 16.8 but logged as 16.9 (user-caught
+            // 2026-07-27 comparing /log against TTN's decoded
+            // payload). Decoding p2 makes this line match TTN's
+            // formatter output digit-for-digit, always.
+            int16_t  traw = (int16_t)(((uint16_t)p2[0] << 8) | p2[1]);
+            uint16_t praw = (uint16_t)(((uint16_t)p2[3] << 8) | p2[4]);
+            snprintf(what, sizeof(what), "port 2 (T=%.1f°C H=%.1f%% P=%.1f hPa)",
+                     (double)traw / 10.0, (double)p2[2] / 2.0, (double)praw / 10.0);
+            // Result fully handled inside (counters, logs, session save).
+            if (send_app_frame(node, p2, sizeof(p2), 2, what, dl, &dl_len, &want_time) >= RADIOLIB_ERR_NONE) {
+                s_p2_sent_once = true;
+                s_p2_last_s    = lw_uptime_s();
             }
         }
         // Session persistence: since V2.8.12 saved inside uplink_exchange()
@@ -1436,6 +1770,21 @@ void lorawan_setup(void) {
     }
 
     s_version_packed = lw_pack_version(VERSION_STR);
+
+    // V2.8.14 schedule, set before the worker exists (main task, at boot, so
+    // no /config POST can race these reads — same rule as lorawan_enabled).
+    // Region clamped like lorawan_task() does (silently here; it logs).
+    uint8_t region = g_cfg.lorawan_region;
+    if (region >= (sizeof(k_bands) / sizeof(k_bands[0]))) region = 2;
+    s_band = k_bands[region];
+    s_fixed_dr = lw_sched_fixed_dr(g_cfg.lorawan_dr, &s_fixed_dr_value);
+    // First interval: the join DR — the fixed DR on a dynamic plan, else the
+    // plan's default (dynamic: first channel's DR; fixed plans: the join span's).
+    const bool dynamic_band = (s_band->bandType == RADIOLIB_LORAWAN_BAND_DYNAMIC);
+    const uint8_t join_dr = (dynamic_band && s_fixed_dr) ? s_fixed_dr_value
+                          : dynamic_band ? s_band->txFreqs[0].dr
+                          : s_band->txSpans[0].drJoinRequest;
+    set_cycle_sf(sf_of_dr(s_band, join_dr));
 
     s_q = xQueueCreate(1, sizeof(lorawan_snapshot_t));
     configASSERT(s_q);

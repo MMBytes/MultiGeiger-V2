@@ -60,6 +60,11 @@ void log_ftp_get_stats(log_ftp_stats_t *out);
  */
 bool log_ftp_imminent(void);
 
+/** @brief True while an FTPS log upload runs (V2.8.15). The LoRaWAN worker
+ *         doesn't start an exchange meanwhile — see radio_turn_rule.h.
+ *         Safe from any task (one seq-cst load). */
+bool log_ftp_is_busy(void);
+
 /** @brief Pause scheduled + retry FTP uploads until next reboot.
  *
  *  V2.4.13: called by the OTA path before the receive-write loop so a

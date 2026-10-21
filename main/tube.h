@@ -203,6 +203,12 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
 /** @brief True if tube_setup(true) was called at boot. */
 bool tube_is_enabled(void);
 
+/** @brief True once tube_setup() has installed the shared GPIO ISR service
+ *         (V2.8.15) — false when the tube is disabled. Other users of GPIO
+ *         interrupts (the LoRaWAN HAL) skip their own install when true, as a
+ *         repeat install makes the IDF driver log a red ESP_LOGE. */
+bool tube_isr_service_installed(void);
+
 /** @brief Monotonic count of valid tube pulses since boot (never reset).
  *
  *  V2.5.6: separate from the tube_read() window accumulator. Lets a sampler

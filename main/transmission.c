@@ -25,6 +25,9 @@
 #include "freertos/task.h"
 
 #include "util.h"               // V2.5.20: url_encode_query_value (Radmon creds)
+#include "esp_timer.h"          // V2.8.15: bounded LoRaWAN wait
+#include "lorawan.h"            // V2.8.15: lorawan_on_air() (includes hal.h)
+#include "radio_turn_rule.h"    // V2.8.15: no upload round while a LoRaWAN exchange is on air
 
 // V2.3.21: drive the OLED status-line slots for sensor.community, Madavi
 // and Radmon (V1 parity — see reference V1 transmission.cpp). OSM and
@@ -132,7 +135,14 @@ static void record_outcome(tx_target_id_t id, int rc, bool ok) {
 #define TX_TASK_PRIO         (tskIDLE_PRIORITY + 1)
 #define TX_QUEUE_DEPTH       1
 
-static volatile bool s_tx_busy = false;
+// V2.8.15: accessed with seq-cst atomics. Besides the gates that read it
+// (FTPS, PSA refresh, ARP, restart, OTA prep, the non-PSRAM MQTT start), it
+// is now one half of the
+// WiFi / LoRaWAN handshake (radio_turn_rule.h): the worker publishes
+// busy=true, THEN reads lorawan_on_air(); the LoRaWAN worker publishes its
+// flag, THEN reads tx_is_idle(). That only works with store->load ordering
+// across both cores, which plain volatile does not give.
+static bool s_tx_busy = false;
 
 static QueueHandle_t s_tx_queue;
 
@@ -223,6 +233,34 @@ static bool wifi_up(void) {
 }
 
 static void tx_run(const tx_context_t *c);
+static bool tx_round_has_targets(const tx_context_t *c);
+
+// V2.8.15: on a node with LoRaWAN, don't start the round while a LoRaWAN
+// exchange is on air (radio_turn_rule.h). Called with s_tx_busy already
+// published, so an exchange that hasn't started yet sees the round and
+// yields; this only waits for one that is already running — ~25 s at SF12
+// with NbTrans 3 (~8 s per transmission incl. both receive windows). Bounded
+// at TX_LORA_WAIT_MAX_S: the network may set NbTrans up to 15 (~2 min at
+// SF12), past which the round goes ahead and overlaps the exchange.
+// Boards without the radio compile this to nothing.
+#define TX_LORA_WAIT_MAX_S 150
+static void wait_for_lorawan_quiet(void) {
+#if HAL_HAS_LORAWAN
+    const int64_t t0 = esp_timer_get_time();
+    while (!rt_tx_round_may_start(lorawan_on_air())) {
+        if (esp_timer_get_time() - t0 >= (int64_t)TX_LORA_WAIT_MAX_S * 1000000LL) {
+            ESP_LOGW(TAG, "LoRaWAN exchange still on air after %d s — uploading anyway",
+                     TX_LORA_WAIT_MAX_S);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    const int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
+    if (waited_ms >= 1000) {
+        ESP_LOGI(TAG, "waited %.1f s for the LoRaWAN exchange to finish", (double)waited_ms / 1000.0);
+    }
+#endif
+}
 
 static void tx_task(void *arg) {
     (void)arg;
@@ -237,10 +275,14 @@ static void tx_task(void *arg) {
         // receive below always takes the item just peeked; the queue ops'
         // critical sections order the busy store before the dequeue.
         if (xQueuePeek(s_tx_queue, &ctx, portMAX_DELAY) == pdTRUE) {
-            s_tx_busy = true;
+            __atomic_store_n(&s_tx_busy, true, __ATOMIC_SEQ_CST);
             (void)xQueueReceive(s_tx_queue, &ctx, 0);
+            // V2.8.15: a round with no upload target enabled (e.g. a
+            // LoRaWAN node that keeps WiFi only for MQTT / web / OTA) runs
+            // in milliseconds and sends nothing — it doesn't wait.
+            if (tx_round_has_targets(&ctx)) wait_for_lorawan_quiet();
             tx_run(&ctx);
-            s_tx_busy = false;
+            __atomic_store_n(&s_tx_busy, false, __ATOMIC_SEQ_CST);
         }
     }
 }
@@ -1251,7 +1293,7 @@ static int send_aqi(const tx_context_t *c) {
 // --- Orchestrator -----------------------------------------------------------
 
 bool tx_is_idle(void) {
-    return !s_tx_busy && uxQueueMessagesWaiting(s_tx_queue) == 0;
+    return !__atomic_load_n(&s_tx_busy, __ATOMIC_SEQ_CST) && uxQueueMessagesWaiting(s_tx_queue) == 0;
 }
 
 void tx_transmit(const tx_context_t *c) {
@@ -1316,6 +1358,17 @@ static const tx_dispatch_t TX_TABLE[] = {
     { TX_TARGET_OSM,           offsetof(tx_context_t, osm),           send_osm,           201, 200, GATE_ANY_PAYLOAD, -1,
       "openSenseMap: skipping (no payload)" },
 };
+
+// V2.8.15: does this round have any upload target enabled? Only such a
+// round waits for a LoRaWAN exchange (tx_task()); conservative — a target
+// that turns out to have no payload this cycle still counts.
+static bool tx_round_has_targets(const tx_context_t *c) {
+    for (size_t i = 0; i < sizeof(TX_TABLE) / sizeof(TX_TABLE[0]); i++) {
+        const tx_target_t *t = (const tx_target_t *)((const char *)c + TX_TABLE[i].target_off);
+        if (t->enabled) return true;
+    }
+    return false;
+}
 
 // Run one table entry: identical to each old hand-written block. `fail_streak`
 // is the caller-owned per-target counter; `any_payload` is precomputed once.

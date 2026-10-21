@@ -33,6 +33,10 @@ static bool s_enabled = false;
 // board keeps its one compile-time pin.
 static int s_gmc_pin = PIN_GMC_COUNT_INPUT;
 
+// V2.8.15: true once tube_setup() has installed the shared GPIO ISR service.
+// Set once at boot on the main task, before any other task reads it.
+static bool s_isr_service_installed = false;
+
 // --- Pulse counter state ---
 static volatile uint32_t isr_gmc_counts     = 0;
 // V2.5.6: monotonic pulse total since boot — NEVER reset by tube_read(). The
@@ -533,6 +537,7 @@ void tube_setup(bool enabled, uint8_t carrier_rev) {
     ESP_ERROR_CHECK(gpio_config(&count_cfg));
 
     ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
+    s_isr_service_installed = true;
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_HV_CAP_FULL_INPUT, cap_full_isr, NULL));
     ESP_ERROR_CHECK(gpio_isr_handler_add(s_gmc_pin,             gmc_count_isr, NULL));
 
@@ -607,6 +612,10 @@ void tube_read(uint32_t *counts_delta, uint32_t *dt_ms,
 
 bool tube_is_enabled(void) {
     return s_enabled;
+}
+
+bool tube_isr_service_installed(void) {
+    return s_isr_service_installed;
 }
 
 uint32_t tube_get_total_counts(void) {

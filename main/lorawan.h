@@ -72,6 +72,7 @@ typedef struct {
 static inline void lorawan_setup(void) {}
 static inline void lorawan_transmit(const lorawan_snapshot_t *snap) { (void)snap; }
 static inline bool lorawan_is_idle(void) { return true; }
+static inline bool lorawan_on_air(void) { return false; }
 static inline bool lorawan_suspend(uint32_t timeout_ms) { (void)timeout_ms; return true; }
 static inline uint32_t lorawan_cycle_interval_ms(void) { return 0; }
 static inline void lorawan_get_status(lorawan_status_t *out) {
@@ -95,6 +96,14 @@ void lorawan_transmit(const lorawan_snapshot_t *snap);
 
 /** @brief True when the LoRaWAN task is idle (safe to hand it new work). */
 bool lorawan_is_idle(void);
+
+/** @brief True while a LoRaWAN exchange is on air: a join attempt, or an
+ *         uplink with its receive windows (V2.8.15). Unlike lorawan_is_idle()
+ *         it ignores a queued snapshot, which can wait for minutes (join
+ *         backoff, duty cycle) with the radio quiet. The WiFi upload round
+ *         and FTPS don't start while this is true (radio_turn_rule.h). Safe
+ *         from any task (one seq-cst load). */
+bool lorawan_on_air(void);
 
 /** @brief OTA prep (V2.8.12): stop all further LoRaWAN radio activity until
  *         reboot and wait for an exchange already on air to finish.

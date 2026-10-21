@@ -9,6 +9,35 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.15 — WiFi uploads and LoRaWAN no longer transmit at the same time
+
+For the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the XIAO ESP32-S3 +
+Wio-SX1262. Item 1 matters only when a node uses both LoRaWAN and WiFi uploads;
+nodes that use only one of the two are unchanged by it. All other boards are
+unchanged.
+
+1. **One radio transfer at a time.** Each cycle used to start the LoRaWAN
+   uplink and the WiFi upload round in the same second. On a test node this
+   coincided with occasional failed LoRaWAN uplinks (the radio did not report
+   the end of the transmission in time), always in the same second as an
+   HTTPS upload started. Now a LoRaWAN exchange (join attempt, or uplink with
+   its receive windows) waits until the WiFi upload round has finished, and
+   the upload round and the daily FTPS log upload wait while an exchange is on
+   air; whichever starts first finishes. This extends the rule that already
+   kept FTPS and the upload round apart. The waits are bounded — the upload
+   round waits at most 150 s for an exchange, an exchange at most 5 minutes
+   for the uploads, and both log any wait over one second; FTPS simply tries
+   again a second later. A node with LoRaWAN that keeps WiFi only for MQTT,
+   the web page or OTA (no upload target enabled) doesn't wait at all. MQTT
+   publishes are short and not part of this.
+2. **No more red "GPIO isr service already installed" line.** Every node with
+   LoRaWAN on and the tube enabled logged this error once per boot, at the
+   first uplink. It was harmless: the LoRaWAN radio asked for the shared GPIO
+   interrupt service that the tube had already set up. It now uses the tube's
+   and only sets one up itself when the tube is disabled.
+
+---
+
 ## V2.8.14 — LoRaWAN: one schedule by data rate, fixed data rate, cleaner receive windows
 
 LoRaWAN changes for the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the

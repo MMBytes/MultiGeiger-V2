@@ -40,6 +40,7 @@
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
 #include "lorawan_sched.h"   // V2.8.14: lw_sched_interval_ms / _port2_due / _fixed_dr / _frame_is_ours
+#include "radio_turn_rule.h" // V2.8.15: rt_lorawan/ftps/tx_round_may_start
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
 #include "tls_logic.h"       // fingerprint_hex, https_redirect_location, civil_to_epoch (V2.8.0 HTTPS)
@@ -905,6 +906,24 @@ static int test_lw_sched_fixed_dr(void) {
     EXPECT_TRUE(!lw_sched_fixed_dr(7, &dr));   // out of range (corrupt NVS) -> ADR
     EXPECT_TRUE(!lw_sched_fixed_dr(255, &dr));
     EXPECT_TRUE(!lw_sched_fixed_dr(3, NULL));
+    return 1;
+}
+
+// V2.8.15 radio-turn rule: no WiFi upload (round or FTPS) while a LoRaWAN
+// exchange is on air, and no exchange while one runs.
+static int test_radio_turn_rule(void) {
+    // LoRaWAN exchange: needs no round running/queued and no FTPS
+    EXPECT_TRUE(rt_lorawan_may_start(true, false));
+    EXPECT_TRUE(!rt_lorawan_may_start(false, false));   // round running or queued
+    EXPECT_TRUE(!rt_lorawan_may_start(true, true));     // FTPS running
+    EXPECT_TRUE(!rt_lorawan_may_start(false, true));
+    // FTPS: the old tx_is_idle() rule plus no exchange on air
+    EXPECT_TRUE(rt_ftps_may_start(true, false));
+    EXPECT_TRUE(!rt_ftps_may_start(false, false));      // unchanged pre-V2.8.15 rule
+    EXPECT_TRUE(!rt_ftps_may_start(true, true));        // exchange on air
+    // WiFi upload round: only an exchange on air holds it back
+    EXPECT_TRUE(rt_tx_round_may_start(false));
+    EXPECT_TRUE(!rt_tx_round_may_start(true));
     return 1;
 }
 
@@ -3003,6 +3022,7 @@ int main(int argc, char **argv) {
     RUN(test_lw_sched_port2_due);
     RUN(test_lw_sched_fixed_dr);
     RUN(test_lw_sched_frame_is_ours);
+    RUN(test_radio_turn_rule);
 
     printf("== env_api_format ==\n");
     RUN(test_env_api_format_typical);

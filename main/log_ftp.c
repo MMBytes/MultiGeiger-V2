@@ -54,6 +54,8 @@
 #include "mqtt.h"          // V2.4.14: mqtt_stop()/mqtt_is_initialized() for FTPS heap teardown
 #include "ntp.h"
 #include "transmission.h"
+#include "lorawan.h"          // V2.8.15: lorawan_on_air()
+#include "radio_turn_rule.h"  // V2.8.15: rt_ftps_may_start()
 #include "util.h"
 
 static const char *TAG = "ftp";
@@ -101,6 +103,10 @@ static const char     *s_chip_id        = "";
 static uint32_t        s_next_upload_ms = 0;   // set in log_ftp_init from cfg
 static int             s_retry_count    = 0;   // retries remaining (0 = none pending)
 static uint32_t        s_retry_ms       = 0;   // wall-clock ms for next retry
+// V2.8.15: an FTPS upload is running (set just before the start check,
+// cleared after the session). Read by the LoRaWAN worker via
+// log_ftp_is_busy(); seq-cst for the handshake in radio_turn_rule.h.
+static bool            s_ftps_busy      = false;
 // V2.4.13: set by log_ftp_pause() before OTA so an in-window scheduled
 // upload can't fire mid-flash. Survives until reboot — both successful OTA
 // (new firmware boots fresh) and failed OTA (user reboots manually) reset.
@@ -158,6 +164,8 @@ bool log_ftp_imminent(void) {
                          (int32_t)(now_ms - s_retry_ms) >= 0);
     return is_scheduled || is_retry;
 }
+
+bool log_ftp_is_busy(void) { return __atomic_load_n(&s_ftps_busy, __ATOMIC_SEQ_CST); }
 
 // V2.4.19: exported so the extracted periodic.c can reset the FTP-side
 // PSA-OOM streak after a successful 24h refresh. See log_ftp.h doc.
@@ -1185,7 +1193,15 @@ void log_ftp_loop(uint32_t now_ms) {
     // the WiFi link and heap have been observed to overlap cleanly, but a
     // slower FTP could push sensor.community / Radmon into retries. Retry
     // next loop tick (1 s) when the worker goes idle.
-    if (!tx_is_idle()) return;
+    // V2.8.15: same gate, now also "no LoRaWAN exchange on air" on a node
+    // that uses both (radio_turn_rule.h). Flag first, then check: an exchange
+    // that starts in between sees s_ftps_busy and yields. On boards without
+    // the radio lorawan_on_air() is always false — the old rule exactly.
+    __atomic_store_n(&s_ftps_busy, true, __ATOMIC_SEQ_CST);
+    if (!rt_ftps_may_start(tx_is_idle(), lorawan_on_air())) {
+        __atomic_store_n(&s_ftps_busy, false, __ATOMIC_SEQ_CST);
+        return;
+    }
 
     if (is_scheduled) {
         // Advance the regular schedule from this attempt — interval counts from
@@ -1226,6 +1242,7 @@ void log_ftp_loop(uint32_t now_ms) {
     }
 
     bool ok = do_ftp_upload();
+    __atomic_store_n(&s_ftps_busy, false, __ATOMIC_SEQ_CST);
 
     if (ok) {
         s_retry_count = 0;

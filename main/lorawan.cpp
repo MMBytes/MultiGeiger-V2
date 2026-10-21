@@ -29,6 +29,10 @@ extern "C" {
 #include "lorawan.h"
 #include "lorawan_codec.h"
 #include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR, frame filter
+#include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
+#include "transmission.h"    // tx_is_idle()
+#include "log_ftp.h"         // log_ftp_is_busy()
+#include "tube.h"            // tube_isr_service_installed()
 #include "config.h"
 #include "applog.h"
 #include "ntp.h"       // ntp_boot_epoch() — "has SNTP ever synced" gate for time sync
@@ -376,17 +380,24 @@ public:
         // attachInterrupt() around every RX window (many times once joined),
         // and the driver's gpio_install_isr_service() logs a red ESP_LOGE
         // "GPIO isr service already installed" on every call after the first
-        // — tube.c installs it at boot, so ours is always a repeat. Without
-        // this guard that benign error spammed /log + syslog on every RX
-        // window forever. The static latch collapses it to the single boot
-        // attempt (whose INVALID_STATE we still tolerate; the IRAM flag must
-        // match tube.c's install — the service is process-wide).
+        // — on a tube-enabled node tube.c installs it at boot, so ours would
+        // always be a repeat. Without this guard that benign error spammed
+        // /log + syslog on every RX window forever. The static latch collapses
+        // it to a single boot attempt (INVALID_STATE still tolerated in case
+        // another driver installed it first; the IRAM flag must match
+        // tube.c's install — the service is process-wide).
+        // V2.8.15: that one boot attempt still logged the red line once per
+        // boot (the driver logs before it returns INVALID_STATE), so skip the
+        // call when tube_setup() already installed the service; install here
+        // only on a tube-disabled node.
         static bool s_isr_service_tried = false;
         if (!s_isr_service_tried) {
             s_isr_service_tried = true;
-            esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-            if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
-                ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(e));
+            if (!tube_isr_service_installed()) {
+                esp_err_t e = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+                if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+                    ESP_LOGE(TAG, "isr service: %s", esp_err_to_name(e));
+                }
             }
         }
         // ACCEPTED RISK (whole-branch review 2026-07-18): the callback
@@ -554,14 +565,43 @@ static void stop_timer_on_preamble(void) {
 static bool s_busy = false;
 static bool s_suspended = false;
 
+// V2.8.15: s_busy also keeps the exchange apart from the WiFi uploads on a
+// node that uses both (radio_turn_rule.h). Same handshake, other partners:
+// publish s_busy, THEN read tx_is_idle() / log_ftp_is_busy(); the WiFi
+// upload round and FTPS publish their own flags, THEN read lorawan_on_air().
+// The exchange yields: if a WiFi transfer runs or is queued it clears
+// s_busy again and retries every TURN_POLL_MS, at most TURN_WAIT_MAX_MS,
+// then goes ahead anyway (logged). A WiFi-only build never gets here; on a
+// LoRaWAN node without WiFi uploads the only "transfer" is an empty round
+// (WiFi up for MQTT / web / OTA, no target enabled), which runs in
+// milliseconds and doesn't wait itself — at most one TURN_POLL_MS yield.
+#define TURN_POLL_MS     100
+#define TURN_WAIT_MAX_MS (5UL * 60UL * 1000UL)   // a round with several HTTPS targets, or FTPS, can take minutes
+
 // Enter one radio exchange. False = suspended for OTA: do not touch the radio.
 static bool exchange_begin(void) {
-    __atomic_store_n(&s_busy, true, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&s_suspended, __ATOMIC_SEQ_CST)) {
-        __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST);
-        return false;
+    const int64_t t0 = esp_timer_get_time();
+    for (;;) {
+        __atomic_store_n(&s_busy, true, __ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&s_suspended, __ATOMIC_SEQ_CST)) {
+            __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST);
+            return false;
+        }
+        const int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
+        if (rt_lorawan_may_start(tx_is_idle(), log_ftp_is_busy())) {
+            if (waited_ms >= 1000) {
+                ESP_LOGI(TAG, "waited %.1f s for the WiFi transfer to finish", (double)waited_ms / 1000.0);
+            }
+            return true;
+        }
+        if (waited_ms >= (int64_t)TURN_WAIT_MAX_MS) {
+            ESP_LOGW(TAG, "WiFi transfer still running after %lu s — going ahead anyway",
+                     (unsigned long)(TURN_WAIT_MAX_MS / 1000));
+            return true;
+        }
+        __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST);   // yield to the upload
+        vTaskDelay(pdMS_TO_TICKS(TURN_POLL_MS));
     }
-    return true;
 }
 static void exchange_end(void) { __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST); }
 
@@ -1739,8 +1779,15 @@ static void lorawan_task(void *arg) {
         // suppressed once lorawan_forget_session() has run, because the
         // imminent-restart window can exceed the documented ~2 s on WiFi+LoRa
         // nodes (the restart defers on the WiFi TX worker's idle check, i.e.
-        // up to a full TLS upload cycle), and an uplink completing in that
-        // window would silently re-save the just-erased session.
+        // up to a full TLS upload cycle, since V2.8.15 plus the round's wait
+        // for a LoRaWAN exchange), and an uplink completing in that window
+        // would silently re-save the just-erased session.
+        //
+        // V2.8.15: if exchange_begin() waited longer than one cycle for the
+        // WiFi round, the snapshot sent was the older one and the newer one
+        // is already queued — it follows as the next exchange (each frame
+        // carries its own dt, so the data stays right; on EU868 the duty
+        // cycle may delay or skip it).
     }
 }
 
@@ -1833,6 +1880,8 @@ bool lorawan_is_idle(void) {
     return !__atomic_load_n(&s_busy, __ATOMIC_SEQ_CST) &&
            (s_q == NULL || uxQueueMessagesWaiting(s_q) == 0);
 }
+
+bool lorawan_on_air(void) { return __atomic_load_n(&s_busy, __ATOMIC_SEQ_CST); }
 
 // OTA prep (httpd task). Publishes the suspension, then waits for any
 // exchange already on air — join attempt or uplink incl. its RX windows — to

@@ -9,6 +9,27 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.16 — LoRaWAN: a damaged join accept no longer blocks every later join
+
+For the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the XIAO ESP32-S3 +
+Wio-SX1262. All other boards are unchanged.
+
+1. **Joining recovers from a corrupt join accept.** LoRaWAN downlinks carry no
+   checksum of their own, so at the edge of coverage a join accept can arrive
+   complete but with bit errors; its integrity check (MIC) then fails and the
+   attempt counts as failed (`-1112` in the join attempt line). The LoRaWAN
+   library (RadioLib 7.8.1) reads the protocol version from the accept before
+   it checks the MIC and keeps it even when the check fails. About half of all
+   damaged accepts claim LoRaWAN 1.1, and from then on every join request was
+   signed with a 1.1 key this firmware never sets, so the network rejected
+   all of them until the next reboot. The firmware now undoes what a rejected
+   accept changed (protocol version, JoinNonce, device address), so the next
+   attempt goes out as normal. When the version had been changed, the log
+   says `rejected join accept claimed LoRaWAN 1.1 — revision restored`. Seen
+   and confirmed on a test node at the edge of coverage.
+
+---
+
 ## V2.8.15 — WiFi uploads and LoRaWAN no longer transmit at the same time
 
 For the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the XIAO ESP32-S3 +

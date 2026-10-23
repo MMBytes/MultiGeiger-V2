@@ -843,7 +843,7 @@ static LoRaWANNode  *s_node = NULL;
 // Class A only: this firmware never enables Class B/C or multicast, so
 // RadioLib's receiveClassC() calls (no-ops for Class A) are left out. Uses
 // protected RadioLib members (receiveClassA, channels, rxDelays, tUplinkEnd,
-// devAddr, phyLayer) — re-check against LoRaWAN.cpp receiveDownlink() on
+// devAddr, phyLayer, rev, joinNonce) — re-check against LoRaWAN.cpp receiveDownlink() on
 // every RadioLib update.
 class GeigerNode : public LoRaWANNode {
 public:
@@ -880,6 +880,31 @@ public:
      *         timeUntilUplink() (EU868: ~128 x lastToA) grows with every
      *         attempt — up to a skipped first uplink after a long join. */
     void setLastToA(RadioLibTime_t ms) { this->lastToA = ms; }
+
+    /** @brief activateOTAA(), undoing what a join accept that FAILED its MIC
+     *         check left behind. RadioLib 7.8.1 processJoinAccept() stores
+     *         JoinNonce, DevAddr and the LoRaWAN revision (DLSettings bit 7)
+     *         BEFORE it checks the MIC. Downlinks carry no PHY CRC, so a
+     *         corrupt accept has bit 7 set about half the time: rev = 1 then
+     *         sticks (nothing resets it), every later join request is MICed
+     *         with the unset 1.1 nwkKey and the network drops them all, and
+     *         every later accept is decrypted with it — no join until a
+     *         reboot. Restoring the three fields makes a rejected accept a
+     *         no-op, as it should be. */
+    int16_t activateOTAAChecked() {
+        const uint8_t  rev   = this->rev;
+        const uint32_t nonce = this->joinNonce;
+        const uint32_t addr  = this->devAddr;
+        const int16_t  st    = this->activateOTAA();
+        if (st == RADIOLIB_ERR_MIC_MISMATCH) {
+            if (this->rev != rev) ESP_LOGW(TAG, "rejected join accept claimed LoRaWAN 1.%u — revision restored",
+                                           (unsigned)this->rev);
+            this->rev       = rev;
+            this->joinNonce = nonce;
+            this->devAddr   = addr;
+        }
+        return st;
+    }
 
 protected:
     int16_t receiveDownlink() override {
@@ -1604,7 +1629,7 @@ static void lorawan_task(void *arg) {
             const int16_t dst = node.setDatarate(join_dr);
             if (dst != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "join DR%u not set: %d", (unsigned)join_dr, dst);
         }
-        int16_t st = node.activateOTAA();
+        int16_t st = node.activateOTAAChecked();
         session_pending = false;   // a pending session is consumed by the first activateOTAA()
         s_obs.on = false;
         const bool sent = (s_obs.tx_us != 0);   // false for a restored session (no TX)

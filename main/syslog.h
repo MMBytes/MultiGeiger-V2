@@ -20,11 +20,12 @@
  *  Pairs with `rsyslog` on the Pi side (already installed on Raspberry Pi OS).
  *  See `[[reference_syslog_pi_setup]]` for the rsyslog drop-in config.
  *
- *  Boot-time logs are NOT shipped — syslog_init runs after `GOT_IP`, so
- *  everything before the first STA connect lives only in the applog ring.
- *  That's the same constraint MQTT has post-V2.4.12 and is generally fine
- *  because the most valuable boot logs are accessible via `/log` after the
- *  device comes up.
+ *  syslog_init runs after `GOT_IP`, so everything logged before the first
+ *  STA connect is in the applog ring only. V2.8.17: once the socket is up,
+ *  syslog_init() replays that part of the ring once, after the boot banner,
+ *  each line prefixed with "boot " ("boot:" banner lines excepted; capped at
+ *  300 lines / 32 KB; skipped if the ring has already wrapped). Until
+ *  V2.8.16 boot-time logs were not shipped at all.
  */
 
 #include <stdbool.h>
@@ -35,7 +36,9 @@
  *
  *  Safe to call once after `GOT_IP`. If host is empty or port is 0, returns
  *  immediately as a no-op (disabled). After this returns, `syslog_emit()`
- *  will start shipping lines.
+ *  will start shipping lines. V2.8.17: before returning it sends the boot
+ *  banner and the paced boot replay (see the file header), which keeps the
+ *  calling (main) task busy for typically ~1 s, at most ~3.5 s.
  *
  *  @param host        Server hostname or IPv4 string (e.g. "192.0.2.10")
  *  @param port        UDP port (typically 514)

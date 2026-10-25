@@ -60,6 +60,10 @@ static char             *s_snap_scratch = NULL; // V2.3.24: snapshot scratch (se
 // from different tasks.
 static volatile bool     s_snap_busy    = false; // a snapshot is in flight
 static size_t            s_pos         = 0;     // next write offset
+// V2.8.17: bytes ever appended (logical stream offset; s_pos == s_total %
+// ring size). applog_publish_mark() returns it, so syslog's boot replay knows
+// where "everything before syslog went live" ends.
+static uint64_t          s_total       = 0;
 static bool              s_wrapped     = false; // has the ring wrapped at least once
 static size_t            s_valid_end   = 0;     // high-water when not wrapped; == size when wrapped
 static SemaphoreHandle_t s_mtx         = NULL;
@@ -150,6 +154,7 @@ static void strip_ansi(char *buf) {
 
 // Append raw bytes to the ring, maintaining wrap + valid_end.
 static void ring_append(const char *data, size_t len) {
+    s_total += len;
     while (len > 0) {
         size_t space = LOG_RING_SIZE - s_pos;
         size_t n = (len < space) ? len : space;
@@ -426,4 +431,26 @@ void applog_stream_end(void) {
     xSemaphoreTake(s_mtx, portMAX_DELAY);
     s_snap_busy = false;
     xSemaphoreGive(s_mtx);
+}
+
+// V2.8.17: boot replay cut-off (see applog.h). Running publish() under the same mutex
+// applog_flush_line() holds while it appends a line and forwards it to
+// syslog makes the split exact: every line appended before the returned
+// offset was flushed while syslog was still down, every later one was
+// forwarded live. A line half-assembled at this moment is appended later,
+// so it lands after the mark and goes out live.
+uint64_t applog_publish_mark(void (*publish)(const void *arg), const void *arg) {
+    if (!s_mtx) {
+        publish(arg);
+        return 0;
+    }
+    xSemaphoreTake(s_mtx, portMAX_DELAY);
+    publish(arg);
+    const uint64_t mark = s_total;
+    xSemaphoreGive(s_mtx);
+    return mark;
+}
+
+size_t applog_ring_size(void) {
+    return LOG_RING_SIZE;
 }

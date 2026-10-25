@@ -61,6 +61,7 @@
 #include "gnss.h"              // gnss_present / gnss_chip_name
 #include "fuel_gauge.h"        // fuel_gauge_chip_ready / fuel_gauge_present
 #include "tube.h"              // tube_is_enabled
+#include "applog.h"            // V2.8.17: applog_publish_mark / applog_stream_* — boot replay
 
 static const char *TAG = "syslog";
 
@@ -94,6 +95,10 @@ static bool               s_in_emit = false;
 // the lines for /log and the scheduled FTPS upload.
 static uint32_t           s_tx_count   = 0;
 static uint32_t           s_drop_count = 0;
+// V2.8.17: boot replay sends counted apart: it runs outside the applog mutex that
+// serialises the two above. syslog_get_stats() reports the sums.
+static uint32_t           s_replay_tx   = 0;
+static uint32_t           s_replay_drop = 0;
 
 // --- V2.8.6: boot banner detail lines ---------------------------------------
 // Hardware and build facts that until now existed only on the serial console
@@ -363,6 +368,13 @@ bool syslog_boot_banner_logged(void) {
     return s_banner_logged;
 }
 
+// V2.8.17: applog_publish_mark() callback — make the socket visible to syslog_emit().
+static void publish_sock(const void *arg) {
+    s_sock = *(const int *)arg;
+}
+
+static void boot_replay(uint64_t mark);
+
 void syslog_init(const char *host, uint16_t port, const char *hostname) {
     if (!host || !host[0] || port == 0) {
         ESP_LOGI(TAG, "disabled (host=%s port=%u)",
@@ -407,12 +419,17 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // Atomic publish — set s_sock LAST so syslog_emit's NULL-check is a
     // safe barrier. Without this, a concurrent vprintf could observe a
     // valid s_sock but stale s_addr.
-    s_sock = sock;
+    // V2.8.17 boot replay: published under the applog mutex, which also returns the
+    // ring offset of that moment — the exact end of what never left the device.
+    const uint64_t mark = applog_publish_mark(publish_sock, &sock);
 
     // V2.8.7: the banner lines live in syslog_boot_banner() so nodes whose
     // syslog never starts can log them too (main.c). Emitted here BEFORE
     // "started", so they still lead every device's server-side log.
     syslog_boot_banner();
+
+    // Then everything logged before the socket existed, once per boot.
+    boot_replay(mark);
 
     ESP_LOGI(TAG, "started — host=%s port=%u hostname=%s",
              host, (unsigned)port, s_hostname);
@@ -431,8 +448,8 @@ bool syslog_is_initialized(void) {
 }
 
 void syslog_get_stats(uint32_t *sent, uint32_t *dropped) {
-    if (sent)    *sent    = s_tx_count;
-    if (dropped) *dropped = s_drop_count;
+    if (sent)    *sent    = s_tx_count + s_replay_tx;
+    if (dropped) *dropped = s_drop_count + s_replay_drop;
 }
 
 // V2.4.16: build one RFC 5424 frame from an already-coalesced full line and
@@ -446,13 +463,34 @@ void syslog_get_stats(uint32_t *sent, uint32_t *dropped) {
 // it pushed the 8 KB httpd task over its stack limit, panicking on
 // /config (and intermittently /log) with `LoadStoreError` in
 // `vPortYieldFromInt`. Moving to BSS eliminates the stack contribution.
+//
+// V2.8.17 boot replay: the framing lives in emit_frame(), which takes its buffers,
+// counters and a message prefix from the caller. The live path (below)
+// keeps its BSS buffers under the applog mutex; the replay runs on the main
+// task outside that mutex and brings its own, so the two never share one.
+typedef struct {
+    char     *buf;       // frame buffer
+    size_t    buf_size;
+    char     *ts;        // timestamp scratch, NTP_LOCALTIME_STR_LEN
+    uint32_t *tx;        // send / drop counters to bump
+    uint32_t *drop;
+} emit_ctx_t;
+
+static void emit_frame(const emit_ctx_t *c, const char *prefix, const char *line, size_t len);
+
 static void emit_packet(const char *line, size_t len) {
     // V2.5.20 (review R10): 600 → 1200 B so a full LOG_LINE_MAX (1024 B)
     // applog line + the RFC 5424 header fits in one frame. Still well under
     // the 1500 B LAN MTU (no IP fragmentation). BSS, single-threaded by
     // construction (applog mutex) — same justification as before.
+    // V2.5.28/V2.8.5: the timestamp buffer, same reasoning (see emit_frame()).
     static char s_emit_buf[1200];
+    static char s_ts_buf[NTP_LOCALTIME_STR_LEN];
+    const emit_ctx_t c = { s_emit_buf, sizeof(s_emit_buf), s_ts_buf, &s_tx_count, &s_drop_count };
+    emit_frame(&c, "", line, len);
+}
 
+static void emit_frame(const emit_ctx_t *c, const char *prefix, const char *line, size_t len) {
     // Severity from the ESP_LOG level prefix. ESP_LOG output looks like:
     //   "I (HH:MM:SS.mmm) tag: text\n"
     // so the first char encodes the level. Default to info on anything else.
@@ -486,9 +524,8 @@ static void emit_packet(const char *line, size_t len) {
     // line logged from another task could pick up a half-written string.
     // BSS, not stack, for the same reason as s_emit_buf above (this runs on
     // whichever task logged, some with small stacks); single-threaded by the
-    // same applog mutex.
-    static char s_ts_buf[NTP_LOCALTIME_STR_LEN];
-    const char *ts = ntp_time_valid() ? ntp_localtime_str(s_ts_buf, sizeof(s_ts_buf)) : "-";
+    // same applog mutex. Boot replay: the caller's buffer (emit_ctx_t).
+    const char *ts = ntp_time_valid() ? ntp_localtime_str(c->ts, NTP_LOCALTIME_STR_LEN) : "-";
 
     // Strip trailing newlines — rsyslog adds its own.
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
@@ -498,15 +535,16 @@ static void emit_packet(const char *line, size_t len) {
 
     // RFC 5424: <PRI>1 SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP
     //           MSGID SP STRUCTURED-DATA SP MSG. APP-NAME "geiger"; PROCID,
-    //           MSGID and STRUCTURED-DATA are all NILVALUE ("-").
-    int n = snprintf(s_emit_buf, sizeof(s_emit_buf),
-                     "<%d>1 %s %s geiger - - - %.*s",
-                     priority, ts, s_hostname, (int)len, line);
+    //           MSGID and STRUCTURED-DATA are all NILVALUE ("-"). The prefix
+    //           ("boot " for replayed lines, "" live) goes in front of MSG.
+    int n = snprintf(c->buf, c->buf_size,
+                     "<%d>1 %s %s geiger - - - %s%.*s",
+                     priority, ts, s_hostname, prefix, (int)len, line);
     if (n > 0) {
         // V2.5.20 (review R10): clamp-and-send on truncation. Pre-V2.5.20 a
         // frame longer than the buffer was silently DROPPED (the `n < sizeof`
         // guard) — a truncated log line on the server beats a missing one.
-        if (n >= (int)sizeof(s_emit_buf)) n = (int)sizeof(s_emit_buf) - 1;
+        if (n >= (int)c->buf_size) n = (int)c->buf_size - 1;
         // MSG_DONTWAIT: non-blocking. If lwIP's TX queue is full we'd
         // rather drop the packet than block applog (which holds its
         // mutex while calling us). UDP send is normally sub-ms.
@@ -519,11 +557,11 @@ static void emit_packet(const char *line, size_t len) {
         // Count only; the report is logged from the TX cycle via
         // syslog_get_stats() — NEVER ESP_LOG here (it would re-enter applog's
         // non-recursive mutex from the emit path → deadlock).
-        if (sendto(s_sock, s_emit_buf, (size_t)n, MSG_DONTWAIT,
+        if (sendto(s_sock, c->buf, (size_t)n, MSG_DONTWAIT,
                    (struct sockaddr *)&s_addr, sizeof(s_addr)) < 0) {
-            s_drop_count++;
+            (*c->drop)++;
         } else {
-            s_tx_count++;
+            (*c->tx)++;
         }
     }
 }
@@ -543,4 +581,115 @@ void syslog_emit(const char *line, size_t len) {
     s_in_emit = true;
     emit_packet(line, len);
     s_in_emit = false;
+}
+
+// --- V2.8.17: boot replay --------------------------------------------------------
+// Everything logged before the socket existed (radio init, every join
+// attempt, sensor probes, TLS, the WiFi connect) reached /log and the FTPS
+// upload but never the server. syslog_init() sends that part of the ring
+// once, right after the banner, each line prefixed with "boot " — without a
+// colon, so the "boot: <Key>:" banner patterns don't match it while greps
+// for the original text ("lorawan: join attempt") still do. The prefix also
+// deliberately breaks the "geiger <L> (" anchor of level-anchored server
+// parsers, so they keep counting only live lines. The line text keeps its
+// boot-time stamp; the syslog header carries the send time, so the server
+// files the block where it arrived (~2 min after boot).
+//
+// Read through applog_stream_begin() like /log and the FTPS upload. Before
+// the ring's first wrap (always the case this soon after boot) seg_a is the
+// ring from byte 0 and the publish mark is a byte index into it; new lines
+// land past seg_a, so it is read without the mutex — provided the ring does
+// not wrap DURING the replay, hence the headroom check. A wrapped ring
+// (syslog up hours late) has lost the boot anyway — skipped, not guessed.
+// "boot:" lines are skipped: the banner just went out live, and a copy
+// logged earlier by main.c's no-syslog fallback would double the "Firmware V"
+// boot count the docs/scripts parsers rely on. Paced like the banner (the
+// tight-heap heltec_v2 once lost an unpaced burst) and capped, both caps on
+// line boundaries. Worst case ~3 s on the main task (300 × 10 ms).
+#define BOOT_REPLAY_MAX_LINES 300
+#define BOOT_REPLAY_MAX_BYTES (32 * 1024)
+// Ring room the replay needs past the boot part: what other tasks may log in
+// the ≤3 s it runs, with a wide margin (a typical boot logs ~9 KB in 2 min).
+#define BOOT_REPLAY_HEADROOM  (8 * 1024)
+// A /log request holding the snapshot (FTPS can't: it runs on the main task,
+// which is in here) is over in milliseconds; wait that out instead of losing
+// the replay.
+#define BOOT_REPLAY_BUSY_TRIES 5
+#define BOOT_REPLAY_BUSY_MS    100
+
+// True for a "<L> (<time>) boot: ..." line (the tag right after the stamp).
+static bool replay_is_banner_line(const char *p, size_t len) {
+    const char *end = p + len;
+    const char *q = memchr(p, ')', len < 48 ? len : 48);
+    return q && (size_t)(end - q) > 7 && memcmp(q, ") boot: ", 8) == 0;
+}
+
+static void boot_replay(uint64_t mark) {
+    static bool s_done = false;   // once per boot: a re-init must not resend
+    if (s_done) return;
+    s_done = true;
+
+    // applog_publish_mark() returns 0 only without applog (init failed).
+    if (mark == 0) {
+        ESP_LOGW(TAG, "boot replay skipped: applog not initialised");
+        return;
+    }
+    applog_stream_t st;
+    bool got = applog_stream_begin(&st);
+    for (int i = 1; !got && i < BOOT_REPLAY_BUSY_TRIES; i++) {
+        vTaskDelay(pdMS_TO_TICKS(BOOT_REPLAY_BUSY_MS));
+        got = applog_stream_begin(&st);
+    }
+    if (!got) {
+        ESP_LOGW(TAG, "boot replay skipped: log snapshot still busy after %u ms (a /log request reading it)",
+                 (unsigned)((BOOT_REPLAY_BUSY_TRIES - 1) * BOOT_REPLAY_BUSY_MS));
+        return;
+    }
+    // Wrapped (seg_b/seg_c in use, or seg_a NULL when the tail was all skipped).
+    if (st.seg_b || st.seg_c || !st.seg_a) {
+        applog_stream_end();
+        ESP_LOGW(TAG, "boot replay skipped: log ring wrapped before syslog started");
+        return;
+    }
+    const size_t ring = applog_ring_size();
+    if (st.len_a + BOOT_REPLAY_HEADROOM > ring) {
+        applog_stream_end();
+        ESP_LOGW(TAG, "boot replay skipped: log ring nearly full (%u of %u B used)",
+                 (unsigned)st.len_a, (unsigned)ring);
+        return;
+    }
+    const size_t limit = (mark < (uint64_t)st.len_a) ? (size_t)mark : st.len_a;
+
+    // Main task only (syslog_init's caller, 16 KB stack that already runs
+    // FTPS/TLS), never concurrent with itself: its own frame buffers on the
+    // stack for the two seconds they are needed — the live path's BSS
+    // buffers belong to the applog mutex and must not be shared.
+    char buf[1200];
+    char ts[NTP_LOCALTIME_STR_LEN];
+    const emit_ctx_t c = { buf, sizeof(buf), ts, &s_replay_tx, &s_replay_drop };
+    unsigned lines = 0, skipped = 0;
+    size_t pos = 0, sent = 0;
+    bool capped = false;
+    while (pos < limit) {
+        const char *p  = st.seg_a + pos;
+        const char *nl = memchr(p, '\n', limit - pos);
+        const size_t len = nl ? (size_t)(nl - p) + 1 : limit - pos;
+        const bool banner = replay_is_banner_line(p, len);
+        // Both caps stop BEFORE a line, so nothing goes out torn.
+        if (len > 1 && !banner &&
+            (lines >= BOOT_REPLAY_MAX_LINES || sent + len > BOOT_REPLAY_MAX_BYTES)) {
+            capped = true;
+            break;
+        }
+        pos += len;
+        if (len <= 1) continue;                    // blank line
+        if (banner) { skipped++; continue; }
+        emit_frame(&c, "boot ", p, len);
+        lines++;
+        sent += len;
+        vTaskDelay(pdMS_TO_TICKS(10));   // let lwIP drain, like BANNER_PACE()
+    }
+    applog_stream_end();
+    ESP_LOGI(TAG, "boot replay: %u lines before syslog sent with prefix \"boot \" (%u B, %u banner lines skipped%s)",
+             lines, (unsigned)sent, skipped, capped ? ", capped" : "");
 }

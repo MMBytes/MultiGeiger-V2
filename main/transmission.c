@@ -929,10 +929,11 @@ static int send_thingspeak(const tx_context_t *c) {
         int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
                             &resp, c->thingspeak.use_insecure);
         if (rc == 200) {
-            // buf is filled by do_request()'s event callback, which cppcheck
-            // can't trace — it constant-folds buf[0] from the init to 0.
-            // cppcheck-suppress knownConditionTrueFalse
-            if (buf[0] && strcmp(buf, "0") != 0) return 200;
+            // Body = the new entry id ("0" = rejected). V2.8.17: test resp.len,
+            // not buf[0] — do_request()'s event callback fills buf through
+            // resp.buf, an alias cppcheck can't follow (it folded buf[0] to the
+            // init's 0 and needed a suppression); resp itself is passed by address.
+            if (resp.len > 0 && strcmp(buf, "0") != 0) return 200;
             ESP_LOGW(TAG, "ThingSpeak rejected (entry id 0 — rate limit or bad key)");
             return -1;
         }
@@ -991,10 +992,8 @@ static int send_thingspeak_pm(const tx_context_t *c) {
         int rc = do_request(url, HTTP_METHOD_GET, NULL, c->chip_id, NULL, NULL,
                             &resp, c->thingspeak_pm.use_insecure);
         if (rc == 200) {
-            // buf is filled by do_request()'s event callback, which cppcheck
-            // can't trace — it constant-folds buf[0] from the init to 0.
-            // cppcheck-suppress knownConditionTrueFalse
-            if (buf[0] && strcmp(buf, "0") != 0) return 200;
+            // Same entry-id check as send_thingspeak() above (V2.8.17: resp.len).
+            if (resp.len > 0 && strcmp(buf, "0") != 0) return 200;
             ESP_LOGW(TAG, "ThingSpeak PM rejected (entry id 0 — rate limit or bad key)");
             return -1;
         }

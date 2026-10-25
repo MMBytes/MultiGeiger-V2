@@ -9,6 +9,37 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.17 — syslog also gets the lines logged before it started
+
+For every board with syslog enabled. Nodes with syslog off are unchanged.
+
+1. **The start of each boot now reaches the syslog server.** Syslog only
+   starts once WiFi has an address, about two minutes after boot (after the
+   setup access point closes). Everything logged before that — sensor probes,
+   the LoRaWAN radio start and every join attempt, the TLS certificate, the
+   WiFi connect — was only in `/log` and the FTPS upload, never on the server.
+   Once syslog is up, the node now sends those lines once, right after the
+   `boot:` summary lines, each with the prefix `boot `, for example
+   `boot I (…) lorawan: join attempt 1: SF10 917.200 MHz … -> accepted | …`.
+   The line keeps its boot-time stamp; the syslog header carries the time it
+   was sent, so the server files the block where it arrived, about two minutes
+   after boot. The `boot:` summary lines themselves are not repeated, so tools
+   that count boots by `boot: Firmware` still count each boot once; a search
+   for the original text (`lorawan: join attempt`) now also finds the lines
+   from the start of the boot. The lines go out paced (10 ms apart, at most
+   300 lines / 32 KB, never cutting a line); on a test node a boot was about
+   110 lines in under two seconds, recorded in one line
+   `syslog: boot replay: … lines …`. `/log` and the FTPS upload are unchanged,
+   since they already had these lines. While the lines are being sent, `/log`
+   briefly answers "log snapshot busy … — retry", as it already does during an
+   FTPS upload. If syslog only comes up so late that the log has wrapped, or
+   is about to, the lines are left out and the node says why instead.
+2. **Internal:** the ThingSpeak upload check reads the response length
+   instead of its first byte (same result), so the static code check no longer
+   needs two exceptions there.
+
+---
+
 ## V2.8.16 — LoRaWAN: a damaged join accept no longer blocks every later join
 
 For the two LoRaWAN boards, the Heltec WiFi LoRa 32 V4 and the XIAO ESP32-S3 +

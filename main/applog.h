@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /** @brief Install the log hook and create the mutex. Idempotent. */
 void applog_init(void);
@@ -77,3 +78,18 @@ typedef struct {
 
 bool applog_stream_begin(applog_stream_t *out);
 void applog_stream_end(void);
+
+/** @brief V2.8.17: run @p publish (syslog going live) under the applog mutex and
+ *         return the ring's logical write offset at that moment.
+ *
+ *  Bytes before the offset were appended while syslog was down and never
+ *  left the device; everything after it was forwarded live. Before the ring
+ *  first wraps, the offset is also the byte index into a snapshot's seg_a,
+ *  so syslog_init() can replay exactly the pre-syslog part of the boot.
+ *  Returns 0 (and still calls @p publish) when applog isn't initialised.
+ */
+uint64_t applog_publish_mark(void (*publish)(const void *arg), const void *arg);
+
+/** @brief V2.8.17: size of the ring in bytes (HAL_LOG_RING_BYTES), so a
+ *         reader can tell how much room is left before the ring wraps. */
+size_t applog_ring_size(void);

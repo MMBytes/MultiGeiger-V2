@@ -144,6 +144,12 @@ static uint32_t           s_replay_drop = 0;
 // config_log_summary's LOG_PACED, which pays nothing when syslog is off).
 #define BANNER_PACE() do { if (s_sock >= 0) vTaskDelay(pdMS_TO_TICKS(10)); } while (0)
 
+// V2.8.18: pause after the warm-up line in syslog_init(), so the WiFi
+// driver's block-ack setup that the first traffic triggers is done before the
+// banner starts (measured on a test node: ~10 ms after the warm-up line,
+// 14 ms after the first banner line without it).
+#define SYSLOG_WARMUP_MS 200
+
 // V2.8.7: set once the banner has been logged at least once this boot, by
 // either caller — see syslog_boot_banner_logged().
 static bool s_banner_logged = false;
@@ -281,7 +287,8 @@ static void banner_sensors(void) {
 // Called a second time if syslog starts after main.c's fallback already
 // logged it locally — the server must still get its copy.
 void syslog_boot_banner(void) {
-    // V2.5.22: boot summary as the FIRST line the server sees. The real boot
+    // V2.5.22: boot summary as the first lines the server sees (since V2.8.18
+    // right after the warm-up line, see syslog_init()). The real boot
     // banner (version / board / chip / reset reason) is logged before WiFi +
     // syslog come up, so it never reaches the server — leaving the firmware
     // version and reset reason invisible to server-side forensics (the gap that
@@ -423,9 +430,22 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
     // ring offset of that moment — the exact end of what never left the device.
     const uint64_t mark = applog_publish_mark(publish_sock, &sock);
 
+    // V2.8.18: one warm-up line, then a short pause, before the banner. The
+    // banner's burst is the first steady traffic to the server, and the WiFi
+    // driver sets up the link's block-ack session on it ("wifi:<ba-add>")
+    // within milliseconds — while the banner is being sent. On a test node
+    // the driver's ba-add line landed between the fragments of a banner line
+    // and split it in /log and on the server, and the second banner line was
+    // occasionally lost (sent without error, never at the first hop). Letting
+    // one line trigger that setup first moves it out of the banner.
+    ESP_LOGI(TAG, "link warm-up — boot banner follows");
+    vTaskDelay(pdMS_TO_TICKS(SYSLOG_WARMUP_MS));
+
     // V2.8.7: the banner lines live in syslog_boot_banner() so nodes whose
     // syslog never starts can log them too (main.c). Emitted here BEFORE
-    // "started", so they still lead every device's server-side log.
+    // "started", so on the server they come before everything else of this
+    // boot except the V2.8.18 warm-up line (and whatever the WiFi driver logs
+    // during its 0.2 s, typically the "wifi:<ba-add>" line).
     syslog_boot_banner();
 
     // Then everything logged before the socket existed, once per boot.

@@ -38,7 +38,8 @@
  *  immediately as a no-op (disabled). After this returns, `syslog_emit()`
  *  will start shipping lines. V2.8.17: before returning it sends the boot
  *  banner and the paced boot replay (see the file header), which keeps the
- *  calling (main) task busy for typically ~1 s, at most ~3.5 s.
+ *  calling (main) task busy for typically ~1 s, at most ~3.5 s. V2.8.18: plus
+ *  a warm-up line and a 0.2 s pause before the banner.
  *
  *  @param host        Server hostname or IPv4 string (e.g. "192.0.2.10")
  *  @param port        UDP port (typically 514)

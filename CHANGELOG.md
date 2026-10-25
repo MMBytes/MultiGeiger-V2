@@ -9,6 +9,31 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.18 — syslog warms the WiFi link up before the boot summary lines
+
+For every board with syslog enabled. Nodes with syslog off are unchanged.
+
+1. **The boot summary lines should no longer collide with the WiFi link
+   setup.** The boot summary is the first burst of traffic to the syslog
+   server, and the WiFi driver sets up the link's acknowledgement scheme for
+   that traffic (block-ack) within milliseconds of the first line, while the
+   summary is still being sent. Its log line (`wifi:<ba-add> …`) then landed
+   in the middle of a summary line and split it into two, so tools counting
+   boots by `boot: Firmware V…` missed the boot. Syslog now sends one line
+   first (`syslog: link warm-up — boot banner follows`) and waits 0.2 s
+   before the summary; in 17 test boots the link setup then always happened
+   on that line, and no summary line was split. The second summary line,
+   `boot: Build:`, had also gone missing now and then (sent without error,
+   never at the server: 3 of 25 boots on one test node, 3 of 80 on another);
+   in the 17 test boots with the warm-up line none was lost, which is
+   encouraging but too few boots to call that fixed. On the server a boot
+   now begins with the warm-up line and, typically, the driver's
+   `wifi:<ba-add>` line, followed by the summary; tools that split the log
+   into boots at `boot: Firmware V…` see those two lines at the end of the
+   previous boot. Boot counts are unaffected.
+
+---
+
 ## V2.8.17 — syslog also gets the lines logged before it started
 
 For every board with syslog enabled. Nodes with syslog off are unchanged.

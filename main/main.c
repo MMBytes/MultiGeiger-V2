@@ -1780,6 +1780,13 @@ void app_main(void) {
     }
 
     history_init();   // V2.5.6: CPM history ring (sampler primed on first tick)
+#if HAL_HAS_LORA_FEM
+    // V2.8.19: on a Heltec V4.3 the speaker's N pin (GPIO5) is the KCT8103L
+    // front end's CTX line, which RadioLib drives once LoRaWAN runs. Probe only
+    // with LoRaWAN on: with it off the front end stays unpowered and the
+    // speaker keeps the pin.
+    if (g_cfg.lorawan_enabled && lorawan_fem_is_kct8103l()) speaker_release_fem_pin();
+#endif
     speaker_setup(g_cfg.play_sound, g_cfg.led_tick, g_cfg.speaker_tick);
 
     // Per-GM-pulse visual feedback. led_init() is unconditional: it drives the

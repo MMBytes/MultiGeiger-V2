@@ -881,6 +881,15 @@
     // it stays gated on g_cfg.lorawan_high_power as a regulatory/EIRP
     // opt-in, not a hardware-safety gate.
     #define PIN_LORA_FEM_PA         46
+    // V2.8.19: the board exists in two front-end revisions, told apart at
+    // boot by lorawan_fem_is_kct8103l(). V4.2 = GC1109: CPS (PA mode) on
+    // GPIO46 = FEM_PA above. V4.3 = KCT8103L (Heltec wiki "LNA" FEM table,
+    // hardware update log V4.3.1): GPIO46 is unconnected and the CTX line is
+    // GPIO5 — LOW = receive through the LNA, HIGH = receive bypass, or (with
+    // CPS = DIO2 HIGH) transmit through the PA. GPIO5 is also PIN_SPEAKER_N
+    // (the speaker's N leg on the V1.9/V1.10 mainboards), so on a V4.3 with
+    // LoRaWAN on the speaker stays off it (speaker_release_fem_pin()).
+    #define PIN_LORA_KCT_CTX         5
 
     // FORMERLY "reserved for future LoRaWAN/Meshtastic work" (hardware-
     // reservation only, spec §6) — as of V2.6.23 the SX1262 SPI bus and

@@ -44,6 +44,15 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick);
 /** @brief Toggle the tick effects at runtime (e.g. after a config save). */
 void speaker_set_modes(bool led_tick, bool speaker_tick);
 
+/** @brief V2.8.19: keep the speaker off PIN_SPEAKER_N for this boot.
+ *
+ *  Call before speaker_setup() when the N pin is the LoRa front end's control
+ *  line (Heltec V4.3 KCT8103L CTX on GPIO5, LoRaWAN on). From then on the N
+ *  pin is never configured or written, and tick sound and melodies stay off;
+ *  the LED tick is unaffected.
+ */
+void speaker_release_fem_pin(void);
+
 /** @brief Stop the pulse tick for the rest of this boot — OTA teardown (V2.7.5).
  *
  *  Clears the tick modes and any melody, stops the 1 ms audio timer and forces

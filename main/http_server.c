@@ -1386,8 +1386,10 @@ static void format_lorawan(char *out, size_t sz) {
             ago_min = (up_s - st.last_dl_uptime_s) / 60u;
         }
         n = append_safe(out, sz, n,
-            "<br><b>Last downlink:</b> RSSI %.0f dBm, SNR %.1f dB, %lu min ago",
-            (double)st.last_dl_rssi, (double)st.last_dl_snr, (unsigned long)ago_min);
+            "<br><b>Last downlink:</b> RSSI %.0f dBm%s, SNR %.1f dB, %lu min ago",
+            (double)st.last_dl_rssi,
+            lorawan_dl_rssi_includes_lna() ? " (incl. ~24 dB LNA gain)" : "",   // V2.8.19
+            (double)st.last_dl_snr, (unsigned long)ago_min);
     }
     if (st.state == LORAWAN_ST_JOINED) {
         // 64 = the node starts asking "do you hear me?" (ADRACKReq); RadioLib's
@@ -2150,10 +2152,18 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // free on the V1.10 mainboard). V2.8.11: on a board without the
                      // front end (HAL_HAS_LORA_FEM 0) it is greyed and forced off.
 #if HAL_HAS_LORA_FEM
-                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s> "
-                     "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> "
-                     "<small>Check your region's EIRP / duty-cycle limits before "
-                     "enabling.</small></label></div>"
+                     // V2.8.19: on a Heltec V4.3 (KCT8103L detected at boot) GPIO46
+                     // drives nothing and the PA is always used in TX, so the box
+                     // is greyed there (and, being disabled, saved as off).
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s%s> "
+                     "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> %s</label></div>"
+                     // V2.8.19: KCT8103L receive LNA. Never greyed: a disabled box
+                     // is not POSTed, which would flip the default (on) to off on
+                     // every save of a V4.2 node.
+                     "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_lna\" %s> "
+                     "Receive through the LNA (Heltec V4.3 only) <span class=\"r\">*</span> "
+                     "<small>Untick near strong transmitters (LNA bypass). Takes effect "
+                     "after a restart.</small></label></div>"
 #else
                      // V2.8.11: bare SX1262 (XIAO + Wio) — greyed like the other
                      // hardware-gated options; config_apply_form() forces it off.
@@ -2531,9 +2541,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // what would otherwise be 8 per-option "selected" args into one %s,
                      // same convention as tube_opts/br_opts), sub-band, data-rate <option>
                      // list (V2.8.14, lora_dr_opts), DevEUI, JoinEUI, AppKey, high-power
-                     // enable. Must match the 8 "%s"/"%u" slots in the "LoRaWAN (TTN)"
-                     // HTML block above 1:1 (V2.6.34: FEM-enable arg removed with its
-                     // checkbox).
+                     // enable — plus, on HAL_HAS_LORA_FEM boards (V2.8.19), high-power
+                     // "disabled", high-power note and LNA enable: 8 args on the XIAO,
+                     // 11 on the Heltec V4. Must match the "%s"/"%u" slots in the
+                     // "LoRaWAN (TTN)" HTML block above 1:1 (V2.6.34: FEM-enable arg
+                     // removed with its checkbox).
                      s_cfg->lorawan_enabled ? "checked" : "",
                      lora_region_opts,
                      (unsigned)s_cfg->lorawan_subband,
@@ -2543,6 +2555,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      e->lora_appkey,
 #if HAL_HAS_LORA_FEM
                      s_cfg->lorawan_high_power ? "checked" : "",
+                     lorawan_fem_kct8103l_detected() ? " disabled" : "",
+                     lorawan_fem_kct8103l_detected()
+                         ? "<small>(no effect on a Heltec V4.3: it always transmits through its PA)</small>"
+                         : "<small>Check your region's EIRP / duty-cycle limits before enabling.</small>",
+                     s_cfg->lorawan_lna ? "checked" : "",
 #else
                      "",   // V2.8.11: no PA — never ticked, even with a carried-over NVS true
 #endif

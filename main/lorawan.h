@@ -84,6 +84,9 @@ static inline void lorawan_get_status(lorawan_status_t *out) {
 static inline const char *lorawan_state_name(lorawan_state_t st) { (void)st; return "disabled"; }
 static inline const char *lorawan_region_name(uint8_t region_idx) { (void)region_idx; return "?"; }
 static inline void lorawan_forget_session(bool wipe_nonces) { (void)wipe_nonces; }
+static inline bool lorawan_fem_is_kct8103l(void) { return false; }
+static inline bool lorawan_fem_kct8103l_detected(void) { return false; }
+static inline bool lorawan_dl_rssi_includes_lna(void) { return false; }
 #else
 
 /** @brief Create the LoRaWAN task. Radio init happens on the task, not here. */
@@ -153,5 +156,25 @@ const char *lorawan_region_name(uint8_t region_idx);
  *  DevNonces" in the TTN console.
  */
 void lorawan_forget_session(bool wipe_nonces);
+
+/** @brief V2.8.19: true if the LoRa front end is a KCT8103L (Heltec V4.3).
+ *
+ *  Probes once — powers the front end (VFEM), then reads GPIO2 as an input:
+ *  the KCT8103L pulls it up, the V4.2's GC1109 down — and caches the answer.
+ *  The probe itself runs on the main task, before lorawan_setup() (main.c
+ *  asks before speaker_setup(), because the KCT8103L's CTX line is the
+ *  speaker's N pin); later calls from any task just return the cache. False
+ *  on boards without a front end.
+ */
+bool lorawan_fem_is_kct8103l(void);
+
+/** @brief V2.8.19: the cached probe result, without probing (any task).
+ *         False if the probe never ran (LoRaWAN off) or found a GC1109. */
+bool lorawan_fem_kct8103l_detected(void);
+
+/** @brief V2.8.19: true if downlink RSSI readings include the KCT8103L's LNA
+ *         gain (~24 dB measured): KCT8103L detected and the LNA mode applied
+ *         at radio init (a lorawan_lna change counts only after a restart). */
+bool lorawan_dl_rssi_includes_lna(void);
 
 #endif

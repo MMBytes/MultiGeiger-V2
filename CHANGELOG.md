@@ -9,6 +9,57 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.19 — Heltec V4.3 boards transmit through their power amplifier
+
+For the LoRaWAN boards. Points 1–3 concern the Heltec WiFi LoRa 32 V4 only;
+point 4 also the XIAO ESP32S3 + Wio-SX1262. Other boards are unchanged.
+
+1. **A Heltec V4.3 now transmits at its rated power.** The Heltec V4 exists
+   with two radio front ends: the V4.2 has a GC1109, the V4.3 a KCT8103L.
+   On the V4.3 the front end's control line (CTX) is GPIO5, which until now
+   was held low as the speaker's N leg, so the front end stayed in receive
+   mode and the transmitter never went through its power amplifier. The
+   firmware now detects the front end at boot (it reads GPIO2's default
+   level before driving it: the KCT8103L pulls it up, the GC1109 down, the
+   same check Meshtastic and MeshCore use) and logs it
+   (`front end: GPIO2 read HIGH 5/5 -> KCT8103L (Heltec V4.3)`). On a V4.3
+   the radio library now drives CTX high while transmitting and low while
+   receiving. On a test node the gateway heard the uplinks 70 dB stronger
+   (-110 dBm before, -40 dBm after), and the network's adaptive data rate
+   then moved the node from SF10 to SF7 and lowered its transmit power.
+   Because the amplifier is now always in the transmit path, the radio is
+   programmed about 11 dB below the power the LoRaWAN stack asks for (the
+   amplifier's gain at low drive, as measured for this board by Meshtastic),
+   so the antenna gets about the band's permitted EIRP (AU915 30 dBm, EU868
+   16 dBm) and not 11 dB more. A V4.2 keeps its previous behaviour.
+2. **On a V4.3 with LoRaWAN on, the speaker stays silent.** Its N leg is the
+   front end's control line there, so the speaker no longer drives GPIO5 and
+   tick sound and boot melody are off (logged once at boot); the LED tick
+   still works. With LoRaWAN off, or on a V4.2, the speaker works as before.
+3. **New `/config` option "Receive through the LNA (Heltec V4.3 only)"**, on
+   by default. The V4.3 front end can receive through its low-noise
+   amplifier or bypass it; Heltec recommends the bypass near strong
+   transmitters, where the extra gain can overload the receiver. Transmit
+   always uses the amplifier. A change takes effect after a restart. The
+   28 dBm option (GPIO46) has no effect on a V4.3 and is greyed out there
+   once the front end has been detected (and saved as off).
+4. **The downlink RSSI is now the packet's received power.** The
+   `downlink (RX…)` log line and the "Last downlink" RSSI on the status page
+   took RadioLib's `getRSSI()`, which on the SX1262 in LoRa mode returns the
+   estimated signal after despreading. That value bottoms out at -127.5 dBm,
+   so on weak links most downlinks read -127 or -128 dBm whatever the real
+   level was. It now comes from the packet RSSI in the same status reply, as
+   Semtech's LoRaWAN stack reports it (reported upstream as RadioLib #1913).
+   At SNR below 0 the packet RSSI is mostly the channel noise, so the log
+   line now also shows the radio's own estimate of the signal after the SNR
+   (`, signal -126 dBm`): on a weak link the pair tells a weak signal from a
+   high noise floor. That estimate also bottoms out at -127.5 dBm; below it
+   the signal is roughly RSSI + SNR. On a strong link both values agree. On a
+   V4.3 with the LNA on, the readings include the LNA's gain (about 24 dB
+   measured); the log line ends with `, LNA on` and the status page adds
+   "(incl. ~24 dB LNA gain)". The start of the log line
+   (`RSSI … dBm SNR … dB`) is unchanged.
+
 ## V2.8.18 — syslog warms the WiFi link up before the boot summary lines
 
 For every board with syslog enabled. Nodes with syslog off are unchanged.

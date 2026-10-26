@@ -58,6 +58,19 @@ static const char *TAG = "speaker";
 static volatile bool s_speaker_tick = false;
 static volatile bool s_led_tick     = false;
 
+// V2.8.19: set by speaker_release_fem_pin() before speaker_setup() when
+// PIN_SPEAKER_N is the LoRa front end's control line (Heltec V4.3: KCT8103L
+// CTX = GPIO5, LoRaWAN on). The speaker then never configures or drives the
+// N pin, and the tick sound and melodies stay off; the LED tick is unaffected.
+static bool s_n_pin_released = false;
+
+// Every write to PIN_SPEAKER_N goes through here.
+static inline void set_n(int level) {
+    if (!s_n_pin_released) gpio_set_level(PIN_SPEAKER_N, level);
+}
+
+void speaker_release_fem_pin(void) { s_n_pin_released = true; }
+
 // Shared between GM ISR and audio timer callback. ISR requests, timer polls.
 // V2.7.4: replaces the bare s_pending_ticks flag with the flag PLUS its defer
 // countdown, so both are written in one place and cleared together. The
@@ -93,7 +106,7 @@ static void tick_start(void) {
         ledc_set_freq(LEDC_SPEED_MODE, LEDC_TIMER_NUM, TICK_FREQ_HZ);
         ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, LEDC_DUTY_HALF);
         ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
-        gpio_set_level(PIN_SPEAKER_N, 1);
+        set_n(1);
     }
     if (s_led_tick) {
 #if HAL_HAS_NEOPIXEL
@@ -107,7 +120,7 @@ static void tick_start(void) {
 static void tick_end(void) {
     ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
-    gpio_set_level(PIN_SPEAKER_N, 0);
+    set_n(0);
 #if !HAL_HAS_NEOPIXEL && defined(PIN_LED_BUILTIN)
     // Only the plain-LED tick needs an off-edge here; the NeoPixel worker
     // times its own 40 ms flash and restores the base colour itself.
@@ -123,11 +136,11 @@ static void melody_apply_step(const melody_step_t *step) {
         ledc_set_freq(LEDC_SPEED_MODE, LEDC_TIMER_NUM, step->freq_mhz / 1000);
         ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, LEDC_DUTY_HALF);
         ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
-        gpio_set_level(PIN_SPEAKER_N, step->volume >= 1 ? 1 : 0);
+        set_n(step->volume >= 1 ? 1 : 0);
     } else {
         ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
         ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
-        gpio_set_level(PIN_SPEAKER_N, 0);
+        set_n(0);
     }
 }
 
@@ -145,7 +158,7 @@ static void audio_timer_cb(void *arg) {
                 // End-of-sequence marker. Silence everything and clear state.
                 ledc_set_duty(LEDC_SPEED_MODE, LEDC_CHANNEL, 0);
                 ledc_update_duty(LEDC_SPEED_MODE, LEDC_CHANNEL);
-                gpio_set_level(PIN_SPEAKER_N, 0);
+                set_n(0);
                 s_melody_seq = NULL;
                 s_melody_idx = 0;
                 // Discard any tick queued during the melody — countdown too,
@@ -218,6 +231,7 @@ static const melody_step_t s_v1_boot_melody[] = {
 };
 
 void speaker_set_modes(bool led_tick, bool speaker_tick) {
+    if (s_n_pin_released) speaker_tick = false;   // V2.8.19: the N pin is the front end's
     s_led_tick     = led_tick;
     s_speaker_tick = speaker_tick;
     if (!led_tick && !speaker_tick) {
@@ -262,23 +276,31 @@ void speaker_suspend(void) {
 }
 
 void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
+    if (s_n_pin_released) {
+        // V2.8.19: the N pin belongs to the LoRa front end — no sound at all
+        // (the P leg alone would drive the piezo against the CTX line).
+        speaker_tick = false;
+        play_sound   = false;
+        ESP_LOGW(TAG, "speaker off: GPIO%d (speaker N) is the LoRa front end's CTX line "
+                      "(Heltec V4.3, LoRaWAN on)", PIN_SPEAKER_N);
+    }
     // LED (if this board has one) + speaker N pin as GPIO outputs.
-    gpio_config_t out_cfg = {
+    uint64_t out_mask = s_n_pin_released ? 0 : (1ULL << PIN_SPEAKER_N);
 #ifdef PIN_LED_BUILTIN
-        .pin_bit_mask = (1ULL << PIN_LED_BUILTIN) | (1ULL << PIN_SPEAKER_N),
-#else
-        .pin_bit_mask = (1ULL << PIN_SPEAKER_N),
+    out_mask |= (1ULL << PIN_LED_BUILTIN);
 #endif
+    gpio_config_t out_cfg = {
+        .pin_bit_mask = out_mask,
         .mode = GPIO_MODE_OUTPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    ESP_ERROR_CHECK(gpio_config(&out_cfg));
+    if (out_mask) ESP_ERROR_CHECK(gpio_config(&out_cfg));
 #ifdef PIN_LED_BUILTIN
     gpio_set_level(PIN_LED_BUILTIN,   0);
 #endif
-    gpio_set_level(PIN_SPEAKER_N, 0);
+    set_n(0);
 
     // LEDC timer — 10-bit resolution, base frequency just a seed (set_freq
     // rewrites it per tick).
@@ -353,6 +375,8 @@ void speaker_setup(bool play_sound, bool led_tick, bool speaker_tick) {
 }
 void speaker_set_modes(bool led_tick, bool speaker_tick) {
     (void)led_tick; (void)speaker_tick;
+}
+void speaker_release_fem_pin(void) {
 }
 void speaker_suspend(void) {
 }

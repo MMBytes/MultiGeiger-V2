@@ -499,7 +499,65 @@ private:
 
 static GeigerLoRaHal s_hal;
 static Module  s_mod(&s_hal, PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
-static SX1262  s_radio(&s_mod);
+// V2.8.19: exposes the protected GetPacketStatus reply. In LoRa mode its bytes
+// are RssiPkt << 16 | SnrPkt << 8 | SignalRssiPkt, and RadioLib's getRSSI()
+// returns SignalRssiPkt, which bottoms out at -127.5 dBm for weak downlinks
+// (RadioLib #1913). packetStatus() returns RssiPkt, the packet's received
+// power, as Semtech's LoRaMac-node reports it, plus SignalRssiPkt and SNR.
+//
+// It also compensates an external power amplifier: RadioLib's LoRaWAN stack
+// treats the radio's output power as the EIRP (it clips the band's limit,
+// AU915 30 dBm / EU868 16 dBm, to the SX1262's -9…22 dBm and sets that). On a
+// Heltec V4.3 the KCT8103L's PA adds ~11 dB on top (Meshtastic's measurement
+// on the V4: +11 dB at 0-15 dBm drive, compressing to +7 dB at 21 dBm), so
+// with a PA gain set, the accepted range is shifted by it and the gain is
+// subtracted before the SX1262 is programmed — the antenna then gets about
+// what the stack asked for, never more. Contract: the power setters are only
+// called on the LoRaWAN worker (radio_init + exchanges); the m_inner flag
+// relies on that and would need locking if another task ever set the power.
+class GeigerSX1262 : public SX1262 {
+public:
+    explicit GeigerSX1262(Module *m) : SX1262(m) {}
+    using SX1262::setOutputPower;   // keep the (power, optimize) overload visible
+
+    /** @brief Set the external PA's gain in dB (0 = none). Before begin(). */
+    void setPaGain(int8_t gain_db) { m_pa_gain = gain_db; }
+
+    int16_t checkOutputPower(int8_t power, int8_t *clipped) override {
+        // SX1262::setOutputPower() re-checks the radio value it gets from us
+        // through this same virtual; that inner check uses the radio's range.
+        if (m_inner) return SX1262::checkOutputPower(power, clipped);
+        const int8_t lo = (int8_t)(-9 + m_pa_gain), hi = (int8_t)(22 + m_pa_gain);
+        if (clipped) *clipped = power < lo ? lo : (power > hi ? hi : power);
+        return (power < lo || power > hi) ? RADIOLIB_ERR_INVALID_OUTPUT_POWER : RADIOLIB_ERR_NONE;
+    }
+    int16_t setOutputPower(int8_t power) override {
+        int8_t p = (int8_t)(power - m_pa_gain);
+        if (p < -9) p = -9;
+        if (p > 22) p = 22;
+        m_inner = true;   // LoRaWAN worker only (radio_init + exchanges): no locking
+        const int16_t st = SX1262::setOutputPower(p);
+        m_inner = false;
+        return st;
+    }
+
+    /** @brief RssiPkt (packet received power), SignalRssiPkt (signal estimate
+     *         after despreading) in dBm and SNR in dB of the last LoRa packet,
+     *         from one GetPacketStatus read. The signal estimate tells a weak
+     *         signal from a high noise floor at negative SNR; it bottoms out
+     *         at -127.5 dBm. SNR decoding as RadioLib's getSNR(). */
+    void packetStatus(float *rssi, float *signal, float *snr) {
+        const uint32_t ps = this->getPacketStatus();
+        *rssi   = -0.5f * (float)((ps >> 16) & 0xFF);
+        *signal = -0.5f * (float)(ps & 0xFF);
+        *snr    = 0.25f * (float)(int8_t)((ps >> 8) & 0xFF);
+    }
+
+private:
+    int8_t m_pa_gain = 0;
+    bool   m_inner   = false;   // inside our own SX1262::setOutputPower() call
+};
+static GeigerSX1262 s_radio(&s_mod);
 static lorawan_status_t s_status;
 static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -611,19 +669,75 @@ static void exchange_end(void) { __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_C
     for (;;) vTaskDelay(portMAX_DELAY);
 }
 
-// Power + radio bring-up. Returns false on hardware failure (module parks
-// in LORAWAN_ST_HW_FAIL — never retried until reboot; the Geiger core is
-// never hostage to the radio).
-static bool radio_init(void) {
 #if HAL_HAS_LORA_FEM
+// V2.8.19: net TX gain of the Heltec V4's PA at low drive (Meshtastic's
+// heltec_v4 variant.h: +11 dB at 0-15 dBm in, compressing to +7 dB at 21 dBm).
+// Using the low-drive value errs on the low side at high drive.
+#define LORA_KCT_PA_GAIN_DB 11
+
+// V2.8.19: front-end type, probed once: -1 = not yet, 0 = GC1109 (or an
+// unclear reading), 1 = KCT8103L. Written only by the first
+// lorawan_fem_is_kct8103l() call (main task, before the worker exists), read
+// afterwards from any task.
+static volatile int8_t s_fem_kct8103l = -1;
+
+bool lorawan_fem_is_kct8103l(void) {
+    if (s_fem_kct8103l >= 0) return s_fem_kct8103l == 1;
     // VFEM: power to the LoRa front end, BEFORE any SPI traffic (V1.9
-    // precedent on the V4; ~100 ms settle).
+    // precedent on the V4; ~100 ms settle). The probe needs it powered.
     gpio_config_t vfem = {};
     vfem.pin_bit_mask = 1ULL << PIN_LORA_VFEM;
     vfem.mode = GPIO_MODE_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&vfem));
     gpio_set_level((gpio_num_t)PIN_LORA_VFEM, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
+    // Read-only probe: the V4.2's GC1109 has an internal pull-down on CSD
+    // (GPIO2), the V4.3's KCT8103L a pull-up — MeshCore's and Meshtastic's
+    // Heltec V4 support detect it the same way. GPIO2 is read as a plain
+    // input (ESP32 pulls off) before radio_init() drives it.
+    gpio_config_t probe = {};
+    probe.pin_bit_mask = 1ULL << PIN_LORA_FEM_EN;
+    probe.mode = GPIO_MODE_INPUT;
+    probe.pull_up_en = GPIO_PULLUP_DISABLE;
+    probe.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&probe));
+    vTaskDelay(pdMS_TO_TICKS(2));   // let a previously driven level decay
+    int highs = 0;
+    for (int i = 0; i < 5; i++) {
+        highs += gpio_get_level((gpio_num_t)PIN_LORA_FEM_EN);
+        esp_rom_delay_us(100);
+    }
+    ESP_LOGI(TAG, "front end: GPIO2 read HIGH %d/5 -> %s", highs,
+             highs == 5 ? "KCT8103L (Heltec V4.3)" : highs == 0 ? "GC1109 (Heltec V4.2)" :
+                          "unclear, treated as GC1109");
+    s_fem_kct8103l = (highs == 5) ? 1 : 0;
+    return s_fem_kct8103l == 1;
+}
+
+bool lorawan_fem_kct8103l_detected(void) { return s_fem_kct8103l == 1; }
+
+// The LNA mode radio_init() actually applied: lorawan_lna is read once there,
+// so a /config change only takes effect after a restart, and the log/status
+// labels must follow the applied mode, not the saved setting.
+static volatile bool s_lna_applied = false;
+
+bool lorawan_dl_rssi_includes_lna(void) {
+    return s_fem_kct8103l == 1 && s_lna_applied;
+}
+#else   // bare SX1262 (XIAO + Wio): no front end to probe
+bool lorawan_fem_is_kct8103l(void) { return false; }
+bool lorawan_fem_kct8103l_detected(void) { return false; }
+bool lorawan_dl_rssi_includes_lna(void) { return false; }
+#endif  // HAL_HAS_LORA_FEM
+
+// Power + radio bring-up. Returns false on hardware failure (module parks
+// in LORAWAN_ST_HW_FAIL — never retried until reboot; the Geiger core is
+// never hostage to the radio).
+static bool radio_init(void) {
+#if HAL_HAS_LORA_FEM
+    // V2.8.19: powers VFEM and, on the first call, probes the front-end type
+    // (usually already done by main.c before speaker_setup()).
+    const bool kct = lorawan_fem_is_kct8103l();
 
     // FEM_EN: always driven — the GC1109 must be enabled for RX (RadioLib
     // discussion #1665), so with LoRaWAN on there is no valid "FEM off"
@@ -634,12 +748,17 @@ static bool radio_init(void) {
     fe.pin_bit_mask = 1ULL << PIN_LORA_FEM_EN;
     fe.mode = GPIO_MODE_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&fe));
-    gpio_set_level((gpio_num_t)PIN_LORA_FEM_EN, 1);   // GC1109 CSD enable
-    ESP_LOGI(TAG, "FEM_EN (GPIO2) driven HIGH (GC1109 RX/TX enable)");
+    gpio_set_level((gpio_num_t)PIN_LORA_FEM_EN, 1);   // CSD enable (GC1109 and KCT8103L)
+    ESP_LOGI(TAG, "FEM_EN (GPIO2) driven HIGH (front end RX/TX enable)");
 
-    // FEM_PA stays opt-in: 28 dBm is a regulatory/power choice, not a
-    // hardware gate (GPIO46 is free on the V1.10 mainboard, see hal.h).
-    if (g_cfg.lorawan_high_power) {
+    // FEM_PA stays opt-in on the V4.2: 28 dBm is a regulatory/power choice,
+    // not a hardware gate (GPIO46 is free on the V1.10 mainboard, see hal.h).
+    // V2.8.19: on a V4.3 GPIO46 is unconnected and the KCT8103L always
+    // transmits through its PA (CTX below), so it is left alone there.
+    if (kct) {
+        if (g_cfg.lorawan_high_power)
+            ESP_LOGI(TAG, "28 dBm mode setting has no effect on a KCT8103L (always PA in TX)");
+    } else if (g_cfg.lorawan_high_power) {
         gpio_config_t pa = {};
         pa.pin_bit_mask = 1ULL << PIN_LORA_FEM_PA;
         pa.mode = GPIO_MODE_OUTPUT;
@@ -661,6 +780,15 @@ static bool radio_init(void) {
     // ends up configured identically. ConfigLoRa_t's defaults are the old
     // begin()'s defaults (434 MHz, 125 kHz, SF9, CR 4/7, private sync word,
     // 10 dBm, 8-symbol preamble); LoRaWANNode reconfigures freq/DR later.
+#if HAL_HAS_LORA_FEM
+    // V2.8.19: the KCT8103L's PA is always in the TX path, so the radio is
+    // programmed ~11 dB below the EIRP the LoRaWAN stack asks for (see
+    // GeigerSX1262). Set before begin(), which already sets a power.
+    if (kct) {
+        s_radio.setPaGain(LORA_KCT_PA_GAIN_DB);
+        ESP_LOGI(TAG, "KCT8103L: TX power compensated for the PA gain (%d dB)", LORA_KCT_PA_GAIN_DB);
+    }
+#endif
     s_radio.tcxoVoltage = HAL_LORA_TCXO_V;
     s_radio.useRegulatorLDO = false;          // DC-DC, as before
     ConfigLoRa_t lora_cfg;                    // all fields at their documented defaults
@@ -678,6 +806,34 @@ static bool radio_init(void) {
     // seeed_xiao_s3 variant (SX126X_RXEN 38).
     s_radio.setRfSwitchPins(PIN_LORA_RF_SW_RX, RADIOLIB_NC);
     ESP_LOGI(TAG, "RF switch: DIO2 + GPIO%d (RX high)", PIN_LORA_RF_SW_RX);
+#endif
+#if HAL_HAS_LORA_FEM
+    // V2.8.19: on a KCT8103L RadioLib drives CTX (GPIO5) through an RF-switch
+    // table next to DIO2 (= CPS): HIGH in TX (PA mode); in RX LOW = through
+    // the LNA (lorawan_lna on, the default) or HIGH = LNA bypass, for sites
+    // with strong transmitters nearby (Heltec wiki "LNA"); idle LOW. Before
+    // V2.8.19 GPIO5 sat LOW as the speaker's N leg, so the KCT8103L never
+    // entered PA mode and a V4.3 transmitted far below its rated power
+    // (measured: +70 dB at the gateway once CTX was driven).
+    if (kct) {
+        static const uint32_t ctx_pins[Module::RFSWITCH_MAX_PINS] = {
+            PIN_LORA_KCT_CTX, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC };
+        static const Module::RfSwitchMode_t ctx_lna[] = {
+            { Module::MODE_IDLE, { 0 } },
+            { Module::MODE_RX,   { 0 } },
+            { Module::MODE_TX,   { 1 } },
+            END_OF_MODE_TABLE };
+        static const Module::RfSwitchMode_t ctx_bypass[] = {
+            { Module::MODE_IDLE, { 0 } },
+            { Module::MODE_RX,   { 1 } },
+            { Module::MODE_TX,   { 1 } },
+            END_OF_MODE_TABLE };
+        const bool lna = g_cfg.lorawan_lna;
+        s_lna_applied = lna;
+        s_radio.setRfSwitchTable(ctx_pins, lna ? ctx_lna : ctx_bypass);
+        ESP_LOGI(TAG, "KCT8103L: GPIO%d = CTX via RadioLib (TX HIGH = PA, RX %s)",
+                 PIN_LORA_KCT_CTX, lna ? "LOW = LNA" : "HIGH = LNA bypass");
+    }
 #endif
     return true;
 }
@@ -1067,7 +1223,7 @@ static bool downlink_unusable(int16_t st) {
 
 // Classify one sendReceive() outcome under s_status_mux. House rule (memory:
 // no-blocking-calls-in-critical-section): time()/ESP_LOG/RadioLib getters
-// (s_radio.getRSSI()/getSNR() do a live SPI round-trip) are ALL called
+// (s_radio.packetStatus() does a live SPI round-trip) are ALL called
 // BEFORE taking the spinlock; only the plain-value stores happen inside it.
 //
 // V2.8.12: `st` > 0 is the RX window (1/2) a downlink arrived in — counted
@@ -1082,15 +1238,24 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
     float rssi = 0.0f, snr = 0.0f;
     bool have_dl = (st > 0);
     if (have_dl) {
-        rssi = s_radio.getRSSI();                 // SPI round-trip — before the lock
-        snr  = s_radio.getSNR();
+        // V2.8.19: RssiPkt, SignalRssiPkt and SNR from one status read (SPI
+        // round-trip — before the lock). The signal estimate follows the SNR
+        // on the line: at negative SNR RssiPkt is mostly the noise floor.
+        float signal = 0.0f;
+        s_radio.packetStatus(&rssi, &signal, &snr);
+        // V2.8.19: on a Heltec V4.3 with the LNA on, both readings include
+        // the LNA's gain (~24 dB measured), so the line says so at the end.
+        const char *lna = "";
+#if HAL_HAS_LORA_FEM
+        if (lorawan_dl_rssi_includes_lna()) lna = ", LNA on";
+#endif
         if (dl_len > 0) {
-            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u bytes, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB",
+            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u bytes, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
                      (int)st, (unsigned)ev->fPort, (unsigned)dl_len, (unsigned long)ev->fCnt,
-                     (double)rssi, (double)snr);
+                     (double)rssi, (double)snr, (double)signal, lna);
         } else {
-            ESP_LOGI(TAG, "downlink (RX%d): MAC commands only, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB",
-                     (int)st, (unsigned long)ev->fCnt, (double)rssi, (double)snr);
+            ESP_LOGI(TAG, "downlink (RX%d): MAC commands only, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
+                     (int)st, (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
         }
     }
 

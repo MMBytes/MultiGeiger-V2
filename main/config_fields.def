@@ -646,6 +646,11 @@ X_STR (lorawan_deveui,         CFG_LORA_EUI_MAX + 1, "lora_deveui",  "")
 X_STR (lorawan_joineui,        CFG_LORA_EUI_MAX + 1, "lora_joineui", "")
 X_STR (lorawan_appkey,         CFG_LORA_KEY_MAX + 1, "lora_appkey",  "")
 X_BOOL(lorawan_high_power,     "lora_hp",      false)
+// V2.8.19: Heltec V4.3 (KCT8103L front end) only — receive through the LNA
+// (true, as Meshtastic defaults) or bypass it, for sites with strong
+// transmitters nearby (Heltec wiki "LNA"). Ignored on a V4.2 (GC1109) and on
+// boards without a front end. Transmit always uses the PA on a V4.3.
+X_BOOL(lorawan_lna,            "lora_lna",     true)
 // V2.8.14: uplink data rate. 0 = ADR (the network picks DR and TX power —
 // default, right for most nodes); 1..6 = fixed DR0..DR5, ADR off (stationary
 // nodes with a known link). The uplink interval follows the DR's spreading

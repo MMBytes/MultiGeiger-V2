@@ -69,6 +69,7 @@
 #endif
 #include "config_form.h"       // V2.8.10 (C3b): /config POST parser + cross-field rules
                                // (the LoRa EUI/key checks moved there with it)
+#include "ota_guard.h"         // V2.8.20: confirm the running image before an update / restart
 
 static const char *TAG = "http";
 
@@ -2774,7 +2775,10 @@ static esp_err_t config_post(httpd_req_t *req) {
         ESP_LOGW(TAG, "config POST: invalid or out-of-range value(s) NOT saved (kept prior): %s",
                  rejected);
     }
-    if (restart_after_save) main_request_restart();
+    if (restart_after_save) {
+        (void)ota_guard_confirm_now("restart after a settings save");   // V2.8.20: see reboot_post()
+        main_request_restart();
+    }
     ESP_LOGI(TAG, "config saved via POST — %s",
              restart_after_save ? "restart flagged" : "no restart requested");
 
@@ -2809,6 +2813,9 @@ static esp_err_t reboot_post(httpd_req_t *req) {
     log_access(req, "POST /reboot");
     if (!check_auth(req)) return ESP_OK;
     if (!check_same_origin(req)) return ESP_OK;
+    // V2.8.20: a deliberate restart must not undo a good update — confirm a
+    // still-unconfirmed image first (a reset during probation rolls back).
+    (void)ota_guard_confirm_now("reboot");
     main_request_restart();
     ESP_LOGW(TAG, "manual reboot requested via /reboot");
     const char *ok =
@@ -2852,6 +2859,7 @@ static esp_err_t lorawan_reset_post(httpd_req_t *req) {
     bool wipe_nonces = (r > 0) && (strstr(body, "wipe_nonces=") != NULL);
 
     lorawan_forget_session(wipe_nonces);
+    (void)ota_guard_confirm_now("LoRaWAN reset");   // V2.8.20: see reboot_post()
     main_request_restart();
     ESP_LOGW(TAG, "LoRaWAN session reset requested via /lorawan_reset (wipe_nonces=%d)",
              (int)wipe_nonces);
@@ -3132,6 +3140,14 @@ static esp_err_t update_post(httpd_req_t *req) {
 }
 
 static esp_err_t update_post_inner(httpd_req_t *req) {
+    // V2.8.20: on a rollback bootloader esp_ota_begin() refuses while the
+    // running image is still PENDING_VERIFY. Confirm it first — and before
+    // the service teardown below, so a failed confirm leaves everything up.
+    if (!ota_guard_confirm_now("firmware update")) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "could not confirm the running firmware - update not started");
+        return ESP_OK;
+    }
     // V2.4.13: reclaim heap BEFORE the OTA receive/write loop. Heltec V2
     // (4MB) with V2.4.11+ ran at min_free ~13 KB at steady state (MQTT TLS
     // session + esp_crt_bundle + WiFi stack); not enough headroom for

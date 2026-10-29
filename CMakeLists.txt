@@ -146,6 +146,15 @@ else()
     message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | seeed_xiao_esp32s3_wio | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram")
 endif()
 
+# V2.8.20: local OTA-rollback TEST images only (never CI or a release):
+# `idf.py -B build_<board>_tf1 -DBOARD=<board> -DOTA_TEST_FAULT=1 build`
+# makes ota_guard.c abort at uptime 60 s, inside the probation period, so a
+# rollback bootloader must return to the previous image. Use a separate
+# build dir: the value stays in that dir's CMakeCache.
+if(DEFINED OTA_TEST_FAULT)
+    add_compile_definitions(OTA_TEST_FAULT=${OTA_TEST_FAULT})
+endif()
+
 # Per-board sdkconfig cache file. Without this, both builds share a single
 # `sdkconfig` cache and the second-board build fails with a target-mismatch
 # error from targets.cmake.

@@ -9,6 +9,65 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.20 — An OTA firmware update that crashes within 4 minutes is undone by itself
+
+For every board. Until now a firmware image that installed fine but then
+crashed at every start kept crashing until the node was flashed over USB.
+
+1. **A new firmware now has to confirm itself before it counts as good.**
+   It does so 2 minutes after the boot access-point window closes (the
+   window is 120 s, longer while a client is connected to the node's own
+   access point), so about 4 minutes after the update in the usual case
+   (`ota: probation period over (boot AP window + 2 min) — confirming the
+   running firmware`). A restart started from the web interface during that
+   time (Reboot, saving /config with a restart, LoRaWAN reset) or the upload
+   of the next update confirms it first, and the log says so. A restart for
+   a re-issued HTTPS certificate (new IP address) waits until the firmware
+   is confirmed. The one condition is that the node's web server is running
+   (otherwise the log says `web server not running — firmware NOT
+   confirmed`). WiFi, internet access, NTP, uploads and sensors are
+   deliberately not part of the check: they depend on the site, not on the
+   firmware.
+2. **If the new firmware does not get that far, the node goes back to the
+   previous one.** A crash, a watchdog reset, a heap-guard restart or a
+   power cut before the confirmation counts as a failed start; at the next
+   start the bootloader runs the previous firmware again, and the boot log
+   says so on every start until the next update (`ota: firmware V… in ota_0
+   was ROLLED BACK (it did not confirm — crash, watchdog or power loss
+   during its first minutes) — running the previous image`). The crash dump
+   of the failed firmware is kept and can still be downloaded.
+3. **The rollback needs a new bootloader, and only a full USB flash
+   installs it** (the web flasher, the board's merged image, or all four
+   files of its release set). An over-the-air update never replaces the
+   bootloader, because a power cut while writing it could leave the node
+   unable to start at all.
+   Nodes updated over the air get the confirmation step but keep their old
+   bootloader, which does not roll back; their log says `state=new — this
+   node's bootloader does not roll back` after an update. Nothing changes
+   for them otherwise.
+4. **Rollback tracking starts with the first update made by V2.8.20.** The
+   update from an earlier version to V2.8.20 itself is written by the old
+   firmware, which does not mark it for confirmation; the boot log then
+   shows `state=undefined — installed by a firmware without rollback
+   tracking, nothing to confirm`.
+5. **On a node with the new bootloader, an over-the-air downgrade to a
+   version before V2.8.20 is undone at its next restart.** Those versions
+   cannot confirm themselves, so the bootloader treats the first restart as
+   a failed start and goes back to the newer firmware. To go back to an
+   older version on such a node, flash it over USB.
+6. **Not covered:** a firmware that keeps running but breaks WiFi, or one
+   that hangs without crashing. Both still need the boot access point or a
+   power cycle, as before.
+
+Verified on a FeatherS3-D: with the old bootloader, updates from V2.8.19
+and between two V2.8.20 test builds (confirmation after 241 s, and early
+on a web-interface restart); with the new bootloader, a test build that
+crashes 60 s after start was rolled back to the previous firmware, a good
+build stayed after a restart, and a downgrade to V2.8.19 was undone at
+its first restart.
+
+---
+
 ## V2.8.19 — Heltec V4.3 boards transmit through their power amplifier
 
 For the LoRaWAN boards. Points 1–3 concern the Heltec WiFi LoRa 32 V4 only;

@@ -47,6 +47,7 @@
 #include "history.h"         // V2.8.8: history.c compiled in unchanged (test/shim + fakes below)
 #include "tube.h"            // V2.8.8: real prototypes, so the fakes below must match them
 #include "tube_pcnt.h"
+#include "ota_guard_logic.h"  // V2.8.20: OTA rollback probation rule
 
 static int g_failures = 0;
 
@@ -2893,6 +2894,50 @@ static int test_live_falling_total_restarts(void) {
     return 1;
 }
 
+// --- V2.8.20: OTA rollback probation rule (ota_guard_logic) ---
+
+// Only an image on an OTA slot that is still unconfirmed (NEW written by a
+// V2.8.20+ updater on an old bootloader, PENDING_VERIFY on a rollback
+// bootloader) needs confirming. UNDEFINED (installed by a firmware without
+// rollback tracking), VALID and factory never do.
+static int test_ota_guard_needs_confirm_states(void) {
+    EXPECT_TRUE(ota_guard_needs_confirm(true, OTA_GUARD_ST_NEW));
+    EXPECT_TRUE(ota_guard_needs_confirm(true, OTA_GUARD_ST_PENDING));
+    EXPECT_TRUE(!ota_guard_needs_confirm(true, OTA_GUARD_ST_VALID));
+    EXPECT_TRUE(!ota_guard_needs_confirm(true, OTA_GUARD_ST_UNDEFINED));
+    EXPECT_TRUE(!ota_guard_needs_confirm(true, OTA_GUARD_ST_OTHER));
+    // factory (not an OTA slot): never, whatever the state reads
+    EXPECT_TRUE(!ota_guard_needs_confirm(false, OTA_GUARD_ST_NEW));
+    EXPECT_TRUE(!ota_guard_needs_confirm(false, OTA_GUARD_ST_PENDING));
+    EXPECT_TRUE(!ota_guard_needs_confirm(false, OTA_GUARD_ST_VALID));
+    return 1;
+}
+
+// Probation ends 120 s after the boot AP window closed (or would have).
+static int test_ota_guard_probation_window_plus_120s(void) {
+    const int64_t over = 200LL * 1000000LL;
+    EXPECT_TRUE(!ota_guard_probation_over(over + 119999999LL, over));
+    EXPECT_TRUE(ota_guard_probation_over(over + 120000000LL, over));
+    EXPECT_TRUE(ota_guard_probation_over(over + 999000000LL, over));
+    EXPECT_TRUE(!ota_guard_probation_over(over - 1000000LL, over));  // clock before the latch
+    // window not over yet (0 = not latched): never, however late
+    EXPECT_TRUE(!ota_guard_probation_over(999000000LL, 0));
+    return 1;
+}
+
+// A failed probation confirm is retried once a minute, not on every main-loop tick.
+static int test_ota_guard_retry_spacing_60s(void) {
+    EXPECT_TRUE(ota_guard_retry_due(0, 0));   // nothing failed yet: due at once
+    EXPECT_TRUE(ota_guard_retry_due(320LL * 1000000LL, 0));
+    const int64_t failed = 320LL * 1000000LL;
+    const int64_t next = ota_guard_next_retry_us(failed);
+    EXPECT_TRUE(next == failed + 60LL * 1000000LL);
+    EXPECT_TRUE(!ota_guard_retry_due(failed, next));
+    EXPECT_TRUE(!ota_guard_retry_due(next - 1, next));
+    EXPECT_TRUE(ota_guard_retry_due(next, next));
+    return 1;
+}
+
 // V2.8.8 (review 2.1 A): optional name filter. `run [substring]` runs only the
 // tests whose function name contains the substring (e.g. `run history_`),
 // for iterating on one area. A filter that matches nothing exits 2, so a typo
@@ -3170,6 +3215,11 @@ int main(int argc, char **argv) {
     RUN(test_form_revc_fixed_board_stores_3);
     RUN(test_form_lora_hp_forced_off_without_fem);
     RUN(test_form_lora_hp_kept_with_fem);
+
+    printf("== ota_guard_logic (V2.8.20) ==\n");
+    RUN(test_ota_guard_needs_confirm_states);
+    RUN(test_ota_guard_probation_window_plus_120s);
+    RUN(test_ota_guard_retry_spacing_60s);
 
     printf("\n");
     if (g_ran == 0) {

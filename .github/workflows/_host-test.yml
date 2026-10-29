@@ -41,7 +41,7 @@ env:
   # include; BOARD_HELTEC_V2 only lets hal.h resolve (pin/capability macros,
   # unused by the tested code). Keep in step with _test.cmd.
   HOST_TEST_CFLAGS: "-I test/shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1"
-  HOST_TEST_SRCS: "test/test_main.c main/history.c main/config_form.c"
+  HOST_TEST_SRCS: "test/test_main.c main/history.c main/config_form.c main/ota_guard_logic.c"
 
 # Read-only token: this workflow only checks out and runs a binary.
 permissions:

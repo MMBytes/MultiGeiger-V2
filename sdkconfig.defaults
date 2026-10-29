@@ -11,6 +11,16 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # CONFIG_PARTITION_TABLE_SINGLE_APP is not set
 
+# V2.8.20: OTA rollback. The app marks a fresh image NEW; a bootloader built
+# with this option boots it as PENDING_VERIFY and, if it resets before
+# ota_guard.c confirms it (boot AP window + 2 min, or a user update/restart
+# from the web UI), returns to the previous image. The bootloader part only
+# reaches a node through a USB / web-flasher full flash; OTA-only nodes keep
+# their old bootloader and simply get the (harmless) confirm logic.
+# NOTE: defaults only fill MISSING keys — delete a local sdkconfig.<board>
+# that already says "is not set" before building.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # Note: CONFIG_LWIP_DHCP_SET_BROADCAST_FLAG existed in IDF 5.x; removed in 6.0.
 # lwIP's dhcp.c now hard-codes "no broadcast flag" (comment: "we don't need the
 # broadcast flag since we can receive unicast traffic before being fully

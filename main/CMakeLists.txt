@@ -55,6 +55,8 @@ idf_component_register(
         "display_tft.c"
         "neopixel.c"
         "led.c"
+        "ota_guard.c"          # V2.8.20: OTA rollback, app side (confirm after probation)
+        "ota_guard_logic.c"    # V2.8.20: pure probation rule (host-tested)
         ${GEIGER_LORAWAN_SRCS}
     INCLUDE_DIRS "."
     REQUIRES

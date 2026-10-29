@@ -35,7 +35,7 @@ REM V2.8.8: same flags and sources as .github/workflows/_host-test.yml
 REM (HOST_TEST_CFLAGS / HOST_TEST_SRCS) - keep the two in step. test\shim
 REM stands in for the ESP-IDF headers that main\history.c includes. V2.8.10:
 REM main\config_form.c (the /config form parser) needs no shim.
-gcc -I test\shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1 -o test\run.exe test\test_main.c main\history.c main\config_form.c
+gcc -I test\shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11 -g -O1 -o test\run.exe test\test_main.c main\history.c main\config_form.c main\ota_guard_logic.c
 if errorlevel 1 (
     echo Build failed.
     exit /b 1

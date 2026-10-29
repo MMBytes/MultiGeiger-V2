@@ -54,6 +54,7 @@
 #include "tube.h"
 #include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
 #include "tube_pcnt.h"   // V2.5.16: PCNT pulse-width comb (V2.7.4: always on)
+#include "ota_guard.h"   // V2.8.20: OTA rollback — confirm the running image after probation
 #include "util.h"
 #include "version.h"
 
@@ -1442,6 +1443,10 @@ void app_main(void) {
     // operator inspects the device.
     coredump_init();
 
+    // V2.8.20: which image runs, whether it still has to be confirmed, and
+    // whether a previous update was rolled back — early, for the same reason.
+    ota_guard_boot_report();
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -2015,8 +2020,10 @@ void app_main(void) {
         // (design D13) when https_enable is off: there is no credential to
         // reconcile and a re-issue reboot would be pure surprise.
         static bool tls_reconciled = false;
+        // V2.8.20: not while a fresh image is still on probation — the
+        // re-issue reboots, and a reset before the confirm rolls it back.
         if (!tls_reconciled && g_cfg.https_enable && n_got_ip > 0 && ntp_time_valid()
-            && !main_ota_in_progress()) {
+            && !main_ota_in_progress() && ota_guard_settled()) {
             tls_reconciled = true;
             esp_netif_t *sta_if = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
             esp_netif_ip_info_t ipi = { 0 };
@@ -2223,6 +2230,14 @@ void app_main(void) {
                 s_ap_deferring = false;
             }
         }
+
+        // V2.8.20: OTA rollback probation — the image is confirmed 2 min
+        // after the boot AP window closes, or would have closed (window
+        // elapsed and no AP client holding it). One rule for every mode:
+        // ap_hold_for_client is only evaluated where a timed close exists
+        // and is false elsewhere, which is exactly "would have closed".
+        ota_guard_tick(esp_timer_get_time(),
+                       (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US && !ap_hold_for_client);
 
         if (s_standalone_ap_on_latched) {
             // V2.6.23: generalized keep-AP-on (was SD-standalone-only in

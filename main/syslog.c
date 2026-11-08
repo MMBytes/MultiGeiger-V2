@@ -62,6 +62,8 @@
 #include "fuel_gauge.h"        // fuel_gauge_chip_ready / fuel_gauge_present
 #include "tube.h"              // tube_is_enabled
 #include "applog.h"            // V2.8.17: applog_publish_mark / applog_stream_* — boot replay
+#include "lorawan.h"           // V2.8.21: lorawan_get_status / lorawan_region_name — LoRaWAN banner line
+#include "lorawan_boot_line.h" // V2.8.21: lw_boot_line
 
 static const char *TAG = "syslog";
 
@@ -277,6 +279,45 @@ static void banner_sensors(void) {
     BANNER_PACE();
 }
 
+// V2.8.21: LoRaWAN start of this boot as one line, verdict first: session
+// resumed, joined (DR/SF/frequency, RX window) or still joining (last error in
+// words), plus region, ADR / fixed DR and the TX power range. The join runs in
+// the first seconds after boot, before syslog exists, so the per-attempt lines
+// may never reach the server (same gap as the TLS line below). Boards without
+// the radio log nothing. lorawan_get_status() is safe from the main task.
+static void banner_lorawan(void) {
+#if HAL_HAS_LORAWAN
+    lorawan_status_t st;
+    lorawan_get_status(&st);
+    lw_boot_t b;
+    memset(&b, 0, sizeof(b));
+    switch (st.state) {
+        case LORAWAN_ST_DISABLED:  b.kind = LW_BOOT_OFF;       break;
+        case LORAWAN_ST_NO_CONFIG: b.kind = LW_BOOT_NO_CONFIG; break;
+        case LORAWAN_ST_HW_FAIL:   b.kind = LW_BOOT_HW_FAIL;   break;
+        case LORAWAN_ST_JOINING:   b.kind = LW_BOOT_JOINING;   break;
+        case LORAWAN_ST_JOINED:    b.kind = st.boot_resumed ? LW_BOOT_RESUMED : LW_BOOT_JOINED; break;
+    }
+    b.region     = lorawan_region_name(st.region);
+    b.subband    = st.subband;
+    b.dev_addr   = st.dev_addr;
+    b.attempts   = st.join_attempts;
+    b.last_error = st.join_last_error;
+    b.ok_dr      = st.join_ok_dr;
+    b.ok_sf      = st.join_ok_sf;
+    b.ok_khz     = st.join_ok_khz;
+    b.ok_window  = st.join_ok_window;
+    b.adr        = !st.fixed_dr;
+    b.fixed_dr   = st.fixed_dr_value;
+    b.pwr_min    = st.tx_power_min;
+    b.pwr_max    = st.tx_power_max;
+    char line[200];
+    lw_boot_line(line, sizeof(line), &b);
+    ESP_LOGI("boot", "LoRaWAN: %s", line);
+    BANNER_PACE();
+#endif
+}
+
 // --- V2.8.7: boot banner, callable with or without syslog -------------------
 // Until V2.8.6 these lines were logged only from inside syslog_init(), so a
 // node with syslog off (or a syslog host that never resolves) never logged
@@ -368,6 +409,7 @@ void syslog_boot_banner(void) {
     // the stubs make this "HTTP :80 — n/a".
     ESP_LOGI("boot", "TLS: %s — %s", http_server_transport_str(), tls_cert_boot_summary());
     BANNER_PACE();
+    banner_lorawan();
     s_banner_logged = true;
 }
 

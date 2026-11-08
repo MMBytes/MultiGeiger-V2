@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /** @brief Uplink interval per LoRa spreading factor, in ms.
  *
@@ -73,28 +74,74 @@ static inline bool lw_sched_fixed_dr(uint8_t setting, uint8_t *dr) {
     return true;
 }
 
-/** @brief Should a frame received in a Class A window be handed to RadioLib?
+/** @brief Would RadioLib 8.0 keep a frame it read out of a Class A window?
  *
- *  RadioLib (7.8.1) stops a frame's NbTrans repeats, and skips RX2, as soon
- *  as RX1 received ANY frame — before it has looked at it. On a busy channel
- *  that is often someone else's downlink, or our own with bit errors (LoRaWAN
- *  downlinks carry no PHY CRC). Only frames that can be ours count:
- *  @param joined  session active: accept data downlinks (MType 3/5, LoRaWAN
- *                 §4.2.1) addressed to exactly @p own_addr; while joining,
- *                 accept only join accepts (MType 1, encrypted, so the
- *                 addressee can't be checked here).
- *  @param frame   first bytes of the frame (MHDR, then DevAddr little-endian)
+ *  Mirrors LoRaWANNode::checkDownlink() (LoRaWAN.cpp, RadioLib 8.0.0): a
+ *  frame it rejects there is dropped silently — the window counts as empty,
+ *  RX2 still opens and the NbTrans repeats go on. The RX-window observer uses
+ *  this to mark such a frame "ignored" in the node log. (checkDownlink()'s
+ *  length limits — over 255 B, too short, over the data rate's size — are
+ *  checked before the frame is read, so the observer never sees those bytes.)
+ *  @param joined  session active: keep data downlinks (MType 3/5) addressed
+ *                 to exactly @p own_addr and at least MHDR + FHDR + FOpts +
+ *                 MIC long; while joining, keep only join accepts (MType 1)
+ *                 of 17 or 33 B (encrypted, so the addressee can't be checked).
+ *  @param frame   the frame as read (MHDR, DevAddr little-endian, FCtrl, ...)
  *  @param len     frame length in bytes
+ *  @return true if RadioLib passes the frame on to its parser.
  */
 static inline bool lw_sched_frame_is_ours(bool joined, uint32_t own_addr, const uint8_t *frame,
                                           size_t len) {
     if (frame == NULL || len < 1) return false;
     const uint8_t mtype = (uint8_t)(frame[0] >> 5);
-    if ((frame[0] & 0x03u) != 0) return false;   // Major != LoRaWAN R1
     if (!joined) return mtype == 1 && (len == 17 || len == 33);   // join accept sizes
     if (mtype != 3 && mtype != 5) return false;
-    if (len < 12) return false;                   // MHDR + FHDR(7) + MIC(4) minimum
+    if (len < 6) return false;                    // no FCtrl byte to read
+    // MHDR 1 + DevAddr 4 + FCtrl 1 + FCnt 2 + FOpts + MIC 4
+    if (len < 12u + (size_t)(frame[5] & 0x0Fu)) return false;
     const uint32_t addr = (uint32_t)frame[1] | ((uint32_t)frame[2] << 8) |
                           ((uint32_t)frame[3] << 16) | ((uint32_t)frame[4] << 24);
     return addr == own_addr;
+}
+
+/** @brief The "next LoRaWAN uplink" line (V2.8.21, user request: the node log
+ *         says WHEN the next uplink comes, not only the interval). main.c logs
+ *         it after every upload round with @p duty_s 0 (schedule only); the
+ *         LoRaWAN worker logs it again after the round's last exchange when
+ *         the duty-cycle limiter holds the next uplink past that round
+ *         (lorawan.cpp, log_duty_hold()). "about": the uplink can still wait a
+ *         few seconds for a WiFi transfer.
+ *  @param in_s  seconds until the next round (whole minutes from 60 s on, rounded)
+ *  @param hh    local hour of that moment, or < 0 if the clock is not set yet
+ *               (a LoRaWAN-only node may still read 1970 — no time is shown then)
+ *  @param sf    the spreading factor the interval follows, 0 = not known (no tail)
+ *  @param duty_s seconds until RadioLib's duty-cycle limiter allows the next uplink
+ *               (0 = no wait). If it outlasts @p in_s, the uplink comes then, not at
+ *               the round: the line says so, and hh/mm/ss must be THAT moment.
+ *  @return the snprintf() length. */
+static inline int lw_next_uplink_line(char *out, size_t n, uint32_t in_s, int hh, int mm, int ss, uint8_t sf,
+                                      uint32_t duty_s) {
+    if (out == NULL || n == 0) return 0;
+    const bool duty = duty_s > in_s;
+    const uint32_t eff_s = duty ? duty_s : in_s;
+    char in[16];
+    if (eff_s < 60) snprintf(in, sizeof(in), "%lu s", (unsigned long)eff_s);
+    else            snprintf(in, sizeof(in), "%lu min", (unsigned long)((eff_s + 30u) / 60u));
+    char round[16];
+    if (in_s < 60) snprintf(round, sizeof(round), "%lu s", (unsigned long)in_s);
+    else           snprintf(round, sizeof(round), "%lu min", (unsigned long)((in_s + 30u) / 60u));
+    char sched[16] = "";
+    if (sf) snprintf(sched, sizeof(sched), "SF%u schedule", (unsigned)sf);
+    char why[64] = "";   // "duty-cycle wait; upload round in " (33) + round (<= 15) + ", "
+    if (duty) snprintf(why, sizeof(why), "duty-cycle wait; upload round in %s%s", round, sf ? ", " : "");
+    if (hh < 0) {
+        return snprintf(out, n, "next LoRaWAN uplink in about %s (%s%s%sclock not set yet)", in, why, sched,
+                        (sf || duty) ? "; " : "");
+    }
+    if (duty) {
+        return snprintf(out, n, "next LoRaWAN uplink at about %02d:%02d:%02d (in %s: %s%s)", hh, mm, ss, in, why,
+                        sched);
+    }
+    return snprintf(out, n, "next LoRaWAN uplink at about %02d:%02d:%02d (in %s%s%s)", hh, mm, ss, in,
+                    sf ? ", " : "", sched);
 }

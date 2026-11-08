@@ -63,6 +63,16 @@ typedef struct {
     uint8_t  cycle_sf;
     bool     fixed_dr;         // true = fixed data rate from /config (ADR off)
     uint8_t  fixed_dr_value;   // that DR, valid if fixed_dr
+    // V2.8.21: this boot's start, for the "boot: LoRaWAN:" banner line
+    // (lorawan_boot_line.h). Kept apart from last_error, which uplinks overwrite.
+    bool     boot_resumed;     // session restored from NVS (no join request sent)
+    int16_t  join_last_error;  // last failed join attempt's RadioLib code (0 = none)
+    uint8_t  join_ok_dr;       // accepted attempt: DR (0xFF = fixed plan, not set)
+    uint8_t  join_ok_sf;       //   spreading factor seen on air
+    uint8_t  join_ok_window;   //   RX window of the accept (1/2, 0 = unknown)
+    uint32_t join_ok_khz;      //   uplink frequency, kHz
+    int8_t   tx_power_min;     // radio's TX power range after any PA offset, dBm
+    int8_t   tx_power_max;     //   (min == max = not known yet)
 } lorawan_status_t;
 
 #if !HAL_HAS_LORAWAN
@@ -75,6 +85,7 @@ static inline bool lorawan_is_idle(void) { return true; }
 static inline bool lorawan_on_air(void) { return false; }
 static inline bool lorawan_suspend(uint32_t timeout_ms) { (void)timeout_ms; return true; }
 static inline uint32_t lorawan_cycle_interval_ms(void) { return 0; }
+static inline void lorawan_note_next_round(uint32_t in_ms) { (void)in_ms; }
 static inline void lorawan_get_status(lorawan_status_t *out) {
     if (out) {
         *out = (lorawan_status_t){0};
@@ -92,8 +103,9 @@ static inline bool lorawan_dl_rssi_includes_lna(void) { return false; }
 /** @brief Create the LoRaWAN task. Radio init happens on the task, not here. */
 void lorawan_setup(void);
 
-/** @brief Enqueue one uplink attempt. Non-blocking; drops if the task is
- *         still busy (joining or mid-uplink) on the previous cycle.
+/** @brief Hand the worker one uplink snapshot. Non-blocking, freshest wins:
+ *         a snapshot the worker has not picked up yet (it is joining, or
+ *         still in the previous exchange) is overwritten by this one.
  */
 void lorawan_transmit(const lorawan_snapshot_t *snap);
 
@@ -133,6 +145,14 @@ bool lorawan_suspend(uint32_t timeout_ms);
  *  one atomic read).
  */
 uint32_t lorawan_cycle_interval_ms(void);
+
+/** @brief When the next upload round starts (V2.8.21), so the worker can tell
+ *         after an exchange whether RadioLib's duty-cycle limiter holds the
+ *         next uplink past that round — and log the later time then. main.c
+ *         calls it wherever it logs "next LoRaWAN uplink" (every round and on
+ *         an interval change). Safe from any task (short critical section).
+ *  @param in_ms  ms from now until the next round. */
+void lorawan_note_next_round(uint32_t in_ms);
 
 /** @brief Read the current join/uplink status snapshot. Safe from any task. */
 void lorawan_get_status(lorawan_status_t *out);

@@ -9,6 +9,76 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.21 — LoRaWAN on RadioLib 8.0, and a node log that explains every exchange
+
+For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).
+Other boards are unchanged.
+
+1. **The LoRaWAN stack is RadioLib 8.0 (was 7.8.1).**
+2. **Updating a LoRaWAN node from V2.8.20 or older starts a new session.**
+   RadioLib 8.0 stores the session and the DevNonce history in a new format,
+   and the old one is not converted. The node joins again after the update,
+   and its DevNonce count starts at 0, so in The Things Network first click
+   "Reset used DevNonces" on the device (otherwise TTN rejects the join
+   requests). For the same reason, a node that ran V2.8.21 and goes back to
+   V2.8.20 or older (by hand, or by V2.8.20's own crash rollback) joins again,
+   usually without another DevNonce reset; V2.8.21 removes the old session
+   from flash once its own session is running, so the old firmware can't
+   resume a session the network has dropped.
+3. **Heltec V4.3: the power amplifier's gain is now compensated by RadioLib**
+   (its output power offset) instead of by this firmware — the same 11 dB,
+   the same power on air (checked on a V4.3: identical gateway level, and a
+   30 dBm AU915 join accepted). The boot log shows the resulting range:
+   `KCT8103L PA: TX power range 2..33 dBm (radio set 11 dB lower,
+   compensating the PA gain)`.
+4. **Both boards receive with the radio's boosted gain** (about 2 dB more
+   sensitivity for about 1 mA more while receiving), instead of RadioLib's
+   power-saving default: `SX1262: RX boosted gain on (…)`.
+5. **The node log explains each exchange on its own**, without the network
+   or gateway console:
+   - With NbTrans > 1 the `uplink OK` line lists each repeat's channel
+     (`867.9/868.3/868.1 MHz`, `TX=2/3` = sent / repeats asked for), and the
+     `rx windows:` line after it says what each repeat's receive windows saw
+     and why fewer repeats went out (`stopped after 2 of 3: valid downlink in
+     RX1 of #2 — a downlink ends the repeats (LoRaWAN)`). A downlink for
+     another device is marked `ignored, repeats go on`.
+   - Every RadioLib error code comes with words, e.g. `uplink failed: -4
+     (payload too long for this data rate, even without MAC answers)`.
+   - `uplink interval now 22 min (SF10 schedule, …)` after a join and
+     whenever the data rate changes the interval — a long wait for the first
+     uplink after a slow-data-rate join reads as the schedule, not a hang.
+   - Every upload round ends with when the next uplink goes out:
+     `next LoRaWAN uplink at about 18:02:53 (in 4 min, SF7 schedule)`. When
+     the duty-cycle limit holds it past the next round, a second line after
+     that round's LoRaWAN exchange gives the later time and says why
+     (`in 3 min: duty-cycle wait; upload round in 1 min, SF12 schedule`).
+     While the node is still joining, the line says so instead: `LoRaWAN
+     still joining — the first uplink follows the join, not the upload
+     round`.
+   - A wait before an exchange names the WiFi transfer it waited for
+     (`waited 4.5 s for the FTPS log upload to finish`).
+   - A new boot banner line sums up the LoRaWAN start: `boot: LoRaWAN:
+     session resumed — DevAddr …, region AU915 sub-band 2, ADR, TX power
+     2..33 dBm` (or joined / joining with the last error / off).
+   - A network time answer that arrives after NTP has synced is no longer
+     just "ignored": the line shows how far the two clocks differ.
+6. **A frame too long for its data rate counts as a failed uplink.** RadioLib
+   8.0 now tells two cases apart: the frame alone is too long for this data
+   rate (`uplink failed: -4 (payload too long for this data rate, even
+   without MAC answers)`), or it fits but not together with the queued MAC
+   answers (those are sent alone first, as before). Until now the first case
+   was treated like the second.
+7. **EU868: the duty-cycle limit is the band's 1 % again** (36 s of air time
+   per hour), not RadioLib's stricter 1/128 (28 s). RadioLib starts every
+   session at 1/128 and sets it back on every restore. The node now sets the
+   band value after joining or resuming, unless the network sent its own
+   limit. At SF12 the wait before the port 2 frame drops from about 3 min to
+   about 2.5 min. The log shows the limit after each join or resume:
+   `duty-cycle limit: 36.0 s of air time per hour (1.00 %, band default)`
+   (`none in AU915` on bands without one).
+
+---
+
 ## V2.8.20 — An OTA firmware update that crashes within 4 minutes is undone by itself
 
 For every board. Until now a firmware image that installed fine but then

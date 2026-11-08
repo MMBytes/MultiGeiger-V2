@@ -28,332 +28,82 @@ extern "C" {
 #include "hal.h"
 #include "lorawan.h"
 #include "lorawan_codec.h"
-#include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR, frame filter
+#include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR
+#include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + its log text
 #include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
 #include "transmission.h"    // tx_is_idle()
 #include "log_ftp.h"         // log_ftp_is_busy()
 #include "tube.h"            // tube_isr_service_installed()
 #include "config.h"
-#include "applog.h"
 #include "ntp.h"       // ntp_boot_epoch() — "has SNTP ever synced" gate for time sync
 #include "version.h"   // VERSION_STR -> s_version_packed (lw_pack_version)
 }
 
 static const char *TAG = "lorawan";
 
-// --- RX-window observer (V2.8.12) ---------------------------------------------
+// --- RX-window observer --------------------------------------------------------
 //
 // Passive record of what the SX1262 did around ONE uplink or join request,
-// gathered in the HAL's spiTransfer() from the commands RadioLib already
-// sends — nothing is added to, or changed in, RadioLib's SPI traffic.
-// Motivation (2026-10-18 XIAO EU868 debug): a missed downlink looked the same
-// in the log whether the gateway sent nothing, the frame was too weak, or the
-// SX126x RX timer aborted it after the preamble; telling those apart took
-// throwaway trace images. One summary line per exchange now does it in
-// production.
-//
-// Only the worker task drives RadioLib, so spiTransfer() — and therefore
-// every write below — runs on that task; no locking needed. Armed by
-// rxobs_begin() right before activateOTAA()/sendReceive(), disarmed after.
-// SX126x opcodes/bit values: SX1261/2 datasheet §13 (mirrored in RadioLib's
-// SX126x.h RADIOLIB_SX126X_CMD_* / RADIOLIB_SX126X_IRQ_*).
-#define OBS_CMD_SET_TX        0x83   // SetTx
-#define OBS_CMD_SET_RX        0x82   // SetRx — 24-bit timeout, 15.625 µs/LSB
-#define OBS_CMD_SET_FREQ      0x86   // SetRfFrequency — 32-bit, F = raw * 32 MHz / 2^25
-#define OBS_CMD_SET_MOD       0x8B   // SetModulationParams — byte 1 = LoRa SF
-#define OBS_CMD_GET_IRQ       0x12   // GetIrqStatus — reply bytes 2..3 = IRQ flags
-#define OBS_CMD_CLEAR_IRQ     0x02   // ClearIrqStatus — first one after SetTx = TX end
-#define OBS_CMD_READ_BUFFER   0x1E   // ReadBuffer — reply: 2 cmd + 1 status byte, then the
-                                     // FIFO data (Module::SPItransferStream layout)
-#define OBS_IRQ_RX_DONE       0x0002
-#define OBS_IRQ_HEADER_VALID  0x0010
-#define OBS_IRQ_HEADER_ERR    0x0020
-#define OBS_IRQ_CRC_ERR       0x0040
-#define OBS_IRQ_TIMEOUT       0x0200
-
-typedef struct {
-    int64_t  open_us;        // esp_timer time of the SetRx that opened the window
-    uint32_t timeout_us;     // SX126x RX timeout programmed for it
-    uint32_t freq_raw;       // SetRfFrequency word in force when it opened
-    uint8_t  sf;             // LoRa SF in force when it opened
-    uint16_t irq;            // OR of the GetIrqStatus replies of the CURRENT repeat
-    uint16_t best_irq;       // most informative earlier repeat (rxobs_rank()); valid
-    bool     has_best;       //   only if has_best — see rxobs_fold()
-    // Frame read out of the FIFO in this window (RadioLib's readData() after
-    // RX_DONE): its first 5 bytes are the plaintext MHDR + DevAddr of a data
-    // downlink, enough to tell "for us" from "someone else's" from "ours,
-    // corrupted" — LoRaWAN downlinks carry NO PHY CRC, so a marginal frame can
-    // reach RX_DONE as garbage, and RadioLib checks the DevAddr before the MIC
-    // (parseDownlink), so such a frame surfaces as -1102, not as a MIC error.
-    bool     rx_seen;
-    uint8_t  rx_len;
-    uint8_t  rx_mhdr;
-    uint32_t rx_addr;        // little-endian on air (LoRaWAN FHDR)
-    uint8_t  n_open;         // how many repeats opened this window (RX2 is skipped
-                             // after a repeat whose RX1 received a frame)
-    bool     ignored;        // V2.8.14: frame not ours or unreadable, dropped by GeigerNode::receiveDownlink()
-} rxobs_win_t;
-
-typedef struct {
-    bool     on;             // armed — set/cleared by the worker around one exchange
-    uint32_t cur_freq_raw;   // last SetRfFrequency word seen (RX or TX)
-    uint8_t  cur_sf;         // last SF seen
-    int64_t  tx_us;          // SetTx time; 0 = no TX seen yet (pre-TX SetRx calls are
-                             // RadioLib's RNG sampling, not RX windows — ignored)
-    int64_t  tx_done_us;     // TX end: first ClearIrqStatus after SetTx; 0 = not seen.
-                             // RadioLib never reads the IRQ register in the TX path —
-                             // transmitUplink() polls DIO1, then SX126x::finishTransmit()
-                             // issues ClearIrqStatus + standby within ~1 ms of TX_DONE.
-    uint32_t tx_freq_raw;
-    uint8_t  tx_sf;
-    uint8_t  n_tx;           // transmissions in this exchange (NbTrans repeats)
-    int      n_win;          // windows opened after the CURRENT transmission (0..2)
-    rxobs_win_t win[2];      // [0] = RX1, [1] = RX2 (Class A)
-} rxobs_t;
-
+// fed from the HAL's spiTransfer() (lorawan_rxobs.h). Only the worker task
+// drives RadioLib, so every write runs on that task; no locking needed.
+// Armed by rxobs_begin() right before activateOTAA()/sendReceive(), disarmed after.
 static rxobs_t s_obs;
-
-// How informative one repeat's window result is, highest first: a frame
-// (clean > CRC error > header error > header only) beats a bare preamble
-// ("no timeout": stop-on-preamble stopped the timer), which beats a plain
-// timeout. Needed because "no timeout" is the ABSENCE of a bit: OR-ing raw
-// IRQ flags across NbTrans repeats let one repeat's TIMEOUT hide another
-// repeat's preamble (XIAO 2026-10-19 11:26, -1105 logged next to an
-// all-"timeout" line).
-static int rxobs_rank(uint16_t irq) {
-    if ((irq & OBS_IRQ_RX_DONE) && !(irq & OBS_IRQ_CRC_ERR)) return 6;
-    if (irq & OBS_IRQ_CRC_ERR)      return 5;
-    if (irq & OBS_IRQ_HEADER_ERR)   return 4;
-    if (irq & OBS_IRQ_HEADER_VALID) return 3;
-    if (!(irq & OBS_IRQ_TIMEOUT))   return 2;   // preamble stopped the timer
-    return 1;                                   // plain timeout
-}
-
-// Fold a window's current-repeat flags into its best-so-far result.
-static void rxobs_fold(rxobs_win_t *w) {
-    if (!w->has_best || rxobs_rank(w->irq) >= rxobs_rank(w->best_irq)) w->best_irq = w->irq;
-    w->has_best = true;
-}
-
-// A window's final result over all repeats: best of the earlier repeats and
-// the current one (whose flags are not folded until the window reopens).
-static uint16_t rxobs_final(const rxobs_win_t *w) {
-    if (!w->has_best || rxobs_rank(w->irq) >= rxobs_rank(w->best_irq)) return w->irq;
-    return w->best_irq;
-}
-
-// Arm the observer for one exchange. Keeps cur_freq/cur_sf: RadioLib may
-// reuse the modem settings from the previous exchange without resending them.
-static void rxobs_begin(void) {
-    s_obs.tx_us = 0;
-    s_obs.tx_done_us = 0;
-    s_obs.n_tx = 0;
-    s_obs.n_win = 0;
-    memset(s_obs.win, 0, sizeof(s_obs.win));
-    s_obs.on = true;
-}
-
-// Called from spiTransfer() after every SPI transaction while armed.
-// `out` = request bytes, `in` = reply bytes (same length).
-static void rxobs_note(const uint8_t *out, size_t len, const uint8_t *in) {
-    const int64_t now = esp_timer_get_time();
-    switch (out[0]) {
-    case OBS_CMD_SET_FREQ:
-        if (len >= 5) {
-            s_obs.cur_freq_raw = ((uint32_t)out[1] << 24) | ((uint32_t)out[2] << 16) |
-                                 ((uint32_t)out[3] << 8) | out[4];
-        }
-        break;
-    case OBS_CMD_SET_MOD:
-        if (len >= 2) s_obs.cur_sf = out[1];
-        break;
-    case OBS_CMD_SET_TX:
-        // A retransmission (NbTrans > 1) starts a new window pair, but each
-        // window's result is the MOST INFORMATIVE one over all repeats
-        // (rxobs_rank()/rxobs_fold()): the network answers whichever repeat
-        // the gateway heard, so the window that carried a downlink may belong
-        // to an earlier repeat (2026-10-19: TTN scheduled RX1 after repeat 1
-        // and RX2 after repeat 2 of the same frame). Timing/frequency fields
-        // describe the last repeat.
-        s_obs.tx_us = now;
-        s_obs.tx_done_us = 0;
-        s_obs.tx_freq_raw = s_obs.cur_freq_raw;
-        s_obs.tx_sf = s_obs.cur_sf;
-        if (s_obs.n_tx < 255) s_obs.n_tx++;
-        s_obs.n_win = 0;
-        break;
-    case OBS_CMD_SET_RX:
-        // Timeout 0xFFFFFF = continuous RX: that is the radio's random()
-        // sampling wideband RSSI, never a Class A window. RadioLib 7.2.1 did
-        // that per channel pick / NbTrans repeat delay (bursts of SetRx
-        // 262144 ms ~18 ms apart right after RX2 in the sf12j trace); 7.8.1
-        // only seeds rand() from it once per session (createSession()), but
-        // the filter stays. Without it, an exchange whose RX1 received a
-        // frame (RX2 skipped) could book an RNG burst as "RX2".
-        if (len >= 4 && out[1] == 0xFF && out[2] == 0xFF && out[3] == 0xFF) break;
-        if (len >= 4 && s_obs.tx_us != 0 && s_obs.n_win < 2) {
-            rxobs_win_t *w = &s_obs.win[s_obs.n_win++];
-            w->open_us = now;
-            // 15.625 µs per LSB = 1/64 ms (datasheet §13.1.4 SetRx).
-            w->timeout_us = ((((uint32_t)out[1] << 16) | ((uint32_t)out[2] << 8) | out[3]) * 125u) / 8u;
-            w->freq_raw = s_obs.cur_freq_raw;
-            w->sf = s_obs.cur_sf;
-            // Window reopened by a later repeat: keep the earlier repeat's
-            // result (best-of, see SetTx) and start this repeat's flags fresh.
-            if (w->n_open > 0) rxobs_fold(w);
-            w->irq = 0;
-            if (w->n_open < 255) w->n_open++;
-        }
-        break;
-    case OBS_CMD_CLEAR_IRQ:
-        // Only the FIRST clear after SetTx marks TX end (finishTransmit()); the
-        // next one, still before RX1's SetRx, is startReceive()'s own clear.
-        if (s_obs.tx_us != 0 && s_obs.tx_done_us == 0 && s_obs.n_win == 0) s_obs.tx_done_us = now;
-        break;
-    case OBS_CMD_GET_IRQ:
-        if (len >= 4 && in && s_obs.n_win > 0) {
-            s_obs.win[s_obs.n_win - 1].irq |= (uint16_t)(((uint16_t)in[2] << 8) | in[3]);
-        }
-        break;
-    case OBS_CMD_READ_BUFFER:
-        // The frame is read after the window that received it closed — so it
-        // belongs to win[n_win - 1]. V2.8.14: read twice for a frame that is
-        // ours (GeigerNode::receiveDownlink()'s check, then RadioLib's
-        // parseDownlink()), once for one that is not; same bytes either way.
-        // 3 header bytes (cmd, offset, status) + at least MHDR + DevAddr.
-        if (len >= 3 + 5 && in && s_obs.n_win > 0) {
-            rxobs_win_t *w = &s_obs.win[s_obs.n_win - 1];
-            w->rx_seen = true;
-            w->rx_len  = (uint8_t)((len - 3) > 255 ? 255 : (len - 3));
-            w->rx_mhdr = in[3];
-            w->rx_addr = (uint32_t)in[4] | ((uint32_t)in[5] << 8) |
-                         ((uint32_t)in[6] << 16) | ((uint32_t)in[7] << 24);
-        }
-        break;
-    default:
-        break;
-    }
-}
-
-// This node's DevAddr, set by the worker once joined/resumed; 0 = unknown.
-// Read only by rxobs_frame() on the same task.
-static uint32_t s_obs_own_addr = 0;
-
-static double rxobs_mhz(uint32_t raw) { return (double)raw * 32.0 / 33554432.0; }
-
-// Describe the frame a window received, for the "rx windows:" line, e.g.
-// "data down for 260b1234 (not ours), 33 B". MType = MHDR bits 7..5 (LoRaWAN
-// §4.2.1): 1 join accept, 3/5 (un)confirmed data down. A join accept is
-// encrypted, so its addressee can't be read — and this node only listens for
-// its own while joining. A data downlink whose DevAddr differs from ours in
-// at most 4 of 32 bits is most likely OUR frame with bit errors (no PHY CRC
-// on downlinks): a foreign address differs in ~16 bits on average.
-static void rxobs_frame(const rxobs_win_t *w, char *out, size_t sz) {
-    const uint8_t mtype = w->rx_mhdr >> 5;
-    if (mtype == 1) {
-        snprintf(out, sz, " (join accept, %u B)", (unsigned)w->rx_len);
-    } else if (mtype == 3 || mtype == 5) {
-        const char *whose;
-        if (s_obs_own_addr == 0) {
-            whose = "";
-        } else if (w->rx_addr == s_obs_own_addr) {
-            whose = " (ours)";
-        } else if (__builtin_popcount(w->rx_addr ^ s_obs_own_addr) <= 4) {
-            whose = " (likely ours, corrupted)";
-        } else {
-            whose = " (not ours)";
-        }
-        snprintf(out, sz, " (data down for %08lx%s, %u B)", (unsigned long)w->rx_addr, whose,
-                 (unsigned)w->rx_len);
-    } else {
-        // Uplink MTypes or Proprietary — in a downlink window: garbage or foreign.
-        snprintf(out, sz, " (MHDR 0x%02x, %u B — not a downlink, likely corrupted)",
-                 (unsigned)w->rx_mhdr, (unsigned)w->rx_len);
-    }
-}
-
-// What one window saw, from the IRQ flags RadioLib's default RX mask latches
-// (RX_DONE, TIMEOUT, CRC_ERR, HEADER_VALID, HEADER_ERR — PhysicalLayer.h
-// RADIOLIB_IRQ_RX_DEFAULT_FLAGS; PREAMBLE_DETECTED is NOT latched). Only
-// flags RadioLib actually reads are seen: it reads the register once right
-// after the window's timeout and again in readData() after an RX_DONE. A
-// header error aborts reception without DIO1, so HDR_ERR is rarely visible —
-// a damaged header usually shows as "no timeout (preamble?)". With the
-// stop-on-preamble setting (stop_timer_on_preamble()), a window that ends
-// with neither TIMEOUT nor RX_DONE means the timer was stopped by a detected
-// preamble but no frame followed — reported as "no timeout (preamble?)".
-static const char *rxobs_result(uint16_t irq) {
-    if (irq & OBS_IRQ_CRC_ERR)    return "CRC_ERR";
-    if (irq & OBS_IRQ_RX_DONE)    return "RX_DONE";
-    if (irq & OBS_IRQ_HEADER_ERR) return "HDR_ERR";
-    // "header, then timeout" should be impossible with stop-on-preamble active
-    // (the timer stops before any header); kept so a lost 0x9F setting shows.
-    // "timeout, no preamble": the window closed on its timer and, because a
-    // preamble would have stopped that timer, none was detected — says what the
-    // radio saw, not why (gateway silent, signal too weak, or wrong timing/SF).
-    if (irq & OBS_IRQ_TIMEOUT) {
-        return (irq & OBS_IRQ_HEADER_VALID) ? "header, then timeout" : "timeout, no preamble";
-    }
-    if (irq & OBS_IRQ_HEADER_VALID) return "header, no end";
-    return "no timeout (preamble?)";
-}
-
-// Render "RX1 868.100 SF9 @+4989 ms to=113 ms timeout, no preamble | RX2 ..." into buf;
-// with NbTrans repeats: "3 TX | RX1 ... x3 ... | RX2 ... x3 ...", where each
-// window's result combines all repeats (see SetTx in rxobs_note()).
-// Window offsets are from TX end (first ClearIrqStatus after SetTx) of the LAST
-// repeat, so they read as the RX1/RX2 delay (TTN EU868: 5 s / 6 s) minus
-// RadioLib's early-open margin; if TX end was not seen they fall back to SetTx
-// and include the ToA. A window last opened by an EARLIER repeat (RX2 skipped
-// after the final repeat's RX1 received a frame) shows "@earlier TX".
-static void rxobs_format(char *buf, size_t sz) {
-    if (s_obs.tx_us == 0) { snprintf(buf, sz, "no TX seen"); return; }
-    const int64_t ref = s_obs.tx_done_us ? s_obs.tx_done_us : s_obs.tx_us;
-    int n = 0;
-    if (s_obs.n_tx > 1) n += snprintf(buf, sz, "%u TX | ", (unsigned)s_obs.n_tx);
-    for (int i = 0; i < 2 && n < (int)sz; i++) {
-        const rxobs_win_t *w = &s_obs.win[i];
-        if (w->n_open == 0) {
-            // RX2 is skipped when RX1 received a frame — that is normal.
-            n += snprintf(buf + n, sz - n, "%sRX%d not opened", i ? " | " : "", i + 1);
-            continue;
-        }
-        char when[20];
-        if (i < s_obs.n_win) {
-            snprintf(when, sizeof(when), "@+%ld ms", (long)((w->open_us - ref) / 1000));
-        } else {
-            snprintf(when, sizeof(when), "@earlier TX");
-        }
-        char reps[8] = "";
-        if (w->n_open > 1) snprintf(reps, sizeof(reps), " x%u", (unsigned)w->n_open);
-        char frame[72] = "";
-        if (w->rx_seen) rxobs_frame(w, frame, sizeof(frame));
-        n += snprintf(buf + n, sz - n, "%sRX%d %.3f SF%u %s to=%lu ms%s %s%s%s", i ? " | " : "", i + 1,
-                      rxobs_mhz(w->freq_raw), (unsigned)w->sf, when,
-                      (unsigned long)(w->timeout_us / 1000), reps, rxobs_result(rxobs_final(w)), frame,
-                      w->ignored ? " ignored" : "");
-    }
-}
+// lorawan_rxobs.h is RadioLib-free (host-tested); its copies of the codes must match.
+static_assert(LW_RXOBS_ERR_TX_TIMEOUT == RADIOLIB_ERR_TX_TIMEOUT, "rxobs code");
+static_assert(LW_RXOBS_ERR_CRC_MISMATCH == RADIOLIB_ERR_CRC_MISMATCH, "rxobs code");
+static_assert(LW_RXOBS_ERR_DOWNLINK_MALFORMED == RADIOLIB_ERR_DOWNLINK_MALFORMED, "rxobs code");
+static_assert(LW_RXOBS_ERR_INVALID_PORT == RADIOLIB_ERR_INVALID_PORT, "rxobs code");
+static_assert(LW_RXOBS_ERR_NO_RX_WINDOW == RADIOLIB_ERR_NO_RX_WINDOW, "rxobs code");
+static_assert(LW_RXOBS_ERR_MIC_MISMATCH == RADIOLIB_ERR_MIC_MISMATCH, "rxobs code");
+// lw_err_text()'s plain literals too: a RadioLib release that renumbers one
+// must fail the build here, not mislabel a node-log line.
+static_assert(RADIOLIB_ERR_UNKNOWN == -1, "lw_err_text code");
+static_assert(RADIOLIB_ERR_CHIP_NOT_FOUND == -2, "lw_err_text code");
+static_assert(RADIOLIB_ERR_PACKET_TOO_LONG == -4, "lw_err_text code");
+static_assert(RADIOLIB_ERR_RX_TIMEOUT == -6, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_FREQUENCY == -12, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_OUTPUT_POWER == -13, "lw_err_text code");
+static_assert(RADIOLIB_ERR_SPI_WRITE_FAILED == -16, "lw_err_text code");
+static_assert(RADIOLIB_ERR_WRONG_MODEM == -20, "lw_err_text code");
+static_assert(RADIOLIB_ERR_LORA_HEADER_DAMAGED == -24, "lw_err_text code");
+static_assert(RADIOLIB_ERR_NULL_POINTER == -28, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_DATA_RATE == -501, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_TCXO_VOLTAGE == -703, "lw_err_text code");
+static_assert(RADIOLIB_ERR_SPI_CMD_TIMEOUT == -705, "lw_err_text code");
+static_assert(RADIOLIB_ERR_SPI_CMD_INVALID == -706, "lw_err_text code");
+static_assert(RADIOLIB_ERR_SPI_CMD_FAILED == -707, "lw_err_text code");
+static_assert(RADIOLIB_ERR_NETWORK_NOT_JOINED == -1101, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_REVISION == -1103, "lw_err_text code");
+static_assert(RADIOLIB_ERR_NO_CHANNEL_AVAILABLE == -1106, "lw_err_text code");
+static_assert(RADIOLIB_ERR_UPLINK_UNAVAILABLE == -1108, "lw_err_text code");
+static_assert(RADIOLIB_ERR_COMMAND_QUEUE_FULL == -1109, "lw_err_text code");
+static_assert(RADIOLIB_ERR_JOIN_NONCE_INVALID == -1111, "lw_err_text code");
+static_assert(RADIOLIB_ERR_DWELL_TIME_EXCEEDED == -1114, "lw_err_text code");
+static_assert(RADIOLIB_ERR_CHECKSUM_MISMATCH == -1115, "lw_err_text code");
+static_assert(RADIOLIB_ERR_NO_JOIN_ACCEPT == -1116, "lw_err_text code");
+static_assert(RADIOLIB_ERR_NONCES_DISCARDED == -1119, "lw_err_text code");
+static_assert(RADIOLIB_ERR_SESSION_DISCARDED == -1120, "lw_err_text code");
+static_assert(RADIOLIB_ERR_INVALID_SUBBAND == -1123, "lw_err_text code");
+static_assert(RADIOLIB_ERR_MAC_ANSWERS_PENDING == -1124, "lw_err_text code");
 
 // RadioLib HAL on raw IDF-6 drivers. CONFIG_FREERTOS_HZ stays 100: delay()
 // is a hybrid — whole ticks via vTaskDelay (scheduler-friendly for the
 // multi-second RX-window waits), sub-tick remainder busy-waited on esp_timer
 // so LoRaWAN's ms-scale window timing holds without a global tick-rate bump.
 //
-// Reconciled against the fetched RadioLib headers (7.2.1, re-checked for
-// 7.8.1 in V2.8.13; managed_components/jgromes__radiolib/src/Hal.h):
-// base-class constructor arity/order (input, output, low, high, rising,
-// falling) and the full pure-virtual list match this class exactly. RadioLib
-// 7.8 also ships an EspHal of its own; it is not used (see CMakeLists.txt,
-// RADIOLIB_RELAX_RTOS_TICK).
+// Matches RadioLib 8.0's Hal.h: base-class constructor arity/order (input,
+// output, low, high, rising, falling) and the full pure-virtual list, with
+// init/term/spiBegin/spiTransfer/spiEnd returning a RadioLib status code.
+// RadioLib also ships an EspHal of its own; it is not used (see
+// CMakeLists.txt, RADIOLIB_RELAX_RTOS_TICK).
 class GeigerLoRaHal : public RadioLibHal {
 public:
     GeigerLoRaHal()
         : RadioLibHal(GPIO_MODE_INPUT, GPIO_MODE_OUTPUT, 0, 1,
                       GPIO_INTR_POSEDGE, GPIO_INTR_NEGEDGE) {}
 
-    void init() override { spiBegin(); }
-    void term() override { spiEnd(); }
+    int16_t init() override { return spiBegin(); }
+    int16_t term() override { return spiEnd(); }
 
     void pinMode(uint32_t pin, uint32_t mode) override {
         if (pin == RADIOLIB_NC) return;
@@ -419,7 +169,7 @@ public:
         // Candidate full fix, not done yet: an ISR-free HAL — attachInterrupt()
         // only stores pin + callback and yield() polls DIO1 and calls it from
         // task context (RadioLib only reads its downlink flag inside
-        // `while (...) hal->yield()` loops, 7.8.1 LoRaWAN.cpp ~1640/1663/1671). Defining
+        // `while (...) hal->yield()` loops, LoRaWAN.cpp receiveClassA()). Defining
         // ESP32 to get RadioLib's IRAM_ATTR is NOT an option: BuildOpt.h would
         // switch RadioLib to its Arduino-ESP32 platform branch.
         gpio_isr_handler_add((gpio_num_t)interruptNum,
@@ -446,8 +196,8 @@ public:
     }
     void yield() override { taskYIELD(); }
 
-    void spiBegin() override {
-        if (s_spi) return;
+    int16_t spiBegin() override {
+        if (s_spi) return RADIOLIB_ERR_NONE;
         spi_bus_config_t bus = {};
         bus.sclk_io_num = PIN_LORA_SCK;
         bus.mosi_io_num = PIN_LORA_MOSI;
@@ -475,23 +225,26 @@ public:
         dev.spics_io_num = -1;                  // RadioLib toggles NSS itself
         dev.queue_size = 1;
         ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &dev, &s_spi));
+        return RADIOLIB_ERR_NONE;
     }
     void spiBeginTransaction() override {}
-    void spiTransfer(uint8_t *out, size_t len, uint8_t *in) override {
+    int16_t spiTransfer(uint8_t *out, size_t len, uint8_t *in) override {
         spi_transaction_t t = {};
         t.length = len * 8;
         t.tx_buffer = out;
         t.rx_buffer = in;
         spi_device_polling_transmit(s_spi, &t);
-        // V2.8.12: passive RX-window observer (read-only, after the transfer).
-        if (s_obs.on && len > 0) rxobs_note(out, len, in);
+        // Passive RX-window observer (read-only, after the transfer).
+        if (s_obs.on && len > 0) rxobs_note(&s_obs, esp_timer_get_time(), out, len, in);
+        return RADIOLIB_ERR_NONE;
     }
     void spiEndTransaction() override {}
-    void spiEnd() override {
-        if (!s_spi) return;
+    int16_t spiEnd() override {
+        if (!s_spi) return RADIOLIB_ERR_NONE;
         spi_bus_remove_device(s_spi);
         spi_bus_free(SPI2_HOST);
         s_spi = NULL;
+        return RADIOLIB_ERR_NONE;
     }
 private:
     spi_device_handle_t s_spi = NULL;
@@ -500,46 +253,23 @@ private:
 static GeigerLoRaHal s_hal;
 static Module  s_mod(&s_hal, PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
 // V2.8.19: exposes the protected GetPacketStatus reply. In LoRa mode its bytes
-// are RssiPkt << 16 | SnrPkt << 8 | SignalRssiPkt, and RadioLib's getRSSI()
-// returns SignalRssiPkt, which bottoms out at -127.5 dBm for weak downlinks
-// (RadioLib #1913). packetStatus() returns RssiPkt, the packet's received
-// power, as Semtech's LoRaMac-node reports it, plus SignalRssiPkt and SNR.
+// are RssiPkt << 16 | SnrPkt << 8 | SignalRssiPkt. RadioLib 8.0's getRSSI()
+// returns RssiPkt too (#1913, fixed upstream 10-26; before, it returned
+// SignalRssiPkt, which bottoms out at -127.5 dBm for weak downlinks), but
+// SignalRssiPkt has no public getter: packetStatus() returns RssiPkt, the
+// packet's received power as Semtech's LoRaMac-node reports it, plus
+// SignalRssiPkt and SNR, all from one SPI read.
 //
-// It also compensates an external power amplifier: RadioLib's LoRaWAN stack
-// treats the radio's output power as the EIRP (it clips the band's limit,
-// AU915 30 dBm / EU868 16 dBm, to the SX1262's -9…22 dBm and sets that). On a
-// Heltec V4.3 the KCT8103L's PA adds ~11 dB on top (Meshtastic's measurement
-// on the V4: +11 dB at 0-15 dBm drive, compressing to +7 dB at 21 dBm), so
-// with a PA gain set, the accepted range is shifted by it and the gain is
-// subtracted before the SX1262 is programmed — the antenna then gets about
-// what the stack asked for, never more. Contract: the power setters are only
-// called on the LoRaWAN worker (radio_init + exchanges); the m_inner flag
-// relies on that and would need locking if another task ever set the power.
+// An external power amplifier (Heltec V4.3's KCT8103L, ~11 dB: Meshtastic's
+// measurement on the V4, +11 dB at 0-15 dBm drive, compressing to +7 dB at
+// 21 dBm) is compensated by RadioLib itself: radio_init() calls
+// setOutputPowerOffset() before begin(), so the LoRaWAN stack's power (= EIRP,
+// the band's limit, AU915 30 dBm / EU868 16 dBm) is accepted over the SX1262's
+// range shifted by the gain, and the gain is subtracted before the radio is
+// programmed — the antenna gets about what the stack asked for, never more.
 class GeigerSX1262 : public SX1262 {
 public:
     explicit GeigerSX1262(Module *m) : SX1262(m) {}
-    using SX1262::setOutputPower;   // keep the (power, optimize) overload visible
-
-    /** @brief Set the external PA's gain in dB (0 = none). Before begin(). */
-    void setPaGain(int8_t gain_db) { m_pa_gain = gain_db; }
-
-    int16_t checkOutputPower(int8_t power, int8_t *clipped) override {
-        // SX1262::setOutputPower() re-checks the radio value it gets from us
-        // through this same virtual; that inner check uses the radio's range.
-        if (m_inner) return SX1262::checkOutputPower(power, clipped);
-        const int8_t lo = (int8_t)(-9 + m_pa_gain), hi = (int8_t)(22 + m_pa_gain);
-        if (clipped) *clipped = power < lo ? lo : (power > hi ? hi : power);
-        return (power < lo || power > hi) ? RADIOLIB_ERR_INVALID_OUTPUT_POWER : RADIOLIB_ERR_NONE;
-    }
-    int16_t setOutputPower(int8_t power) override {
-        int8_t p = (int8_t)(power - m_pa_gain);
-        if (p < -9) p = -9;
-        if (p > 22) p = 22;
-        m_inner = true;   // LoRaWAN worker only (radio_init + exchanges): no locking
-        const int16_t st = SX1262::setOutputPower(p);
-        m_inner = false;
-        return st;
-    }
 
     /** @brief RssiPkt (packet received power), SignalRssiPkt (signal estimate
      *         after despreading) in dBm and SNR in dB of the last LoRa packet,
@@ -552,10 +282,6 @@ public:
         *signal = -0.5f * (float)(ps & 0xFF);
         *snr    = 0.25f * (float)(int8_t)((ps >> 8) & 0xFF);
     }
-
-private:
-    int8_t m_pa_gain = 0;
-    bool   m_inner   = false;   // inside our own SX1262::setOutputPower() call
 };
 static GeigerSX1262 s_radio(&s_mod);
 static lorawan_status_t s_status;
@@ -569,37 +295,6 @@ static const LoRaWANBand_t *s_band = NULL;    // the region's band plan, set in 
 // region can't use that DR, falling back to ADR.
 static bool    s_fixed_dr = false;
 static uint8_t s_fixed_dr_value = 0;
-
-// --- SX126x RX timer: stop on preamble (V2.8.12) -----------------------------
-//
-// SetStopRxTimerOnPreambleDetect(1) (opcode 0x9F, datasheet §13.4.8). The
-// SX126x default (0) stops the RX timeout only once the LoRa HEADER is
-// decoded. RadioLib (7.2.1 and 7.8.1) opens each Class A window for ToA(0 B) + scanGuard
-// (LoRaWAN.cpp receiveClassA) and then assumes "RxTimeout not set => something
-// is being received, keep listening" — an assumption that only holds with
-// stop-on-preamble, which RadioLib never configures (still true in 7.8.1). At SF12 the header ends
-// ~663 ms into a downlink, against a window timeout of ToA(0 B) + scanGuard
-// (~673 ms with RadioLib's default scanGuard = 10 ms; 713 ms measured in the
-// scanGuard = 50 test image) opened only a few ms early, so a downlink
-// arriving a few tens of ms late (non-GPS gateway) was aborted after
-// its preamble: IRQ 0x0204 = PREAMBLE + TIMEOUT, caught on the XIAO/Wio EU868
-// bench 2026-10-18 on two TTN-sent join accepts. With 1, the timer stops at
-// the preamble and the frame completes; a false preamble costs at most
-// RadioLib's own tMax wait (7.8.1 LoRaWAN.cpp ~1663), then standby.
-//
-// Sent before every join attempt and every uplink, not just once: since
-// RadioLib 7.3 the chip SLEEPS between the end of the uplink and each RX
-// window (LoRaWAN.cpp sleepDelay() -> SX126x::sleep(), warm start = the
-// configuration is kept in retention memory, datasheet §13.1.1). The
-// setting is expected to survive that; re-sending it per exchange also
-// covers a cold start or a re-begin(). One 2-byte SPI command per exchange.
-static void stop_timer_on_preamble(void) {
-    const uint8_t on = 0x01;
-    int16_t st = s_mod.SPIwriteStream(RADIOLIB_SX126X_CMD_STOP_TIMER_ON_PREAMBLE, &on, 1);
-    if (st != RADIOLIB_ERR_NONE) {
-        ESP_LOGW(TAG, "StopRxTimerOnPreamble failed: %d (RX windows may cut late downlinks)", st);
-    }
-}
 
 // --- OTA suspension (V2.8.12) --------------------------------------------------
 //
@@ -637,8 +332,16 @@ static bool s_suspended = false;
 #define TURN_WAIT_MAX_MS (5UL * 60UL * 1000UL)   // a round with several HTTPS targets, or FTPS, can take minutes
 
 // Enter one radio exchange. False = suspended for OTA: do not touch the radio.
+// Which WiFi transfer(s) held an exchange back, for its log line.
+static const char *turn_what(bool round, bool ftps) {
+    if (round && ftps) return "the upload round and the FTPS log upload";
+    if (ftps) return "the FTPS log upload";
+    return "the upload round";
+}
+
 static bool exchange_begin(void) {
     const int64_t t0 = esp_timer_get_time();
+    bool held_by_round = false, held_by_ftps = false;   // what we waited for (log only)
     for (;;) {
         __atomic_store_n(&s_busy, true, __ATOMIC_SEQ_CST);
         if (__atomic_load_n(&s_suspended, __ATOMIC_SEQ_CST)) {
@@ -646,15 +349,20 @@ static bool exchange_begin(void) {
             return false;
         }
         const int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
-        if (rt_lorawan_may_start(tx_is_idle(), log_ftp_is_busy())) {
+        const bool round_idle = tx_is_idle();
+        const bool ftps_busy  = log_ftp_is_busy();
+        if (rt_lorawan_may_start(round_idle, ftps_busy)) {
             if (waited_ms >= 1000) {
-                ESP_LOGI(TAG, "waited %.1f s for the WiFi transfer to finish", (double)waited_ms / 1000.0);
+                ESP_LOGI(TAG, "waited %.1f s for %s to finish", (double)waited_ms / 1000.0,
+                         turn_what(held_by_round, held_by_ftps));
             }
             return true;
         }
+        held_by_round = held_by_round || !round_idle;
+        held_by_ftps  = held_by_ftps || ftps_busy;
         if (waited_ms >= (int64_t)TURN_WAIT_MAX_MS) {
-            ESP_LOGW(TAG, "WiFi transfer still running after %lu s — going ahead anyway",
-                     (unsigned long)(TURN_WAIT_MAX_MS / 1000));
+            ESP_LOGW(TAG, "%s still running after %lu s — going ahead anyway",
+                     turn_what(held_by_round, held_by_ftps), (unsigned long)(TURN_WAIT_MAX_MS / 1000));
             return true;
         }
         __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_CST);   // yield to the upload
@@ -771,34 +479,37 @@ static bool radio_init(void) {
     // Let RadioLib own ALL SX1262 configuration (lesson from RadioLib
     // discussion #1665: mixing manual raw commands with RadioLib breaks the
     // radio state). begin() also sets DIO2 as the RF switch and DIO3 as the
-    // TCXO supply. V2.8.11: the TCXO voltage comes from hal.h (Heltec V4 1.6 V
-    // = RadioLib's default, bench-proven there; Wio-SX1262 1.8 V).
-    // V2.8.13 (RadioLib 7.8.1): the configuration-structure begin(). The
-    // parameter-list begin() is deprecated (removed in RadioLib 8.0); TCXO
-    // voltage and regulator are now public members set BEFORE begin() — the
-    // old begin() does exactly this internally (SX1262.cpp), so the radio
-    // ends up configured identically. ConfigLoRa_t's defaults are the old
-    // begin()'s defaults (434 MHz, 125 kHz, SF9, CR 4/7, private sync word,
-    // 10 dBm, 8-symbol preamble); LoRaWANNode reconfigures freq/DR later.
+    // TCXO supply; the TCXO voltage comes from hal.h (Heltec V4 1.6 V,
+    // Wio-SX1262 1.8 V). Configuration-structure begin(): TCXO voltage and
+    // regulator are public members set BEFORE it; ConfigLoRa_t's defaults
+    // (434 MHz, 125 kHz, SF9, CR 4/7, private sync word, 10 dBm, 8-symbol
+    // preamble) are replaced by LoRaWANNode with the band's settings later.
 #if HAL_HAS_LORA_FEM
-    // V2.8.19: the KCT8103L's PA is always in the TX path, so the radio is
-    // programmed ~11 dB below the EIRP the LoRaWAN stack asks for (see
-    // GeigerSX1262). Set before begin(), which already sets a power.
-    if (kct) {
-        s_radio.setPaGain(LORA_KCT_PA_GAIN_DB);
-        ESP_LOGI(TAG, "KCT8103L: TX power compensated for the PA gain (%d dB)", LORA_KCT_PA_GAIN_DB);
-    }
+    // The KCT8103L's PA is always in the TX path, so RadioLib programs the
+    // radio ~11 dB below the EIRP the LoRaWAN stack asks for. Must come
+    // before begin(): begin() sets a power, and that call computes the
+    // accepted range from the offset (PhysicalLayer applyOutputPowerOffset()).
+    if (kct) (void)s_radio.setOutputPowerOffset(LORA_KCT_PA_GAIN_DB);   // scalar form: cannot fail
 #endif
-    s_radio.tcxoVoltage = HAL_LORA_TCXO_V;
-    s_radio.useRegulatorLDO = false;          // DC-DC, as before
+    static_assert(HAL_LORA_TCXO_V == 1.6f || HAL_LORA_TCXO_V == 1.8f, "map HAL_LORA_TCXO_V to RadioLibTCXOVoltage_t");
+    s_radio.tcxoVoltage = (HAL_LORA_TCXO_V == 1.8f) ? Voltage1V8 : Voltage1V6;
+    s_radio.useRegulatorLDO = false;          // DC-DC
     ConfigLoRa_t lora_cfg;                    // all fields at their documented defaults
     int16_t st = s_radio.begin(lora_cfg);
     if (st != RADIOLIB_ERR_NONE) {
-        ESP_LOGE(TAG, "SX1262 begin failed: %d — LoRaWAN parked (HW_FAIL)", st);
+        ESP_LOGE(TAG, "SX1262 begin failed: %d (%s) — LoRaWAN parked (HW_FAIL)", (int)st, lw_err_text(st));
         return false;
     }
     ESP_LOGI(TAG, "SX1262 init OK");
-    stop_timer_on_preamble();   // V2.8.12 — see the helper; re-sent per exchange too
+    {
+        // TX power range after begin() (it applied any PA offset), for the
+        // "boot: LoRaWAN:" line. Getters before the lock (house rule).
+        const int8_t pmin = s_radio.getOutputPowerMin(), pmax = s_radio.getOutputPowerMax();
+        portENTER_CRITICAL(&s_status_mux);
+        s_status.tx_power_min = pmin;
+        s_status.tx_power_max = pmax;
+        portEXIT_CRITICAL(&s_status_mux);
+    }
 #ifdef PIN_LORA_RF_SW_RX
     // V2.8.11 (XIAO + Wio): the module's RF_SW1 input wants HIGH to receive.
     // RadioLib drives this pin HIGH in RX and LOW in TX / idle (Module.cpp
@@ -816,6 +527,9 @@ static bool radio_init(void) {
     // entered PA mode and a V4.3 transmitted far below its rated power
     // (measured: +70 dB at the gateway once CTX was driven).
     if (kct) {
+        // Range after begin(): its setOutputPower() call applied the offset.
+        ESP_LOGI(TAG, "KCT8103L PA: TX power range %d..%d dBm (radio set %d dB lower, compensating the PA gain)",
+                 (int)s_radio.getOutputPowerMin(), (int)s_radio.getOutputPowerMax(), LORA_KCT_PA_GAIN_DB);
         static const uint32_t ctx_pins[Module::RFSWITCH_MAX_PINS] = {
             PIN_LORA_KCT_CTX, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC };
         static const Module::RfSwitchMode_t ctx_lna[] = {
@@ -835,6 +549,20 @@ static bool radio_init(void) {
                  PIN_LORA_KCT_CTX, lna ? "LOW = LNA" : "HIGH = LNA bypass");
     }
 #endif
+    // Boosted RX gain (SX126x register 0x08AC = 0x96) instead of RadioLib's
+    // power-saving default: about +2 dB receive sensitivity for about +1 mA
+    // while receiving (Semtech datasheet; Meshtastic enables it by default).
+    // persist = true also puts the register in the radio's retention list, so a
+    // warm-start sleep would keep it (this firmware registers no sleep callback,
+    // so RadioLib keeps the radio in standby between the uplink and the RX
+    // windows anyway). Weak downlinks fail by about this margin (XIAO EU868, 2026-10).
+    const int16_t gst = s_radio.setRxBoostedGainMode(true, true);
+    if (gst == RADIOLIB_ERR_NONE) {
+        ESP_LOGI(TAG, "SX1262: RX boosted gain on (about +2 dB receive sensitivity, about +1 mA while receiving)");
+    } else {
+        ESP_LOGW(TAG, "SX1262: RX boosted gain NOT set: %d (%s) — receiving with the power-saving gain",
+                 (int)gst, lw_err_text(gst));
+    }
     return true;
 }
 
@@ -856,12 +584,9 @@ const char *lorawan_region_name(uint8_t region_idx) {
 // Names for logging reuse REGION_NAMES above (lorawan_region_name()) rather
 // than a second parallel string table.
 //
-// Verified against the fetched RadioLib headers (7.2.1; re-checked for 7.8.1,
-// managed_components/jgromes__radiolib/src/protocols/LoRaWAN/LoRaWAN.h:453-463):
-// all eight plain band objects (EU868, US915, EU433, AU915, CN470, AS923,
-// KR920, IN865) exist with these exact names — no adaptation needed. AS923
-// also has AS923_2/_3/_4 sub-region-frequency variants; per the task brief
-// this table uses the plain AS923 object only.
+// All eight are RadioLib's plain band objects (LoRaWAN.h: EU868, US915,
+// EU433, AU915, CN470, AS923, KR920, IN865). AS923 also has AS923_2/_3/_4
+// sub-region-frequency variants; this table uses the plain AS923 object only.
 static const LoRaWANBand_t *const k_bands[] = {
     &EU868, &US915, &AU915, &AS923, &IN865, &KR920, &EU433, &CN470,
 };
@@ -936,6 +661,62 @@ static bool nvs_load_blob(const char *key, uint8_t *buf, size_t len) {
 // which on a WiFi+LoRa node can hold it for a full TLS upload cycle.
 static volatile bool s_forget_pending = false;
 
+// --- Session persistence (RadioLib 8.0 buffer callbacks) ----------------------
+//
+// RadioLib calls these itself: the persistence store (DevNonce/JoinNonce)
+// before every join request, the session store after every uplink — also
+// between NbTrans repeats, i.e. inside an exchange. The store callbacks only
+// copy to RAM; the worker writes NVS after the exchange (lw8_flush()), never
+// while an RX window may be open. Restore: a missing blob is handed over as
+// an all-zero buffer, which RadioLib rejects (CHECKSUM_MISMATCH); the
+// s_lw8_*_found flags tell that apart from a stored blob it rejected.
+#define LW8_KEY_PERS "lw8_pers"
+#define LW8_KEY_SESS "lw8_sess"
+static uint8_t s_lw8_pers[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE];
+static uint8_t s_lw8_sess[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
+static bool s_lw8_pers_dirty = false;
+static bool s_lw8_sess_dirty = false;
+// Restore log wording only (lw_restore_verdict()): what the restore callbacks found.
+static bool s_lw8_pers_found  = false;   // a persistence blob was in NVS at boot
+static bool s_lw8_sess_called = false;   // RadioLib got as far as the session restore
+static bool s_lw8_sess_found  = false;   // ... and a session blob was in NVS
+static bool s_lw8_sess_unfinished = false;   // ... saved before its first uplink: withheld
+
+// cppcheck-suppress constParameterCallback ; signature fixed by RadioLib BufferCb_t
+static void lw8_store_pers(uint8_t *buf, size_t len) {
+    if (len != sizeof(s_lw8_pers)) return;
+    memcpy(s_lw8_pers, buf, len);
+    s_lw8_pers_dirty = true;
+}
+// cppcheck-suppress constParameterCallback ; signature fixed by RadioLib BufferCb_t
+static void lw8_store_sess(uint8_t *buf, size_t len) {
+    if (len != sizeof(s_lw8_sess)) return;
+    memcpy(s_lw8_sess, buf, len);
+    s_lw8_sess_dirty = true;
+}
+static void lw8_restore_pers(uint8_t *buf, size_t len) {
+    s_lw8_pers_found = nvs_load_blob(LW8_KEY_PERS, buf, len);
+    if (!s_lw8_pers_found) memset(buf, 0, len);
+}
+/** @brief RadioLib's session restore callback. A session still marked
+ *         "activating" is handed over as empty instead (V2.8.21). RadioLib 8.0
+ *         saves the session right after a join, BEFORE it marks it active;
+ *         after a reset before the first uplink it would apply that blob's
+ *         channel masks/DR, reject it with -1101 and leave the status at
+ *         "activating" — the next join then skips createSession() (no
+ *         defaults; on EU868 stale masks point at zeroed CFList channels, so
+ *         a DR0 join picks frequency 0: -12). An all-zero buffer fails
+ *         RadioLib's checkBufferCommon() before any state is touched, so the
+ *         join starts exactly as on a fresh board; the DevNonce history (the
+ *         persistence buffer) is not affected. */
+static void lw8_restore_sess(uint8_t *buf, size_t len) {
+    s_lw8_sess_called = true;
+    s_lw8_sess_found = nvs_load_blob(LW8_KEY_SESS, buf, len);
+    s_lw8_sess_unfinished = s_lw8_sess_found &&
+                            buf[RADIOLIB_LORAWAN_SESSION_STATUS] == RADIOLIB_LORAWAN_SESSION_ACTIVATING;
+    if (!s_lw8_sess_found || s_lw8_sess_unfinished) memset(buf, 0, len);
+}
+
 // Session forget for /lorawan_reset (http_server.c). Erases only the NVS
 // blobs — the running worker's in-RAM session is untouched (it isn't built
 // for live restart), so the caller reboots right after. The s_forget_pending
@@ -949,20 +730,61 @@ void lorawan_forget_session(bool wipe_nonces) {
         return;
     }
     // ESP_ERR_NVS_NOT_FOUND (blob never written) is success for an erase.
-    esp_err_t e = nvs_erase_key(h, "session");
+    esp_err_t e = nvs_erase_key(h, LW8_KEY_SESS);
     if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGE(TAG, "forget session: erase 'session': %s", esp_err_to_name(e));
+        ESP_LOGE(TAG, "forget session: erase '%s': %s", LW8_KEY_SESS, esp_err_to_name(e));
     }
     if (wipe_nonces) {
-        e = nvs_erase_key(h, "nonces");
+        e = nvs_erase_key(h, LW8_KEY_PERS);
         if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGE(TAG, "forget session: erase 'nonces': %s", esp_err_to_name(e));
+            ESP_LOGE(TAG, "forget session: erase '%s': %s", LW8_KEY_PERS, esp_err_to_name(e));
         }
     }
     nvs_commit(h);
     nvs_close(h);
     ESP_LOGW(TAG, "session forgotten (%s) — fresh OTAA join on next boot",
              wipe_nonces ? "incl. DevNonce history" : "DevNonce history kept");
+}
+
+/** @brief Erase the RadioLib 7.x session blob V2.8.20 and older kept under
+ *         "session" (V2.8.21). Called once the RadioLib 8.0 session is active
+ *         (joined or resumed): the old session is dead on the network from
+ *         then on. Left in place, a node put back on V2.8.20 (by hand, or by
+ *         V2.8.20's own crash rollback) would resume it and send into a
+ *         session the network no longer accepts, without ever re-joining.
+ *         Without it, V2.8.20 joins afresh. Its DevNonce history ("nonces")
+ *         is kept on purpose: V2.8.20 loads it independently, so that join
+ *         continues the old counter, which is normally above every DevNonce
+ *         V2.8.21 used since restarting at 0 (unless V2.8.21 sent more join
+ *         requests than the whole earlier history) — TTN then accepts it
+ *         without another reset. Not found = nothing to do, silent. */
+static void lw_erase_v2820_session(void) {
+    nvs_handle_t h;
+    const esp_err_t o = nvs_open("lorawan", NVS_READWRITE, &h);
+    if (o != ESP_OK) {
+        // Logged: the old session stays, and a return to V2.8.20 would resume it.
+        ESP_LOGW(TAG, "could not remove the LoRaWAN session saved by V2.8.20 or older: %s", esp_err_to_name(o));
+        return;
+    }
+    const esp_err_t e = nvs_erase_key(h, "session");
+    if (e == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (e == ESP_OK) {
+        ESP_LOGI(TAG, "removed the LoRaWAN session saved by V2.8.20 or older (a return to that firmware "
+                      "now joins afresh)");
+    } else if (e != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "could not remove the LoRaWAN session saved by V2.8.20 or older: %s", esp_err_to_name(e));
+    }
+}
+
+// Write what RadioLib handed the store callbacks during the exchange or join
+// attempt that just ended (worker task, radio idle). The ONLY writer of the
+// two blobs; skipped once an operator's wipe is pending, so an exchange that
+// ends between the wipe and the restart can't write the session back.
+static void lw8_flush(void) {
+    if (s_forget_pending) return;
+    if (s_lw8_pers_dirty) { s_lw8_pers_dirty = false; nvs_save_blob(LW8_KEY_PERS, s_lw8_pers, sizeof(s_lw8_pers)); }
+    if (s_lw8_sess_dirty) { s_lw8_sess_dirty = false; nvs_save_blob(LW8_KEY_SESS, s_lw8_sess, sizeof(s_lw8_sess)); }
 }
 
 // --- Worker task --------------------------------------------------------------
@@ -972,34 +794,14 @@ void lorawan_forget_session(bool wipe_nonces) {
 // the latest window. Mirrors transmission.c's queue-depth-1 convention but
 // NOT its drop-if-busy policy — see lorawan_transmit() for why they differ.
 static QueueHandle_t s_q;
-static LoRaWANNode  *s_node = NULL;
 
-// --- Class A receive: only our own frames end the exchange (V2.8.14) ----------
+// --- LoRaWANNode subclass -----------------------------------------------------
 //
-// RadioLib 7.8.1 receiveDownlink() opens RX1 and returns as soon as RX1
-// received ANY frame (RX2 is then skipped), and sendReceive() stops the
-// remaining NbTrans repeats on any non-zero result (LoRaWAN.cpp ~215: "if an
-// error occured or a downlink was received, stop retransmission") — all
-// before parseDownlink() has looked at the frame. On a shared channel that
-// frame is often someone else's downlink, or ours with bit errors (no PHY CRC
-// on downlinks): XIAO 2026-10-19, FCnt 857 and 862 sent once or twice instead
-// of NbTrans=3 because of foreign frames, and a corrupted own frame in RX1
-// hid RX2. The override below reads the frame first (lw_sched_frame_is_ours())
-// and treats anything that can't be ours as "nothing received": RX2 still
-// opens, the repeats continue, and the ADR backoff counts it as no downlink.
-// A NO_RX_WINDOW (-1105, RX2 already passed because a preamble or frame held
-// RX1 open) is likewise "nothing received" instead of an error that ended
-// the exchange — the frame did go on air.
-//
-// Not fixed here (upstream report planned): RX1 held open past the RX2 start
-// by a false preamble still loses a real RX2 downlink — the SX126x header-
-// error IRQ is not routed to DIO1 (RADIOLIB_IRQ_RX_DEFAULT_MASK = RX_DONE),
-// so receiveClassA() waits for the longest possible frame.
-//
-// Class A only: this firmware never enables Class B/C or multicast, so
-// RadioLib's receiveClassC() calls (no-ops for Class A) are left out. Uses
-// protected RadioLib members (receiveClassA, channels, rxDelays, tUplinkEnd,
-// devAddr, phyLayer, rev, joinNonce) — re-check against LoRaWAN.cpp receiveDownlink() on
+// RadioLib 8.0's own Class A receive path is used unchanged: a frame its
+// checkDownlink() rejects (not ours, unreadable) is dropped and the window
+// counts as empty, so RX2 and the NbTrans repeats go on (the observer marks
+// such a frame "ignored" in the log, lorawan_rxobs.h). Uses protected RadioLib
+// members (channels, band, dwellTimeUp, phyLayer, nbTrans) — re-check them on
 // every RadioLib update.
 class GeigerNode : public LoRaWANNode {
 public:
@@ -1013,13 +815,12 @@ public:
      *         current DR: the band's size limit and, on dwell-time plans
      *         (AU915/AS923: 400 ms), the air time of the whole frame (+13 B
      *         MHDR/FHDR/FPort/MIC) — the same ToA-vs-dwell arithmetic
-     *         RadioLib's adrBackoff() uses. Not getMaxPayloadLen(): with dwell time it subtracts 13
-     *         from a uint8_t that can be below 13 (SF11/SF12 under 400 ms)
-     *         and wraps to ~243, and it also subtracts queued MAC answers. */
+     *         RadioLib's adrBackoff() uses. Not getMaxPayloadLen(): that one
+     *         also subtracts the queued MAC answers. */
     bool payloadFits(uint8_t len) { return this->frameFits(len, 0); }
 
     /** @brief As payloadFits(), for `payload` bytes plus `fopts` bytes of
-     *         MAC answers in the FOpts field. Same wrap-free arithmetic. */
+     *         MAC answers in the FOpts field. */
     bool frameFits(size_t payload, size_t fopts) {
         const uint8_t dr = this->uplinkDr();
         if (dr >= RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES) return false;
@@ -1030,66 +831,36 @@ public:
                this->dwellTimeUp;
     }
 
-    /** @brief Make the duty-cycle limiter see only the LAST join request:
-     *         RadioLib resets lastToA at the start of sendReceive() but not
-     *         in activateOTAA(), so join requests add up and
-     *         timeUntilUplink() (EU868: ~128 x lastToA) grows with every
-     *         attempt — up to a skipped first uplink after a long join. */
-    void setLastToA(RadioLibTime_t ms) { this->lastToA = ms; }
+    /** @brief NbTrans the next sendReceive() will use (set by the network's
+     *         LinkADRReq, reset to 1 by the ADR backoff). */
+    uint8_t nbTransNow() const { return this->nbTrans; }
 
-    /** @brief activateOTAA(), undoing what a join accept that FAILED its MIC
-     *         check left behind. RadioLib 7.8.1 processJoinAccept() stores
-     *         JoinNonce, DevAddr and the LoRaWAN revision (DLSettings bit 7)
-     *         BEFORE it checks the MIC. Downlinks carry no PHY CRC, so a
-     *         corrupt accept has bit 7 set about half the time: rev = 1 then
-     *         sticks (nothing resets it), every later join request is MICed
-     *         with the unset 1.1 nwkKey and the network drops them all, and
-     *         every later accept is decrypted with it — no join until a
-     *         reboot. Restoring the three fields makes a rejected accept a
-     *         no-op, as it should be. */
-    int16_t activateOTAAChecked() {
-        const uint8_t  rev   = this->rev;
-        const uint32_t nonce = this->joinNonce;
-        const uint32_t addr  = this->devAddr;
-        const int16_t  st    = this->activateOTAA();
-        if (st == RADIOLIB_ERR_MIC_MISMATCH) {
-            if (this->rev != rev) ESP_LOGW(TAG, "rejected join accept claimed LoRaWAN 1.%u — revision restored",
-                                           (unsigned)this->rev);
-            this->rev       = rev;
-            this->joinNonce = nonce;
-            this->devAddr   = addr;
+    /** @brief After activation: duty-cycle limit back to the band's own value
+     *         (EU868: 36 s/h = 1 %) unless the network set one. RadioLib seeds
+     *         every session with a synthetic DutyCycleReq (MaxDCycle 7 = 1/128
+     *         for a 1 % band, 10 for 0.1 %) and replays it on every restore,
+     *         so a setDutyCycle() before activation does not stick. A stored
+     *         MaxDCycle other than that seed came from the network and is kept
+     *         (a network request for exactly the seed value can't be told
+     *         apart and is relaxed too). No-op with the limiter off or on
+     *         bands without a limit. Call only while the session is active:
+     *         createSession() runs before activation only.
+     *  @param[out] by_network true if the limit in force was set by the network.
+     *  @return the limit in force, ms of air time per hour (0 = none). */
+    uint32_t applyBandDutyCycle(bool *by_network) {
+        *by_network = false;
+        if (!this->dutyCycleEnabled) return 0;   // limiter off: no limit in force
+        if (this->band->dutyCycle == 0) {        // band without a limit: any limit is the network's
+            *by_network = (this->dutyCycle != 0);
+            return this->dutyCycle;
         }
-        return st;
-    }
-
-protected:
-    int16_t receiveDownlink() override {
-        int16_t st = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, &this->channels[RADIOLIB_LORAWAN_RX1],
-                                         RADIOLIB_LORAWAN_RX1, this->rxDelays[RADIOLIB_LORAWAN_RX1],
-                                         this->tUplinkEnd);
-        if (st > 0 && this->keep_frame()) return st;
-        if (st < 0 && st != RADIOLIB_ERR_NO_RX_WINDOW) return st;   // radio/HAL error
-        st = this->receiveClassA(RADIOLIB_LORAWAN_DOWNLINK, &this->channels[RADIOLIB_LORAWAN_RX2],
-                                 RADIOLIB_LORAWAN_RX2, this->rxDelays[RADIOLIB_LORAWAN_RX2],
-                                 this->tUplinkEnd);
-        if (st > 0 && this->keep_frame()) return st;
-        if (st < 0 && st != RADIOLIB_ERR_NO_RX_WINDOW) return st;
-        return 0;   // nothing (usable) received in either window
-    }
-
-private:
-    // Read the frame the last window received and decide. The SX126x keeps
-    // the frame in its buffer, so parseDownlink() reads the same bytes again
-    // for a kept frame. Static buffer: runs deep inside sendReceive() on the
-    // worker task (the only RadioLib caller), so no stack frame for 256 B.
-    bool keep_frame() {
-        static uint8_t frame[256];
-        const size_t len = this->phyLayer->getPacketLength();
-        bool keep = len > 0 && len <= sizeof(frame) &&
-                    this->phyLayer->readData(frame, len) == RADIOLIB_ERR_NONE &&
-                    lw_sched_frame_is_ours(this->isActivated(), this->devAddr, frame, len);
-        if (!keep && s_obs.on && s_obs.n_win > 0) s_obs.win[s_obs.n_win - 1].ignored = true;
-        return keep;
+        uint8_t seed = 0;   // createSession()'s MaxDCycle for this band
+        if (this->band->dutyCycle == 3600) seed = 10;
+        else if (this->band->dutyCycle == 36000) seed = 7;
+        const uint8_t stored = this->bufferSession[RADIOLIB_LORAWAN_SESSION_DUTY_CYCLE] & 0x0F;
+        if (stored == seed) this->setDutyCycle(true, 0);   // 0 = the band's value
+        else *by_network = true;
+        return this->dutyCycle;
     }
 };
 
@@ -1115,6 +886,27 @@ static uint8_t sf_of_dr(const LoRaWANBand_t *band, uint8_t dr) {
 
 static void set_cycle_sf(uint8_t sf) { __atomic_store_n(&s_cycle_sf, sf, __ATOMIC_RELAXED); }
 
+/** @brief set_cycle_sf() plus one log line when the uplink interval changes
+ *         (or always, with @p force, right after a join or session resume), so
+ *         a long gap before the next uplink reads as the schedule, not a hang.
+ *         The TX round runs one interval after the previous one (main.c), so
+ *         the next uplink comes at most one interval from now. Worker task only. */
+static void set_cycle_sf_noted(uint8_t sf, bool force) {
+    const uint8_t was = __atomic_load_n(&s_cycle_sf, __ATOMIC_RELAXED);
+    set_cycle_sf(sf);
+    if (sf == 0 || (sf == was && !force)) return;
+    // Whole minutes: every lw_sched_interval_ms() entry is a whole number of
+    // minutes (4/7/12/22/30) — keep it that way or round here.
+    const unsigned min = (unsigned)(lw_sched_interval_ms(sf) / 60000u);
+    if (__atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
+        ESP_LOGI(TAG, "uplink interval now %u min (fixed DR%u = SF%u schedule) — the next uplink comes at most %u min "
+                      "from now", min, (unsigned)s_fixed_dr_value, (unsigned)sf, min);
+    } else {
+        ESP_LOGI(TAG, "uplink interval now %u min (SF%u schedule, data rate set by ADR) — the next uplink comes at "
+                      "most %u min from now", min, (unsigned)sf, min);
+    }
+}
+
 uint32_t lorawan_cycle_interval_ms(void) {
     portENTER_CRITICAL(&s_status_mux);
     const lorawan_state_t st = s_status.state;
@@ -1138,8 +930,8 @@ static void apply_fixed_dr(GeigerNode &node) {
     int16_t st = (was == want) ? RADIOLIB_ERR_NONE : node.setDatarate(want);
     if (st == RADIOLIB_ERR_NONE && !node.payloadFits(10)) st = RADIOLIB_ERR_DWELL_TIME_EXCEEDED;
     if (st != RADIOLIB_ERR_NONE) {
-        ESP_LOGW(TAG, "fixed DR%u not usable in this region (%d) — falling back to ADR",
-                 (unsigned)want, (int)st);
+        ESP_LOGW(TAG, "fixed DR%u not usable in this region: %d (%s) — falling back to ADR",
+                 (unsigned)want, (int)st, lw_err_text(st));
         __atomic_store_n(&s_fixed_dr, false, __ATOMIC_RELAXED);
         // Only the size/dwell branch gets here with the DR moved (a refused
         // setDatarate() leaves it unchanged).
@@ -1203,23 +995,11 @@ static uint8_t s_prev_dr     = 0;
 static int16_t s_prev_power  = 0;
 static bool    s_prev_had_dl = false;   // previous exchange received a downlink
 
-// sendReceive() errors that come from the RECEIVE side only — the uplink
-// itself went on air and counts (FCntUp advanced). Seen on the 2026-10-18/19
-// XIAO bench, each explained by the "rx windows:" line next to it:
-//  - DOWNLINK_MALFORMED (-1102): a frame reached RX_DONE but failed
-//    parseDownlink's checks — usually a DevAddr mismatch: someone else's
-//    downlink on a shared channel, or (no PHY CRC on downlinks) our own frame
-//    with bit errors on a marginal link.
-//  - MIC_MISMATCH (-1112): a frame addressed to us that failed its MIC —
-//    corrupted on the way (same no-CRC reason).
-// Counting these as "uplink failed" inflated fail=/last_err= with events that
-// say nothing about the uplink. Only used when a TX was actually seen.
-// (V2.8.12 also listed NO_RX_WINDOW, -1105 "RX2 opening already passed";
-// since V2.8.14 GeigerNode::receiveDownlink() turns that into "nothing
-// received", so it no longer reaches here.)
-static bool downlink_unusable(int16_t st) {
-    return st == RADIOLIB_ERR_DOWNLINK_MALFORMED || st == RADIOLIB_ERR_MIC_MISMATCH;
-}
+// Receive-side-only errors after a real TX: lw_downlink_unusable()
+// (lorawan_rxobs.h, host-tested). Counting them as "uplink failed" would
+// inflate fail=/last_err= with events that say nothing about the uplink.
+// Only used when a TX was actually seen.
+static bool downlink_unusable(int16_t st) { return lw_downlink_unusable(st); }
 
 // Classify one sendReceive() outcome under s_status_mux. House rule (memory:
 // no-blocking-calls-in-critical-section): time()/ESP_LOG/RadioLib getters
@@ -1267,9 +1047,7 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
     const bool rx_only = (air_ms > 0) && downlink_unusable(st);
     const bool sent_ok = (st >= RADIOLIB_ERR_NONE) || rx_only;
     if (rx_only) {
-        ESP_LOGI(TAG, "downlink unusable (%d: %s) — uplink itself was sent", (int)st,
-                 st == RADIOLIB_ERR_DOWNLINK_MALFORMED ? "frame not for us or corrupted" :
-                 "MIC mismatch, corrupted");
+        ESP_LOGI(TAG, "downlink unusable: %d (%s) — the uplink itself was sent", (int)st, lw_err_text(st));
     }
     if (sent_ok) {
         if (have_dl) {
@@ -1314,23 +1092,23 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
         // Regulatory guard: RadioLib itself refused the send before TX (duty
         // cycle, no enabled channel, or a frame over the 400 ms dwell limit),
         // not a radio/network failure — counted as skipped, not as failed.
-        // A dwell refusal that send_app_frame() then recovers (MAC answers
-        // alone, then the frame) is counted here too: duty_skip= counts
-        // refused attempts, not lost frames.
+        // duty_skip= counts refused attempts, not lost frames.
         portENTER_CRITICAL(&s_status_mux);
         s_status.duty_skipped++;
         portEXIT_CRITICAL(&s_status_mux);
-        ESP_LOGI(TAG, "regulatory guard (duty cycle / channel / dwell time): frame skipped (%d)", st);
-    } else if (st == RADIOLIB_ERR_PACKET_TOO_LONG) {
-        // Refused before TX: payload + queued MAC answers over the DR's limit.
-        // send_app_frame() recovers (MAC answers alone, then the frame), so
-        // neither failed= nor last_err= is touched; logged there.
+        ESP_LOGI(TAG, "frame skipped by the regulatory guard: %d (%s)", (int)st, lw_err_text(st));
+    } else if (st == RADIOLIB_ERR_MAC_ANSWERS_PENDING) {
+        // Refused before TX: the payload fits the DR, but not together with the
+        // queued MAC answers. send_app_frame() recovers (MAC answers alone,
+        // then the frame), so neither failed= nor last_err= is touched; logged
+        // there. (A payload too long on its own is PACKET_TOO_LONG, -4: nothing
+        // recovers that, so it counts as a failure below.)
     } else {
         portENTER_CRITICAL(&s_status_mux);
         s_status.failed++;
         s_status.last_error = st;
         portEXIT_CRITICAL(&s_status_mux);
-        ESP_LOGW(TAG, "uplink failed: %d", st);
+        ESP_LOGW(TAG, "uplink failed: %d (%s)", (int)st, lw_err_text(st));
     }
 }
 
@@ -1341,31 +1119,25 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
 // doing nothing at all. `what` carries the per-port payload summary so the
 // radio-parameter tail isn't duplicated at both call sites.
 //
-// fcnt_wire is passed explicitly (from node.getFCntUp() AFTER the send)
-// rather than taken from ev->fCnt: RadioLib increments its internal fCntUp
-// for the NEXT frame before filling the event struct (LoRaWAN.cpp — the
-// `fCntUp += 1` precedes the eventUp fill), so ev->fCnt reads one higher
-// than what actually went on air. Caught live 2026-07-27: TTN showed
-// f_cnt 79 for a frame this log had claimed as 80. getFCntUp() returns
-// `fCntUp - 1` = the last transmitted frame's counter — TTN-exact.
+// fcnt_wire = ev->fCnt: RadioLib 8.0 fills the uplink event BEFORE it
+// advances fCntUp for the next frame, so it is the FCnt that went on air.
+// (getFCntUp() is not: after a MAC-only uplink RadioLib sent inside the
+// exchange, it names that frame's counter.)
 //
-// V2.8.12: appends the exact transmission count, the air time (all NbTrans
-// repeats) and the downlink result — `st` is sendReceive()'s return: 0 = no
-// downlink, 1/2 = RX window. The RSSI/SNR of a received downlink are on the
-// "downlink (RXn)" line logged just before this one by record_uplink_result().
-//
-// TX count from the RX-window observer (s_obs.n_tx = SetTx commands seen),
-// replacing the old "(retransmitted)" suffix, which had to guess from
-// RadioLib's eventUp->nbTrans: that counter is 0-based and the retransmit
-// loop breaks BEFORE incrementing when a downlink is heard, so "2 TXs,
-// downlink on the 2nd" and "1 TX, no downlink" both read 1 — the suffix could
-// only fire for clear cases. Counting SetTx on the SPI bus is exact, and shows
-// directly when the network changes NbTrans (2026-10-18: 1 → 3 → 2).
+// The channels and the TX count come from the RX-window observer
+// (rxobs_uplink_tx()): one frequency per repeat ("867.9/868.3/868.1 MHz" —
+// ev->freq is only the last repeat's, and in Hz), "TX=2/3" = sent / NbTrans
+// in force, plus any TX of a MAC-only uplink inside the exchange. The
+// "rx windows:" line right after says why fewer repeats went out. `st` is
+// sendReceive()'s return: 0 = no downlink, 1/2 = RX window. The RSSI/SNR of a
+// received downlink are on the "downlink (RXn)" line logged just before.
 static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEvent_t *ev,
                           int16_t st, uint32_t air_ms) {
-    ESP_LOGI(TAG, "uplink OK: %s FCnt=%lu DR%u %.1f MHz %d dBm TX=%u air=%lu ms | DL: %s",
-             what, (unsigned long)fcnt_wire, (unsigned)ev->datarate,
-             (double)ev->freq, (int)ev->power, (unsigned)s_obs.n_tx, (unsigned long)air_ms,
+    char freqs[OBS_MAX_REP * 7 + 8], tx[48];   // tx worst case "15/15 +255 MAC-only (from FCnt 4294967295)"
+    rxobs_uplink_tx(&s_obs, st, fcnt_wire, freqs, sizeof(freqs), tx, sizeof(tx));
+    ESP_LOGI(TAG, "uplink OK: %s FCnt=%lu DR%u %s MHz %d dBm TX=%s air=%lu ms | DL: %s",
+             what, (unsigned long)fcnt_wire, (unsigned)ev->datarate, freqs, (int)ev->power, tx,
+             (unsigned long)air_ms,
              st == 1 ? "RX1" : st == 2 ? "RX2" : st < 0 ? "unusable (see rx windows)" : "none");
 }
 
@@ -1423,12 +1195,9 @@ static uint32_t timesync_now_s(void) {
 static uint32_t s_timesync_last_s   = 0;   // uptime s at last DeviceTimeAns (or give-up); 0 = never
 static uint32_t s_timesync_attempts = 0;   // consecutive unanswered requests in the current window
 
-// (V2.8.13: the "stale answer" guard is gone. RadioLib 7.2.1 kept the last
-// downlink's MAC answers until the next Class A downlink, so an identical
-// re-read had to be filtered; since 7.4.0 sendReceive() clears that store
-// before every uplink — LoRaWAN.cpp "clear the MAC downlink buffer as we are
-// going to transmit a new uplink" — so an answer read right after the port-1
-// exchange can only belong to that exchange.)
+// No "stale answer" guard is needed: sendReceive() clears the MAC downlink
+// store before every uplink (LoRaWAN.cpp), so an answer read right after the
+// port-1 exchange can only belong to that exchange.
 
 // Shared give-up path: stamp the window as if answered so the next request
 // waits the full daily interval, WARN once per window (not per cycle).
@@ -1456,17 +1225,28 @@ static void timesync_give_up(void) {
 // that turns true the moment WE set the clock, which would kill the daily
 // re-sync after the first apply.
 //
-// V2.8.13: RadioLib 7.8.1 returns the answer already advanced by the time
-// elapsed since the end of the uplink that carried the request
-// (getMacDeviceTimeAns(): `ms += millis() - tUplinkEnd`), with the fraction
-// in milliseconds — the ~5-6 s lag RadioLib 7.2.1 left (RX1 delay + air
-// time) is gone for a frame sent once. With NbTrans > 1, tUplinkEnd is the
+// RadioLib returns the answer already advanced by the time elapsed since the
+// end of the uplink that carried the request (getMacDeviceTimeAns():
+// `ms += millis() - tUplinkEnd`), with the fraction in milliseconds, so for
+// a frame sent once there is no lag left. With NbTrans > 1, tUplinkEnd is the
 // end of the LAST repeat while the network's time refers to the repeat it
 // heard, so the clock can be early by up to one repeat period (~6-7 s at
 // EU868); the daily re-sync keeps that bounded.
 static void timesync_apply(uint32_t unix_s, uint16_t ms) {
     if (ntp_boot_epoch() != 0) {
-        ESP_LOGI(TAG, "DeviceTimeAns received but NTP has synced meanwhile — ignored");
+        // NTP synced while the request was out: NTP stays the clock authority,
+        // but how far the two disagree is worth one line.
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        const int64_t diff_ms = ((int64_t)unix_s * 1000 + ms) - ((int64_t)now.tv_sec * 1000 + now.tv_usec / 1000);
+        const time_t nt = (time_t)unix_s;
+        struct tm ut;
+        gmtime_r(&nt, &ut);
+        char when[24];
+        strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &ut);
+        ESP_LOGI(TAG, "DeviceTime: network clock %s.%03u UTC, %lld ms %s the NTP clock — not applied (NTP is synced)",
+                 when, (unsigned)ms, (long long)(diff_ms < 0 ? -diff_ms : diff_ms),
+                 diff_ms < 0 ? "behind" : "ahead of");
         return;
     }
     int64_t delta = (int64_t)unix_s - (int64_t)time(NULL);
@@ -1477,7 +1257,7 @@ static void timesync_apply(uint32_t unix_s, uint16_t ms) {
     }
     struct timeval tv;
     tv.tv_sec  = (time_t)unix_s;
-    tv.tv_usec = (suseconds_t)((uint32_t)ms * 1000UL);   // RadioLib 7.8.1: fraction in ms
+    tv.tv_usec = (suseconds_t)((uint32_t)ms * 1000UL);   // RadioLib's fraction is in ms
     settimeofday(&tv, NULL);
     time_t t = (time_t)unix_s;
     struct tm lt;
@@ -1491,8 +1271,8 @@ static void timesync_apply(uint32_t unix_s, uint16_t ms) {
 // --- One uplink exchange (V2.8.12) ---------------------------------------------
 //
 // sendReceive() plus everything around it that both ports need: the OTA
-// suspension handshake, the stop-on-preamble re-send, the RX-window
-// observer, result bookkeeping + log lines, and the session save.
+// suspension handshake, the RX-window observer, result bookkeeping + log
+// lines, and the session save.
 //
 // Session saved after EVERY exchange (A4), not once per cycle: a reset
 // between port 1 and port 2 used to rewind FCntUp to the cycle start, so the
@@ -1506,13 +1286,15 @@ static void timesync_apply(uint32_t unix_s, uint16_t ms) {
 //
 // V2.8.14 duty-cycle backstop: RadioLib's limiter is on (setDutyCycle(true)
 // in lorawan_task(); none on US915/AU915/CN470/KR920/IN865). On EU868-type
-// plans the effective limit is RadioLib's session default, 1/128 = ~28 s/h:
-// createSession() applies a synthetic DutyCycleReq (MaxDCycle 7) over the
-// band's 36 s/h, and session restores replay it. sendReceive() would REFUSE
-// a frame that comes too early (RADIOLIB_ERR_UPLINK_UNAVAILABLE). The SF
-// schedule normally keeps well clear of it; the limiter bites at very high
-// NbTrans and for the port-2 frame right after port 1, which waits ~128 x
-// the port-1 exchange's air time (up to ~3 min at SF12). So wait here
+// plans the limit is the band's 36 s/h (1 %) since V2.8.21: RadioLib's
+// session default is 1/128 = ~28 s/h (createSession() applies a synthetic
+// DutyCycleReq, MaxDCycle 7, and restores replay it), which
+// applyBandDutyCycle() undoes after activation; a limit the network set is
+// kept. sendReceive() would REFUSE a frame that comes too early
+// (RADIOLIB_ERR_UPLINK_UNAVAILABLE). The SF schedule normally keeps well
+// clear of it; the limiter bites at very high NbTrans and for the port-2
+// frame right after port 1, which waits ~100 x the port-1 exchange's air
+// time (~2.5 min at SF12; ~128 x under a 1/128 network limit). So wait here
 // instead of losing the frame — outside exchange_begin(), so an OTA can
 // still suspend the worker meanwhile — unless the wait would exceed
 // DUTY_WAIT_MAX_MS, then skip it (counted as duty_skipped).
@@ -1525,9 +1307,25 @@ static void timesync_apply(uint32_t unix_s, uint16_t ms) {
 // Read by poll_device_time(), so a skipped frame isn't counted as an
 // unanswered DeviceTimeReq.
 static bool s_last_exchange_sent = false;
+
+/** @brief One info line when RadioLib's 32-bit millisecond clock (HAL millis())
+ *         has wrapped since the last check — every 49.7 days of uptime. RadioLib
+ *         8.0 handles the wrap itself; the line lets a reader tie anything odd
+ *         at that moment to it. Worker task only (before each exchange and join
+ *         attempt). */
+static void lw_clock_wrap_note(GeigerNode &node) {
+    static uint32_t s_last_ms = 0;
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    const bool wrapped = now_ms < s_last_ms;
+    s_last_ms = now_ms;
+    if (!wrapped) return;
+    ESP_LOGI(TAG, "RadioLib's millisecond clock wrapped (every 49.7 days of uptime) — handled by RadioLib 8.0, "
+                  "next uplink allowed in %lu ms", (unsigned long)node.timeUntilUplink());
+}
 static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len, uint8_t port,
                                const char *what, uint8_t *dl, size_t *dl_len) {
     s_last_exchange_sent = false;
+    lw_clock_wrap_note(node);
     const RadioLibTime_t wait_ms = node.timeUntilUplink();
     if (wait_ms > DUTY_WAIT_MAX_MS) {
         ESP_LOGW(TAG, "duty cycle: port %u frame skipped, next uplink allowed in %lu s",
@@ -1541,19 +1339,17 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
         vTaskDelay(pdMS_TO_TICKS(wait_ms) + 1);
     }
     if (!exchange_begin()) park_for_ota();
-    stop_timer_on_preamble();
     LoRaWANEvent_t ev_up = {}, ev_dn = {};
     *dl_len = 0;
-    rxobs_begin();
+    rxobs_begin(&s_obs, node.nbTransNow());   // NbTrans read BEFORE the exchange changes it
     int16_t st = node.sendReceive(data, len, port, dl, dl_len, false, &ev_up, &ev_dn);
     s_obs.on = false;
     // getLastToA(): RadioLib resets it at the start of each sendReceive() and
-    // adds every NbTrans repeat, so this is the exchange's whole uplink air time.
-    // Keyed on "a TX was seen", not on st: a frame that went on air but whose
-    // downlink failed to parse (st < 0, e.g. RADIOLIB_ERR_DOWNLINK_MALFORMED
-    // for a foreign frame in our window) still spent the air time. One gap:
-    // on RADIOLIB_ERR_TX_TIMEOUT RadioLib returns before adding the repeat's
-    // ToA (LoRaWAN.cpp transmitUplink), so that rare frame counts 0 ms.
+    // adds every NbTrans repeat (also before a TX timeout), and a MAC-only
+    // uplink it sends inside the exchange keeps the outer air time — so this
+    // is the exchange's whole uplink air time. Keyed on "a TX was seen", not
+    // on st: a frame that went on air but whose downlink failed to parse
+    // (st < 0) still spent the air time.
     const bool sent = (s_obs.tx_us != 0);
     s_last_exchange_sent = sent;
     const uint32_t air_ms = sent ? (uint32_t)node.getLastToA() : 0;
@@ -1563,30 +1359,29 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
     // eventUp after its TX loop on these paths too, so the uplink line is valid.
     const bool rx_only = sent && downlink_unusable(st);
     if (st >= RADIOLIB_ERR_NONE || rx_only) {
-        log_uplink_ok(what, node.getFCntUp(), &ev_up, st, air_ms);
+        log_uplink_ok(what, ev_up.fCnt, &ev_up, st, air_ms);
         adr_track(&ev_up, rx_only ? 0 : st);
     }
     if (sent) {
         // Also (especially) after a failed exchange: which window saw what is
         // the first question for "uplink failed: <code>".
-        char rx[320];
-        rxobs_format(rx, sizeof(rx));
+        // Static, not on the worker's stack (~600 B with NbTrans 3 and frames);
+        // this task is the only user.
+        static char rx[LW_RXOBS_LINE_MAX];
+        rxobs_format(&s_obs, rx, sizeof(rx), st);
         ESP_LOGI(TAG, "rx windows: %s", rx);
     }
-    // Same s_forget_pending gate as every other session save — see
-    // lorawan_forget_session().
-    // PACKET_TOO_LONG is refused in isValidUplink(), before RadioLib changes
-    // any state: nothing to save.
-    if (!s_forget_pending && st != RADIOLIB_ERR_PACKET_TOO_LONG) {
-        nvs_save_blob("session", node.getBufferSession(), RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
-    }
+    // Whatever RadioLib handed the store callbacks during this exchange
+    // (nothing for a frame refused before TX); lw8_flush() keeps the
+    // s_forget_pending gate.
+    lw8_flush();
     exchange_end();
     // A downlink may have moved the DR (LinkADRReq; with ADR off RadioLib
     // skips the backoff, so that is the only way): undo that in fixed-DR
     // mode, then let the next cycle's interval follow the DR the next
     // uplink will actually use.
     apply_fixed_dr(node);
-    set_cycle_sf(sf_of_dr(s_band, node.uplinkDr()));
+    set_cycle_sf_noted(sf_of_dr(s_band, node.uplinkDr()), false);
     // Callers treat an rx-only error like "no downlink": the uplink went out,
     // so e.g. the port-2 frame of the same cycle must still be sent.
     return rx_only ? 0 : st;
@@ -1598,9 +1393,9 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
 // of the uplink that carried the request and TTN serves it in that uplink's
 // RX1, so polling here (a) avoids adding a second exchange's ~3-8 s to the
 // apply latency and (b) can't lose the stored answer to the next uplink
-// clearing fOptsDown (RadioLib 7.8.1 clears it before every uplink). Since
-// 7.8.1 the returned time is advanced to "now" by RadioLib itself (see
-// timesync_apply(); up to one repeat period early with NbTrans > 1) — this
+// clearing fOptsDown (RadioLib clears it before every uplink, LoRaWAN.cpp
+// sendReceive()). The returned time is advanced to "now" by RadioLib itself
+// (see timesync_apply(); up to one repeat period early with NbTrans > 1) — this
 // feature still only rescues standalone nodes from 1970-era timestamps; it
 // is not NTP. Clears *want, so a second call in the same cycle is a no-op.
 // If the frame never went on air (duty-cycle skip, dwell refusal), the
@@ -1629,17 +1424,12 @@ static void poll_device_time(GeigerNode &node, bool *want) {
 
 // Send one application frame, then poll for the DeviceTimeAns.
 //
-// Small-DR stall guard (V2.8.14): RadioLib refuses a frame before TX with
-// RADIOLIB_ERR_PACKET_TOO_LONG (-4) when payload + queued MAC answers
-// exceed the DR's limit (isValidUplink() vs getMaxPayloadLen(), which
-// subtracts fOptsUpLen). At AU915/AS923 DR2 (400 ms dwell: 11 B) or US915
-// DR0 (11 B) a 10 B port-1 frame plus a 2 B LinkADRAns or 3 B DevStatusAns
-// no longer fits. The answers are only cleared by a TX, and RadioLib's own
-// MAC-only fallback checks the answers alone, so every later cycle was
-// refused too. With 12+ B of answers on a dwell plan the same stall shows
-// up as RADIOLIB_ERR_DWELL_TIME_EXCEEDED instead (getMaxPayloadLen() wraps,
-// isValidUplink() passes, transmitUplink() refuses the 400 ms+ frame); the
-// uplink loop keeps its own DeviceTimeReq from pushing the queue that far.
+// Small-DR stall guard: RadioLib refuses a frame before TX with
+// RADIOLIB_ERR_MAC_ANSWERS_PENDING (-1124) when the payload fits the DR but
+// not together with the queued MAC answers (isValidUplink() ->
+// testPayloadLength(), dwell-time aware). At AU915/AS923 DR2 (400 ms dwell:
+// 11 B) or US915 DR0 (11 B) a 10 B port-1 frame plus a 2 B LinkADRAns or 3 B
+// DevStatusAns no longer fits, and the answers are only cleared by a TX.
 // Here: send the answers alone (port 0, RadioLib moves them into
 // FRMPayload), poll for a DeviceTimeAns right after that frame (the retry
 // would clear it), then send the frame once more. One retry only: if the
@@ -1648,17 +1438,64 @@ static void poll_device_time(GeigerNode &node, bool *want) {
 static int16_t send_app_frame(GeigerNode &node, const uint8_t *data, size_t len, uint8_t port,
                               const char *what, uint8_t *dl, size_t *dl_len, bool *want_time) {
     int16_t st = uplink_exchange(node, data, len, port, what, dl, dl_len);
-    if (st == RADIOLIB_ERR_PACKET_TOO_LONG ||
-        (st == RADIOLIB_ERR_DWELL_TIME_EXCEEDED && node.getMacUplinkLen() > 0)) {
-        ESP_LOGW(TAG, "port %u frame (%u B) and queued MAC answers do not fit at DR%u — "
+    if (st == RADIOLIB_ERR_MAC_ANSWERS_PENDING) {
+        ESP_LOGW(TAG, "port %u frame (%u B) and %u B of queued MAC answers do not fit together at DR%u — "
                       "sending the MAC answers alone first", (unsigned)port, (unsigned)len,
-                 (unsigned)node.uplinkDr());
+                 (unsigned)node.getMacUplinkLen(), (unsigned)node.uplinkDr());
         st = uplink_exchange(node, NULL, 0, 0, "MAC answers only (port 0)", dl, dl_len);
         poll_device_time(node, want_time);
         if (st >= RADIOLIB_ERR_NONE) st = uplink_exchange(node, data, len, port, what, dl, dl_len);
     }
     poll_device_time(node, want_time);   // no-op if already polled
     return st;
+}
+
+// --- Duty-cycle hold note (V2.8.21) -------------------------------------------
+//
+// main.c logs "next LoRaWAN uplink" when it QUEUES a round — before that
+// round's exchanges run — so its line can only show the schedule. The
+// duty-cycle wait those exchanges leave behind is known here, after the
+// round's last one: if it holds the next uplink past the next round, the same
+// line follows with that later time and the reason.
+
+// esp_timer ms at which the next round starts (lorawan_note_next_round());
+// 0 = not known yet. Under s_status_mux (64-bit: no single atomic store).
+static uint64_t s_next_round_ms = 0;
+
+void lorawan_note_next_round(uint32_t in_ms) {
+    const uint64_t at = (uint64_t)(esp_timer_get_time() / 1000) + in_ms;
+    portENTER_CRITICAL(&s_status_mux);
+    s_next_round_ms = at;
+    portEXIT_CRITICAL(&s_status_mux);
+}
+
+/** @brief After a round's last exchange: log "next LoRaWAN uplink at about …
+ *         (in N min: duty-cycle wait; upload round in M min, …)" when RadioLib's
+ *         limiter will hold the next uplink past the next round. Silent when
+ *         the round comes first (main.c's line already said when) or the next
+ *         round's time is not known. Worker task only. */
+static void log_duty_hold(GeigerNode &node) {
+    const RadioLibTime_t wait_ms = node.timeUntilUplink();   // 0 = no wait
+    if (wait_ms == 0) return;
+    portENTER_CRITICAL(&s_status_mux);
+    const uint64_t round_ms = s_next_round_ms;
+    portEXIT_CRITICAL(&s_status_mux);
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (round_ms <= now_ms) return;   // not known, or the round is already due
+    const uint32_t in_s   = (uint32_t)((round_ms - now_ms) / 1000u);
+    const uint32_t duty_s = (uint32_t)(wait_ms / 1000u);
+    if (duty_s <= in_s) return;       // the round comes first
+    int hh = -1, mm = 0, ss = 0;      // < 0: clock not set, no time of day
+    if (ntp_time_valid()) {
+        const time_t at = time(NULL) + (time_t)duty_s;
+        struct tm lt;
+        localtime_r(&at, &lt);
+        hh = lt.tm_hour; mm = lt.tm_min; ss = lt.tm_sec;
+    }
+    char line[128];   // lw_next_uplink_line()'s worst case is ~115 chars
+    lw_next_uplink_line(line, sizeof(line), in_s, hh, mm, ss, __atomic_load_n(&s_cycle_sf, __ATOMIC_RELAXED),
+                        duty_s);
+    ESP_LOGI(TAG, "%s", line);
 }
 
 // Worker-task-private frame-plan state (V2.8.14): when the last port-2 frame
@@ -1710,30 +1547,55 @@ static void lorawan_task(void *arg) {
     // function's stack frame (this loop never returns in practice, but a
     // static also keeps the object off an 8 KB task stack).
     static GeigerNode node(&s_radio, k_bands[region], subband);
-    s_node = &node;
     node.beginOTAA(creds.join_eui, creds.dev_eui, NULL, creds.app_key); // NULL nwkKey = LoRaWAN 1.0.x
-    // V2.8.14 duty-cycle backstop (see uplink_exchange()): on EU868-type
-    // plans effectively 1/128 = ~28 s/h (RadioLib's session default), none on
+    // V2.8.14 duty-cycle backstop (see uplink_exchange()): none on
     // US915/AU915/CN470/KR920/IN865. The enable flag is RAM-only in RadioLib,
-    // so set on every boot; a network DutyCycleReq may change the limit.
+    // so set on every boot. The LIMIT set here does not stick: the pre-join
+    // session and every restore put RadioLib's 1/128 seed back (EU868 joins
+    // run under it); after activation applyBandDutyCycle() restores the
+    // band's 1 % unless the network set a limit.
     node.setDutyCycle(true);
 
-    // Restore persisted state. Nonces first (join replay protection), then
-    // session (rejoin-free resume). A rejected restore is self-healing: log,
-    // fall through to a clean join. Buffer sized to the larger of the two
-    // (SESSION_BUF_SIZE > NONCES_BUF_SIZE) and reused for both loads.
-    uint8_t buf[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
-    if (nvs_load_blob("nonces", buf, RADIOLIB_LORAWAN_NONCES_BUF_SIZE)) {
-        int16_t st = node.setBufferNonces(buf);
-        if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "nonces restore rejected: %d", st);
-    }
-    // True while setBufferSession() has staged a session that the first
+    // Restore persisted state through RadioLib's buffer callbacks (see
+    // lw8_store_pers()): loadBuffers() reads the persistence buffer (DevNonce /
+    // JoinNonce, join replay protection) first, then the session (rejoin-free
+    // resume). beginOTAA() above must come first: it clears both and computes
+    // the key checksum the persistence buffer is checked against. A rejected
+    // restore is self-healing: log, fall through to a clean join. A node with
+    // no persistence blob (new board) starts at DevNonce 0, as RadioLib does.
+    node.setCallbackStorePersistence(lw8_store_pers);
+    node.setCallbackRestorePersistence(lw8_restore_pers);
+    node.setCallbackStoreSession(lw8_store_sess);
+    node.setCallbackRestoreSession(lw8_restore_sess);
+    // True while loadBuffers() has staged a session that the first
     // activateOTAA() will activate without a join (see the join loop).
     bool session_pending = false;
-    if (nvs_load_blob("session", buf, RADIOLIB_LORAWAN_SESSION_BUF_SIZE)) {
-        int16_t st = node.setBufferSession(buf);
-        if (st != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "session restore rejected: %d", st);
+    {
+        const int16_t st = node.loadBuffers();
         session_pending = (st == RADIOLIB_ERR_NONE);
+        switch (lw_restore_verdict(st, s_lw8_pers_found, s_lw8_sess_called, s_lw8_sess_found,
+                                   s_lw8_sess_unfinished)) {
+        case LW_RESTORE_OK:
+            break;
+        case LW_RESTORE_NO_PERS:
+            ESP_LOGI(TAG, "no saved DevNonce history (new board, first start after the update to V2.8.21, or "
+                          "after a full LoRaWAN reset) — joining, DevNonce starts at 0");
+            break;
+        case LW_RESTORE_PERS_BAD:
+            ESP_LOGW(TAG, "saved DevNonce history not usable: %d (%s) — joining, DevNonce restarts at 0 "
+                          "(reset the used DevNonces in TTN)", (int)st, lw_err_text(st));
+            break;
+        case LW_RESTORE_NO_SESS:
+            ESP_LOGI(TAG, "no saved LoRaWAN session — joining");
+            break;
+        case LW_RESTORE_SESS_BAD:
+            ESP_LOGW(TAG, "saved LoRaWAN session not usable: %d (%s) — joining", (int)st, lw_err_text(st));
+            break;
+        case LW_RESTORE_SESS_UNFINISHED:   // see lw8_restore_sess()
+            ESP_LOGW(TAG, "saved LoRaWAN session is from before its first uplink (restart right after the "
+                          "join) — joining again");
+            break;
+        }
     }
 
     // Join with exponential backoff: 1,2,4,... min, about an hour at most (spec §4;
@@ -1750,10 +1612,9 @@ static void lorawan_task(void *arg) {
     // Floor DR0, or DR2 on dwell-time-limited plans (AS923: 400 ms dwell, an
     // SF11/SF12 join request exceeds it). Fixed plans (US915, AU915, CN470)
     // take the join DR from the channel, so no DR is set for them.
-    // V2.8.13 (RadioLib 7.8.1): activateOTAA() lost its initialDr parameter;
-    // the join DR is now set with setDatarate() right before each attempt
-    // (supported before a join since RadioLib 7.5.0 — setDatarate() creates
-    // the pre-join session itself). Skipped while a restored session is
+    // activateOTAA() takes no initial DR: the join DR is set with
+    // setDatarate() right before each attempt (setDatarate() creates the
+    // pre-join session itself). Skipped while a restored session is
     // pending: activateOTAA() then just activates it, without a TX, and its
     // data rate must stay the one the network set.
     //
@@ -1783,33 +1644,35 @@ static void lorawan_task(void *arg) {
         // Duty-cycle backstop for join requests too: a retry 60 s after an
         // SF12 request (~1.5 s on air) would otherwise be refused by RadioLib
         // and wasted as a "failed" attempt that never went on air.
+        lw_clock_wrap_note(node);
         const RadioLibTime_t jwait_ms = node.timeUntilUplink();
         if (jwait_ms > 0) vTaskDelay(pdMS_TO_TICKS(jwait_ms) + 1);
         if (join_dr_steps && !session_pending) set_cycle_sf(sf_of_dr(band, join_dr));
         if (!exchange_begin()) park_for_ota();
-        stop_timer_on_preamble();
-        rxobs_begin();
-        const RadioLibTime_t air0 = node.getLastToA();   // not reset by joins — take the delta
+        // The observer tells join accepts from data frames by own_addr == 0
+        // (RadioLib: sessionStatus ACTIVATING); reset it per attempt so a
+        // rejoin later in the same boot reads its accept right.
+        s_obs.own_addr = 0;
+        rxobs_begin(&s_obs, 1);   // a join request is sent once per activateOTAA()
         if (join_dr_steps && !session_pending) {
             const int16_t dst = node.setDatarate(join_dr);
-            if (dst != RADIOLIB_ERR_NONE) ESP_LOGW(TAG, "join DR%u not set: %d", (unsigned)join_dr, dst);
+            if (dst != RADIOLIB_ERR_NONE) {
+                ESP_LOGW(TAG, "join DR%u not set: %d (%s)", (unsigned)join_dr, (int)dst, lw_err_text(dst));
+            }
         }
-        int16_t st = node.activateOTAAChecked();
+        int16_t st = node.activateOTAA();
         session_pending = false;   // a pending session is consumed by the first activateOTAA()
         s_obs.on = false;
         const bool sent = (s_obs.tx_us != 0);   // false for a restored session (no TX)
-        const uint32_t join_air_ms = sent ? (uint32_t)(node.getLastToA() - air0) : 0;
-        if (sent) node.setLastToA(join_air_ms);   // duty cycle: this request only (setLastToA())
-        // Same s_forget_pending gate as the uplink loop's session save (the
-        // full save-site class, not just one instance): a join attempt
+        // RadioLib resets lastToA for every join request, so this is this
+        // request's air time and the duty-cycle limiter sees only it.
+        const uint32_t join_air_ms = sent ? (uint32_t)node.getLastToA() : 0;
+        // The DevNonce RadioLib stored before the request (persistence store
+        // callback). lw8_flush() keeps the s_forget_pending gate: a join attempt
         // completing between an operator's "wipe DevNonce history" and the
-        // deferred restart would otherwise re-save the RAM nonces and
-        // silently undo the explicit wipe. Reboot is imminent; a skipped
-        // nonces save costs nothing.
-        if (!s_forget_pending) {
-            nvs_save_blob("nonces", node.getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
-        }
-        exchange_end();   // after the nonces write — radio is in standby by now
+        // deferred restart must not write the nonces back.
+        lw8_flush();
+        exchange_end();   // after the NVS write — radio is in standby by now
         portENTER_CRITICAL(&s_status_mux); s_status.join_attempts++; portEXIT_CRITICAL(&s_status_mux);
 
         // V2.8.12 per-attempt line: what went on air and what each RX window
@@ -1826,13 +1689,13 @@ static void lorawan_task(void *arg) {
                     accept_win = i + 1;
                 }
             }
-            char rx[320];
-            rxobs_format(rx, sizeof(rx));
+            static char rx[LW_RXOBS_LINE_MAX];   // worker task only, like the uplink line's
+            rxobs_format(&s_obs, rx, sizeof(rx), 0);   // one TX: the single-TX form
             char drs[12] = "";   // " (DR255)" worst case for a uint8_t
             if (join_dr_steps) snprintf(drs, sizeof(drs), " (DR%u)", (unsigned)join_dr);
-            char res[24];
+            char res[96];
             if (st == RADIOLIB_LORAWAN_NEW_SESSION) snprintf(res, sizeof(res), "accepted");
-            else snprintf(res, sizeof(res), "no accept (%d)", (int)st);
+            else snprintf(res, sizeof(res), "no accept: %d (%s)", (int)st, lw_err_text(st));
             ESP_LOGI(TAG, "join attempt %lu%s: SF%u %.3f MHz air=%lu ms -> %s | %s",
                      (unsigned long)attempts, drs, (unsigned)s_obs.tx_sf, rxobs_mhz(s_obs.tx_freq_raw),
                      (unsigned long)join_air_ms, res, rx);
@@ -1846,21 +1709,44 @@ static void lorawan_task(void *arg) {
             ESP_LOGI(TAG, "%s%s — DevAddr %08lx, region %s sub-band %u",
                      st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed" : "joined (OTAA)",
                      via, (unsigned long)dev_addr, lorawan_region_name(region), (unsigned)subband);
+            const uint32_t ok_khz = (uint32_t)(rxobs_mhz(s_obs.tx_freq_raw) * 1000.0 + 0.5);
             portENTER_CRITICAL(&s_status_mux);
             s_status.dev_addr = dev_addr;
-            s_obs_own_addr = dev_addr;   // worker task, like the observer itself
+            s_obs.own_addr = dev_addr;   // worker task, like the observer itself
+            // The "boot: LoRaWAN:" banner line (syslog.c) reads these.
+            s_status.boot_resumed = (st == RADIOLIB_LORAWAN_SESSION_RESTORED);
+            if (sent) {
+                s_status.join_ok_dr     = join_dr_steps ? join_dr : 0xFF;
+                s_status.join_ok_sf     = s_obs.tx_sf;
+                s_status.join_ok_window = (uint8_t)accept_win;
+                s_status.join_ok_khz    = ok_khz;
+            }
             portEXIT_CRITICAL(&s_status_mux);
             apply_fixed_dr(node);   // ADR off + the fixed DR (no-op in ADR mode)
-            set_cycle_sf(sf_of_dr(band, node.uplinkDr()));
+            lw_erase_v2820_session();   // the old session is dead from here on
+            {
+                bool by_network = false;
+                const uint32_t dc_ms = node.applyBandDutyCycle(&by_network);
+                if (dc_ms == 0) {
+                    ESP_LOGI(TAG, "duty-cycle limit: none in %s", lorawan_region_name(region));
+                } else {
+                    ESP_LOGI(TAG, "duty-cycle limit: %.1f s of air time per hour (%.2f %%, %s)", dc_ms / 1000.0,
+                             dc_ms / 36000.0, by_network ? "set by the network" : "band default");
+                }
+            }
+            set_cycle_sf_noted(sf_of_dr(band, node.uplinkDr()), true);
             set_state(LORAWAN_ST_JOINED);
             break;
         }
-        portENTER_CRITICAL(&s_status_mux); s_status.last_error = st; portEXIT_CRITICAL(&s_status_mux);
+        portENTER_CRITICAL(&s_status_mux);
+        s_status.last_error = st;
+        s_status.join_last_error = st;   // kept for the boot line; uplinks overwrite last_error
+        portEXIT_CRITICAL(&s_status_mux);
         // Step the join DR down only after an attempt that actually went on air
         // (a duty-cycle-blocked attempt says nothing about the link).
         const bool step = join_dr_steps && sent && join_dr > join_dr_floor;
         if (step) join_dr--;
-        ESP_LOGW(TAG, "join failed: %d — retry in %lus%s", st, (unsigned long)backoff_s,
+        ESP_LOGW(TAG, "join failed: %d (%s) — retry in %lu s%s", (int)st, lw_err_text(st), (unsigned long)backoff_s,
                  step ? " (next attempt one DR lower)" : "");
         vTaskDelay(pdMS_TO_TICKS(backoff_s * 1000));
         if (backoff_s < 3600) backoff_s *= 2;
@@ -1916,7 +1802,7 @@ static void lorawan_task(void *arg) {
             int16_t tst = node.sendMacCommandReq(RADIOLIB_LORAWAN_MAC_DEVICE_TIME);
             s_timesync_attempts++;   // queue failures count too — see timesync_give_up()
             if (tst != RADIOLIB_ERR_NONE) {
-                ESP_LOGW(TAG, "DeviceTimeReq queue failed: %d", tst);
+                ESP_LOGW(TAG, "DeviceTimeReq not queued: %d (%s)", (int)tst, lw_err_text(tst));
                 want_time = false;   // nothing went on air — don't poll for an answer
                 if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) timesync_give_up();
             }
@@ -1927,8 +1813,7 @@ static void lorawan_task(void *arg) {
         // RadioLib writes the decrypted payload straight in (no clamp to the
         // caller's buffer), setting *dl_len afterward. A network-scheduled
         // application downlink can be up to RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE
-        // (242 B; RadioLib 7.8.1 — 7.2.1 called it MAX_DOWNLINK_SIZE, 250) at
-        // higher data rates; a smaller buffer here would let a (MIC-valid)
+        // (242 B) at higher data rates; a smaller buffer here would let a (MIC-valid)
         // oversized downlink smash this task's stack. Sized like RadioLib's
         // own sendReceive() wrappers (+1). ~243 B on the 8 KB worker stack is fine.
         uint8_t dl[RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE + 1]; size_t dl_len = 0;
@@ -1964,6 +1849,7 @@ static void lorawan_task(void *arg) {
                 s_p2_last_s    = lw_uptime_s();
             }
         }
+        if (send_p1 || send_p2) log_duty_hold(node);   // after the round's LAST exchange
         // Session persistence: since V2.8.12 saved inside uplink_exchange()
         // after EVERY exchange (A4), behind the same s_forget_pending gate —
         // suppressed once lorawan_forget_session() has run, because the

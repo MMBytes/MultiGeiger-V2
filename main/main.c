@@ -35,6 +35,9 @@
 #include "http_server.h"
 #include "log_ftp.h"
 #include "lorawan.h"            // V2.6.23: SX1262 LoRaWAN uplink (Heltec V4-R2; V2.8.11: + XIAO + Wio)
+#if HAL_HAS_LORAWAN
+#include "lorawan_sched.h"      // V2.8.21: lw_next_uplink_line (LoRa boards only, see log_next_uplink())
+#endif
 #include "main_status.h"
 #include "mqtt.h"
 #include "neopixel.h"
@@ -763,6 +766,56 @@ static void display_live_tick(uint32_t now_ms, bool use_filtered) {
     display_running((int)(up_us / 1000000LL), nsvph, cpm, g_cfg.show_display);
     s_drawn        = true;
     s_last_draw_ms = now_ms;
+}
+
+/** @brief Log when the next LoRaWAN uplink comes (V2.8.21, user request), from
+ *         the main loop, which owns the schedule. Only while the LoRaWAN
+ *         schedule drives the upload rounds (lorawan_cycle_interval_ms() != 0);
+ *         WiFi-only boards log nothing. @p in_ticks = ticks until the next round.
+ *         @p after_round = called right after a round queued its snapshot
+ *         (false: the interval changed between rounds). While still joining,
+ *         only the after-round call logs, and says the queued data goes out
+ *         after the join; the interval-change call stays silent then (at boot
+ *         nothing is queued yet, and a quick join sends at the first round).
+ *
+ *  Schedule only: this runs when the round is QUEUED, before its exchanges,
+ *  so the duty-cycle wait they leave is not known yet. The worker logs the
+ *  same line with the later time after the round's last exchange if the
+ *  limiter holds the next uplink past this round (lorawan.cpp,
+ *  log_duty_hold()); lorawan_note_next_round() tells it when the round is. */
+static void log_next_uplink(TickType_t in_ticks, bool after_round) {
+#if HAL_HAS_LORAWAN
+    if (lorawan_cycle_interval_ms() == 0) return;
+    lorawan_status_t st;
+    lorawan_get_status(&st);
+    const uint32_t in_ms = (uint32_t)pdTICKS_TO_MS(in_ticks);
+    lorawan_note_next_round(in_ms);
+    // Still joining (the schedule already follows the join data rate, on
+    // every band: lorawan_setup() seeds it from the join DR, fixed plans like
+    // AU915 included): no uplink goes out at the round — the worker sends the
+    // snapshot this round queued right after the join instead (freshest wins:
+    // a later round's snapshot replaces it).
+    if (st.state != LORAWAN_ST_JOINED) {
+        if (after_round) {
+            ESP_LOGI(TAG, "LoRaWAN still joining — the first uplink follows the join, not the upload round");
+        }
+        return;
+    }
+    const uint32_t in_s = in_ms / 1000u;
+    int hh = -1, mm = 0, ss = 0;
+    if (ntp_time_valid()) {
+        const time_t at = time(NULL) + (time_t)in_s;
+        struct tm lt;
+        localtime_r(&at, &lt);
+        hh = lt.tm_hour; mm = lt.tm_min; ss = lt.tm_sec;
+    }
+    char line[128];
+    lw_next_uplink_line(line, sizeof(line), in_s, hh, mm, ss, st.cycle_sf, 0);   // 0: no duty-cycle part
+    ESP_LOGI(TAG, "%s", line);
+#else
+    (void)in_ticks;
+    (void)after_round;
+#endif
 }
 
 static void do_tx_cycle(void) {
@@ -1917,6 +1970,15 @@ void app_main(void) {
         {
             const uint32_t lw_ms = lorawan_cycle_interval_ms();
             tx_interval = pdMS_TO_TICKS(lw_ms ? lw_ms : tx_interval_cfg_ms);
+            // V2.8.21: also when the interval itself changes between rounds —
+            // after boot, once the LoRaWAN schedule replaces the configured
+            // interval (session resumed / joined), and on an ADR data-rate change.
+            static TickType_t s_logged_interval = 0;
+            if (lw_ms && tx_interval != s_logged_interval) {
+                s_logged_interval = tx_interval;
+                const TickType_t left = tick_interval_remaining(xTaskGetTickCount(), last_tx, tx_interval);
+                log_next_uplink(left, false);
+            }
         }
         TickType_t now = xTaskGetTickCount();
         TickType_t wait = tick_interval_remaining(now, last_tx, tx_interval);
@@ -2344,6 +2406,7 @@ void app_main(void) {
             if (!main_ota_in_progress()) {
                 do_tx_cycle();
                 last_tx = xTaskGetTickCount();
+                log_next_uplink(tx_interval, true);   // V2.8.21: every round (LoRaWAN schedule only)
             }
         }
 

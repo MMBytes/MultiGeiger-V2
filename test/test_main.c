@@ -40,6 +40,8 @@
 #include "tube_logic.h"   // clamp_u32, gmc_classify, guard_effective_us
 #include "lorawan_codec.h"   // lw_hex_decode, lw_eui_from_hex, lw_pack_version, lw_build_port1/2
 #include "lorawan_sched.h"   // V2.8.14: lw_sched_interval_ms / _port2_due / _fixed_dr / _frame_is_ours
+#include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + rx windows / uplink OK text
+#include "lorawan_boot_line.h" // V2.8.21: "boot: LoRaWAN:" summary line
 #include "radio_turn_rule.h" // V2.8.15: rt_lorawan/ftps/tx_round_may_start
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
@@ -938,8 +940,14 @@ static int test_lw_sched_frame_is_ours(void) {
     EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 11));  // shorter than any data frame
     f[0] = 0x40;                                                     // unconfirmed data UP
     EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
-    f[0] = 0x61;                                                     // Major != 0
-    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    f[0] = 0x61;                                                     // Major != 0: RadioLib 8.0 has no Major check
+    EXPECT_TRUE(lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 12));
+    f[0] = 0x60;
+    f[5] = 0x03;                                                     // FCtrl: FOptsLen 3
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 14));  // 12 + 3 needed
+    EXPECT_TRUE(lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 15));
+    EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, f, 5));   // no FCtrl byte
+    f[5] = 0x00;
     // While joining: only a join accept (MHDR 0x20) of 17 or 33 B.
     f[0] = 0x20;
     EXPECT_TRUE(lw_sched_frame_is_ours(false, 0, f, 17));
@@ -949,6 +957,372 @@ static int test_lw_sched_frame_is_ours(void) {
     f[0] = 0x60;
     EXPECT_TRUE(!lw_sched_frame_is_ours(false, 0x0A0B0C0Du, f, 12)); // joining: no data frames
     EXPECT_TRUE(!lw_sched_frame_is_ours(true, 0x0A0B0C0Du, NULL, 12));
+    return 1;
+}
+
+// lorawan_rxobs.h (V2.8.21) — the RX-window observer and its "rx windows:" /
+// "uplink OK:" text, driven with the SPI sequences RadioLib 8.0 sends (ported
+// from the rxobs harness; expectations follow RadioLib 8.0: a foreign or
+// unread frame never ends an exchange). DevAddrs made up.
+#define RXT_OWN     0x260B1234u
+#define RXT_FOREIGN 0x66492766u
+static int64_t g_rxt_now = 1000000;   // 0 would read as "no TX seen yet"
+static rxobs_t g_rxt;
+static char    g_rxt_buf[LW_RXOBS_LINE_MAX];
+
+static void rxt_spi(const uint8_t *o, size_t n, const uint8_t *i) { rxobs_note(&g_rxt, g_rxt_now, o, n, i); }
+static uint32_t rxt_raw(double mhz) { return (uint32_t)(mhz * 33554432.0 / 32.0 + 0.5); }
+static void rxt_freq(double mhz) {
+    const uint32_t r = rxt_raw(mhz);
+    const uint8_t o[5] = { OBS_CMD_SET_FREQ, (uint8_t)(r >> 24), (uint8_t)(r >> 16), (uint8_t)(r >> 8), (uint8_t)r };
+    rxt_spi(o, 5, NULL);
+}
+static void rxt_sf(uint8_t sf) { const uint8_t o[2] = { OBS_CMD_SET_MOD, sf }; rxt_spi(o, 2, NULL); }
+static void rxt_rx(uint32_t ms) {
+    const uint32_t t = ms * 64u;
+    const uint8_t o[4] = { OBS_CMD_SET_RX, (uint8_t)(t >> 16), (uint8_t)(t >> 8), (uint8_t)t };
+    rxt_spi(o, 4, NULL);
+}
+static void rxt_irq(uint16_t f) {
+    const uint8_t o[4] = { OBS_CMD_GET_IRQ, 0, 0, 0 };
+    const uint8_t i[4] = { 0, 0, (uint8_t)(f >> 8), (uint8_t)f };
+    rxt_spi(o, 4, i);
+}
+static void rxt_frame(uint8_t mhdr, uint32_t addr, size_t len) {
+    uint8_t o[64] = { OBS_CMD_READ_BUFFER }, i[64] = { 0 };
+    i[3] = mhdr;
+    i[4] = (uint8_t)addr; i[5] = (uint8_t)(addr >> 8); i[6] = (uint8_t)(addr >> 16); i[7] = (uint8_t)(addr >> 24);
+    rxt_spi(o, 3 + len, i);   // i[8] = FCtrl 0 (no FOpts)
+}
+// One TX as RadioLib 8.0 drives it. rx1/rx2: 0 = window not opened, 1 = timeout,
+// 2 = our frame, 3 = foreign frame (read, then dropped), 4 = RX_DONE not read.
+static void rxt_tx(double mhz, int rx1, int rx2) {
+    rxt_sf(12); rxt_freq(mhz);
+    const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
+    rxt_spi(tx, 4, NULL);
+    g_rxt_now += 1482000;
+    rxt_irq(0x0001);   // checkIrq(TX_DONE)
+    const uint8_t c[3] = { OBS_CMD_CLEAR_IRQ, 0, 0 };
+    rxt_spi(c, 3, NULL);
+    rxt_spi(c, 3, NULL);
+    const int rx[2] = { rx1, rx2 };
+    for (int w = 0; w < 2; w++) {
+        if (!rx[w]) continue;
+        if (w == 0) { g_rxt_now += 4991000; rxt_freq(mhz); rxt_rx(2996); }
+        else        { g_rxt_now += 1000000; rxt_freq(869.525); rxt_sf(9); rxt_rx(708); }
+        g_rxt_now += 50000;
+        if (rx[w] == 1) { rxt_irq(OBS_IRQ_TIMEOUT); continue; }
+        rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
+        if (rx[w] != 4) rxt_frame(0x60, rx[w] == 2 ? RXT_OWN : RXT_FOREIGN, w ? 18 : 14);
+    }
+    g_rxt_now += 3000000;
+}
+static void rxt_begin(uint8_t nb_trans) {
+    g_rxt.own_addr = RXT_OWN;
+    rxobs_begin(&g_rxt, nb_trans);
+}
+// Assert the "rx windows:" text and the "uplink OK:" freqs / TX parts.
+static int rxt_check(int16_t st, const char *windows, const char *freqs, const char *tx) {
+    char f[OBS_MAX_REP * 7 + 8], t[48];
+    rxobs_format(&g_rxt, g_rxt_buf, sizeof(g_rxt_buf), st);
+    EXPECT_STREQ(g_rxt_buf, windows);
+    rxobs_uplink_tx(&g_rxt, st, 1127, f, sizeof(f), t, sizeof(t));
+    EXPECT_STREQ(f, freqs);
+    EXPECT_STREQ(t, tx);
+    return 1;
+}
+#define RXT_LAST_BOTH(f) " | last TX: RX1 " f " SF12 @+4991 ms to=2996 ms; RX2 869.525 SF9 @+6041 ms to=708 ms"
+#define RXT_LAST_RX1(f)  " | last TX: RX1 " f " SF12 @+4991 ms to=2996 ms; RX2 not opened"
+#define RXT_TT "RX1 timeout, no preamble; RX2 timeout, no preamble"
+#define RXT_FOREIGN14 "RX_DONE (data down for 66492766 (not ours), 14 B) ignored, repeats go on"
+#define RXT_UNREAD "RX_DONE (not read: RadioLib dropped it, too long/short) ignored, repeats go on"
+
+static int test_rxobs_all_timeouts(void) {   // A
+    rxt_begin(3); rxt_tx(867.1, 1, 1); rxt_tx(868.5, 1, 1); rxt_tx(867.3, 1, 1);
+    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.100, #2 868.500, #3 867.300: " RXT_TT
+                     RXT_LAST_BOTH("867.300"), "867.1/868.5/867.3", "3/3");
+}
+static int test_rxobs_own_dl_rx1_first_repeat(void) {   // B
+    rxt_begin(3); rxt_tx(867.9, 2, 0);
+    return rxt_check(1, "NbTrans 3 (set by network) | stopped after 1 of 3: valid downlink in RX1 of #1 — a downlink "
+                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 RX_DONE (data down for 260b1234 (ours), 14 B); "
+                     "RX2 not opened" RXT_LAST_RX1("867.900"), "867.9", "1/3");
+}
+static int test_rxobs_foreign_frame_repeats_go_on(void) {   // C (RadioLib 8.0: dropped, st 0)
+    rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 3, 1); rxt_tx(868.1, 1, 1);
+    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900: " RXT_TT " | #2 868.300: RX1 "
+                     RXT_FOREIGN14 "; RX2 timeout, no preamble | #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"),
+                     "867.9/868.3/868.1", "3/3");
+}
+static int test_rxobs_foreign_then_own_dl(void) {   // C2: the later repeat is named
+    rxt_begin(3); rxt_tx(867.9, 3, 1); rxt_tx(868.3, 2, 0);
+    return rxt_check(1, "NbTrans 3 (set by network) | stopped after 2 of 3: valid downlink in RX1 of #2 — a downlink "
+                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 " RXT_FOREIGN14 "; RX2 timeout, no preamble | "
+                     "#2 868.300: RX1 RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened"
+                     RXT_LAST_RX1("868.300"), "867.9/868.3", "2/3");
+}
+static int test_rxobs_own_malformed_ends_exchange(void) {   // C3: the -1102 left on RadioLib 8.0
+    rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 2, 0);
+    return rxt_check(-1102, "NbTrans 3 (set by network) | stopped after 2 of 3: unusable frame in RX1 of #2, -1102 "
+                     "(downlink addressed to us but malformed (bad FPort or FOpts), dropped), ended them early — "
+                     "LoRaWAN says only a valid downlink ends the repeats | #1 867.900: " RXT_TT " | #2 868.300: RX1 "
+                     "RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened" RXT_LAST_RX1("868.300"),
+                     "867.9/868.3", "2/3");
+}
+static int test_rxobs_own_dl_rx2_last_repeat(void) {   // D
+    rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 1, 2);
+    return rxt_check(2, "NbTrans 3 (set by network) | all 3 sent, valid downlink in RX2 of #3 | #1 867.900, "
+                     "#2 868.300: " RXT_TT " | #3 868.100: RX1 timeout, no preamble; RX2 RX_DONE (data down for "
+                     "260b1234 (ours), 18 B)" RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1", "3/3");
+}
+static int test_rxobs_single_tx(void) {   // E
+    rxt_begin(1); rxt_tx(867.5, 1, 1);
+    return rxt_check(0, "RX1 867.500 SF12 @+4991 ms to=2996 ms timeout, no preamble | RX2 869.525 SF9 @+6041 ms "
+                     "to=708 ms timeout, no preamble", "867.5", "1");
+}
+static int test_rxobs_single_tx_foreign(void) {   // F (RadioLib 8.0: dropped, RX2 opens, st 0)
+    rxt_begin(1); rxt_tx(867.5, 3, 1);
+    return rxt_check(0, "RX1 867.500 SF12 @+4991 ms to=2996 ms RX_DONE (data down for 66492766 (not ours), 14 B) "
+                     "ignored (RadioLib dropped it, the window counts as empty) | RX2 869.525 SF9 @+6041 ms "
+                     "to=708 ms timeout, no preamble", "867.5", "1");
+}
+static int test_rxobs_rx_window_missed(void) {   // G
+    rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 0);
+    return rxt_check(-1105, "NbTrans 3 (set by network) | stopped at TX 2 of 3: -1105 (RX window missed: RX1 held "
+                     "open past RX2, or too late) | #1 867.900: " RXT_TT " | #2 868.300: RX1 timeout, no preamble; "
+                     "RX2 not opened" RXT_LAST_RX1("868.300"), "867.9/868.3", "2/3");
+}
+static int test_rxobs_nested_mac_only(void) {   // K
+    rxt_begin(3); rxt_tx(867.9, 2, 0); rxt_tx(868.3, 1, 1); rxt_tx(868.5, 1, 1); rxt_tx(867.1, 1, 1);
+    return rxt_check(1, "NbTrans 3 (set by network) | stopped after 1 of 3: valid downlink in RX1 of #1 — a downlink "
+                     "ends the repeats (LoRaWAN); then 3 TX of a MAC-only uplink (M1..: RadioLib sends MAC answers "
+                     "that do not fit the next frame on their own) | #1 867.900: RX1 RX_DONE (data down for 260b1234 "
+                     "(ours), 14 B); RX2 not opened | M1 868.300, M2 868.500, M3 867.100: " RXT_TT
+                     RXT_LAST_BOTH("867.100"), "867.9", "1/3 +3 MAC-only (from FCnt 1128)");
+}
+static int test_rxobs_nested_mac_only_nbtrans1(void) {   // K2
+    rxt_begin(1); rxt_tx(867.9, 2, 0); rxt_tx(868.3, 1, 1);
+    return rxt_check(1, "NbTrans 1 | all 1 sent, valid downlink in RX1 of #1; then 1 TX of a MAC-only uplink (M1..: "
+                     "RadioLib sends MAC answers that do not fit the next frame on their own) | #1 867.900: RX1 "
+                     "RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened | M1 868.300: " RXT_TT
+                     RXT_LAST_BOTH("868.300"), "867.9", "1 +1 MAC-only (from FCnt 1128)");
+}
+static int test_rxobs_foreign_on_last_repeat(void) {   // L (RadioLib 8.0: st 0)
+    rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 3, 1);
+    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900, #2 868.300: " RXT_TT " | #3 868.100: "
+                     "RX1 " RXT_FOREIGN14 "; RX2 timeout, no preamble" RXT_LAST_BOTH("868.100"),
+                     "867.9/868.3/868.1", "3/3");
+}
+static int test_rxobs_unread_frame_repeats_go_on(void) {   // M2
+    rxt_begin(3); rxt_tx(867.9, 4, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 1, 1);
+    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900: RX1 " RXT_UNREAD "; RX2 timeout, "
+                     "no preamble | #2 868.300, #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1",
+                     "3/3");
+}
+static int test_rxobs_unread_frames_two_repeats(void) {   // P (formatter robustness; st 0 on RadioLib 8.0)
+    rxt_begin(3); rxt_tx(867.9, 4, 1); rxt_tx(868.3, 1, 4);
+    return rxt_check(0, "NbTrans 3 (set by network) | stopped after 2 of 3, no downlink (cause not seen) | #1 867.900: "
+                     "RX1 " RXT_UNREAD "; RX2 timeout, no preamble | #2 868.300: RX1 timeout, no preamble; RX2 "
+                     RXT_UNREAD RXT_LAST_BOTH("868.300"), "867.9/868.3", "2/3");
+}
+static int test_rxobs_tx_timeout(void) {   // N
+    rxt_begin(3); rxt_tx(867.9, 1, 1);
+    const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
+    rxt_spi(tx, 4, NULL);   // second TX, no TX end, no windows
+    return rxt_check(-5, "NbTrans 3 (set by network) | stopped at TX 2 of 3: -5 (TX timeout (the radio did not report the end of the transmission)) | #1 867.900: " RXT_TT
+                     " | #2 869.525: RX1 not opened; RX2 not opened | last TX: RX1 not opened; RX2 not opened",
+                     "867.9/869.5", "2/3");
+}
+static int test_rxobs_unread_both_windows(void) {   // Q (formatter robustness; st 0 on RadioLib 8.0)
+    rxt_begin(3); rxt_tx(867.9, 4, 4);
+    return rxt_check(0, "NbTrans 3 (set by network) | stopped after 1 of 3, no downlink (cause not seen) | #1 867.900: "
+                     "RX1 " RXT_UNREAD "; RX2 " RXT_UNREAD RXT_LAST_BOTH("867.900"), "867.9", "1/3");
+}
+#define RXT_I_LINE "NbTrans 15 (set by network) | all 15 sent | #1 867.100: RX1 timeout, no preamble; RX2 RX_DONE " \
+    "(data down for 66492766 (not ours), 18 B) ignored, repeats go on | #2 867.300: " RXT_TT " | #3 867.500: RX1 "      \
+    "timeout, no preamble; RX2 RX_DONE (data down for 66492766 (not ours), 18 B) ignored, repeats go on | #4 867.700: " \
+    RXT_TT " | +11 more TX not listed" RXT_LAST_BOTH("868.300")
+static void rxt_fifteen(void) {
+    rxt_begin(15);
+    for (int k = 0; k < 15; k++) rxt_tx(867.1 + 0.2 * (k % 8), 1, (k % 2) ? 1 : 3);
+}
+static int test_rxobs_nbtrans_above_max_rep(void) {   // I: OBS_MAX_REP 4, no overflow
+    rxt_fifteen();
+    return rxt_check(0, RXT_I_LINE, "867.1/867.3/867.5/867.7/...", "15/15");
+}
+static int test_rxobs_truncation_keeps_verdict(void) {   // J
+    char small[100];
+    rxt_fifteen();
+    rxobs_format(&g_rxt, small, sizeof(small), 0);
+    EXPECT_INT(strlen(small), 99);
+    EXPECT_TRUE(strncmp(small, RXT_I_LINE, 99) == 0);
+    return 1;
+}
+// lw_err_text (V2.8.21): every RadioLib status code the LoRaWAN code paths can
+// return has plain words; unknown codes get the fallback. Values from RadioLib
+// 8.0 TypeDef.h (cross-checked against RadioLib in lorawan.cpp).
+static int test_lw_err_text(void) {
+    static const int16_t known[] = {
+        -1, -2, -4, -5, -6, -7, -12, -13, -16, -20, -24, -28, -501,
+        -703, -705, -706, -707,
+        -1101, -1102, -1103, -1104, -1105, -1106, -1108, -1109, -1111, -1112,
+        -1114, -1115, -1116, -1119, -1120, -1123, -1124,
+    };
+    const char *fallback = lw_err_text(-32000);
+    EXPECT_STREQ(fallback, "RadioLib error, see RadioLib TypeDef.h");
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        const char *s = lw_err_text(known[i]);
+        if (s == NULL || s[0] == '\0' || strcmp(s, fallback) == 0) {
+            printf("    code %d has no words\n", (int)known[i]);
+            return 0;
+        }
+    }
+    // The -1102 wording must not claim "not for us": on RadioLib 8.0 a foreign
+    // frame is dropped silently; -1102 means our DevAddr, malformed.
+    EXPECT_TRUE(strstr(lw_err_text(-1102), "not for us") == NULL);
+    EXPECT_STREQ(lw_err_text(-4), "payload too long for this data rate, even without MAC answers");
+    EXPECT_STREQ(lw_err_text(-1124), "payload fits, but not together with the queued MAC answers");
+    // Re-review 2: setDatarate()'s only error; -1115 is a corrupt/empty blob, not
+    // a key mismatch (-1119); -7 on a LoRaWAN downlink is a bit error (no PHY CRC).
+    EXPECT_STREQ(lw_err_text(-501), "no channel in this region allows this data rate");
+    EXPECT_STREQ(lw_err_text(-1115), "saved data corrupt or empty (checksum mismatch)");
+    EXPECT_STREQ(lw_err_text(-7), "frame corrupted (integrity check failed)");
+    return 1;
+}
+
+// V2.8.21 (user): every upload round says when the next LoRaWAN uplink comes.
+static int test_lw_next_uplink_line(void) {
+    char out[128];   // as main.c's line buffer
+    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 0);
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 12:41:07 (in 30 min, SF12 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 1800, -1, 0, 0, 12, 0);   // clock not set yet
+    EXPECT_STREQ(out, "next LoRaWAN uplink in about 30 min (SF12 schedule; clock not set yet)");
+    lw_next_uplink_line(out, sizeof(out), 239, 9, 5, 0, 7, 0);      // rounds to whole minutes
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 09:05:00 (in 4 min, SF7 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 45, 9, 5, 0, 7, 0);       // under a minute: seconds
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 09:05:00 (in 45 s, SF7 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 600, 23, 59, 59, 0, 0);   // SF not known: no schedule tail
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 23:59:59 (in 10 min)");
+    // rc3: RadioLib's duty-cycle limiter holds the uplink past the next round —
+    // the time is the later moment (caller's job), the line names why.
+    lw_next_uplink_line(out, sizeof(out), 180, 15, 8, 10, 12, 500);
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 15:08:10 (in 8 min: duty-cycle wait; upload round in 3 min, "
+                      "SF12 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 180, -1, 0, 0, 12, 500);
+    EXPECT_STREQ(out, "next LoRaWAN uplink in about 8 min (duty-cycle wait; upload round in 3 min, SF12 schedule; "
+                      "clock not set yet)");
+    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 500);   // wait shorter than the round: no mention
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 12:41:07 (in 30 min, SF12 schedule)");
+    return 1;
+}
+
+// Review fix 1: receive-side-only errors after a real TX are "sent, no usable
+// downlink" — incl. -1104 (our DevAddr, FPort rejected by parseDownlink()).
+static int test_lw_downlink_unusable(void) {
+    EXPECT_TRUE(lw_downlink_unusable(-1102));
+    EXPECT_TRUE(lw_downlink_unusable(-1104));
+    EXPECT_TRUE(lw_downlink_unusable(-1105));
+    EXPECT_TRUE(lw_downlink_unusable(-1112));
+    EXPECT_TRUE(!lw_downlink_unusable(-4));
+    EXPECT_TRUE(!lw_downlink_unusable(-5));
+    EXPECT_TRUE(!lw_downlink_unusable(-1124));
+    EXPECT_TRUE(!lw_downlink_unusable(0));
+    return 1;
+}
+
+// Review fix 2: which restore line fits. loadBuffers() restores the
+// persistence buffer first and stops there on failure (the session callback
+// is then never called).
+static int test_lw_restore_verdict(void) {
+    EXPECT_INT(lw_restore_verdict(0, true, true, true, false), LW_RESTORE_OK);
+    EXPECT_INT(lw_restore_verdict(-1101, false, false, false, false), LW_RESTORE_NO_PERS);   // new board
+    EXPECT_INT(lw_restore_verdict(-1119, true, false, false, false), LW_RESTORE_PERS_BAD);   // keys changed
+    EXPECT_INT(lw_restore_verdict(-1101, true, true, false, false), LW_RESTORE_NO_SESS);
+    EXPECT_INT(lw_restore_verdict(-1120, true, true, true, false), LW_RESTORE_SESS_BAD);
+    // Session saved right after a join, before its first uplink: withheld from
+    // RadioLib (handed over all-zero -> -1115), own line instead of "corrupt".
+    EXPECT_INT(lw_restore_verdict(-1115, true, true, true, true), LW_RESTORE_SESS_UNFINISHED);
+    EXPECT_INT(lw_restore_verdict(-1115, true, true, true, false), LW_RESTORE_SESS_BAD);
+    return 1;
+}
+
+// lw_boot_line (V2.8.21): the "boot: LoRaWAN:" summary, verdict first.
+// DevAddrs made up.
+static lw_boot_t lwb(lw_boot_kind_t kind) {
+    lw_boot_t b;
+    memset(&b, 0, sizeof(b));
+    b.kind = kind;
+    b.region = "AU915";
+    b.subband = 2;
+    b.dev_addr = 0x260B1234u;
+    b.adr = true;
+    b.ok_dr = 0xFF;
+    b.pwr_min = 2;
+    b.pwr_max = 33;
+    return b;
+}
+static int test_lw_boot_line_states(void) {
+    char out[200];
+    lw_boot_t b = lwb(LW_BOOT_OFF);
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "off (disabled in /config)");
+    b = lwb(LW_BOOT_NO_CONFIG);
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "not started: DevEUI, JoinEUI or AppKey missing or malformed in /config");
+    b = lwb(LW_BOOT_HW_FAIL);
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "not started: radio init failed (see the \"SX1262 begin failed\" line)");
+    b = lwb(LW_BOOT_RESUMED);
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "session resumed — DevAddr 260b1234, region AU915 sub-band 2, ADR, TX power 2..33 dBm");
+    b = lwb(LW_BOOT_JOINED);
+    b.ok_window = 1; b.ok_dr = 3; b.ok_sf = 9; b.ok_khz = 867700;
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "joined via RX1 at DR3 (SF9, 867.7 MHz) — DevAddr 260b1234, region AU915 sub-band 2, ADR, "
+                      "TX power 2..33 dBm");
+    b = lwb(LW_BOOT_JOINING);
+    b.attempts = 3; b.last_error = -1116;
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "joining — attempt 3, last error -1116 (no join accept received), region AU915 sub-band 2, ADR, "
+                      "TX power 2..33 dBm");
+    return 1;
+}
+static int test_lw_boot_line_variants(void) {
+    char out[200];
+    lw_boot_t b = lwb(LW_BOOT_JOINING);   // before the first attempt finished
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "joining — first attempt pending, region AU915 sub-band 2, ADR, TX power 2..33 dBm");
+    b = lwb(LW_BOOT_RESUMED);             // fixed DR, no PA (no power range), EU868 without sub-band
+    b.adr = false; b.fixed_dr = 3; b.pwr_min = 0; b.pwr_max = 0; b.region = "EU868"; b.subband = 0;
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "session resumed — DevAddr 260b1234, region EU868, fixed DR3");
+    b = lwb(LW_BOOT_JOINED);              // fixed plan: DR from the channel, window unknown
+    b.ok_sf = 10; b.ok_khz = 917800;
+    lw_boot_line(out, sizeof(out), &b);
+    EXPECT_STREQ(out, "joined (SF10, 917.8 MHz) — DevAddr 260b1234, region AU915 sub-band 2, ADR, TX power 2..33 dBm");
+    char small[40];                       // truncated, terminated, verdict kept
+    b = lwb(LW_BOOT_RESUMED);
+    lw_boot_line(small, sizeof(small), &b);
+    EXPECT_INT(strlen(small), 39);
+    EXPECT_TRUE(strncmp(small, "session resumed — DevAddr", strlen("session resumed — DevAddr")) == 0);
+    return 1;
+}
+
+static int test_rxobs_join_accept_not_ignored(void) {   // joining: own_addr 0
+    g_rxt.own_addr = 0;
+    rxobs_begin(&g_rxt, 1);
+    rxt_sf(12); rxt_freq(868.1);
+    const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
+    rxt_spi(tx, 4, NULL);
+    g_rxt_now += 1482000;
+    const uint8_t c[3] = { OBS_CMD_CLEAR_IRQ, 0, 0 };
+    rxt_spi(c, 3, NULL);
+    g_rxt_now += 4991000; rxt_rx(2996);
+    g_rxt_now += 50000; rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
+    rxt_frame(0x20, 0, 17);
+    rxobs_format(&g_rxt, g_rxt_buf, sizeof(g_rxt_buf), 0);
+    EXPECT_STREQ(g_rxt_buf, "RX1 868.100 SF12 @+4991 ms to=2996 ms RX_DONE (join accept, 17 B) | RX2 not opened");
+    EXPECT_TRUE(!g_rxt.win[0].ignored);
     return 1;
 }
 
@@ -3067,6 +3441,31 @@ int main(int argc, char **argv) {
     RUN(test_lw_sched_port2_due);
     RUN(test_lw_sched_fixed_dr);
     RUN(test_lw_sched_frame_is_ours);
+    RUN(test_rxobs_all_timeouts);
+    RUN(test_rxobs_own_dl_rx1_first_repeat);
+    RUN(test_rxobs_foreign_frame_repeats_go_on);
+    RUN(test_rxobs_foreign_then_own_dl);
+    RUN(test_rxobs_own_malformed_ends_exchange);
+    RUN(test_rxobs_own_dl_rx2_last_repeat);
+    RUN(test_rxobs_single_tx);
+    RUN(test_rxobs_single_tx_foreign);
+    RUN(test_rxobs_rx_window_missed);
+    RUN(test_rxobs_nested_mac_only);
+    RUN(test_rxobs_nested_mac_only_nbtrans1);
+    RUN(test_rxobs_foreign_on_last_repeat);
+    RUN(test_rxobs_unread_frame_repeats_go_on);
+    RUN(test_rxobs_unread_frames_two_repeats);
+    RUN(test_rxobs_tx_timeout);
+    RUN(test_rxobs_unread_both_windows);
+    RUN(test_rxobs_nbtrans_above_max_rep);
+    RUN(test_rxobs_truncation_keeps_verdict);
+    RUN(test_rxobs_join_accept_not_ignored);
+    RUN(test_lw_err_text);
+    RUN(test_lw_next_uplink_line);
+    RUN(test_lw_downlink_unusable);
+    RUN(test_lw_restore_verdict);
+    RUN(test_lw_boot_line_states);
+    RUN(test_lw_boot_line_variants);
     RUN(test_radio_turn_rule);
 
     printf("== env_api_format ==\n");

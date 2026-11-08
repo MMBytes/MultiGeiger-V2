@@ -101,26 +101,8 @@ idf_component_register(
         # `docs/en/migration-guides/release-6.x/6.0/protocols.rst:151`.
 )
 
-# V2.6.23: RadioLib's PhysicalLayer base class is overloaded with different
-# default-arg signatures across its module subclasses (SX1262, LR11x0,
-# CC1101, ...) — an upstream design choice, not something fixable from this
-# tree since managed_components/ is gitignored and regenerated on every
-# checkout. That trips -Woverloaded-virtual (pulled in by this project's
-# -Wextra) and gets promoted to a hard error under our global -Werror
-# policy, so the library fails to compile out of the box. Demote it for
-# RadioLib's own translation units only — every other component keeps
-# -Werror on overloaded-virtual.
-if(CONFIG_GEIGER_LORAWAN)
-    idf_component_get_property(geiger_radiolib_lib jgromes__radiolib COMPONENT_LIB)
-    target_compile_options(${geiger_radiolib_lib} PRIVATE -Wno-error=overloaded-virtual)
-
-    # Task 5: lorawan.cpp itself (this component, __idf_main — NOT the
-    # RadioLib component library target above) also `#include "RadioLib.h"`,
-    # which pulls in the exact same PhysicalLayer.h/CC1101.h/RF69.h/... class
-    # hierarchy and trips the identical -Woverloaded-virtual promotion, this
-    # time in our own TU rather than RadioLib's compiled sources. Scoped to
-    # this one source file (not the whole ${COMPONENT_LIB}) so every other
-    # file in main/ keeps -Werror on overloaded-virtual, per the comment above.
-    set_source_files_properties(lorawan.cpp PROPERTIES
-        COMPILE_OPTIONS "-Wno-error=overloaded-virtual")
-endif()
+# V2.8.21: the -Wno-error=overloaded-virtual demotion that V2.6.23 added for
+# RadioLib's translation units and lorawan.cpp is gone. RadioLib 8.0.0 no
+# longer trips -Woverloaded-virtual: its first build here printed no warning
+# with the demotion still in place, so RadioLib now compiles under the full
+# -Werror like every other component.

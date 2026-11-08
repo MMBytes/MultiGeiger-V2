@@ -29,7 +29,7 @@ typedef struct {
     bool has_fuel_gauge;          ///< HAL_HAS_FUEL_GAUGE: MAX17048 battery gauge on board
     bool has_lorawan;             ///< HAL_HAS_LORAWAN: lora_* keys get strict hex checks
     bool has_carrier_rev_switch;  ///< HAL_HAS_CARRIER_REV_SWITCH: revc_carrier may be 3
-    bool has_lora_fem;            ///< HAL_HAS_LORA_FEM: Heltec GC1109 front end (28 dBm mode)
+    bool has_lora_fem;            ///< HAL_HAS_LORA_FEM: Heltec GC1109 front end (high-power mode)
     uint8_t carrier_rev_fixed;    ///< HAL_REVC_CARRIER_FIXED, 0 = none: carrier stored on non-switch boards
 } config_form_caps_t;
 

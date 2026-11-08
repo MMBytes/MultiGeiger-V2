@@ -30,6 +30,7 @@ extern "C" {
 #include "lorawan_codec.h"
 #include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR
 #include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + its log text
+#include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain for setOutputPowerOffset()
 #include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
 #include "transmission.h"    // tx_is_idle()
 #include "log_ftp.h"         // log_ftp_is_busy()
@@ -378,11 +379,6 @@ static void exchange_end(void) { __atomic_store_n(&s_busy, false, __ATOMIC_SEQ_C
 }
 
 #if HAL_HAS_LORA_FEM
-// V2.8.19: net TX gain of the Heltec V4's PA at low drive (Meshtastic's
-// heltec_v4 variant.h: +11 dB at 0-15 dBm in, compressing to +7 dB at 21 dBm).
-// Using the low-drive value errs on the low side at high drive.
-#define LORA_KCT_PA_GAIN_DB 11
-
 // V2.8.19: front-end type, probed once: -1 = not yet, 0 = GC1109 (or an
 // unclear reading), 1 = KCT8103L. Written only by the first
 // lorawan_fem_is_kct8103l() call (main task, before the worker exists), read
@@ -459,21 +455,24 @@ static bool radio_init(void) {
     gpio_set_level((gpio_num_t)PIN_LORA_FEM_EN, 1);   // CSD enable (GC1109 and KCT8103L)
     ESP_LOGI(TAG, "FEM_EN (GPIO2) driven HIGH (front end RX/TX enable)");
 
-    // FEM_PA stays opt-in on the V4.2: 28 dBm is a regulatory/power choice,
-    // not a hardware gate (GPIO46 is free on the V1.10 mainboard, see hal.h).
-    // V2.8.19: on a V4.3 GPIO46 is unconnected and the KCT8103L always
-    // transmits through its PA (CTX below), so it is left alone there.
+    // FEM_PA stays opt-in on the V4.2: the PA buys power only where the band
+    // allows more than the bare SX1262's 22 dBm (AU915), and costs current
+    // (GPIO46 is free on the V1.10 mainboard, see hal.h). V2.8.19: on a V4.3
+    // GPIO46 is unconnected and the KCT8103L always transmits through its PA
+    // (CTX below), so it is left alone there.
     if (kct) {
         if (g_cfg.lorawan_high_power)
-            ESP_LOGI(TAG, "28 dBm mode setting has no effect on a KCT8103L (always PA in TX)");
+            ESP_LOGI(TAG, "high-power setting has no effect on a KCT8103L (always PA in TX)");
     } else if (g_cfg.lorawan_high_power) {
         gpio_config_t pa = {};
         pa.pin_bit_mask = 1ULL << PIN_LORA_FEM_PA;
         pa.mode = GPIO_MODE_OUTPUT;
         ESP_ERROR_CHECK(gpio_config(&pa));
-        gpio_set_level((gpio_num_t)PIN_LORA_FEM_PA, 1);   // 28 dBm gain stage
-        ESP_LOGW(TAG, "FEM_PA (GPIO46) driven HIGH — 28 dBm mode");
+        gpio_set_level((gpio_num_t)PIN_LORA_FEM_PA, 1);   // GC1109 PA into the TX path
+        ESP_LOGI(TAG, "FEM_PA (GPIO46) driven HIGH — GC1109 PA in the TX path");
     }
+    // V2.8.22: dB the PA adds — RadioLib programs the radio that much lower.
+    const int8_t pa_gain = lw_pa_offset_db(kct, g_cfg.lorawan_high_power);
 #endif  // HAL_HAS_LORA_FEM — boards without it have a bare SX1262 (no power-up step)
 
     // Let RadioLib own ALL SX1262 configuration (lesson from RadioLib
@@ -485,11 +484,12 @@ static bool radio_init(void) {
     // (434 MHz, 125 kHz, SF9, CR 4/7, private sync word, 10 dBm, 8-symbol
     // preamble) are replaced by LoRaWANNode with the band's settings later.
 #if HAL_HAS_LORA_FEM
-    // The KCT8103L's PA is always in the TX path, so RadioLib programs the
-    // radio ~11 dB below the EIRP the LoRaWAN stack asks for. Must come
-    // before begin(): begin() sets a power, and that call computes the
-    // accepted range from the offset (PhysicalLayer applyOutputPowerOffset()).
-    if (kct) (void)s_radio.setOutputPowerOffset(LORA_KCT_PA_GAIN_DB);   // scalar form: cannot fail
+    // With a PA in the TX path (KCT8103L always; GC1109 when high power is
+    // on, V2.8.22), RadioLib programs the radio ~11 dB below the EIRP the
+    // LoRaWAN stack asks for. Must come before begin(): begin() sets a power,
+    // and that call computes the accepted range from the offset
+    // (PhysicalLayer applyOutputPowerOffset()).
+    if (pa_gain) (void)s_radio.setOutputPowerOffset(pa_gain);   // scalar form: cannot fail
 #endif
     static_assert(HAL_LORA_TCXO_V == 1.6f || HAL_LORA_TCXO_V == 1.8f, "map HAL_LORA_TCXO_V to RadioLibTCXOVoltage_t");
     s_radio.tcxoVoltage = (HAL_LORA_TCXO_V == 1.8f) ? Voltage1V8 : Voltage1V6;
@@ -519,6 +519,12 @@ static bool radio_init(void) {
     ESP_LOGI(TAG, "RF switch: DIO2 + GPIO%d (RX high)", PIN_LORA_RF_SW_RX);
 #endif
 #if HAL_HAS_LORA_FEM
+    if (pa_gain) {
+        // Range after begin(): its setOutputPower() call applied the offset.
+        ESP_LOGI(TAG, "%s PA: TX power range %d..%d dBm (radio set %d dB lower, compensating the PA gain)",
+                 kct ? "KCT8103L" : "GC1109", (int)s_radio.getOutputPowerMin(),
+                 (int)s_radio.getOutputPowerMax(), (int)pa_gain);
+    }
     // V2.8.19: on a KCT8103L RadioLib drives CTX (GPIO5) through an RF-switch
     // table next to DIO2 (= CPS): HIGH in TX (PA mode); in RX LOW = through
     // the LNA (lorawan_lna on, the default) or HIGH = LNA bypass, for sites
@@ -527,9 +533,6 @@ static bool radio_init(void) {
     // entered PA mode and a V4.3 transmitted far below its rated power
     // (measured: +70 dB at the gateway once CTX was driven).
     if (kct) {
-        // Range after begin(): its setOutputPower() call applied the offset.
-        ESP_LOGI(TAG, "KCT8103L PA: TX power range %d..%d dBm (radio set %d dB lower, compensating the PA gain)",
-                 (int)s_radio.getOutputPowerMin(), (int)s_radio.getOutputPowerMax(), LORA_KCT_PA_GAIN_DB);
         static const uint32_t ctx_pins[Module::RFSWITCH_MAX_PINS] = {
             PIN_LORA_KCT_CTX, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC };
         static const Module::RfSwitchMode_t ctx_lna[] = {

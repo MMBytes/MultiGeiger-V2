@@ -630,8 +630,9 @@ X_BOOL(standalone_ap_on,       "sd_ap_on",   false)
 // standalone_ap_on above). Only the LoRaWAN boards (Heltec V4; V2.8.11: XIAO
 // + Wio) render them in /config and act on them. deveui/joineui/appkey hold the TTN-console hex strings
 // verbatim; parsing/endianness happens in lorawan.cpp at use time.
-// lorawan_high_power drives the Heltec V4's GC1109 FEM 28 dBm gain-stage select
-// (GPIO46; V2.8.11: forced off where HAL_HAS_LORA_FEM is 0) — a regulatory/power choice, kept opt-in (see hal.h
+// lorawan_high_power puts the Heltec V4.2's GC1109 PA into the TX path
+// (GPIO46; V2.8.11: forced off where HAL_HAS_LORA_FEM is 0; V2.8.22: its gain is
+// subtracted, lorawan_pa.h) — a power/current choice, kept opt-in (see hal.h
 // PIN_LORA_FEM_PA). The former lorawan_fem_en flag was removed in
 // V2.6.34: the GC1109 front end is required for LoRa RX, so lorawan.cpp
 // now always drives FEM_EN (GPIO2) when LoRaWAN is on — a config option

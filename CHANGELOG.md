@@ -9,6 +9,28 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.22 — Heltec V4.2 high-power mode stays within the band's power limit
+
+For the Heltec WiFi LoRa 32 V4.2 (GC1109 front end) with LoRaWAN on. Other
+boards, and the V4.3, are unchanged.
+
+1. **With high-power mode on, a V4.2 now transmits at the band's limit, not
+   about 11 dB above it.** The setting switches the GC1109's power amplifier
+   into the transmit path, but until now the firmware did not account for
+   its gain: the LoRaWAN stack asked for the band's limit (EU868 16 dBm,
+   AU915 30 dBm EIRP) and the amplifier added its gain on top. RadioLib now
+   programs the radio 11 dB lower whenever the amplifier is in the path —
+   the same compensation the V4.3 has had since V2.8.19. The 11 dB is the
+   gain Heltec measured for the GC1109 at 868 MHz at low to medium drive.
+   The boot log shows the resulting range:
+   `GC1109 PA: TX power range 2..33 dBm (radio set 11 dB lower, compensating
+   the PA gain)`.
+2. **What the setting is now for:** in EU868 it no longer changes the power
+   on air (the bare radio already reaches 16 dBm). In AU915 it lets the node
+   go above the bare radio's 22 dBm, up to about 28 dBm. On `/config` it
+   reads "High-power mode: V4.2 amplifier (GPIO46)", with the limits next
+   to it; "28 dBm" is gone from the label and the log.
+
 ## V2.8.21 — LoRaWAN on RadioLib 8.0, and a node log that explains every exchange
 
 For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).

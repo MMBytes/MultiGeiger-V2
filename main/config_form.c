@@ -320,7 +320,7 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
     if (!caps->has_carrier_rev_switch)
         next->revc_carrier = caps->carrier_rev_fixed ? caps->carrier_rev_fixed : 2;
 
-    // V2.8.11: 28 dBm mode drives the Heltec V4's GC1109 amplifier; on a LoRa
+    // V2.8.11: high-power mode drives the Heltec V4's GC1109 amplifier; on a LoRa
     // board without one (XIAO + Wio) it is greyed and forced off.
     if (!caps->has_lora_fem) next->lorawan_high_power = false;
 

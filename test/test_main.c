@@ -42,6 +42,7 @@
 #include "lorawan_sched.h"   // V2.8.14: lw_sched_interval_ms / _port2_due / _fixed_dr / _frame_is_ours
 #include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + rx windows / uplink OK text
 #include "lorawan_boot_line.h" // V2.8.21: "boot: LoRaWAN:" summary line
+#include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain RadioLib subtracts
 #include "radio_turn_rule.h" // V2.8.15: rt_lorawan/ftps/tx_round_may_start
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
@@ -2878,7 +2879,7 @@ static int test_form_revc_fixed_board_stores_3(void) {
 }
 
 static int test_form_lora_hp_forced_off_without_fem(void) {
-    // V2.8.11: 28 dBm mode drives the Heltec's GC1109 amplifier. A LoRa board
+    // V2.8.11: high-power mode drives the Heltec's GC1109 amplifier. A LoRa board
     // without one (XIAO + Wio) must never store it, even from a ticked box or
     // a config saved on a Heltec.
     config_form_caps_t caps = form_caps_none();
@@ -2889,6 +2890,20 @@ static int test_form_lora_hp_forced_off_without_fem(void) {
     form_apply("lora_en=on&lora_hp=on", &caps);
     EXPECT_TRUE(!g_form_next.lorawan_high_power);
     EXPECT_TRUE(g_form_next.lorawan_enabled);
+    return 1;
+}
+
+// V2.8.22: whenever a PA is in the TX path its gain goes to RadioLib, so the
+// stack's power (= the band's EIRP limit) is what reaches the antenna. Before,
+// a V4.2 with high power on got no offset and sent ~11 dB above the limit.
+static int test_lw_pa_offset(void) {
+    EXPECT_INT(lw_pa_offset_db(false, false), 0);              // V4.2, PA bypassed
+    EXPECT_INT(lw_pa_offset_db(false, true), LW_PA_GAIN_DB);   // V4.2, PA on (the fix)
+    EXPECT_INT(lw_pa_offset_db(true, false), LW_PA_GAIN_DB);   // V4.3: PA always in TX
+    EXPECT_INT(lw_pa_offset_db(true, true), LW_PA_GAIN_DB);    //   setting has no effect
+    // EU868: the stack asks 16 dBm EIRP; the radio gets 16 - 11 = 5 dBm, which
+    // Heltec's table (868 MHz, PA on) puts at 15.8 dBm at the antenna port.
+    EXPECT_INT(16 - lw_pa_offset_db(false, true), 5);
     return 1;
 }
 
@@ -3614,6 +3629,7 @@ int main(int argc, char **argv) {
     RUN(test_form_revc_fixed_board_stores_3);
     RUN(test_form_lora_hp_forced_off_without_fem);
     RUN(test_form_lora_hp_kept_with_fem);
+    RUN(test_lw_pa_offset);
 
     printf("== ota_guard_logic (V2.8.20) ==\n");
     RUN(test_ota_guard_needs_confirm_states);

@@ -2148,16 +2148,18 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "pattern=\"[0-9a-fA-F]{32}\"></label>"
                      // V2.6.34: the "Drive FEM enable (GPIO2)" checkbox is gone —
                      // the GC1109 front end is required for LoRa RX, so lorawan.cpp
-                     // now always enables it. High power stays a choice: 28 dBm is
-                     // a regulatory/EIRP decision, not a hardware gate (GPIO46 is
-                     // free on the V1.10 mainboard). V2.8.11: on a board without the
-                     // front end (HAL_HAS_LORA_FEM 0) it is greyed and forced off.
+                     // now always enables it. High power stays a choice: the PA
+                     // costs current and adds power only where the band allows more
+                     // than 22 dBm (V2.8.22: its gain is subtracted, so the band's
+                     // EIRP limit holds either way; GPIO46 is free on the V1.10
+                     // mainboard). V2.8.11: on a board without the front end
+                     // (HAL_HAS_LORA_FEM 0) it is greyed and forced off.
 #if HAL_HAS_LORA_FEM
                      // V2.8.19: on a Heltec V4.3 (KCT8103L detected at boot) GPIO46
                      // drives nothing and the PA is always used in TX, so the box
                      // is greyed there (and, being disabled, saved as off).
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s%s> "
-                     "28 dBm high-power mode (GPIO46) <span class=\"r\">*</span> %s</label></div>"
+                     "High-power mode: V4.2 amplifier (GPIO46) <span class=\"r\">*</span> %s</label></div>"
                      // V2.8.19: KCT8103L receive LNA. Never greyed: a disabled box
                      // is not POSTed, which would flip the default (on) to off on
                      // every save of a V4.2 node.
@@ -2169,7 +2171,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // V2.8.11: bare SX1262 (XIAO + Wio) — greyed like the other
                      // hardware-gated options; config_apply_form() forces it off.
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"lora_hp\" %s "
-                     "disabled> 28 dBm high-power mode "
+                     "disabled> High-power mode "
                      "<small>(no power amplifier on this board)</small></label></div>"
 #endif
                      "<p style=\"font-size:0.85em;color:#666;line-height:1.4\">With LoRaWAN "
@@ -2559,7 +2561,8 @@ static esp_err_t config_get(httpd_req_t *req) {
                      lorawan_fem_kct8103l_detected() ? " disabled" : "",
                      lorawan_fem_kct8103l_detected()
                          ? "<small>(no effect on a Heltec V4.3: it always transmits through its PA)</small>"
-                         : "<small>Check your region's EIRP / duty-cycle limits before enabling.</small>",
+                         : "<small>Power stays within your region's limit (EU868 16 dBm, AU915 30 dBm "
+                           "EIRP); gains only where that exceeds 22 dBm. Takes effect after a restart.</small>",
                      s_cfg->lorawan_lna ? "checked" : "",
 #else
                      "",   // V2.8.11: no PA — never ticked, even with a carried-over NVS true

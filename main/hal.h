@@ -593,7 +593,7 @@
     #define HAL_HAS_NEOPIXEL        0   // No onboard NeoPixel
     #define HAL_HAS_SD_CARD         0   // No microSD slot on this board
     #define HAL_HAS_LORAWAN         1   // Wio-SX1262 — see PIN_LORA_* below
-    #define HAL_HAS_LORA_FEM        0   // Bare SX1262, no PA / front-end module (28 dBm greyed)
+    #define HAL_HAS_LORA_FEM        0   // Bare SX1262, no PA / front-end module (high power greyed)
     #define HAL_LORA_TCXO_V      1.8f   // Wio-SX1262 TCXO supply on DIO3 (Meshtastic: SX126X_DIO3_TCXO_VOLTAGE 1.8)
     #define HAL_HAS_ALS             0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE      0   // No onboard fuel gauge
@@ -875,11 +875,12 @@
     // RadioLib discussion #1665 the GC1109 must be enabled for RX, so with
     // LoRaWAN on there is no valid "FEM off" configuration.
     #define PIN_LORA_FEM_EN          2
-    // FEM_PA (Heltec pin-map name; GC1109 gain-stage select for the 28 dBm
-    // path). V1.10 removed the DIP switch bank that double-booked this pin
+    // FEM_PA (Heltec pin-map name; GC1109 PA-path select, high-power mode).
+    // V1.10 removed the DIP switch bank that double-booked this pin
     // (S2 + pull-ups + parallel jumpers, "DIP1"), so GPIO46 is free — but
-    // it stays gated on g_cfg.lorawan_high_power as a regulatory/EIRP
-    // opt-in, not a hardware-safety gate.
+    // it stays gated on g_cfg.lorawan_high_power, a power/current opt-in,
+    // not a hardware-safety gate (V2.8.22: RadioLib subtracts the PA gain,
+    // lorawan_pa.h, so the band's EIRP limit holds either way).
     #define PIN_LORA_FEM_PA         46
     // V2.8.19: the board exists in two front-end revisions, told apart at
     // boot by lorawan_fem_is_kct8103l(). V4.2 = GC1109: CPS (PA mode) on
@@ -921,8 +922,8 @@
     //                 called this pin "DIP1" (unused input); the V1.10
     //                 rework removed that DIP switch/pull-up/jumper, so
     //                 the pin is free. See PIN_LORA_FEM_PA above: driven
-    //                 only when g_cfg.lorawan_high_power is set (28 dBm
-    //                 regulatory opt-in).
+    //                 only when g_cfg.lorawan_high_power is set
+    //                 (high-power opt-in).
     //
     // RESERVED / never repurpose (out of scope or module-internal — see
     // spec §2 and §9, and WiFi_LoRa_32_V4.3.1_Datasheet.pdf Table 2.2.1/2.2.2
@@ -1676,8 +1677,8 @@
 
 // V2.8.11: LoRa radio values, needed only where HAL_HAS_LORAWAN is 1.
 //   HAL_HAS_LORA_FEM   1 = Heltec-style GC1109 front end: lorawan.cpp powers
-//                      it (PIN_LORA_VFEM / FEM_EN) and offers 28 dBm mode
-//                      (PIN_LORA_FEM_PA); 0 = bare SX1262, 28 dBm greyed out.
+//                      it (PIN_LORA_VFEM / FEM_EN) and offers high-power mode
+//                      (PIN_LORA_FEM_PA); 0 = bare SX1262, high power greyed out.
 //   HAL_LORA_TCXO_V    TCXO supply the SX1262 puts on DIO3, in volts.
 //   PIN_LORA_RF_SW_RX  optional: an extra RF-switch line RadioLib drives HIGH
 //                      in receive and LOW otherwise (XIAO + Wio: GPIO38).

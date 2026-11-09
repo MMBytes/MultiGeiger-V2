@@ -9,6 +9,16 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.24 — MQTT client updated to esp-mqtt 1.1.0
+
+For all boards with MQTT (Home Assistant) enabled. Nothing changes in what is
+published, in the settings or in RAM use.
+
+1. **The MQTT client library is esp-mqtt 1.1.0 (was 1.0.0).** It decodes at
+   most the four length bytes the MQTT 3.1.1 standard allows at the start of
+   a packet from the broker; a malformed packet with more of them used to
+   overflow an integer in the decoder.
+
 ## V2.8.23 — The node log says which MAC commands the network sent, and what the node answered
 
 For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).

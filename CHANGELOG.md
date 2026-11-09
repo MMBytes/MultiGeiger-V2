@@ -9,6 +9,27 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.23 — The node log says which MAC commands the network sent, and what the node answered
+
+For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).
+Other boards are unchanged.
+
+1. **A downlink with MAC commands is now followed by a line naming each
+   command and its settings.** Until now the log only said "MAC commands
+   only". Example:
+   `MAC from network: DevStatusReq (asks for battery level and link margin)`.
+   A LinkADRReq shows the data rate, TX power, channels and NbTrans it asks
+   for; RXParamSetupReq, NewChannelReq, TxParamSetupReq, DeviceTimeAns and
+   the other LoRaWAN 1.0.x commands are decoded the same way.
+2. **A second line shows the node's answer**, which goes out with the next
+   uplink. Example:
+   `MAC answer, goes out with the next uplink: DevStatusAns — battery not
+   measured (0xFF), margin +9 dB (SNR of the downlink as received)`.
+   A rejected setting reads "REJECTED" (for example
+   `LinkADRAns — TX power accepted, data rate accepted, channel mask REJECTED`).
+   Answers too long for the next uplink, which RadioLib sends at once in a
+   separate uplink, are named as such.
+
 ## V2.8.22 — Heltec V4.2 high-power mode stays within the band's power limit
 
 For the Heltec WiFi LoRa 32 V4.2 (GC1109 front end) with LoRaWAN on. Other

@@ -90,6 +90,14 @@ typedef struct {
     uint8_t  rx_mhdr;
     uint16_t irq;            // OR of this window's GetIrqStatus replies
     uint32_t rx_addr;
+    // V2.8.23: the MAC part of a data downlink (rxobs_note_mac()). FOpts are
+    // plaintext in LoRaWAN 1.0.x (encrypted in 1.1); an FPort-0 payload is
+    // always encrypted, so only its length is kept.
+    bool     mac_seen;       // a data down with a consistent FOptsLen (fields below valid)
+    uint8_t  fopts_len;      // FCtrl bits 3..0: MAC command bytes in the header (0..15)
+    uint8_t  fopts[15];
+    int16_t  fport;          // -1 = no FPort (frame without payload)
+    uint8_t  frm_len;        // FRMPayload bytes after the FPort
 } rxobs_hit_t;
 
 /** One transmission (NbTrans repeat, or a MAC-only uplink RadioLib sent inside
@@ -176,6 +184,30 @@ static inline void rxobs_begin(rxobs_t *o, uint8_t nb_trans) {
 static inline rxobs_hit_t *rxobs_hit(rxobs_t *o, int i) {
     if (o->n_tx == 0 || o->n_tx > OBS_MAX_REP || i < 0 || i > 1) return NULL;
     return &o->rep[o->n_tx - 1].w[i];
+}
+
+/** @brief V2.8.23: keep the MAC part of a data downlink read out of the FIFO.
+ *         Frame layout (LoRaWAN 1.0.4 §4): MHDR 1, DevAddr 4, FCtrl 1, FCnt 2,
+ *         FOpts 0..15, then optionally FPort 1 + FRMPayload, MIC 4 — so 12
+ *         bytes plus FOpts at least. Kept for every frame; the caller only
+ *         uses the one RadioLib accepted (rxobs_accepted_hit()).
+ *  @param f, flen the frame as read (from MHDR, without the SPI header) */
+static inline void rxobs_note_mac(rxobs_hit_t *h, const uint8_t *f, size_t flen) {
+    h->mac_seen = false;
+    const uint8_t mtype = f[0] >> 5;
+    if ((mtype != 3 && mtype != 5) || flen < 12) return;   // not a data down
+    const uint8_t fol = f[5] & 0x0F;
+    if (flen < 12u + fol) return;
+    h->mac_seen = true;
+    h->fopts_len = fol;
+    memcpy(h->fopts, &f[8], fol);
+    if (flen > 12u + fol) {
+        h->fport = f[8 + fol];
+        h->frm_len = (uint8_t)(flen - 12u - fol - 1u);
+    } else {
+        h->fport = -1;
+        h->frm_len = 0;
+    }
 }
 
 /** @brief SetRfFrequency word → MHz. */
@@ -267,6 +299,7 @@ static inline void rxobs_note(rxobs_t *o, int64_t now_us, const uint8_t *out, si
                 h->rx_mhdr = w->rx_mhdr;
                 h->rx_addr = w->rx_addr;
                 h->ignored = w->ignored;
+                rxobs_note_mac(h, &in[3], len - 3);   // V2.8.23
             }
         }
         break;
@@ -468,6 +501,33 @@ static inline rxobs_split_t rxobs_split(const rxobs_t *o, int16_t st) {
     }
     if (s.end_rep >= 0) s.own_tx = s.end_rep + 1;
     return s;
+}
+
+/** @brief V2.8.23: the window record of the downlink RadioLib accepted, or
+ *         NULL. Only for @p st = 1/2 (valid downlink): the same window
+ *         rxobs_split() names as the end of the exchange. */
+static inline const rxobs_hit_t *rxobs_accepted_hit(const rxobs_t *o, int16_t st) {
+    if (st != 1 && st != 2) return NULL;
+    const rxobs_split_t s = rxobs_split(o, st);
+    if (s.end_rep < 0 || s.end_rep >= OBS_MAX_REP) return NULL;
+    const rxobs_hit_t *h = &o->rep[s.end_rep].w[s.end_win - 1];
+    return h->rx_seen ? h : NULL;
+}
+
+/** @brief V2.8.23: the first frame RadioLib kept in the windows of a MAC-only
+ *         uplink it sent inside the exchange (TX after the frame's own
+ *         repeats), or NULL. Whether RadioLib accepted it is not visible here;
+ *         the caller only uses it when that downlink's answers are queued. */
+static inline const rxobs_hit_t *rxobs_nested_hit(const rxobs_t *o, int16_t st) {
+    const rxobs_split_t s = rxobs_split(o, st);
+    const int recorded = o->n_tx < OBS_MAX_REP ? o->n_tx : OBS_MAX_REP;
+    for (int r = s.own_tx; r < recorded; r++) {
+        for (int i = 0; i < 2; i++) {
+            const rxobs_hit_t *h = &o->rep[r].w[i];
+            if (h->opened && !h->ignored && h->rx_seen) return h;
+        }
+    }
+    return NULL;
 }
 
 /** @brief Two repeats read the same in the log (one shared entry) if neither

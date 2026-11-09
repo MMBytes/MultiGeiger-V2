@@ -31,6 +31,7 @@ extern "C" {
 #include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR
 #include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + its log text
 #include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain for setOutputPowerOffset()
+#include "lorawan_mac.h"     // V2.8.23: MAC commands + answers in plain words
 #include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
 #include "transmission.h"    // tx_is_idle()
 #include "log_ftp.h"         // log_ftp_is_busy()
@@ -838,6 +839,21 @@ public:
      *         LinkADRReq, reset to 1 by the ADR backoff). */
     uint8_t nbTransNow() const { return this->nbTrans; }
 
+    /** @brief V2.8.23: the MAC answers queued for the next uplink — RadioLib's
+     *         fOptsUp, which parseDownlink() REPLACES with the answers to a
+     *         downlink's MAC commands (LoRaWAN.cpp, "fOptsReLen <= 15" branch)
+     *         and composeUplink() sends and clears. Read it right after the
+     *         exchange that received the downlink.
+     *  @param[out] len bytes queued (0..15) */
+    const uint8_t *macQueue(uint8_t *len) const {
+        *len = this->fOptsUpLen;
+        return this->fOptsUp;
+    }
+
+    /** @brief LoRaWAN revision of the session: 0 = 1.0.x (FOpts plaintext on
+     *         air), 1 = 1.1 (FOpts encrypted with NwkSEncKey). */
+    uint8_t macRev() const { return this->rev; }
+
     /** @brief After activation: duty-cycle limit back to the band's own value
      *         (EU868: 36 s/h = 1 %) unless the network set one. RadioLib seeds
      *         every session with a synthetic DutyCycleReq (MaxDCycle 7 = 1/128
@@ -1162,6 +1178,87 @@ static void adr_track(const LoRaWANEvent_t *ev, int16_t st) {
     s_prev_had_dl = (st > 0);
 }
 
+// --- MAC commands in plain words (V2.8.23) --------------------------------------
+//
+// RadioLib carries out a downlink's MAC commands inside sendReceive() and then
+// deletes them (only LinkCheckAns/DeviceTimeAns stay readable), so up to
+// V2.8.22 the log said only "MAC commands only" (a DevStatusReq could only be
+// identified from the gateway's own record). Two lines after the downlink:
+//   "MAC from network: …" — decoded from the frame the RX-window observer read
+//      out of the FIFO (FOpts are plaintext in LoRaWAN 1.0.x);
+//   "MAC answer …"        — RadioLib's answer queue for the next uplink.
+// Nothing for a downlink without MAC commands. Worker task only.
+// Not covered: a downlink accepted on repeat 5 or later (past OBS_MAX_REP the
+// observer keeps no frame) — TTN sets NbTrans <= 3, so it does not occur.
+static void log_mac_exchange(const GeigerNode &node, int16_t st) {
+    const rxobs_hit_t *h = rxobs_accepted_hit(&s_obs, st);
+    if (h == NULL || !h->mac_seen) return;
+    // FPort 0 = MAC commands in the (always encrypted) payload. RadioLib
+    // processes an FPort-0 payload only when it is not empty.
+    const bool port0 = (h->fport == 0 && h->frm_len > 0);
+    if (h->fopts_len == 0 && !port0) return;
+    // Static, not on the worker's stack (LW_MAC_LINE_MAX); this task is the only user.
+    static char line[LW_MAC_LINE_MAX];
+    const bool decoded = (h->fopts_len > 0 && node.macRev() == 0);
+    if (decoded) {
+        lw_mac_format_down(h->fopts, h->fopts_len, s_band->bandType == RADIOLIB_LORAWAN_BAND_FIXED, line,
+                           sizeof(line));
+        ESP_LOGI(TAG, "MAC from network: %s", line);
+    } else if (h->fopts_len > 0) {
+        ESP_LOGI(TAG, "MAC from network: %u bytes of MAC commands, encrypted on air (LoRaWAN 1.1), so not "
+                      "decoded here", (unsigned)h->fopts_len);
+    }
+    if (port0) {
+        // TTN uses FPort 0 only when the commands exceed the 15-byte FOpts field.
+        ESP_LOGI(TAG, "MAC from network: %u bytes of MAC commands in the encrypted payload (FPort 0), so not "
+                      "decoded here", (unsigned)h->frm_len);
+    }
+    uint8_t qlen = 0;
+    const uint8_t *q = node.macQueue(&qlen);
+    // Answers too long for the next frame went out at once in a MAC-only
+    // uplink inside this exchange (the observer saw its TX); RadioLib sent
+    // them from a local buffer, so they are not in the queue. Anything queued
+    // now answers that MAC-only uplink's own downlink, if it got one.
+    const rxobs_split_t s = rxobs_split(&s_obs, st);
+    if (s_obs.n_tx > s.own_tx) {
+        ESP_LOGI(TAG, "MAC answer: sent at once in a MAC-only uplink (too long to ride on the next frame) — "
+                      "see the M1.. entries of the rx windows line below");
+        if (qlen > 0) {
+            // Queued answers mean RadioLib accepted that uplink's own downlink:
+            // name its commands first, so the answers are not left unexplained.
+            const rxobs_hit_t *hn = rxobs_nested_hit(&s_obs, st);
+            if (hn != NULL && hn->mac_seen && hn->fopts_len > 0 && node.macRev() == 0) {
+                lw_mac_format_down(hn->fopts, hn->fopts_len, s_band->bandType == RADIOLIB_LORAWAN_BAND_FIXED, line,
+                                   sizeof(line));
+                ESP_LOGI(TAG, "MAC from network, in the downlink to that MAC-only uplink: %s", line);
+            } else {
+                ESP_LOGI(TAG, "MAC from network, in the downlink to that MAC-only uplink: not readable here "
+                              "(encrypted, or not recorded)");
+            }
+            lw_mac_format_up(q, qlen, line, sizeof(line));
+            ESP_LOGI(TAG, "MAC answer to the MAC-only uplink's own downlink, goes out with the next uplink: %s",
+                     line);
+        }
+        return;
+    }
+    if (qlen == 0) {
+        // Only explained by the commands themselves if all were answerless;
+        // otherwise RadioLib declined them (unknown or incomplete command, one
+        // this region does not use, e.g. NewChannelReq on AU915).
+        if (!decoded) {
+            ESP_LOGI(TAG, "MAC answer: none queued (the commands need no answer, or RadioLib declined them)");
+        } else if (lw_mac_down_answerless(h->fopts, h->fopts_len)) {
+            ESP_LOGI(TAG, "MAC answer: none (LinkCheckAns and DeviceTimeAns need no answer)");
+        } else {
+            ESP_LOGI(TAG, "MAC answer: none queued (RadioLib declined these commands: unknown, incomplete, or not "
+                          "used in this region)");
+        }
+        return;
+    }
+    lw_mac_format_up(q, qlen, line, sizeof(line));
+    ESP_LOGI(TAG, "MAC answer, goes out with the next uplink: %s", line);
+}
+
 // --- DeviceTimeReq network time sync (design approved 2026-07-27) -------------
 //
 // Class A nodes can't hear Class B time beacons; the standard Class A
@@ -1357,6 +1454,7 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
     s_last_exchange_sent = sent;
     const uint32_t air_ms = sent ? (uint32_t)node.getLastToA() : 0;
     record_uplink_result(st, *dl_len, &ev_dn, air_ms);
+    log_mac_exchange(node, st);   // V2.8.23: right under the "downlink (RXn)" line
     // Receive-side-only errors after a real TX count as "sent, no usable
     // downlink" (record_uplink_result() / downlink_unusable()). RadioLib fills
     // eventUp after its TX loop on these paths too, so the uplink line is valid.

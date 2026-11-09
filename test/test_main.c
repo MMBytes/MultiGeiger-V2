@@ -43,6 +43,7 @@
 #include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + rx windows / uplink OK text
 #include "lorawan_boot_line.h" // V2.8.21: "boot: LoRaWAN:" summary line
 #include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain RadioLib subtracts
+#include "lorawan_mac.h"     // V2.8.23: MAC commands + answers in plain words
 #include "radio_turn_rule.h" // V2.8.15: rt_lorawan/ftps/tx_round_may_start
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
@@ -2907,6 +2908,202 @@ static int test_lw_pa_offset(void) {
     return 1;
 }
 
+// lorawan_mac.h (V2.8.23) — MAC commands and answers in plain words. Vectors:
+// a DevStatusReq/Ans pair seen on air (gateway record: downlink FOpts "06",
+// then uplink FOpts "06 ff 09"), the rest built from LoRaWAN 1.0.4 §5.
+static char g_mac_buf[LW_MAC_LINE_MAX];
+
+static int test_lw_mac_dev_status_pair(void) {
+    const uint8_t down[] = { 0x06 };
+    lw_mac_format_down(down, sizeof(down), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DevStatusReq (asks for battery level and link margin)");
+    const uint8_t up[] = { 0x06, 0xFF, 0x09 };
+    lw_mac_format_up(up, sizeof(up), g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DevStatusAns — battery not measured (0xFF), margin +9 dB (SNR of the downlink as received)");
+    const uint8_t up2[] = { 0x06, 0x00, 0x3B };   // external power, margin 6-bit -5
+    lw_mac_format_up(up2, sizeof(up2), g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DevStatusAns — battery external power (0), margin -5 dB (SNR of the downlink as received)");
+    const uint8_t up3[] = { 0x06, 127, 0x00 };
+    lw_mac_format_up(up3, sizeof(up3), g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DevStatusAns — battery 127 of 254 (50 %), margin +0 dB (SNR of the downlink as received)");
+    return 1;
+}
+
+static int test_lw_mac_link_adr_fixed_plan(void) {
+    // AU915 two-block form: all 125 kHz off + 500 kHz ch 65, then ch 8-15 on;
+    // DR5, power index 2, NbTrans 1 in the last block.
+    const uint8_t down[] = { 0x03, 0x5F, 0x02, 0x00, 0x70, 0x03, 0x52, 0x00, 0xFF, 0x01 };
+    lw_mac_format_down(down, sizeof(down), true, g_mac_buf, sizeof(g_mac_buf));
+    // RadioLib applies the run as one block: masks in order, DR/power/NbTrans of the last.
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq (2 blocks, applied together) — DR5, TX power index 2 (max EIRP - 4 dB), all "
+                 "125 kHz channels off, 500 kHz channels set to: 65, then 125 kHz channels 0-15 set to: 8-15, "
+                 "NbTrans 1 (each uplink sent 1 time)");
+    const uint8_t sub[] = { 0x03, 0xF0, 0x02, 0x00, 0x53 };   // ChMaskCntl 5: sub-band 2, NbTrans 3
+    lw_mac_format_down(sub, sizeof(sub), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq — data rate unchanged, TX power index 0 (max EIRP), adds channels 8-15 and "
+                 "500 kHz channel 65, NbTrans 3 (each uplink sent 3 times)");
+    const uint8_t ans[] = { 0x03, 0x07, 0x03, 0x06 };
+    lw_mac_format_up(ans, sizeof(ans), g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRAns — TX power accepted, data rate accepted, channel mask accepted; LinkADRAns — "
+                 "TX power accepted, data rate accepted, channel mask REJECTED");
+    return 1;
+}
+
+static int test_lw_mac_dynamic_plan_settings(void) {
+    // EU868: channels 0-2 + 4, RX2 back to 869.525 MHz DR3, RX1 delay 1 s.
+    const uint8_t down[] = { 0x03, 0x00, 0x17, 0x00, 0x00, 0x05, 0x03, 0xD2, 0xAD, 0x84, 0x08, 0x00 };
+    lw_mac_format_down(down, sizeof(down), false, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq — DR0, TX power index 0 (max EIRP), channels 0-15 set to: 0-2, 4, NbTrans 0 = "
+                 "back to the default of 1 transmission per uplink; "
+                 "RXParamSetupReq — RX1 DR offset 0, RX2 DR3 at 869.525 MHz; RXTimingSetupReq — RX1 opens 1 s after "
+                 "the uplink");
+    const uint8_t ch[] = { 0x07, 0x03, 0x18, 0x4F, 0x84, 0x50, 0x07, 0x04, 0x00, 0x00, 0x00, 0x00 };
+    lw_mac_format_down(ch, sizeof(ch), false, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "NewChannelReq — channel 3 at 867.1 MHz, DR0-DR5; NewChannelReq — channel 4 removed");
+    const uint8_t up[] = { 0x05, 0x07, 0x08 };
+    lw_mac_format_up(up, sizeof(up), g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "RXParamSetupAns — RX1 DR offset accepted, RX2 DR accepted, RX2 frequency accepted "
+                 "(repeated in every uplink until the next downlink); RXTimingSetupAns (applied) (repeated in every "
+                 "uplink until the next downlink)");
+    return 1;
+}
+
+static int test_lw_mac_time_duty_tx_param(void) {
+    // DeviceTimeAns for 2026-11-09 00:08:56.500 UTC: GPS 1478218154 s + 128/256 s.
+    const uint8_t down[] = { 0x0D, 0xAA, 0xD1, 0x1B, 0x58, 0x80, 0x04, 0x07, 0x09, 0x3D, 0x02, 0x0C, 0x01 };
+    lw_mac_format_down(down, sizeof(down), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DeviceTimeAns — network time 2026-11-09 00:08:56.500 UTC at the end of our uplink; "
+                 "DutyCycleReq — on air at most 1/128 of the time (MaxDCycle 7); TxParamSetupReq — max EIRP 30 dBm, "
+                 "uplink dwell time 400 ms limit, downlink dwell time 400 ms limit; LinkCheckAns — our uplink arrived "
+                 "12 dB above the demodulation floor, heard by 1 gateway");
+    const uint8_t dc0[] = { 0x04, 0x00 };
+    lw_mac_format_down(dc0, sizeof(dc0), false, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DutyCycleReq — no extra limit from the network, only the band's own (MaxDCycle 0)");
+    return 1;
+}
+
+static int test_lw_mac_unknown_incomplete_truncated(void) {
+    const uint8_t unk[] = { 0x06, 0x55, 0x01 };   // RadioLib stops at an unknown CID
+    lw_mac_format_down(unk, sizeof(unk), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "DevStatusReq (asks for battery level and link margin); unknown MAC command 0x55 — the "
+                 "rest is not decoded (RadioLib skips it too): 5501");
+    const uint8_t inc[] = { 0x03, 0x52 };
+    lw_mac_format_down(inc, sizeof(inc), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "03: incomplete (1 of 4 bytes) — not applied by RadioLib");
+    lw_mac_format_down(inc, 0, true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "");
+    // Fifteen 1-byte commands into a small buffer: cut, terminated, no overrun.
+    uint8_t many[15];
+    memset(many, 0x06, sizeof(many));
+    char small[40];
+    memset(small, 'x', sizeof(small));
+    lw_mac_format_down(many, sizeof(many), true, small, 32);
+    EXPECT_INT(strlen(small), 31);
+    for (size_t k = 32; k < sizeof(small); k++) EXPECT_TRUE(small[k] == 'x');   // nothing past the limit
+    lw_mac_utc(0, small, sizeof(small));   // the epoch and a leap day render
+    EXPECT_STREQ(small, "1970-01-01 00:00:00");
+    lw_mac_utc(1709208000u, small, sizeof(small));
+    EXPECT_STREQ(small, "2024-02-29 12:00:00");
+    return 1;
+}
+
+static int test_lw_mac_dynamic_cntl_answerless_mhz(void) {
+    // EU868 ChMaskCntl 6 (all on), 5 (banks, no 500 kHz on a dynamic plan),
+    // 7 (reserved: RadioLib rejects the mask), and an empty block.
+    const uint8_t down[] = { 0x03, 0x5F, 0x00, 0x00, 0x60, 0x03, 0x5F, 0x01, 0x00, 0x50,
+                             0x03, 0x5F, 0x00, 0x00, 0x70 };
+    lw_mac_format_down(down, sizeof(down), false, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq (3 blocks, applied together) — DR5, TX power unchanged, all defined channels "
+                 "on, then adds channels 0-7, then ChMaskCntl 7 (reserved in this region, so the node rejects the "
+                 "channel mask), NbTrans 0 = back to the default of 1 transmission per uplink");
+    const uint8_t empty[] = { 0x03, 0x5F, 0x00, 0x00, 0x01 };
+    lw_mac_format_down(empty, sizeof(empty), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq — DR5, TX power unchanged, 125 kHz channels 0-15 set to: none, NbTrans 1 "
+                 "(each uplink sent 1 time)");
+    // A LinkADRReq cut short after one full block: the full block alone.
+    const uint8_t cut[] = { 0x03, 0x5F, 0x00, 0x00, 0x01, 0x03, 0x5F };
+    lw_mac_format_down(cut, sizeof(cut), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq — DR5, TX power unchanged, 125 kHz channels 0-15 set to: none, NbTrans 1 "
+                 "(each uplink sent 1 time); 03: incomplete (1 of 4 bytes) — not applied by RadioLib");
+    // A second LinkADRReq after another command: rejected by RadioLib, not applied.
+    const uint8_t two[] = { 0x03, 0x5F, 0x00, 0x00, 0x01, 0x06, 0x03, 0x2F, 0x00, 0x00, 0x01 };
+    lw_mac_format_down(two, sizeof(two), true, g_mac_buf, sizeof(g_mac_buf));
+    EXPECT_STREQ(g_mac_buf, "LinkADRReq — DR5, TX power unchanged, 125 kHz channels 0-15 set to: none, NbTrans 1 "
+                 "(each uplink sent 1 time); DevStatusReq (asks for battery level and link margin); LinkADRReq (a "
+                 "second, separate one) — not applied: the node rejects it, only one LinkADRReq block per downlink "
+                 "counts");
+    // Empty answer queue: explained only by answerless commands.
+    const uint8_t lc[] = { 0x02, 0x0C, 0x01, 0x0D, 1, 2, 3, 4, 5 };
+    EXPECT_TRUE(lw_mac_down_answerless(lc, sizeof(lc)));
+    const uint8_t mixed[] = { 0x02, 0x0C, 0x01, 0x06 };
+    EXPECT_TRUE(!lw_mac_down_answerless(mixed, sizeof(mixed)));
+    EXPECT_TRUE(!lw_mac_down_answerless(lc, 2));   // incomplete
+    EXPECT_TRUE(!lw_mac_down_answerless(lc, 0));
+    char f[48];
+    lw_mac_mhz(8680000u, f, sizeof(f));
+    EXPECT_STREQ(f, "868.0");
+    lw_mac_mhz(9233000u, f, sizeof(f));
+    EXPECT_STREQ(f, "923.3");
+    return 1;
+}
+
+static int test_rxobs_note_mac_frames(void) {
+    rxobs_hit_t h;
+    memset(&h, 0, sizeof(h));
+    // A MAC-only downlink: MHDR 0x60, DevAddr 260b1234 (made up), FCtrl FOptsLen 1, FCnt 128, FOpts 06, MIC.
+    const uint8_t f1[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x01, 0x80, 0x00, 0x06, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, f1, sizeof(f1));
+    EXPECT_TRUE(h.mac_seen);
+    EXPECT_INT(h.fopts_len, 1);
+    EXPECT_INT(h.fopts[0], 0x06);
+    EXPECT_INT(h.fport, -1);
+    // Confirmed down, no FOpts, FPort 1 + 1 byte payload (a test downlink).
+    const uint8_t f2[] = { 0xA0, 0x34, 0x12, 0x0B, 0x26, 0x20, 0x81, 0x00, 0x01, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, f2, sizeof(f2));
+    EXPECT_TRUE(h.mac_seen);
+    EXPECT_INT(h.fopts_len, 0);
+    EXPECT_INT(h.fport, 1);
+    EXPECT_INT(h.frm_len, 1);
+    // FPort 0: MAC commands in the encrypted payload (3 bytes).
+    const uint8_t f3[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x00, 0x82, 0x00, 0x00, 9, 9, 9, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, f3, sizeof(f3));
+    EXPECT_INT(h.fport, 0);
+    EXPECT_INT(h.frm_len, 3);
+    // Join accept, and a FOptsLen longer than the frame: nothing kept.
+    const uint8_t f4[] = { 0x20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    rxobs_note_mac(&h, f4, sizeof(f4));
+    EXPECT_TRUE(!h.mac_seen);
+    const uint8_t f5[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x0F, 0x80, 0x00, 0x06, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, f5, sizeof(f5));
+    EXPECT_TRUE(!h.mac_seen);
+    return 1;
+}
+
+static int test_rxobs_accepted_hit(void) {
+    // Foreign frame in #1 RX1 (dropped), ours in #2 RX1: the accepted one is #2's.
+    rxt_begin(3); rxt_tx(867.9, 3, 1); rxt_tx(868.3, 2, 0);
+    const rxobs_hit_t *h = rxobs_accepted_hit(&g_rxt, 1);
+    EXPECT_TRUE(h == &g_rxt.rep[1].w[0]);
+    EXPECT_INT(h->rx_addr, RXT_OWN);
+    EXPECT_TRUE(rxobs_accepted_hit(&g_rxt, 0) == NULL);         // no downlink
+    EXPECT_TRUE(rxobs_accepted_hit(&g_rxt, -1112) == NULL);     // unusable frame
+    // Ours in RX2 of the only TX: st 2 picks RX2.
+    rxt_begin(1); rxt_tx(867.1, 1, 2);
+    EXPECT_TRUE(rxobs_accepted_hit(&g_rxt, 2) == &g_rxt.rep[0].w[1]);
+    // Ours in #1 RX1, then a MAC-only TX whose RX1 gets another frame of ours:
+    // the accepted frame is the FIRST kept one, the nested one is found after it.
+    rxt_begin(1); rxt_tx(867.1, 2, 0); rxt_tx(868.1, 2, 0);
+    EXPECT_TRUE(rxobs_accepted_hit(&g_rxt, 1) == &g_rxt.rep[0].w[0]);
+    EXPECT_INT(rxobs_split(&g_rxt, 1).own_tx, 1);
+    EXPECT_TRUE(rxobs_nested_hit(&g_rxt, 1) == &g_rxt.rep[1].w[0]);
+    rxt_begin(1); rxt_tx(867.1, 2, 0); rxt_tx(868.1, 1, 1);   // MAC-only TX heard nothing
+    EXPECT_TRUE(rxobs_nested_hit(&g_rxt, 1) == NULL);
+    // st 1 but no frame recorded (RX_DONE never read out): nothing to decode.
+    rxt_begin(1); rxt_tx(867.1, 4, 0);
+    EXPECT_TRUE(rxobs_accepted_hit(&g_rxt, 1) == NULL);
+    return 1;
+}
+
 static int test_form_lora_hp_kept_with_fem(void) {
     config_form_caps_t caps = form_caps_none();
     caps.has_lorawan  = true;
@@ -3630,6 +3827,14 @@ int main(int argc, char **argv) {
     RUN(test_form_lora_hp_forced_off_without_fem);
     RUN(test_form_lora_hp_kept_with_fem);
     RUN(test_lw_pa_offset);
+    RUN(test_lw_mac_dev_status_pair);
+    RUN(test_lw_mac_link_adr_fixed_plan);
+    RUN(test_lw_mac_dynamic_plan_settings);
+    RUN(test_lw_mac_time_duty_tx_param);
+    RUN(test_lw_mac_unknown_incomplete_truncated);
+    RUN(test_lw_mac_dynamic_cntl_answerless_mhz);
+    RUN(test_rxobs_note_mac_frames);
+    RUN(test_rxobs_accepted_hit);
 
     printf("== ota_guard_logic (V2.8.20) ==\n");
     RUN(test_ota_guard_needs_confirm_states);

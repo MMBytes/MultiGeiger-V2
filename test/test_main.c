@@ -3079,6 +3079,57 @@ static int test_rxobs_note_mac_frames(void) {
     return 1;
 }
 
+// V2.8.25: rxobs_dl_kind() — the "downlink (RXn): …" wording. The empty case
+// is the 12-byte frame TTN sent the XIAO on 2026-11-11 to answer ADRACKReq
+// (FCntDown 353), which V2.8.24 logged as "MAC commands only".
+static int test_rxobs_dl_kind(void) {
+    rxobs_hit_t h;
+    memset(&h, 0, sizeof(h));
+    EXPECT_INT(rxobs_dl_kind(NULL), RXOBS_DL_UNKNOWN);
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_UNKNOWN);   // mac_seen false
+    // Empty: MHDR 0x60, DevAddr, FCtrl ADR bit only (FOptsLen 0), FCnt 353, MIC — 12 bytes.
+    const uint8_t e[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x80, 0x61, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, e, sizeof(e));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_EMPTY);
+    // FPort 0 with nothing after it: RadioLib skips it, so still empty.
+    const uint8_t e0[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x80, 0x62, 0x01, 0x00, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, e0, sizeof(e0));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_EMPTY);
+    // FOpts DevStatusReq (06).
+    const uint8_t m[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x01, 0x63, 0x01, 0x06, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, m, sizeof(m));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_MAC);
+    // FPort 0 with a 3-byte (encrypted) MAC payload.
+    const uint8_t m0[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x00, 0x64, 0x01, 0x00, 9, 9, 9, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, m0, sizeof(m0));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_MAC);
+    // FPort 1, 0 bytes of data.
+    const uint8_t p[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x00, 0x65, 0x01, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, p, sizeof(p));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_PORT_NO_DATA);
+    // FPort 1, 1 byte (the port-1 test downlink).
+    const uint8_t d[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x00, 0x66, 0x01, 0x01, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, d, sizeof(d));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_DATA);
+    // FOpts AND data: MAC wins (the "MAC from network:" line follows either way).
+    const uint8_t md[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x01, 0x67, 0x01, 0x06, 0x01, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, md, sizeof(md));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_MAC);
+    // Confirmed (MHDR 0xA0) empty frame: still empty.
+    const uint8_t ce[] = { 0xA0, 0x34, 0x12, 0x0B, 0x26, 0x80, 0x68, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, ce, sizeof(ce));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_EMPTY);
+    // FPort 200 (>= 128) with 1 byte: data, not a negative port read as empty.
+    const uint8_t hp[] = { 0x60, 0x34, 0x12, 0x0B, 0x26, 0x00, 0x69, 0x01, 0xC8, 0x01, 1, 2, 3, 4 };
+    rxobs_note_mac(&h, hp, sizeof(hp));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_DATA);
+    // A join accept on a reused record: mac_seen cleared -> unknown, not the stale kind.
+    const uint8_t ja[] = { 0x20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    rxobs_note_mac(&h, ja, sizeof(ja));
+    EXPECT_INT(rxobs_dl_kind(&h), RXOBS_DL_UNKNOWN);
+    return 1;
+}
+
 static int test_rxobs_accepted_hit(void) {
     // Foreign frame in #1 RX1 (dropped), ours in #2 RX1: the accepted one is #2's.
     rxt_begin(3); rxt_tx(867.9, 3, 1); rxt_tx(868.3, 2, 0);
@@ -3834,6 +3885,7 @@ int main(int argc, char **argv) {
     RUN(test_lw_mac_unknown_incomplete_truncated);
     RUN(test_lw_mac_dynamic_cntl_answerless_mhz);
     RUN(test_rxobs_note_mac_frames);
+    RUN(test_rxobs_dl_kind);
     RUN(test_rxobs_accepted_hit);
 
     printf("== ota_guard_logic (V2.8.20) ==\n");

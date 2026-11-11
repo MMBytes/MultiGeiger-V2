@@ -1007,6 +1007,11 @@ static uint32_t airtime_add(uint32_t ms) {
 // but RadioLib's copy persists in the NVS session, ours restarts at boot.
 #define ADR_ACK_LIMIT 64u   // RADIOLIB_LORAWAN_ADR_ACK_LIMIT_EXP = 6
 static uint32_t s_ul_since_dl = 0;
+// V2.8.25: a downlink (or a fresh join) since boot. From then on RadioLib's ADR counter
+// and ours restarted at the same downlink (parseDownlink: adrFCnt =
+// getFCntUp() + 1), so a count below 64 proves no ADRACKReq was sent; before
+// the first one, RadioLib's NVS copy may be ahead. Worker task only.
+static bool s_dl_seen = false;
 
 // Previous uplink's radio parameters, to log ADR-driven changes.
 static bool    s_prev_valid  = false;
@@ -1048,13 +1053,73 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
 #if HAL_HAS_LORA_FEM
         if (lorawan_dl_rssi_includes_lna()) lna = ", LNA on";
 #endif
+        // V2.8.25: a confirmed downlink (MType 5) obliges the node to ACK it.
+        // parseDownlink() keeps its FCnt (confFCntDown) and composeUplink()
+        // sets the ACK bit on the next uplink TX. That is the MAC-only uplink
+        // RadioLib sends inside this same exchange when the MAC answers are
+        // too long to ride along (observer: more TX than this frame's own
+        // repeats), else the next regular uplink, whose "uplink OK" line then
+        // says "carries the ACK". Until V2.8.24 neither line said so.
+        // ev->confirmed is filled for every accepted downlink, data or not
+        // (LoRaWAN.cpp parseDownlink, isConfirmedDown).
+        const char *conf = "";
+        if (ev->confirmed) {
+            const rxobs_split_t sp = rxobs_split(&s_obs, st);
+            conf = (s_obs.n_tx > sp.own_tx)
+                       ? ", confirmed (the network asks for an ACK; it went out in the MAC-only uplink sent inside "
+                         "this exchange)"
+                       : ", confirmed (the network asks for an ACK; it goes out with the next uplink)";
+        }
         if (dl_len > 0) {
-            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u bytes, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
-                     (int)st, (unsigned)ev->fPort, (unsigned)dl_len, (unsigned long)ev->fCnt,
-                     (double)rssi, (double)snr, (double)signal, lna);
+            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u %s%s, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, "
+                          "signal %.0f dBm%s",
+                     (int)st, (unsigned)ev->fPort, (unsigned)dl_len, (dl_len == 1) ? "byte" : "bytes", conf,
+                     (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
         } else {
-            ESP_LOGI(TAG, "downlink (RX%d): MAC commands only, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
-                     (int)st, (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
+            // V2.8.25: dl_len 0 is either MAC commands or a bare 12-byte frame
+            // (TTN's answer to ADRACKReq); the frame the RX-window observer
+            // read tells them apart. Until V2.8.24 both said "MAC commands
+            // only", and no "MAC from network:" line followed the empty one.
+            const rxobs_dl_kind_t kind = rxobs_dl_kind(rxobs_accepted_hit(&s_obs, st));
+            static char buf[200];   // the two texts with a number; worker task only
+            const char *what = "no application data (frame not recorded, so any MAC commands are not shown)";
+            if (kind == RXOBS_DL_MAC) {
+                what = "MAC commands only";   // the "MAC from network:" line follows
+            } else if (kind == RXOBS_DL_DATA) {
+                // Not reachable today: RadioLib's payLen and the observer's
+                // frm_len are both frame length - 12 - FOptsLen - 1.
+                what = "no application data handed over, although the frame carried a payload";
+            } else if (kind == RXOBS_DL_PORT_NO_DATA) {
+                snprintf(buf, sizeof(buf), "port %u, 0 bytes of data, no MAC commands", (unsigned)ev->fPort);
+                what = buf;
+            } else if (kind == RXOBS_DL_EMPTY) {
+                // s_ul_since_dl still holds the count BEFORE this downlink (the
+                // reset comes below). RadioLib sets ADRACKReq on the uplink
+                // after the 64th one without a downlink (composeUplink:
+                // fCntUp - adrFCnt >= 64), and a downlink in reply to that one
+                // finds our count at exactly 64. Known limit: on a LoRaWAN 1.1
+                // session RadioLib stops setting ADRACKReq once all backoff
+                // steps are done, so ">= 64" overstates it there (both of our
+                // TTN nodes run 1.0.x).
+                if (__atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
+                    what = "empty (no data, no MAC commands) — nothing to change on the node";
+                } else if (s_ul_since_dl >= ADR_ACK_LIMIT) {
+                    what = "empty (no data, no MAC commands) — the network's answer to the node's ADRACKReq: "
+                           "it hears the node, nothing to change";
+                } else if (s_dl_seen) {
+                    snprintf(buf, sizeof(buf),
+                             "empty (no data, no MAC commands) — the node had not asked for an answer (%lu %s "
+                             "since the last downlink; ADRACKReq starts after 64); nothing to change",
+                             (unsigned long)s_ul_since_dl, (s_ul_since_dl == 1) ? "uplink" : "uplinks");
+                    what = buf;
+                } else {
+                    what = "empty (no data, no MAC commands) — the network confirms it hears the node (first "
+                           "downlink since boot; RadioLib's own count survives reboots, so this may answer its "
+                           "ADRACKReq); nothing to change";
+                }
+            }
+            ESP_LOGI(TAG, "downlink (RX%d): %s%s, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
+                     (int)st, what, conf, (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
         }
     }
 
@@ -1071,21 +1136,27 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
     if (sent_ok) {
         if (have_dl) {
             s_ul_since_dl = 0;
+            s_dl_seen = true;   // after the "downlink (RXn)" line, which reads the old value
         } else if (++s_ul_since_dl == ADR_ACK_LIMIT && __atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
             // Fixed DR = ADR off: RadioLib sets neither the ADR bit nor
             // ADRACKReq and skips adrBackoff() (LoRaWAN.cpp composeUplink /
             // sendReceive), so nothing changes on the node's side.
-            ESP_LOGW(TAG, "no downlink for %u uplinks since boot (fixed data rate, ADR off: "
-                     "no ADRACKReq, no backoff)", (unsigned)ADR_ACK_LIMIT);
+            ESP_LOGW(TAG, "no downlink for the last %u uplinks (counted since the last downlink or boot; "
+                     "fixed data rate, ADR off: no ADRACKReq, no backoff)", (unsigned)ADR_ACK_LIMIT);
         } else if (s_ul_since_dl == ADR_ACK_LIMIT) {
-            // Worded for THIS boot's count: RadioLib's own counter lives in the
-            // NVS session and survives reboots, so after a reboot it may be well
-            // past 64 already (2026-10-18: this line came 2 h after RadioLib's
-            // ADRACKReq started, with two backoff steps already taken).
-            ESP_LOGW(TAG, "no downlink for %u uplinks since boot — the node is asking the "
-                     "network for an answer (ADRACKReq; RadioLib's count survives reboots "
-                     "and may be higher); ADR backoff (one step every 32 uplinks: TX power "
-                     "to max, then DR-1, last the default channels with one transmission "
+            // Our count restarts at every downlink AND at boot; RadioLib's own
+            // counter lives in the NVS session and survives reboots, so after a
+            // reboot it may be well past 64 already (2026-10-18: this line came
+            // 2 h after RadioLib's ADRACKReq started, with two backoff steps
+            // already taken). V2.8.25: until V2.8.24 the line said "since boot"
+            // even hours after the last downlink (2026-11-11, node up 2 days),
+            // and "is asking" — but RadioLib sets ADRACKReq only from the NEXT
+            // uplink (composeUplink: fCntUp - adrFCnt >= 64; this, the 64th,
+            // had 63).
+            ESP_LOGW(TAG, "no downlink for the last %u uplinks (counted since the last downlink or "
+                     "boot) — from the next uplink on, the node asks the network for an answer (ADRACKReq; "
+                     "RadioLib's own count survives reboots, so it may be asking already); ADR backoff (one step every "
+                     "32 uplinks: TX power to max, then DR-1, last the default channels with one transmission "
                      "per frame) continues while the network stays silent",
                      (unsigned)ADR_ACK_LIMIT);
         }
@@ -1154,9 +1225,12 @@ static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEve
                           int16_t st, uint32_t air_ms) {
     char freqs[OBS_MAX_REP * 7 + 8], tx[48];   // tx worst case "15/15 +255 MAC-only (from FCnt 4294967295)"
     rxobs_uplink_tx(&s_obs, st, fcnt_wire, freqs, sizeof(freqs), tx, sizeof(tx));
-    ESP_LOGI(TAG, "uplink OK: %s FCnt=%lu DR%u %s MHz %d dBm TX=%s air=%lu ms | DL: %s",
+    // V2.8.25: ev->confirming = this uplink carried the ACK bit for a
+    // confirmed downlink (sendReceive: confFCntDown was set at TX time), so
+    // the "confirmed … goes out with the next uplink" promise is visible.
+    ESP_LOGI(TAG, "uplink OK: %s FCnt=%lu DR%u %s MHz %d dBm TX=%s air=%lu ms%s | DL: %s",
              what, (unsigned long)fcnt_wire, (unsigned)ev->datarate, freqs, (int)ev->power, tx,
-             (unsigned long)air_ms,
+             (unsigned long)air_ms, ev->confirming ? ", carries the ACK for the network's confirmed downlink" : "",
              st == 1 ? "RX1" : st == 2 ? "RX2" : st < 0 ? "unusable (see rx windows)" : "none");
 }
 
@@ -1810,6 +1884,11 @@ static void lorawan_task(void *arg) {
             ESP_LOGI(TAG, "%s%s — DevAddr %08lx, region %s sub-band %u",
                      st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed" : "joined (OTAA)",
                      via, (unsigned long)dev_addr, lorawan_region_name(region), (unsigned)subband);
+            // V2.8.25: a fresh join starts RadioLib's ADR counter in step with
+            // ours (beginOTAA -> clearSession: adrFCnt = 0, fCntUp = 0), so the "may answer
+            // an ADRACKReq from before the reboot" hint is only true after a
+            // resumed session. The join accept is a downlink, too.
+            if (st == RADIOLIB_LORAWAN_NEW_SESSION) s_dl_seen = true;
             const uint32_t ok_khz = (uint32_t)(rxobs_mhz(s_obs.tx_freq_raw) * 1000.0 + 0.5);
             portENTER_CRITICAL(&s_status_mux);
             s_status.dev_addr = dev_addr;

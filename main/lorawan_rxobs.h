@@ -210,6 +210,33 @@ static inline void rxobs_note_mac(rxobs_hit_t *h, const uint8_t *f, size_t flen)
     }
 }
 
+/** What a received downlink carried, as far as the frame read out of the FIFO
+ *  shows it (rxobs_dl_kind()). */
+typedef enum {
+    RXOBS_DL_UNKNOWN = 0,    ///< frame not recorded (no hit, or not a consistent data down)
+    RXOBS_DL_EMPTY,          ///< no FOpts and no FPort: 12 bytes, header + MIC only
+    RXOBS_DL_PORT_NO_DATA,   ///< an application FPort (1..255) with 0 payload bytes
+    RXOBS_DL_MAC,            ///< MAC commands in FOpts, or an FPort-0 payload
+    RXOBS_DL_DATA,           ///< application data (FPort 1..255, payload > 0)
+} rxobs_dl_kind_t;
+
+/** @brief V2.8.25: classify the downlink RadioLib accepted, for the node log's
+ *         "downlink (RXn): …" line.
+ *
+ *  RadioLib's dl_len is 0 both for a frame with MAC commands and for a bare
+ *  12-byte frame (TTN's usual answer to ADRACKReq), so until V2.8.24 both were
+ *  logged as "MAC commands only" — with no "MAC from network:" line following
+ *  the empty one (seen 2026-11-11, FCntDown 353/354). An FPort-0 frame counts
+ *  as MAC only when its payload is not empty, as in log_mac_exchange()
+ *  (RadioLib skips an empty FPort-0 payload).
+ *  @param h the accepted window's record (rxobs_accepted_hit()), may be NULL */
+static inline rxobs_dl_kind_t rxobs_dl_kind(const rxobs_hit_t *h) {
+    if (h == NULL || !h->mac_seen) return RXOBS_DL_UNKNOWN;
+    if (h->fopts_len > 0 || (h->fport == 0 && h->frm_len > 0)) return RXOBS_DL_MAC;
+    if (h->fport > 0) return (h->frm_len > 0) ? RXOBS_DL_DATA : RXOBS_DL_PORT_NO_DATA;
+    return RXOBS_DL_EMPTY;   // fport -1, or FPort 0 with nothing after it
+}
+
 /** @brief SetRfFrequency word → MHz. */
 static inline double rxobs_mhz(uint32_t raw) { return (double)raw * 32.0 / 33554432.0; }
 

@@ -9,6 +9,38 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.25 — Node log lines about downlinks say what really happened
+
+For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).
+Other boards are unchanged. Only log text changes; the node behaves as before.
+
+1. **An empty downlink is now called empty.** When a node has sent 64
+   uplinks without hearing anything, it asks the network for an answer
+   (ADRACKReq), and TTN usually replies with a bare frame that carries no
+   data and no MAC commands. The log called it "MAC commands only", and no
+   line naming any command followed. It now reads, for example:
+   `downlink (RX1): empty (no data, no MAC commands) — the network's answer
+   to the node's ADRACKReq: it hears the node, nothing to change`.
+   The text after the dash differs when the node had not asked (it then
+   gives the number of uplinks since the last downlink), on the first
+   downlink after a restart, and on a fixed data rate. A downlink to an
+   application port with 0 bytes of data names the port, and "MAC commands
+   only" appears only when commands were really received.
+2. **"No downlink for 64 uplinks" no longer says "since boot".** The count
+   restarts at every downlink, so on a node that had been running for days
+   the old wording was wrong. It also said the node "is asking" for an
+   answer, which it only does from the next uplink on. It now reads
+   `no downlink for the last 64 uplinks (counted since the last downlink or
+   boot) — from the next uplink on, the node asks the network for an answer`.
+3. **A confirmed downlink is marked as such, and so is the uplink that
+   acknowledges it.** The network can ask the node to acknowledge a
+   downlink; the node then sends the ACK with its next uplink. The log
+   showed neither. It now reads, for example:
+   `downlink (RX1): port 1, 1 byte, confirmed (the network asks for an ACK;
+   it goes out with the next uplink), FCntDown=137, …` and, on the next
+   uplink, `uplink OK: … air=61 ms, carries the ACK for the network's
+   confirmed downlink | DL: none` ("1 byte" was "1 bytes").
+
 ## V2.8.24 — MQTT client updated to esp-mqtt 1.1.0
 
 For all boards with MQTT (Home Assistant) enabled. Nothing changes in what is

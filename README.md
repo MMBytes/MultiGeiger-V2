@@ -199,6 +199,10 @@ Default credentials (change these on first login — the same password protects 
 | Username | `admin` |
 | Password | `ESP32Geiger` |
 
+**Locked out of the web page?** After 5 wrong passwords in a row the node refuses every login for a while, the correct password too (1 minute at first, doubling with each further lock up to 8 h 32 min). Wait until the time shown has passed, or press the reset button or unplug the node for about 10 seconds; that clears the lock.
+
+**Stored passwords on `/config`:** the page never shows them. A field shows `******** SECRET SET ********` when a value is stored; leave it empty to keep it, enter `-` to clear it, or type a new value.
+
 ## Build from source
 
 Needed only if you want to modify the firmware.

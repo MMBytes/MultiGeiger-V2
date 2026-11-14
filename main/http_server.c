@@ -16,6 +16,9 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_attr.h"          // V2.8.26: RTC_NOINIT_ATTR for the login lockout state
+#include "esp_rtc_time.h"      // V2.8.26: esp_rtc_get_time_us — keeps counting across resets
+#include <inttypes.h>
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -70,6 +73,7 @@
 #include "config_form.h"       // V2.8.10 (C3b): /config POST parser + cross-field rules
                                // (the LoRa EUI/key checks moved there with it)
 #include "ota_guard.h"         // V2.8.20: confirm the running image before an update / restart
+#include "auth_lockout.h"      // V2.8.26: admin login lockout rule
 
 static const char *TAG = "http";
 
@@ -216,14 +220,64 @@ static void tls_sess_user_cb(esp_https_server_user_cb_arg_t *arg) {
 // side test runner under `test/` can include it directly. Same constant-
 // time semantics as the V2.3.33 (B2) original.
 
+// V2.8.26: login lockout state (rule in auth_lockout.h). RTC no-init RAM keeps
+// it across crashes, watchdog and software restarts; auth_lock_on_boot() wipes
+// it on a power-on (incl. the reset button) or when it does not validate. Only
+// the main httpd task touches it: check_auth() runs on that one task (the :80
+// redirector registers no protected route; AP and STA share the instance), so
+// no lock is needed.
+static RTC_NOINIT_ATTR auth_lockout_t s_auth_lock;
+
+/** @brief Answer a protected request while the login is locked: 429 with
+ *         Retry-After and a one-line plain-text reason. */
+static void send_locked(httpd_req_t *req, uint32_t remaining_s) {
+    // httpd keeps the header POINTER until httpd_resp_send, so `ra` must stay
+    // in scope until then.
+    char ra[12];
+    snprintf(ra, sizeof(ra), "%" PRIu32, remaining_s);
+    char body[96];
+    snprintf(body, sizeof(body),
+             "Login locked after wrong passwords. Try again in %" PRIu32 " min.\n",
+             (remaining_s + 59u) / 60u);
+    httpd_resp_set_status(req, "429 Too Many Requests");
+    httpd_resp_set_hdr(req, "Retry-After", ra);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
 // Returns true if Authorization header is "Basic base64(admin:<ap_password>)".
-// On failure, sends 401 + WWW-Authenticate and returns false. The caller must
-// return ESP_OK immediately without sending anything further.
+// On failure, sends 401 + WWW-Authenticate (or 429 while the login is locked)
+// and returns false. The caller must return ESP_OK immediately without
+// sending anything further.
 //
 // Distinguishes two failure modes: header absent (expected first-touch from
-// a fresh browser — logged as INFO) vs. header present but wrong credentials
-// (a real bad-password attempt — logged as WARN so it stands out in /log).
+// a fresh browser — not counted, nothing logged) vs. header present but wrong
+// credentials (a real bad-password attempt — counted towards the lockout and
+// logged as WARN so it stands out in /log).
+//
+// V2.8.26: AUTH_LOCK_FAILS wrong passwords in a row lock the login; while
+// locked every request here is refused with 429, the correct password too,
+// and the password is not even looked at.
 static bool check_auth(httpd_req_t *req) {
+    const uint64_t now = esp_rtc_get_time_us();   // once: it briefly masks interrupts
+    auth_lock_verdict_t v = auth_lock_check(&s_auth_lock, now);
+    char ipstr[48];
+    if (v.just_unlocked) {
+        ESP_LOGI(TAG, "admin login lock had ended before this request (it lasted %" PRIu32
+                      " min; %" PRIu32 " requests were refused during it since the last boot)",
+                 v.lock_s / 60u, v.refused);
+    }
+    if (v.remaining_s > 0) {
+        if (v.refused == 1) {
+            peer_ipstr(req, ipstr, sizeof(ipstr));
+            ESP_LOGI(TAG, "admin login refused for %s from %s: still locked for %" PRIu32
+                          " s (the correct password is refused too until then)",
+                     req->uri, ipstr, v.remaining_s);
+        }
+        send_locked(req, v.remaining_s);
+        return false;
+    }
+
     char header[160];
     size_t hlen = httpd_req_get_hdr_value_len(req, "Authorization");
     bool header_present = (hlen > 0 && hlen < sizeof(header));
@@ -250,13 +304,22 @@ static bool check_auth(httpd_req_t *req) {
     size_t got_len = strlen(header + 6);
     if (got_len != enc_len) goto unauth;
     if (ct_memcmp(header + 6, expected, enc_len) != 0) goto unauth;
+    auth_lock_on_success(&s_auth_lock);
     return true;
 
 unauth:
     if (header_present) {
-        char ipstr[48];
         peer_ipstr(req, ipstr, sizeof(ipstr));
-        ESP_LOGW(TAG, "auth failed for %s from %s", req->uri, ipstr);
+        uint32_t lock_s = auth_lock_on_fail(&s_auth_lock, now);
+        if (lock_s > 0) {
+            ESP_LOGW(TAG, "admin login LOCKED for %" PRIu32 " min after %d wrong passwords in a row "
+                          "(last from %s); until then every login is refused, the correct password too",
+                     lock_s / 60u, AUTH_LOCK_FAILS, ipstr);
+            send_locked(req, lock_s);
+            return false;
+        }
+        ESP_LOGW(TAG, "auth failed for %s from %s (wrong password %u of %d before a lockout)",
+                 req->uri, ipstr, (unsigned)s_auth_lock.fails, AUTH_LOCK_FAILS);
     }
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"MultiGeiger\"");
@@ -1669,6 +1732,12 @@ fail:
 // PSRAM-backed boards.
 #define CFG_FORM_BUF_SIZE HAL_CFG_FORM_BUF_SIZE
 
+/** @brief Placeholder text of a secret field on /config (V2.8.26): says only
+ *         whether a value is stored, never the value. */
+static const char *secret_placeholder(const char *stored) {
+    return (stored && stored[0]) ? CONFIG_SECRET_PLACEHOLDER_SET : CONFIG_SECRET_PLACEHOLDER_UNSET;
+}
+
 static esp_err_t config_get(httpd_req_t *req) {
     log_access(req, "GET /config");
     if (!check_auth(req)) return ESP_OK;
@@ -1696,46 +1765,35 @@ static esp_err_t config_get(httpd_req_t *req) {
     // it, so plain malloc (no calloc) is sufficient.
     typedef struct {
         char ssid       [ESC_WORST(CFG_WIFI_SSID_MAX)];
-        char pw         [ESC_WORST(CFG_WIFI_PSK_MAX)];
         char chip       [96];   // chip id: digits/dashes only, never expands
         char ru         [ESC_WORST(CFG_USER_NAME_MAX)];
-        char rp         [ESC_WORST(CFG_PASSWORD_MAX)];
         char ntp1       [ESC_WORST(CFG_NTP_HOST_MAX)];
         char ntp2       [ESC_WORST(CFG_NTP_HOST_MAX)];
         char ntp3       [ESC_WORST(CFG_NTP_HOST_MAX)];
-        char ap         [ESC_WORST(CFG_AP_PW_MAX)];
         char tz         [ESC_WORST(CFG_TZ_POSIX_MAX)];
         char apn        [ESC_WORST(CFG_AP_NAME_MAX)];
         char host       [ESC_WORST(CFG_HOSTNAME_MAX)];
         char fhost      [ESC_WORST(CFG_FTP_HOST_MAX)];
         char fuser      [ESC_WORST(CFG_USER_NAME_MAX)];
-        char fpw        [ESC_WORST(CFG_PASSWORD_MAX)];
         char fpath      [ESC_WORST(CFG_FTP_PATH_MAX)];
         char osm        [ESC_WORST(CFG_OSM_BOX_MAX)];
-        char osm_tok    [ESC_WORST(CFG_TOKEN_MAX)];
-        char aqi        [ESC_WORST(CFG_TOKEN_MAX)];
         char osm_st     [ESC_WORST(CFG_OSM_BOX_MAX)];   // V2.5.26: OSM staging
-        char osm_st_tok [ESC_WORST(CFG_TOKEN_MAX)];
         // V2.5.1: GMCMap + ThingSpeak. Numeric/hex by validation, but escaped
         // for the same defence-in-depth reason as the LoRa fields below.
         char gmc_aid    [ESC_WORST(CFG_USER_NAME_MAX)];
         char gmc_gid    [ESC_WORST(CFG_USER_NAME_MAX)];
-        char ts_key     [ESC_WORST(CFG_TOKEN_MAX)];
-        char ts_pm_key  [ESC_WORST(CFG_TOKEN_MAX)];     // V2.5.4: ThingSpeak PM
         char mhost      [ESC_WORST(CFG_MQTT_HOST_MAX)];
         char muser      [ESC_WORST(CFG_USER_NAME_MAX)];
-        char mpw        [ESC_WORST(CFG_PASSWORD_MAX)];
         char mpfx       [ESC_WORST(CFG_MQTT_PFX_MAX)];
         char slh        [ESC_WORST(CFG_SYSLOG_HOST_MAX)];   // V2.4.15: syslog
 #if HAL_HAS_LORAWAN
-        // V2.6.23 (T8): DevEUI/JoinEUI/AppKey are plain hex strings — no HTML
+        // V2.6.23 (T8): DevEUI/JoinEUI are plain hex strings — no HTML
         // metacharacters possible in a value that later passes lw_hex_decode —
         // but escaped anyway: defence-in-depth against a stored value that
         // predates/bypasses POST validation (hand-crafted request, NVS carried
         // over from a future firmware).
         char lora_deveui [ESC_WORST(CFG_LORA_EUI_MAX)];
         char lora_joineui[ESC_WORST(CFG_LORA_EUI_MAX)];
-        char lora_appkey [ESC_WORST(CFG_LORA_KEY_MAX)];
 #endif
     } esc_bufs_t;
     esc_bufs_t *e = malloc(sizeof(*e));
@@ -1758,40 +1816,29 @@ static esp_err_t config_get(httpd_req_t *req) {
         return ESP_OK;
     }
     html_esc(s_cfg->wifi_ssid,     e->ssid, sizeof(e->ssid));
-    html_esc(s_cfg->wifi_password, e->pw,   sizeof(e->pw));
     html_esc(s_chip_id,            e->chip, sizeof(e->chip));  // read-only display
     html_esc(s_cfg->radmon_user,   e->ru,   sizeof(e->ru));
-    html_esc(s_cfg->radmon_password, e->rp, sizeof(e->rp));
     html_esc(s_cfg->ntp_server,    e->ntp1, sizeof(e->ntp1));
     html_esc(s_cfg->ntp_server2,   e->ntp2, sizeof(e->ntp2));
     html_esc(s_cfg->ntp_server3,   e->ntp3, sizeof(e->ntp3));
     html_esc(s_cfg->tz_posix,      e->tz,   sizeof(e->tz));
-    html_esc(s_cfg->ap_password,   e->ap,   sizeof(e->ap));
     html_esc(s_cfg->ap_name,       e->apn,  sizeof(e->apn));
     html_esc(s_cfg->wifi_hostname, e->host, sizeof(e->host));
     html_esc(s_cfg->ftp_host,      e->fhost, sizeof(e->fhost));
     html_esc(s_cfg->ftp_user,      e->fuser, sizeof(e->fuser));
-    html_esc(s_cfg->ftp_password,  e->fpw,   sizeof(e->fpw));
     html_esc(s_cfg->ftp_path,      e->fpath, sizeof(e->fpath));
     html_esc(s_cfg->osm_box_id,       e->osm,     sizeof(e->osm));
-    html_esc(s_cfg->osm_access_token, e->osm_tok, sizeof(e->osm_tok));
     html_esc(s_cfg->osm_staging_box_id, e->osm_st,     sizeof(e->osm_st));
-    html_esc(s_cfg->osm_staging_token,  e->osm_st_tok, sizeof(e->osm_st_tok));
-    html_esc(s_cfg->aqi_token,        e->aqi,     sizeof(e->aqi));
     html_esc(s_cfg->gmc_account_id,     e->gmc_aid, sizeof(e->gmc_aid));
     html_esc(s_cfg->gmc_geiger_id,      e->gmc_gid, sizeof(e->gmc_gid));
-    html_esc(s_cfg->thingspeak_api_key, e->ts_key,  sizeof(e->ts_key));
-    html_esc(s_cfg->thingspeak_pm_api_key, e->ts_pm_key, sizeof(e->ts_pm_key));
     html_esc(s_cfg->mqtt_broker,       e->mhost, sizeof(e->mhost));
     html_esc(s_cfg->mqtt_user,         e->muser, sizeof(e->muser));
-    html_esc(s_cfg->mqtt_password,     e->mpw,   sizeof(e->mpw));
     html_esc(s_cfg->mqtt_topic_prefix, e->mpfx,  sizeof(e->mpfx));
     html_esc(s_cfg->mqtt_tls_ca,       e_mca,   ESC_WORST(CFG_MQTT_CA_CERT_MAX));
     html_esc(s_cfg->syslog_host,       e->slh,   sizeof(e->slh));
 #if HAL_HAS_LORAWAN
     html_esc(s_cfg->lorawan_deveui,    e->lora_deveui,  sizeof(e->lora_deveui));
     html_esc(s_cfg->lorawan_joineui,   e->lora_joineui, sizeof(e->lora_joineui));
-    html_esc(s_cfg->lorawan_appkey,    e->lora_appkey,  sizeof(e->lora_appkey));
 #endif
 
     // V2.3.30: build the display-brightness <option> list dynamically — OFF
@@ -1908,18 +1955,19 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
                      "use <b>Save and restart</b> at the bottom when changing these.</p>"
                      "<form method=\"post\" action=\"/config\">"
+                     "<p><small>Secret fields: leave empty to keep, enter - to clear.</small></p>"
                      "<h3>Network</h3>"
                      "<label>WiFi SSID <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
                      "<label>WiFi password <span class=\"r\">*</span>"
-                     "<input type=\"password\" name=\"wifi_pw\" value=\"%s\"></label>"
+                     "<input type=\"password\" name=\"wifi_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label>"
                      "<label>DHCP hostname (visible in router) <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"wifi_host\" value=\"%s\" maxlength=\"32\"></label>"
                      "<label>AP SSID (used in AP / fallback mode) <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
                      // V2.5.30: moved here (below AP SSID) from the old "Other" section.
                      "<label>Web admin and access point password"
-                     "<input type=\"password\" name=\"ap_pw\" value=\"%s\"></label>"
+                     "<input type=\"password\" name=\"ap_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"32\"></label>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
                      "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
                      "%s</label></div>"
@@ -2144,8 +2192,8 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "pattern=\"[0-9a-fA-F]{16}\" style=\"font-family:monospace\" "
                      "placeholder=\"as shown in TTN console\"></label>"
                      "<label>AppKey (32 hex chars) <span class=\"r\">*</span>"
-                     "<input type=\"password\" name=\"lora_appkey\" value=\"%s\" maxlength=\"32\" "
-                     "pattern=\"[0-9a-fA-F]{32}\"></label>"
+                     "<input type=\"password\" name=\"lora_appkey\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"32\" "
+                     "pattern=\"[0-9a-fA-F]{32}|-\"></label>"
                      // V2.6.34: the "Drive FEM enable (GPIO2)" checkbox is gone —
                      // the GC1109 front end is required for LoRa RX, so lorawan.cpp
                      // now always enables it. High power stays a choice: the PA
@@ -2208,26 +2256,26 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
                      "<div class=\"cfg\">"
                      "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
-                     "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"%s\"></label></div>"
+                     "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
                      "openSenseMap (HTTPS only)</label></div>"
                      "<div class=\"cfg\">"
                      "<label>Box ID (24-char MongoDB ObjectId &mdash; per-device on opensensemap.org)"
                      "<input type=\"text\" name=\"osm_box\" value=\"%s\" maxlength=\"25\"></label>"
                      "<label>Access Token (optional &mdash; only if your box has authentication enabled)"
-                     "<input type=\"password\" name=\"osm_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<input type=\"password\" name=\"osm_tok\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm_st\" %s> "
                      "openSenseMap STAGING (HTTPS only)</label></div>"
                      "<div class=\"cfg\">"
                      "<label>Staging Box ID (beta &mdash; per-device on staging.opensensemap.org)"
                      "<input type=\"text\" name=\"osm_st_box\" value=\"%s\" maxlength=\"25\"></label>"
                      "<label>Staging Access Token (optional)"
-                     "<input type=\"password\" name=\"osm_st_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<input type=\"password\" name=\"osm_st_tok\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_aqi\" %s> "
                      "aqi.eco (HTTPS only)</label></div>"
                      "<div class=\"cfg\">"
                      "<label>aqi.eco token"
-                     "<input type=\"text\" name=\"aqi_tok\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<input type=\"password\" name=\"aqi_tok\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_gmc\" id=\"send_gmc\" %s> "
                      "GMCMap (gmcmap.com, HTTP only) &mdash; radiation-only</label></div>"
                      "<div class=\"cfg\">"
@@ -2240,7 +2288,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_https\" %s> HTTPS</label></div>"
                      "<div class=\"cfg\">"
                      "<label>Channel Write API Key"
-                     "<input type=\"password\" name=\"ts_key\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<input type=\"password\" name=\"ts_key\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      // V2.5.4: ThingSpeak (Particulate Matter) — independent channel for the
                      // SPS30 dust node. field1-4=PM1.0/2.5/4.0/10, 5-7=T/H/P, 8=typ. size.
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_ts_pm\" %s> "
@@ -2248,18 +2296,18 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ts_pm_https\" %s> HTTPS</label></div>"
                      "<div class=\"cfg\">"
                      "<label>Channel Write API Key"
-                     "<input type=\"password\" name=\"ts_pm_key\" value=\"%s\" maxlength=\"64\"></label></div>"
+                     "<input type=\"password\" name=\"ts_pm_key\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<h3>FTP log upload</h3>"
                      "<p>Periodically uploads the in-memory log ring (same content as "
                      "<a href=\"/log\">/log</a>) to a LAN FTP server. Passive mode. "
-                     "Leave user/password empty for anonymous login.</p>"
+                     "For anonymous login leave the user empty and clear the password (enter -).</p>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_en\" %s> "
                      "Enable FTP log upload</label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_tls\" %s> "
                      "Use explicit TLS (AUTH TLS on port 21) &mdash; certificate NOT verified</label></div>"
                      "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
                      "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
-                     "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"%s\"></label>"
+                     "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label>"
                      "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
                      "<label>Upload interval (minutes) (Max 10090)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
@@ -2325,7 +2373,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<label>Username (optional)"
                      "<input type=\"text\" name=\"mqtt_user\" value=\"%s\" maxlength=\"32\"></label>"
                      "<label>Password (optional)"
-                     "<input type=\"password\" name=\"mqtt_pw\" value=\"%s\" maxlength=\"64\"></label>"
+                     "<input type=\"password\" name=\"mqtt_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label>"
                      "<label>Topic prefix <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"mqtt_pfx\" value=\"%s\" maxlength=\"31\"></label>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"mqtt_ha\" %s> "
@@ -2438,7 +2486,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<p><a href=\"/\">Back to status</a> &middot; "
                      "<a href=\"/update\">Firmware update</a></p>"
                      "</body></html>",
-                     e->ssid, e->pw, e->host, e->apn, e->ap,   // V2.5.30: e->ap (ap_pw) moved to Network
+                     e->ssid, secret_placeholder(s_cfg->wifi_password), e->host, e->apn, secret_placeholder(s_cfg->ap_password),   // V2.5.30: ap_pw moved to Network
                      s_cfg->wifi_11bg_only ? "checked" : "",
     // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
     // restricts the 2.4GHz protocol set — 5GHz has no 802.11b/g to limit
@@ -2555,7 +2603,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      lora_dr_opts,   // V2.8.14: uplink data rate <option> list
                      e->lora_deveui,
                      e->lora_joineui,
-                     e->lora_appkey,
+                     secret_placeholder(s_cfg->lorawan_appkey),
 #if HAL_HAS_LORA_FEM
                      s_cfg->lorawan_high_power ? "checked" : "",
                      lorawan_fem_kct8103l_detected() ? " disabled" : "",
@@ -2578,27 +2626,27 @@ static esp_err_t config_get(httpd_req_t *req) {
                      s_cfg->send_sealevel_pressure ? "checked" : "",
                      s_cfg->send_radmon ? "checked" : "",
                      s_cfg->radmon_https ? "checked" : "",
-                     e->ru, e->rp,
+                     e->ru, secret_placeholder(s_cfg->radmon_password),
                      s_cfg->send_osm ? "checked" : "",
                      e->osm,
-                     e->osm_tok,
+                     secret_placeholder(s_cfg->osm_access_token),
                      s_cfg->send_osm_staging ? "checked" : "",
                      e->osm_st,
-                     e->osm_st_tok,
+                     secret_placeholder(s_cfg->osm_staging_token),
                      s_cfg->send_aqi ? "checked" : "",
-                     e->aqi,
+                     secret_placeholder(s_cfg->aqi_token),
                      s_cfg->send_gmc ? "checked" : "",
                      e->gmc_aid,
                      e->gmc_gid,
                      s_cfg->send_thingspeak ? "checked" : "",
                      s_cfg->thingspeak_https ? "checked" : "",
-                     e->ts_key,
+                     secret_placeholder(s_cfg->thingspeak_api_key),
                      s_cfg->send_thingspeak_pm ? "checked" : "",
                      s_cfg->thingspeak_pm_https ? "checked" : "",
-                     e->ts_pm_key,
+                     secret_placeholder(s_cfg->thingspeak_pm_api_key),
                      s_cfg->ftp_enabled ? "checked" : "",
                      s_cfg->ftp_tls ? "checked" : "",
-                     e->fhost, e->fuser, e->fpw, e->fpath,
+                     e->fhost, e->fuser, secret_placeholder(s_cfg->ftp_password), e->fpath,
                      (unsigned long)s_cfg->ftp_interval_min,
                      s_cfg->ftp_ps_disabled ? "checked" : "",
                      s_cfg->ftp_tls12_only ? "checked" : "",
@@ -2607,7 +2655,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      e->mhost,
                      (unsigned long)s_cfg->mqtt_port,
                      e->muser,
-                     e->mpw,
+                     secret_placeholder(s_cfg->mqtt_password),
                      e->mpfx,
                      s_cfg->mqtt_ha_discovery ? "checked" : "",
                      // V2.4.6: MQTT TLS row format args (5 in order: enable, then three
@@ -2647,9 +2695,10 @@ static esp_err_t config_get(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
-    // V2.8.5: this page carries every stored secret (WiFi / MQTT / FTP /
-    // Radmon passwords, API tokens) in its password inputs. no-store keeps
-    // the browser and any proxy from writing it to a disk cache.
+    // V2.8.5: no-store keeps the browser and any proxy from writing the page
+    // to a disk cache. V2.8.26: stored secrets are no longer on the page (their
+    // fields are empty; only the placeholder says whether one is set), but the
+    // page still shows addresses, user names and the node's setup.
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_send(req, body, n > 0 ? n : 0);
     free(body);
@@ -2726,6 +2775,14 @@ static esp_err_t config_post(httpd_req_t *req) {
     const bool restart_after_save = form_res.restart_requested;
     const char *rejected = form_res.rejected;
 
+    // V2.8.26: name the secrets this save changes or clears (names only, never
+    // values) — on the result page and in the log, so an unexpected change
+    // (e.g. a browser filling a field) is seen at once. Compared before the
+    // commit below overwrites *s_cfg. Contents come from the fixed key list,
+    // so they are safe to echo into the page unescaped.
+    static char secrets_changed[192];
+    config_form_secret_changes(s_cfg, &cfg_next, secrets_changed, sizeof(secrets_changed));
+
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
     // stays unchanged so the device continues on the old in-memory config
     // and the user can retry without a RAM/NVS split-brain until next reboot.
@@ -2735,6 +2792,11 @@ static esp_err_t config_post(httpd_req_t *req) {
         return ESP_OK;
     }
     *s_cfg = cfg_next;
+    if (secrets_changed[0]) {
+        char ipstr[48];
+        peer_ipstr(req, ipstr, sizeof(ipstr));
+        ESP_LOGI(TAG, "config saved from %s: secrets %s", ipstr, secrets_changed);
+    }
 
     // V2.3.30: live-apply OLED/SerLCD brightness (no reboot for this field).
     // No-op if the panel is dark (show_display=false) or if the value didn't
@@ -2797,7 +2859,7 @@ static esp_err_t config_post(httpd_req_t *req) {
           "<p><a href=\"/config\">Back to configuration</a> &middot; "
           "<a href=\"/\">Back to status</a></p>";
 
-    static char page[1024];
+    static char page[1280];   // V2.8.26: +256 for the "Secrets …" line (worst case ~1.05 KB)
     int n = append_safe(page, sizeof(page), 0,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Saved</title></head><body><h1>%s</h1>", h1);
@@ -2805,6 +2867,9 @@ static esp_err_t config_post(httpd_req_t *req) {
         n = append_safe(page, sizeof(page), n,
             "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were invalid "
             "or out of range and were NOT saved (previous value kept): %s</p>", rejected);
+    }
+    if (secrets_changed[0]) {
+        n = append_safe(page, sizeof(page), n, "<p>Secrets %s</p>", secrets_changed);
     }
     append_safe(page, sizeof(page), n, "%s</body></html>", body);
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
@@ -3770,6 +3835,20 @@ static esp_err_t redirect_to_https(httpd_req_t *req) {
 void http_server_start(config_t *cfg, const char *chip_id) {
     s_cfg     = cfg;
     s_chip_id = chip_id ? chip_id : "";
+
+    // V2.8.26: validate the login lockout state kept in RTC RAM. A power-on
+    // (incl. the reset button) clears it; after a crash, watchdog or software
+    // restart an active lock continues with its real remaining time.
+    {
+        const uint64_t now = esp_rtc_get_time_us();
+        auth_lock_on_boot(&s_auth_lock, now, esp_reset_reason() == ESP_RST_POWERON);
+        const uint32_t r = auth_lock_remaining_s(&s_auth_lock, now);
+        if (r > 0) {
+            ESP_LOGW(TAG, "admin login still LOCKED for %" PRIu32 " s after the reboot "
+                          "(a lock survives crashes, watchdog and software restarts; the reset "
+                          "button or a power cycle clears it)", r);
+        }
+    }
 
     // STA MAC — burned into eFuse, same across boots. Displayed on / and
     // /config so the user can identify the board without serial access.

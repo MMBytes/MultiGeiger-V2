@@ -206,7 +206,9 @@ static int do_request(const char *url, esp_http_client_method_t method,
     }
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
-        ESP_LOGE(TAG, "http_client_init failed for %s", url);
+        // V2.8.26: never log a credential carried in the URL (query or aqi.eco path).
+        const int ul = url_log_len(url);
+        ESP_LOGE(TAG, "http_client_init failed for %.*s%s", ul, url, url[ul] ? "…" : "");
         return -1;
     }
     if (content_type) esp_http_client_set_header(client, "Content-Type", content_type);
@@ -218,10 +220,11 @@ static int do_request(const char *url, esp_http_client_method_t method,
     esp_err_t err = esp_http_client_perform(client);
     int status = (err == ESP_OK) ? esp_http_client_get_status_code(client) : -1;
     if (err != ESP_OK) {
-        // Truncate at '?' to avoid logging query-string credentials.
-        const char *q = strchr(url, '?');
-        int url_len = q ? (int)(q - url) : (int)strlen(url);
-        ESP_LOGW(TAG, "perform error: %s (%.*s)", esp_err_to_name(err), url_len, url);
+        // Cut before any credential: the query (Radmon, ThingSpeak) and, since
+        // V2.8.26, the aqi.eco token in the path (/update/<token>).
+        const int url_len = url_log_len(url);
+        ESP_LOGW(TAG, "perform error: %s (%.*s%s)", esp_err_to_name(err), url_len, url,
+                 url[url_len] ? "…" : "");
     }
     esp_http_client_cleanup(client);
     return status;

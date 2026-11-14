@@ -89,6 +89,20 @@ static inline int hex_nibble(char c) {
  *  V2.4.1+ (T1): moved from http_server.c. V2.4.1 (B6) introduced the
  *  RFC-strict behaviour; pre-V2.4.1 preserved the literal `%`.
  */
+/** @brief Length of the part of an upload URL that may be logged (V2.8.26):
+ *         up to the first '?' (credentials in the query, e.g. Radmon,
+ *         ThingSpeak) and, when "/update/" comes before that, up to and
+ *         including "/update/" (aqi.eco puts its token in the path).
+ *         Use as "%.*s". NULL or "" → 0. */
+static inline int url_log_len(const char *url) {
+    if (!url) return 0;
+    const char *q = strchr(url, '?');
+    const char *u = strstr(url, "/update/");
+    const char *cut = q;
+    if (u && (!q || u < q)) cut = u + 8;   // keep "/update/", drop what follows
+    return cut ? (int)(cut - url) : (int)strlen(url);
+}
+
 static inline void url_decode(char *s) {
     char *w = s;
     while (*s) {

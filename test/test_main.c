@@ -52,6 +52,7 @@
 #include "tube.h"            // V2.8.8: real prototypes, so the fakes below must match them
 #include "tube_pcnt.h"
 #include "ota_guard_logic.h"  // V2.8.20: OTA rollback probation rule
+#include "auth_lockout.h"     // V2.8.26: admin login lockout rule
 
 static int g_failures = 0;
 
@@ -2100,6 +2101,24 @@ static int test_generalized_time_negative_fails(void) {
     return 1;
 }
 
+// --- util.h: url_log_len (V2.8.26) --------------------------------------------
+
+// An upload URL may carry a credential in its query (Radmon, ThingSpeak) or in
+// its path (aqi.eco /update/<token>); the logged part must stop before both.
+static int test_url_log_len(void) {
+    static const char radmon[] = "https://radmon.org/radmon.php?user=a&password=b";
+    EXPECT_INT(url_log_len(radmon), (int)(strstr(radmon, "?") - radmon));
+    static const char aqi[] = "https://api.aqi.eco/update/SECRETTOKEN";
+    EXPECT_INT(url_log_len(aqi), (int)strlen("https://api.aqi.eco/update/"));
+    static const char plain[] = "https://api.example.org/push";
+    EXPECT_INT(url_log_len(plain), (int)strlen(plain));
+    static const char q_first[] = "https://x.org/a?next=/update/zz";   // '?' before /update/
+    EXPECT_INT(url_log_len(q_first), (int)(strstr(q_first, "?") - q_first));
+    EXPECT_INT(url_log_len(""), 0);
+    EXPECT_INT(url_log_len(NULL), 0);
+    return 1;
+}
+
 // --- util.h: V2.8.5 helpers -------------------------------------------------
 // parse_long_strict / parse_float_strict replace strtol(val, NULL, 10) in the
 // /config schema dispatch, where "abc" used to store 0.
@@ -2524,6 +2543,110 @@ static int test_schema_every_key_on_config_form(void) {
         if (!strstr(src, needle)) {
             printf("    key '%s' has no form field (%s) in %s\n", k_schema[i].key, needle,
                    HTTP_SERVER_SRC);
+            ok = 0;
+        }
+    }
+    free(src);
+    return ok;
+}
+
+#include "config_form.h"   // V2.8.26: k_config_secret_keys for the scans below (#pragma once)
+
+// V2.8.26: every secret field on /config is an empty password field whose
+// placeholder (not its value) says whether a secret is stored.
+static int test_config_form_no_secret_values(void) {
+    char *src = read_text_file(HTTP_SERVER_SRC);
+    if (!src) {
+        printf("    cannot read %s (run the tests from the repo root)\n", HTTP_SERVER_SRC);
+        return 0;
+    }
+    int ok = 1;
+    for (size_t i = 0; i < k_config_secret_keys_n; i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "name=\\\"%s\\\"", k_config_secret_keys[i]);
+        const char *at = strstr(src, needle);
+        if (!at) { printf("    %s: no form field\n", k_config_secret_keys[i]); ok = 0; continue; }
+        // The <input …> element around the needle: attributes may come before name=.
+        const char *start = at;
+        while (start > src && strncmp(start, "<input", 6) != 0) start--;
+        const char *end = strchr(at, '>');
+        if (!end || start == src) { printf("    %s: no <input>\n", k_config_secret_keys[i]); ok = 0; continue; }
+        size_t len = (size_t)(end - start);
+        char elem[512];
+        if (len >= sizeof elem) len = sizeof elem - 1;
+        memcpy(elem, start, len);
+        elem[len] = 0;
+        if (!strstr(elem, "type=\\\"password\\\"") || !strstr(elem, "value=\\\"\\\"") ||
+            !strstr(elem, "placeholder=\\\"%s\\\"")) {
+            printf("    %s: not an empty password field with a placeholder: %.120s\n",
+                   k_config_secret_keys[i], elem);
+            ok = 0;
+        }
+    }
+    free(src);
+    return ok;
+}
+
+// V2.8.26: a stored secret may only reach the page through secret_placeholder()
+// (which prints a fixed text); the one other use is the login check.
+static int test_config_form_secret_members_only_as_placeholder(void) {
+    static const char *const members[] = {
+        "wifi_password", "ap_password", "lorawan_appkey", "radmon_password",
+        "osm_access_token", "osm_staging_token", "thingspeak_api_key",
+        "thingspeak_pm_api_key", "ftp_password", "mqtt_password", "aqi_token",
+    };
+    char *src = read_text_file(HTTP_SERVER_SRC);
+    if (!src) {
+        printf("    cannot read %s (run the tests from the repo root)\n", HTTP_SERVER_SRC);
+        return 0;
+    }
+    int ok = 1;
+    EXPECT_INT((int)(sizeof members / sizeof members[0]), (int)k_config_secret_keys_n);
+    for (size_t m = 0; m < sizeof members / sizeof members[0]; m++) {
+        char needle[64];
+        snprintf(needle, sizeof needle, "s_cfg->%s", members[m]);
+        const size_t nl = strlen(needle);
+        for (const char *p = strstr(src, needle); p; p = strstr(p + 1, needle)) {
+            const char nx = p[nl];
+            if (nx == '_' || (nx >= 'a' && nx <= 'z') || (nx >= '0' && nx <= '9')) continue;  // longer name
+            static const char via[]   = "secret_placeholder(";
+            static const char login[] = "\"admin:%s\", ";
+            const bool ok_via   = (size_t)(p - src) >= sizeof via - 1 &&
+                                  strncmp(p - (sizeof via - 1), via, sizeof via - 1) == 0;
+            const bool ok_login = strcmp(members[m], "ap_password") == 0 &&
+                                  (size_t)(p - src) >= sizeof login - 1 &&
+                                  strncmp(p - (sizeof login - 1), login, sizeof login - 1) == 0;
+            if (!ok_via && !ok_login) {
+                printf("    %s used outside secret_placeholder(): %.60s\n", needle, p - 20);
+                ok = 0;
+            }
+        }
+    }
+    free(src);
+    return ok;
+}
+
+// V2.8.26: a password field that is not in the secret list would echo its value.
+static int test_config_form_every_password_input_is_secret(void) {
+    char *src = read_text_file(HTTP_SERVER_SRC);
+    if (!src) {
+        printf("    cannot read %s (run the tests from the repo root)\n", HTTP_SERVER_SRC);
+        return 0;
+    }
+    int ok = 1;
+    static const char ty[] = "type=\\\"password\\\"";
+    for (const char *p = strstr(src, ty); p; p = strstr(p + 1, ty)) {
+        const char *start = p;
+        while (start > src && strncmp(start, "<input", 6) != 0) start--;
+        const char *end = strchr(p, '>');
+        const char *nm = strstr(start, "name=\\\"");
+        if (start == src || !end || !nm || nm > end) continue;   // CSS selector etc., not an <input>
+        nm += 7;
+        const char *q = strstr(nm, "\\\"");
+        char key[48] = {0};
+        if (q && (size_t)(q - nm) < sizeof key) memcpy(key, nm, (size_t)(q - nm));
+        if (!config_form_is_secret_key(key)) {
+            printf("    password field '%s' is not in k_config_secret_keys\n", key);
             ok = 0;
         }
     }
@@ -3170,6 +3293,259 @@ static int test_form_lora_hp_kept_with_fem(void) {
     return 1;
 }
 
+// --- V2.8.26: secret fields (empty = keep, "-" = clear) ---------------------
+
+/** @brief Put the same value into a string field of both prev and next. */
+#define FORM_SEED(field, val)                                                 \
+    do {                                                                      \
+        safe_strcpy(g_form_prev.field, (val), sizeof g_form_prev.field);      \
+        safe_strcpy(g_form_next.field, (val), sizeof g_form_next.field);      \
+    } while (0)
+
+static const char k_hex32[] = "00112233445566778899aabbccddeeff";
+
+// An empty secret field keeps the stored value.
+static int test_form_secret_empty_keeps(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    form_apply("mqtt_pw=&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "old");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// Exactly "-" (also URL-encoded) clears a secret.
+static int test_form_secret_dash_clears(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    form_apply("mqtt_pw=-&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "");
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    form_apply("mqtt_pw=%2D&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// Anything else is the new secret; only an exact "-" clears.
+static int test_form_secret_new_value_sets(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    form_apply("mqtt_pw=new1&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "new1");
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    form_apply("mqtt_pw=-x&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "-x");
+    return 1;
+}
+
+// Long secrets are stored complete (a 64-char token, a 32-hex AppKey).
+static int test_form_secret_long_values_complete(void) {
+    static const char tok64[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan = true;
+    form_reset();
+    char body[256];
+    snprintf(body, sizeof body, "osm_tok=%s&lora_appkey=%s&save=1", tok64, k_hex32);
+    form_apply(body, &caps);
+    EXPECT_STREQ(g_form_next.osm_access_token, tok64);
+    EXPECT_STREQ(g_form_next.lorawan_appkey, k_hex32);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// The admin password cannot be cleared; empty keeps it as for every secret.
+static int test_form_ap_pw_clear_rejected(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("ap_pw=-&save=1", &caps);
+    EXPECT_STREQ(g_form_next.ap_password, g_form_prev.ap_password);
+    EXPECT_TRUE(form_rejected_has("ap_pw"));
+    form_reset();
+    form_apply("ap_pw=&save=1", &caps);
+    EXPECT_STREQ(g_form_next.ap_password, g_form_prev.ap_password);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// A secret longer than its field is rejected, never silently cut (a cut admin
+// password would be unknown to the owner).
+static int test_form_secret_too_long_rejected(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[256];
+    char v[100];
+
+    form_reset();
+    memset(v, 'a', 33); v[33] = 0;                       // CFG_AP_PW_MAX + 1
+    snprintf(body, sizeof body, "ap_pw=%s&save=1", v);
+    form_apply(body, &caps);
+    EXPECT_STREQ(g_form_next.ap_password, g_form_prev.ap_password);
+    EXPECT_TRUE(form_rejected_has("ap_pw"));
+
+    form_reset();
+    memset(v, 'b', 32); v[32] = 0;                       // exactly CFG_AP_PW_MAX: fits
+    snprintf(body, sizeof body, "ap_pw=%s&save=1", v);
+    form_apply(body, &caps);
+    EXPECT_STREQ(g_form_next.ap_password, v);
+    EXPECT_STREQ(g_form_res.rejected, "");
+
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    memset(v, 'c', 65); v[65] = 0;                       // CFG_PASSWORD_MAX + 1
+    snprintf(body, sizeof body, "mqtt_pw=%s&save=1", v);
+    form_apply(body, &caps);
+    EXPECT_STREQ(g_form_next.mqtt_password, "old");
+    EXPECT_TRUE(form_rejected_has("mqtt_pw"));
+
+    form_reset();
+    memset(v, 'd', 64); v[64] = 0;                       // 64-hex WPA PSK: fits
+    snprintf(body, sizeof body, "wifi_pw=%s&save=1", v);
+    form_apply(body, &caps);
+    EXPECT_STREQ(g_form_next.wifi_password, v);
+    return 1;
+}
+
+// AppKey: empty keeps, "-" unconfigures, bad hex is still rejected.
+static int test_form_appkey_keep_clear(void) {
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan = true;
+    form_reset();
+    FORM_SEED(lorawan_appkey, k_hex32);
+    form_apply("lora_appkey=&save=1", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_appkey, k_hex32);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    form_reset();
+    FORM_SEED(lorawan_appkey, k_hex32);
+    form_apply("lora_appkey=-&save=1", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_appkey, "");
+    form_reset();
+    FORM_SEED(lorawan_appkey, k_hex32);
+    form_apply("lora_appkey=xyz&save=1", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_appkey, k_hex32);
+    EXPECT_TRUE(form_rejected_has("lora_appkey"));
+    return 1;
+}
+
+// A kept secret first in the body must not stop the fields after it.
+static int test_form_secret_first_then_fields(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(mqtt_password, "old");
+    g_form_prev.send_madavi = false;
+    g_form_next.send_madavi = false;
+    form_apply("mqtt_pw=&mqtt_user=bob&send_mad=on&save_restart=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_user, "bob");
+    EXPECT_TRUE(g_form_next.send_madavi);
+    EXPECT_TRUE(g_form_res.restart_requested);
+    EXPECT_STREQ(g_form_next.mqtt_password, "old");
+    return 1;
+}
+
+/** @brief Seed all 11 secrets with distinct values. */
+static void form_seed_all_secrets(void) {
+    FORM_SEED(wifi_password, "wifi-secret-1");
+    FORM_SEED(ap_password, "admin-secret-2");
+    FORM_SEED(lorawan_appkey, k_hex32);
+    FORM_SEED(radmon_password, "radmon-3");
+    FORM_SEED(osm_access_token, "osmtok-4");
+    FORM_SEED(osm_staging_token, "osmst-5");
+    FORM_SEED(thingspeak_api_key, "ts-6");
+    FORM_SEED(thingspeak_pm_api_key, "tspm-7");
+    FORM_SEED(ftp_password, "ftp-8");
+    FORM_SEED(mqtt_password, "mqtt-9");
+    FORM_SEED(aqi_token, "aqi-10");
+}
+
+/** @brief Re-save with every secret EMPTY, interleaved with the ticked bools. */
+static int form_roundtrip_empty_secrets(bool has_lorawan) {
+    config_form_caps_t caps = form_caps_none();
+    caps.has_lorawan = has_lorawan;
+    form_reset();
+    form_seed_all_secrets();
+    char body[1024];
+    int n = 0;
+    size_t s = 0;
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        if (k_schema[i].type != 'B' || k_schema[i].def == 0) continue;
+        if (s < k_config_secret_keys_n)
+            n += snprintf(body + n, sizeof body - (size_t)n, "%s=&", k_config_secret_keys[s++]);
+        n += snprintf(body + n, sizeof body - (size_t)n, "%s=on&", k_schema[i].key);
+    }
+    while (s < k_config_secret_keys_n)
+        n += snprintf(body + n, sizeof body - (size_t)n, "%s=&", k_config_secret_keys[s++]);
+    n += snprintf(body + n, sizeof body - (size_t)n, "save=1");
+    EXPECT_TRUE(n > 0 && (size_t)n < sizeof body);   // form_apply copies into 1024 B
+    form_apply(body, &caps);
+    EXPECT_TRUE(memcmp(&g_form_next, &g_form_prev, sizeof g_form_next) == 0);
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// A plain re-save (all secret fields empty) changes no stored byte.
+static int test_form_secret_roundtrip_empty(void) {
+    EXPECT_TRUE(form_roundtrip_empty_secrets(false));
+    EXPECT_TRUE(form_roundtrip_empty_secrets(true));
+    return 1;
+}
+
+// Non-secret fields keep today's behaviour: "-" is a value, empty clears.
+static int test_form_non_secret_dash_and_empty(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("mqtt_user=-&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_user, "-");
+    form_reset();
+    FORM_SEED(mqtt_user, "bob");
+    form_apply("mqtt_user=&save=1", &caps);
+    EXPECT_STREQ(g_form_next.mqtt_user, "");
+    return 1;
+}
+
+// The secret key list names 11 real form keys.
+static int test_form_secret_keys_exist(void) {
+    EXPECT_INT((int)k_config_secret_keys_n, 11);
+    for (size_t i = 0; i < k_config_secret_keys_n; i++) {
+        bool found = false;
+        for (size_t j = 0; j < SCHEMA_N; j++)
+            if (strcmp(k_schema[j].key, k_config_secret_keys[i]) == 0) found = true;
+        if (!found) printf("    unknown secret key %s\n", k_config_secret_keys[i]);
+        EXPECT_TRUE(found);
+        EXPECT_TRUE(config_form_is_secret_key(k_config_secret_keys[i]));
+    }
+    EXPECT_TRUE(!config_form_is_secret_key("mqtt_user"));
+    return 1;
+}
+
+// The change summary names secrets only, never their values.
+static int test_form_secret_changes_summary(void) {
+    char out[128];
+    form_reset();
+    config_form_secret_changes(&g_form_prev, &g_form_next, out, sizeof out);
+    EXPECT_STREQ(out, "");
+    FORM_SEED(mqtt_password, "a");
+    FORM_SEED(wifi_password, "x");
+    safe_strcpy(g_form_next.mqtt_password, "", sizeof g_form_next.mqtt_password);
+    safe_strcpy(g_form_next.wifi_password, "y", sizeof g_form_next.wifi_password);
+    config_form_secret_changes(&g_form_prev, &g_form_next, out, sizeof out);
+    EXPECT_STREQ(out, "changed: wifi_pw; cleared: mqtt_pw");
+    EXPECT_TRUE(strchr(out, 'x') == NULL && strchr(out, 'y') == NULL);   // no values
+    char small[16];
+    config_form_secret_changes(&g_form_prev, &g_form_next, small, sizeof small);
+    EXPECT_TRUE(strlen(small) < sizeof small);
+    form_reset();
+    safe_strcpy(g_form_next.mqtt_user, "bob", sizeof g_form_next.mqtt_user);
+    config_form_secret_changes(&g_form_prev, &g_form_next, out, sizeof out);
+    EXPECT_STREQ(out, "");
+    return 1;
+}
+#undef FORM_SEED
+
 // ----------------------------------------------------------------------------
 // history.c  (V2.8.8, review 2.1 C2)
 // ----------------------------------------------------------------------------
@@ -3575,6 +3951,200 @@ static int test_ota_guard_retry_spacing_60s(void) {
     return 1;
 }
 
+// --- auth_lockout.h (V2.8.26: admin login lockout) ---------------------------
+
+/** @brief Seconds → microseconds for the lockout tests. */
+#define S(sec) ((uint64_t)(sec) * 1000000u)
+
+/** @brief A clean lock state, as after a boot over garbage RTC memory. */
+static auth_lockout_t lock_fresh(void) {
+    auth_lockout_t s;
+    memset(&s, 0xA5, sizeof s);
+    auth_lock_on_boot(&s, 0, false);
+    return s;
+}
+
+/** @brief 5 wrong passwords at `t`, `t`+1 µs …; returns the 5th call's lock seconds. */
+static uint32_t lock_five_fails(auth_lockout_t *s, uint64_t t) {
+    uint32_t r = 0;
+    for (int i = 0; i < AUTH_LOCK_FAILS; i++) r = auth_lock_on_fail(s, t + (uint64_t)i);
+    return r;
+}
+
+// Four wrong passwords never lock.
+static int test_auth_lock_four_fails_no_lock(void) {
+    auth_lockout_t s = lock_fresh();
+    for (int i = 1; i <= 4; i++) EXPECT_INT(auth_lock_on_fail(&s, S(i)), 0);
+    EXPECT_INT(auth_lock_check(&s, S(5)).remaining_s, 0);
+    return 1;
+}
+
+// The 5th wrong password locks for 60 s; the remaining time rounds up.
+static int test_auth_lock_five_fails_lock_60s(void) {
+    auth_lockout_t s = lock_fresh();
+    for (int i = 1; i <= 4; i++) EXPECT_INT(auth_lock_on_fail(&s, S(i)), 0);
+    EXPECT_INT(auth_lock_on_fail(&s, S(5)), 60);
+    EXPECT_INT(auth_lock_check(&s, S(5) + S(59) + 1).remaining_s, 1);
+    auth_lock_verdict_t v = auth_lock_check(&s, S(65));
+    EXPECT_INT(v.remaining_s, 0);
+    EXPECT_TRUE(v.just_unlocked);
+    EXPECT_INT(v.lock_s, 60);
+    return 1;
+}
+
+// Locks double up to the 8 h 32 min cap; the cap is exact (64-bit µs math).
+static int test_auth_lock_backoff_steps_to_cap(void) {
+    static const uint32_t want[12] = {60, 120, 240, 480, 960, 1920, 3840, 7680,
+                                      15360, 30720, 30720, 30720};
+    auth_lockout_t s = lock_fresh();
+    uint64_t t = S(10);
+    for (int i = 0; i < 12; i++) {
+        uint32_t got = lock_five_fails(&s, t);
+        EXPECT_INT(got, want[i]);
+        uint64_t start = t + (AUTH_LOCK_FAILS - 1);
+        if (i == 9) {
+            EXPECT_INT(auth_lock_check(&s, start + S(30719)).remaining_s, 1);
+        }
+        auth_lock_verdict_t v = auth_lock_check(&s, start + S(got));
+        EXPECT_INT(v.remaining_s, 0);
+        EXPECT_TRUE(v.just_unlocked);
+        t = start + S(got) + S(1);
+    }
+    return 1;
+}
+
+// A correct login resets the level: the next lock is 60 s again.
+static int test_auth_lock_success_resets_level(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(1)), 60);
+    EXPECT_TRUE(auth_lock_check(&s, S(100)).just_unlocked);
+    auth_lock_on_success(&s);
+    EXPECT_INT(lock_five_fails(&s, S(200)), 60);
+    return 1;
+}
+
+// After a lock the count starts again at 0, the level stays.
+static int test_auth_lock_fails_reset_after_unlock(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(1)), 60);
+    EXPECT_TRUE(auth_lock_check(&s, S(100)).just_unlocked);
+    for (int i = 0; i < 4; i++) EXPECT_INT(auth_lock_on_fail(&s, S(200) + (uint64_t)i), 0);
+    EXPECT_INT(auth_lock_on_fail(&s, S(210)), 120);
+    return 1;
+}
+
+// Requests refused during a lock are counted and reported once it ends.
+static int test_auth_lock_refused_counted(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(1)), 60);
+    EXPECT_INT(auth_lock_check(&s, S(10)).refused, 1);
+    EXPECT_INT(auth_lock_check(&s, S(11)).refused, 2);
+    EXPECT_INT(auth_lock_check(&s, S(12)).refused, 3);
+    auth_lock_verdict_t v = auth_lock_check(&s, S(100));
+    EXPECT_TRUE(v.just_unlocked);
+    EXPECT_INT(v.refused, 3);
+    v = auth_lock_check(&s, S(101));
+    EXPECT_TRUE(!v.just_unlocked);
+    EXPECT_INT(v.refused, 0);
+    EXPECT_INT(v.remaining_s, 0);
+    return 1;
+}
+
+// The same wrong password counts every time (no repeat exemption).
+static int test_auth_lock_same_password_counts(void) {
+    auth_lockout_t s = lock_fresh();
+    for (int i = 1; i <= 4; i++) EXPECT_INT(auth_lock_on_fail(&s, S(i)), 0);
+    EXPECT_INT(auth_lock_on_fail(&s, S(5)), 60);
+    return 1;
+}
+
+// A reboot during a lock keeps the real remaining time (RTC timer kept running).
+static int test_auth_lock_boot_continues_real_time(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(100) - 4), 60);   // 5th fail at S(100)
+    auth_lock_on_boot(&s, S(130), false);
+    EXPECT_INT(auth_lock_check(&s, S(131)).remaining_s, 29);
+    return 1;
+}
+
+// A lock that ended while nobody checked stays ended after a reboot.
+static int test_auth_lock_boot_after_expiry_stays_unlocked(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(100) - 4), 60);
+    auth_lock_on_boot(&s, S(100000), false);
+    auth_lock_verdict_t v = auth_lock_check(&s, S(100001));
+    EXPECT_INT(v.remaining_s, 0);
+    EXPECT_TRUE(v.just_unlocked);
+    EXPECT_TRUE(!auth_lock_check(&s, S(100002)).just_unlocked);
+    return 1;
+}
+
+// RTC time earlier than the lock start: cannot tell how long → full restart.
+static int test_auth_lock_boot_time_backwards_restarts(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(1000) - 4), 60);
+    auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(auth_lock_check(&s, S(6)).remaining_s, 59);
+    return 1;
+}
+
+// A power-on (incl. the reset button) clears everything.
+static int test_auth_lock_boot_power_on_clears(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(lock_five_fails(&s, S(1)), 60);
+    auth_lock_on_boot(&s, S(5), true);
+    EXPECT_INT(auth_lock_check(&s, S(6)).remaining_s, 0);
+    EXPECT_INT(s.level, 0);
+    return 1;
+}
+
+// Garbage or impossible states in RTC memory are wiped at boot.
+static int test_auth_lock_boot_garbage_cleared(void) {
+    auth_lockout_t s;
+    memset(&s, 0xA5, sizeof s);
+    auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.magic, AUTH_LOCK_MAGIC);
+    EXPECT_INT(s.fails, 0);
+    EXPECT_INT(s.level, 0);
+    EXPECT_INT(s.locked, 0);
+
+    s = lock_fresh(); s.level = 200;             auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.level, 0);
+    s = lock_fresh(); s.locked = 1; s.level = 0; auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.locked, 0);
+    s = lock_fresh(); s.fails = 5;               auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.fails, 0);
+    s = lock_fresh(); s.locked = 2; s.level = 1; auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.locked, 0);
+    EXPECT_INT(s.level, 0);
+    return 1;
+}
+
+// The legitimate state at the cap (level 10, 4 fails) survives a boot.
+static int test_auth_lock_boot_keeps_cap_state(void) {
+    auth_lockout_t s = lock_fresh();
+    s.level = AUTH_LOCK_LEVEL_MAX + 1;
+    s.fails = 4;
+    auth_lock_on_boot(&s, S(5), false);
+    EXPECT_INT(s.level, AUTH_LOCK_LEVEL_MAX + 1);
+    EXPECT_INT(s.fails, 4);
+    EXPECT_INT(auth_lock_on_fail(&s, S(6)), 30720);
+    return 1;
+}
+
+// The remaining-time peek has no side effects.
+static int test_auth_lock_remaining_peek(void) {
+    auth_lockout_t s = lock_fresh();
+    EXPECT_INT(auth_lock_remaining_s(&s, S(1)), 0);
+    EXPECT_INT(lock_five_fails(&s, S(100) - 4), 60);
+    EXPECT_INT(auth_lock_remaining_s(&s, S(130)), 30);
+    EXPECT_INT(s.refused, 0);
+    EXPECT_INT(auth_lock_remaining_s(&s, S(200)), 0);
+    EXPECT_INT(s.locked, 1);   // a peek never clears the lock
+    return 1;
+}
+#undef S
+
 // V2.8.8 (review 2.1 A): optional name filter. `run [substring]` runs only the
 // tests whose function name contains the substring (e.g. `run history_`),
 // for iterating on one area. A filter that matches nothing exits 2, so a typo
@@ -3808,6 +4378,7 @@ int main(int argc, char **argv) {
     RUN(test_generalized_time_negative_fails);
 
     // V2.8.5 helpers
+    RUN(test_url_log_len);   // V2.8.26
     RUN(test_parse_long_strict_accepts_numbers);
     RUN(test_parse_long_strict_rejects_garbage);
     RUN(test_parse_float_strict);
@@ -3854,6 +4425,9 @@ int main(int argc, char **argv) {
     RUN(test_schema_integer_bounds_fit_target_types);
     RUN(test_schema_string_defaults_fit);
     RUN(test_schema_every_key_on_config_form);
+    RUN(test_config_form_no_secret_values);                   // V2.8.26
+    RUN(test_config_form_secret_members_only_as_placeholder); // V2.8.26
+    RUN(test_config_form_every_password_input_is_secret);     // V2.8.26
     RUN(test_config_form_fields_are_schema_keys);
 
     printf("== config_form (review 2.1 C3b) ==\n");
@@ -3877,6 +4451,19 @@ int main(int argc, char **argv) {
     RUN(test_form_revc_fixed_board_stores_3);
     RUN(test_form_lora_hp_forced_off_without_fem);
     RUN(test_form_lora_hp_kept_with_fem);
+    // V2.8.26: secret fields
+    RUN(test_form_secret_empty_keeps);
+    RUN(test_form_secret_dash_clears);
+    RUN(test_form_secret_new_value_sets);
+    RUN(test_form_secret_long_values_complete);
+    RUN(test_form_ap_pw_clear_rejected);
+    RUN(test_form_secret_too_long_rejected);
+    RUN(test_form_appkey_keep_clear);
+    RUN(test_form_secret_first_then_fields);
+    RUN(test_form_secret_roundtrip_empty);
+    RUN(test_form_non_secret_dash_and_empty);
+    RUN(test_form_secret_keys_exist);
+    RUN(test_form_secret_changes_summary);
     RUN(test_lw_pa_offset);
     RUN(test_lw_mac_dev_status_pair);
     RUN(test_lw_mac_link_adr_fixed_plan);
@@ -3892,6 +4479,21 @@ int main(int argc, char **argv) {
     RUN(test_ota_guard_needs_confirm_states);
     RUN(test_ota_guard_probation_window_plus_120s);
     RUN(test_ota_guard_retry_spacing_60s);
+    // V2.8.26: admin login lockout
+    RUN(test_auth_lock_four_fails_no_lock);
+    RUN(test_auth_lock_five_fails_lock_60s);
+    RUN(test_auth_lock_backoff_steps_to_cap);
+    RUN(test_auth_lock_success_resets_level);
+    RUN(test_auth_lock_fails_reset_after_unlock);
+    RUN(test_auth_lock_refused_counted);
+    RUN(test_auth_lock_same_password_counts);
+    RUN(test_auth_lock_boot_continues_real_time);
+    RUN(test_auth_lock_boot_after_expiry_stays_unlocked);
+    RUN(test_auth_lock_boot_time_backwards_restarts);
+    RUN(test_auth_lock_boot_power_on_clears);
+    RUN(test_auth_lock_boot_garbage_cleared);
+    RUN(test_auth_lock_boot_keeps_cap_state);
+    RUN(test_auth_lock_remaining_peek);
 
     printf("\n");
     if (g_ran == 0) {

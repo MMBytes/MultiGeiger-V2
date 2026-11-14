@@ -9,6 +9,53 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.26 — Login lockout, and the settings page no longer shows stored passwords
+
+For all boards.
+
+1. **The web login locks after 5 wrong passwords in a row.** The node then
+   refuses every login for 1 minute, the correct password too, and answers
+   `429 Too Many Requests` with a `Retry-After` header and the line "Login
+   locked after wrong passwords. Try again in N min." Each further lock
+   lasts twice as long (1, 2, 4, 8, 16, 32 minutes, 1 h 4 min, 2 h 8 min,
+   4 h 16 min, then at most 8 h 32 min). A correct login resets everything.
+   A lock survives a crash, a watchdog reset and a software restart with its
+   real remaining time; the reset button or a power cycle clears it. Only
+   requests that send a wrong password count. The status page `/` and `/log`
+   stay open during a lock. The log says what happened, for example
+   `auth failed for /config from … (wrong password 2 of 5 before a lockout)`,
+   `admin login LOCKED for 1 min after 5 wrong passwords in a row …` and
+   `admin login lock had ended before this request (it lasted 1 min; …)`.
+   Scripts that use a wrong or old password now lock the node after 5 runs.
+2. **`/config` no longer sends stored passwords, keys and tokens back to the
+   browser.** The fields for the WiFi password, admin password, LoRaWAN
+   AppKey, Radmon, FTP and MQTT passwords, and the openSenseMap, ThingSpeak
+   and aqi.eco tokens are always empty. A grey hint shows
+   `******** SECRET SET ********` when a value is stored and `not set` when
+   not. On saving, an empty field keeps the stored value, a single `-`
+   clears it, and anything else becomes the new value. The admin password
+   cannot be cleared. The page after saving, and one log line, name the
+   secrets that were changed or cleared (names only), e.g.
+   `Secrets changed: wifi_pw; cleared: mqtt_pw`. The aqi.eco token field is
+   now a password field too. For anonymous FTP leave the user empty and
+   clear the password with `-`. A secret can no longer be exactly `-`.
+   A value longer than its field (e.g. an admin password over 32
+   characters) is no longer cut short silently: it is not saved, the old
+   value stays, and the page lists the field as not saved.
+   After going back to an older firmware, reload `/config` before saving:
+   an older firmware reads the empty fields as "clear".
+3. **The aqi.eco token no longer appears in the log.** When an upload
+   failed, the log printed the request address, and aqi.eco carries its
+   token in the address. The log now stops before it.
+4. **A syslog server name that resolves to an IPv6 address is refused** with
+   the line `syslog server … resolved to a non-IPv4 address; syslog needs
+   IPv4 …`. Before, the 16-byte IPv6 address was copied into a 4-byte field.
+5. **Stack protector on all boards.** A write past the end of a buffer on
+   the stack now ends in a clean `Stack smashing protect failure!` restart
+   instead of running on with corrupted memory.
+
+---
+
 ## V2.8.25 — Node log lines about downlinks say what really happened
 
 For the LoRaWAN boards (Heltec WiFi LoRa 32 V4, XIAO ESP32S3 + Wio-SX1262).

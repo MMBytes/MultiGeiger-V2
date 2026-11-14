@@ -1,6 +1,7 @@
 #include "config_form.h"
 
 #include <stdarg.h>
+#include <stddef.h>          // offsetof (V2.8.26 secret table)
 #include <stdio.h>
 #include <string.h>
 
@@ -177,6 +178,75 @@ static int form_append(char *out, size_t sz, int n, const char *fmt, ...) {
     return n;
 }
 
+// --- V2.8.26: secret fields ---------------------------------------------------
+// One list drives the key table, the predicate and the change summary, so a
+// key and its config_t member can never drift apart.
+#define CONFIG_SECRET_FIELDS(X)               \
+    X("wifi_pw",     wifi_password)           \
+    X("ap_pw",       ap_password)             \
+    X("lora_appkey", lorawan_appkey)          \
+    X("rad_pw",      radmon_password)         \
+    X("osm_tok",     osm_access_token)        \
+    X("osm_st_tok",  osm_staging_token)       \
+    X("ts_key",      thingspeak_api_key)      \
+    X("ts_pm_key",   thingspeak_pm_api_key)   \
+    X("ftp_pw",      ftp_password)            \
+    X("mqtt_pw",     mqtt_password)           \
+    X("aqi_tok",     aqi_token)
+
+#define SECRET_KEY(key, member) key,
+const char *const k_config_secret_keys[] = { CONFIG_SECRET_FIELDS(SECRET_KEY) };
+#undef SECRET_KEY
+const size_t k_config_secret_keys_n = sizeof(k_config_secret_keys) / sizeof(k_config_secret_keys[0]);
+
+/** @brief Where a secret lives in config_t. */
+typedef struct {
+    const char *key;   ///< form key
+    size_t      off;   ///< offsetof the member in config_t
+    size_t      size;  ///< sizeof the member
+} secret_field_t;
+
+#define SECRET_ROW(key, member) { key, offsetof(config_t, member), sizeof(((config_t *)0)->member) },
+static const secret_field_t k_secret_fields[] = { CONFIG_SECRET_FIELDS(SECRET_ROW) };
+#undef SECRET_ROW
+
+/** @brief Size of the config_t member behind a secret form key, 0 if none. */
+static size_t secret_field_size(const char *key) {
+    for (size_t i = 0; i < sizeof(k_secret_fields) / sizeof(k_secret_fields[0]); i++)
+        if (strcmp(key, k_secret_fields[i].key) == 0) return k_secret_fields[i].size;
+    return 0;
+}
+
+bool config_form_is_secret_key(const char *key) {
+    for (size_t i = 0; i < k_config_secret_keys_n; i++)
+        if (strcmp(key, k_config_secret_keys[i]) == 0) return true;
+    return false;
+}
+
+void config_form_secret_changes(const config_t *prev, const config_t *next,
+                                char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    int n = 0;
+    // Two passes, same order as the list: first the changed, then the cleared ones.
+    for (int pass = 0; pass < 2; pass++) {
+        bool first = true;
+        for (size_t i = 0; i < sizeof(k_secret_fields) / sizeof(k_secret_fields[0]); i++) {
+            const secret_field_t *f = &k_secret_fields[i];
+            const char *a = (const char *)prev + f->off;
+            const char *b = (const char *)next + f->off;
+            if (strncmp(a, b, f->size) == 0) continue;
+            const bool cleared = (a[0] != 0 && b[0] == 0);
+            if (cleared != (pass == 1)) continue;
+            n = form_append(out, out_sz, n, "%s%s%s",
+                            first ? (n ? "; " : "") : ", ",
+                            first ? (pass ? "cleared: " : "changed: ") : "",
+                            f->key);
+            first = false;
+        }
+    }
+}
+
 // --- Form parser + cross-field rules -----------------------------------------
 
 void config_apply_form(config_t *next, const config_t *prev, char *body,
@@ -220,7 +290,37 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         // V2.3.32: 0 (OFF) accepted — display_set_contrast interprets as
         // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
         bool oor = false;   // matched a known field but value out of range/step
-        if (strcmp(p, "oled_bright") == 0) {
+
+        // V2.8.26: secret fields. /config sends them back empty, so empty means
+        // "keep the stored value"; exactly "-" clears one (the admin password
+        // cannot be cleared). A clear is turned into an empty value and handed to
+        // the normal branches below, which store "" (the AppKey branch treats ""
+        // as "not configured"). Never a `continue`: the loop advances only at its
+        // tail, and the rejected-key bookkeeping below must still run.
+        bool skip = false;
+        if (config_form_is_secret_key(p)) {
+            if (val[0] == '\0') {
+                skip = true;                                        // keep
+            } else if (strcmp(val, CONFIG_SECRET_CLEAR) == 0) {
+                if (strcmp(p, "ap_pw") == 0) {
+                    oor  = true;                                    // cannot be cleared
+                    skip = true;
+                } else {
+                    val[0] = '\0';                                  // clear
+                }
+            } else if (strlen(val) >= secret_field_size(p)) {
+                // Too long for its field: reject instead of storing a cut
+                // value nobody knows (a cut admin password would lock the
+                // owner out). Old value kept, key reported as not saved.
+                oor  = true;
+                skip = true;
+            }
+        }
+
+        if (skip) {
+            // nothing to store
+        }
+        else if (strcmp(p, "oled_bright") == 0) {
             // V2.8.5: strict parse — "abc" used to read as 0, i.e. panel OFF.
             long v = -1;
             if (parse_long_strict(val, &v) &&
@@ -262,7 +362,8 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         else if (caps->has_lorawan && strcmp(p, "lora_appkey") == 0) {
             uint8_t scratch[16];
             if (val[0] == '\0') {
-                next->lorawan_appkey[0] = 0;
+                // V2.8.26: zero-fill, so no byte of the old key stays in RAM.
+                safe_strcpy(next->lorawan_appkey, "", sizeof(next->lorawan_appkey));
             } else if (lw_hex_decode(val, scratch, sizeof(scratch))) {
                 safe_strcpy(next->lorawan_appkey, val, sizeof(next->lorawan_appkey));
             } else {

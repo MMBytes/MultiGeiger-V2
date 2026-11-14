@@ -21,6 +21,14 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # that already says "is not set" before building.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
+# V2.8.26: stack protector ("normal": canary in every function with a local
+# array). A write past the end of a stack buffer then ends in a clean
+# "Stack smashing protect failure!" panic + reboot instead of running on with
+# a corrupted return address. Costs a few % flash and ~1 % CPU.
+# NOTE: defaults only fill MISSING keys — flip MODE_NONE in a local
+# sdkconfig.<board> (or delete it) before building.
+CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y
+
 # Note: CONFIG_LWIP_DHCP_SET_BROADCAST_FLAG existed in IDF 5.x; removed in 6.0.
 # lwIP's dhcp.c now hard-codes "no broadcast flag" (comment: "we don't need the
 # broadcast flag since we can receive unicast traffic before being fully

@@ -456,7 +456,15 @@ void syslog_init(const char *host, uint16_t port, const char *hostname) {
             close(sock);
             return;
         }
-        memcpy(&s_addr.sin_addr, he->h_addr, (size_t)he->h_length);
+        // V2.8.26: copy only an IPv4 answer of exactly the size of sin_addr.
+        // An IPv6 (AAAA) answer is 16 bytes and would run past the 4-byte field.
+        if (he->h_addrtype != AF_INET || he->h_length != (int)sizeof(s_addr.sin_addr)) {
+            ESP_LOGE(TAG, "syslog server %s resolved to a non-IPv4 address; syslog needs IPv4 - "
+                          "enter the server's IPv4 address instead", host);
+            close(sock);
+            return;
+        }
+        memcpy(&s_addr.sin_addr, he->h_addr, sizeof(s_addr.sin_addr));
     }
 
     if (hostname && hostname[0]) {

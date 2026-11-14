@@ -18,6 +18,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>   // size_t (V2.8.26 secret-field API)
 #include <stdint.h>
 #include "config.h"
 #include "hal.h"   // HAL_HAS_* — read only by config_form_caps_from_hal()
@@ -78,3 +79,28 @@ static inline config_form_caps_t config_form_caps_from_hal(void) {
  */
 void config_apply_form(config_t *next, const config_t *prev, char *body,
                        const config_form_caps_t *caps, config_form_result_t *res);
+
+// --- V2.8.26: secret fields --------------------------------------------------
+// /config never sends a stored secret back to the browser: its field is always
+// empty and only the placeholder says whether a value is set. On save, for
+// these keys only: empty = keep the stored value, exactly "-" = clear it (the
+// admin password cannot be cleared), anything else = the new value.
+
+#define CONFIG_SECRET_PLACEHOLDER_SET   "******** SECRET SET ********"  ///< placeholder: a value is stored
+#define CONFIG_SECRET_PLACEHOLDER_UNSET "not set"                       ///< placeholder: nothing stored
+#define CONFIG_SECRET_CLEAR             "-"                             ///< field value that clears a secret
+
+/** @brief Form keys of the secret fields (wifi_pw, ap_pw, lora_appkey, …). */
+extern const char *const k_config_secret_keys[];
+/** @brief Number of entries in k_config_secret_keys. */
+extern const size_t k_config_secret_keys_n;
+
+/** @brief True if `key` is the form key of a secret field. */
+bool config_form_is_secret_key(const char *key);
+
+/** @brief Name the secret fields that differ between `prev` and `next`, never
+ *         their values: "changed: wifi_pw; cleared: mqtt_pw" (set → empty =
+ *         cleared, any other difference = changed). Empty string when nothing
+ *         differs. Always NUL-terminates within `out_sz`. */
+void config_form_secret_changes(const config_t *prev, const config_t *next,
+                                char *out, size_t out_sz);

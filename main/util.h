@@ -49,6 +49,21 @@ static inline void safe_strcpy(char *dst, const char *src, size_t dstsz) {
     memset(dst + n, 0, dstsz - n);
 }
 
+/** @brief Copy a string into an exact-size byte field such as IDF's
+ *         wifi_config_t ssid[32] / password[64] (V2.8.27). A value as long as
+ *         the field is copied complete, WITHOUT a terminator; a shorter one is
+ *         followed by the caller's zeroes. The caller zeroes `dst` first.
+ *         The destination is NOT a C string — never print it with %s.
+ *         Bounded scan instead of strnlen (undeclared under -std=c11; see
+ *         safe_strcpy above).
+ *  @return number of bytes copied (0..dst_sz) */
+static inline size_t copy_fixed_field(uint8_t *dst, size_t dst_sz, const char *src) {
+    size_t n = 0;
+    while (n < dst_sz && src[n]) n++;
+    memcpy(dst, src, n);
+    return n;
+}
+
 /** @brief Constant-time byte compare for credential material.
  *
  *  Standard `strcmp` / `memcmp` short-circuit on the first differing
@@ -79,16 +94,6 @@ static inline int hex_nibble(char c) {
     return -1;
 }
 
-/** @brief URL-decode an application/x-www-form-urlencoded string in place.
- *
- *  Handles `+` → space and `%XY` → byte. Per RFC 3986 §2.1, a malformed
- *  `%XY` (XY not two hex digits, or `%` at end of string with insufficient
- *  bytes) is invalid encoding: the lone `%` is dropped and the trailing
- *  characters walk through as plain bytes (`%G5` → `G5`, `%2` at end → `2`).
- *
- *  V2.4.1+ (T1): moved from http_server.c. V2.4.1 (B6) introduced the
- *  RFC-strict behaviour; pre-V2.4.1 preserved the literal `%`.
- */
 /** @brief Length of the part of an upload URL that may be logged (V2.8.26):
  *         up to the first '?' (credentials in the query, e.g. Radmon,
  *         ThingSpeak) and, when "/update/" comes before that, up to and
@@ -103,6 +108,16 @@ static inline int url_log_len(const char *url) {
     return cut ? (int)(cut - url) : (int)strlen(url);
 }
 
+/** @brief URL-decode an application/x-www-form-urlencoded string in place.
+ *
+ *  Handles `+` → space and `%XY` → byte. Per RFC 3986 §2.1, a malformed
+ *  `%XY` (XY not two hex digits, or `%` at end of string with insufficient
+ *  bytes) is invalid encoding: the lone `%` is dropped and the trailing
+ *  characters walk through as plain bytes (`%G5` → `G5`, `%2` at end → `2`).
+ *
+ *  V2.4.1+ (T1): moved from http_server.c. V2.4.1 (B6) introduced the
+ *  RFC-strict behaviour; pre-V2.4.1 preserved the literal `%`.
+ */
 static inline void url_decode(char *s) {
     char *w = s;
     while (*s) {

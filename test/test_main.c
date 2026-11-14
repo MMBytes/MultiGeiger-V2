@@ -30,6 +30,7 @@
 // zero exit code if any test failed (so CI marks the job red).
 
 #include <ctype.h>
+#include <float.h>   // FLT_MAX (V2.8.27 port-2 range test)
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -857,6 +858,42 @@ static int test_lw_build_port2(void) {
     // -> 70000 > 65535).
     if (!lw_build_port2(p, 0.0f, 0.0f, 700000.0f)) return 0;
     if (p[3] != 0xFF || p[4] != 0xFF) return 0;
+    return 1;
+}
+
+// V2.8.27: NaN / infinity are refused (no port 2, `out` untouched); finite
+// values beyond the field saturate instead of wrapping; every physical value
+// keeps the V1.9 bytes.
+static int test_lw_build_port2_nonfinite_and_range(void) {
+    uint8_t p[5];
+    const float bad[][3] = {
+        {NAN, 50.0f, 101325.0f}, {20.0f, NAN, 101325.0f}, {20.0f, 50.0f, NAN},
+        {20.0f, INFINITY, 101325.0f}, {-INFINITY, 50.0f, 101325.0f},
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        memset(p, 0xAA, sizeof p);
+        EXPECT_TRUE(!lw_build_port2(p, bad[i][0], bad[i][1], bad[i][2]));
+        for (int k = 0; k < 5; k++) EXPECT_INT(p[k], 0xAA);
+    }
+    // temp saturates at the s16 limits (1e30f and FLT_MAX overflow the product)
+    EXPECT_TRUE(lw_build_port2(p, 1e30f, 50.0f, 101325.0f));
+    EXPECT_INT(p[0], 0x7F); EXPECT_INT(p[1], 0xFF);
+    EXPECT_TRUE(lw_build_port2(p, FLT_MAX, 50.0f, 101325.0f));
+    EXPECT_INT(p[0], 0x7F); EXPECT_INT(p[1], 0xFF);
+    EXPECT_TRUE(lw_build_port2(p, -1e30f, 50.0f, 101325.0f));
+    EXPECT_INT(p[0], 0x80); EXPECT_INT(p[1], 0x00);
+    // hum saturates to one byte instead of wrapping (130 % was 0x04, -5 % was 0xF6)
+    EXPECT_TRUE(lw_build_port2(p, 20.0f, 1e30f, 101325.0f));  EXPECT_INT(p[2], 0xFF);
+    EXPECT_TRUE(lw_build_port2(p, 20.0f, FLT_MAX, 101325.0f)); EXPECT_INT(p[2], 0xFF);
+    EXPECT_TRUE(lw_build_port2(p, 20.0f, 130.0f, 101325.0f)); EXPECT_INT(p[2], 0xFF);
+    EXPECT_TRUE(lw_build_port2(p, 20.0f, -5.0f, 101325.0f));  EXPECT_INT(p[2], 0x00);
+    // physical values: unchanged bytes
+    EXPECT_TRUE(lw_build_port2(p, 21.7f, 0.0f, 101325.0f));
+    EXPECT_INT(p[0], 0x00); EXPECT_INT(p[1], 0xD9); EXPECT_INT(p[2], 0x00);
+    EXPECT_TRUE(lw_build_port2(p, -40.0f, 48.5f, 101325.0f));
+    EXPECT_INT(p[0], 0xFE); EXPECT_INT(p[1], 0x70); EXPECT_INT(p[2], 0x61);
+    EXPECT_TRUE(lw_build_port2(p, 3276.75f, 127.5f, 101325.0f));
+    EXPECT_INT(p[0], 0x7F); EXPECT_INT(p[1], 0xFF); EXPECT_INT(p[2], 0xFF);
     return 1;
 }
 
@@ -2098,6 +2135,45 @@ static int test_generalized_time_negative_fails(void) {
     char out[15] = "junk";
     EXPECT_INT(epoch_to_generalized_time(-1, out, sizeof(out)), 0);
     EXPECT_STREQ(out, "");
+    return 1;
+}
+
+// --- util.h: copy_fixed_field (V2.8.27) ---------------------------------------
+
+// IDF's WiFi SSID/password fields are exact-size byte arrays: a 32-char SSID
+// and a 64-char PSK must arrive complete, not cut to 31/63.
+static int test_copy_fixed_field(void) {
+    uint8_t b32[32];
+    char s32[33];
+    memset(s32, 'S', 32); s32[32] = 0;
+    memset(b32, 0, sizeof b32);
+    EXPECT_INT((int)copy_fixed_field(b32, sizeof b32, s32), 32);
+    EXPECT_TRUE(memcmp(b32, s32, 32) == 0);
+
+    memset(b32, 0, sizeof b32);
+    EXPECT_INT((int)copy_fixed_field(b32, sizeof b32, "ten-chars!"), 10);
+    EXPECT_TRUE(memcmp(b32, "ten-chars!", 10) == 0 && b32[10] == 0);   // short = still terminated
+
+    uint8_t b64[64];
+    char s64[65];
+    memset(s64, 'a', 64); s64[64] = 0;
+    memset(b64, 0, sizeof b64);
+    EXPECT_INT((int)copy_fixed_field(b64, sizeof b64, s64), 64);
+    EXPECT_TRUE(memcmp(b64, s64, 64) == 0);
+
+    memset(b32, 0, sizeof b32);
+    EXPECT_INT((int)copy_fixed_field(b32, sizeof b32, ""), 0);
+    for (size_t i = 0; i < sizeof b32; i++) EXPECT_INT(b32[i], 0);
+
+    // A source longer than the field stops at the field: the byte behind it
+    // (a canary inside a larger array) must stay untouched.
+    uint8_t guard[33];
+    memset(guard, 0, sizeof guard);
+    guard[32] = 0xC5;
+    char s40[41];
+    memset(s40, 'L', 40); s40[40] = 0;
+    EXPECT_INT((int)copy_fixed_field(guard, 32, s40), 32);
+    EXPECT_INT(guard[32], 0xC5);
     return 1;
 }
 
@@ -3544,6 +3620,87 @@ static int test_form_secret_changes_summary(void) {
     EXPECT_STREQ(out, "");
     return 1;
 }
+
+// --- V2.8.27: character rules for MQTT prefix, openSenseMap box IDs, aqi token ---
+
+/** @brief Post `key=<encoded>`; true if the key was accepted (not in the rejected list). */
+static bool form_post_one(const char *key, const char *encoded) {
+    config_form_caps_t caps = form_caps_none();
+    char body[256];
+    snprintf(body, sizeof body, "%s=%s&save=1", key, encoded);
+    form_apply(body, &caps);
+    return !form_rejected_has(key);
+}
+
+// MQTT prefix: letters, digits and _ - . / only (topic- and JSON-safe).
+static int test_form_mqtt_prefix_charset(void) {
+    static const char *const bad[] = {"a%22b", "a+b", "a%2Bb", "a%23b", "a%5Cb", "a%C3%BCb", "a%24b"};
+    form_reset();
+    EXPECT_TRUE(form_post_one("mqtt_pfx", "home/geiger_1.a-b"));
+    EXPECT_STREQ(g_form_next.mqtt_topic_prefix, "home/geiger_1.a-b");
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        form_reset();
+        FORM_SEED(mqtt_topic_prefix, "geiger");
+        if (form_post_one("mqtt_pfx", bad[i])) printf("    accepted %s\n", bad[i]);
+        EXPECT_TRUE(form_rejected_has("mqtt_pfx"));
+        EXPECT_STREQ(g_form_next.mqtt_topic_prefix, "geiger");
+    }
+    return 1;
+}
+
+// openSenseMap box IDs: letters and digits (staging IDs are alphanumeric).
+static int test_form_osm_box_charset(void) {
+    static const char *const keys[] = {"osm_box", "osm_st_box"};
+    for (size_t k = 0; k < 2; k++) {
+        form_reset();
+        EXPECT_TRUE(form_post_one(keys[k], "5f2b56f4263bf1001b0d5c2e"));
+        form_reset();
+        EXPECT_TRUE(form_post_one(keys[k], "xkwy3b925w783phvpy21vand"));
+        static const char *const bad[] = {"ab/cd", "ab%3Fx", "a+b"};
+        for (size_t i = 0; i < 3; i++) {
+            form_reset();
+            EXPECT_TRUE(!form_post_one(keys[k], bad[i]));
+        }
+    }
+    EXPECT_STREQ(g_form_next.osm_staging_box_id, "");   // last bad post kept the default
+    return 1;
+}
+
+// aqi.eco token: letters/digits; still a secret (empty = keep, "-" = clear).
+static int test_form_aqi_token_charset(void) {
+    form_reset();
+    EXPECT_TRUE(form_post_one("aqi_tok", "abc123XYZ"));
+    EXPECT_STREQ(g_form_next.aqi_token, "abc123XYZ");
+    form_reset();
+    FORM_SEED(aqi_token, "abc123");
+    EXPECT_TRUE(!form_post_one("aqi_tok", "ab%2Fcd"));
+    EXPECT_STREQ(g_form_next.aqi_token, "abc123");
+    form_reset();
+    FORM_SEED(aqi_token, "abc123");
+    EXPECT_TRUE(!form_post_one("aqi_tok", "ab%3Fcd"));
+    form_reset();
+    FORM_SEED(aqi_token, "abc123");
+    EXPECT_TRUE(form_post_one("aqi_tok", ""));          // keep
+    EXPECT_STREQ(g_form_next.aqi_token, "abc123");
+    form_reset();
+    FORM_SEED(aqi_token, "abc123");
+    EXPECT_TRUE(form_post_one("aqi_tok", "-"));         // clear
+    EXPECT_STREQ(g_form_next.aqi_token, "");
+    return 1;
+}
+
+// A stored value that breaks the new rule is refused on re-save; the rest of
+// the same save still goes through.
+static int test_form_charset_unchanged_value_resaved(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(mqtt_topic_prefix, "bad\"x");
+    form_apply("mqtt_pfx=bad%22x&mqtt_user=bob&save=1", &caps);
+    EXPECT_TRUE(form_rejected_has("mqtt_pfx"));
+    EXPECT_STREQ(g_form_next.mqtt_topic_prefix, "bad\"x");
+    EXPECT_STREQ(g_form_next.mqtt_user, "bob");
+    return 1;
+}
 #undef FORM_SEED
 
 // ----------------------------------------------------------------------------
@@ -4270,6 +4427,7 @@ int main(int argc, char **argv) {
     RUN(test_lw_pack_version);
     RUN(test_lw_build_port1);
     RUN(test_lw_build_port2);
+    RUN(test_lw_build_port2_nonfinite_and_range);   // V2.8.27
     RUN(test_lw_sched_interval);
     RUN(test_lw_sched_port2_due);
     RUN(test_lw_sched_fixed_dr);
@@ -4378,6 +4536,7 @@ int main(int argc, char **argv) {
     RUN(test_generalized_time_negative_fails);
 
     // V2.8.5 helpers
+    RUN(test_copy_fixed_field);   // V2.8.27
     RUN(test_url_log_len);   // V2.8.26
     RUN(test_parse_long_strict_accepts_numbers);
     RUN(test_parse_long_strict_rejects_garbage);
@@ -4464,6 +4623,11 @@ int main(int argc, char **argv) {
     RUN(test_form_non_secret_dash_and_empty);
     RUN(test_form_secret_keys_exist);
     RUN(test_form_secret_changes_summary);
+    // V2.8.27: character rules
+    RUN(test_form_mqtt_prefix_charset);
+    RUN(test_form_osm_box_charset);
+    RUN(test_form_aqi_token_charset);
+    RUN(test_form_charset_unchanged_value_resaved);
     RUN(test_lw_pa_offset);
     RUN(test_lw_mac_dev_status_pair);
     RUN(test_lw_mac_link_adr_fixed_plan);

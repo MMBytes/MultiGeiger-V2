@@ -494,7 +494,9 @@ void mqtt_publish_state(const main_status_t *st,
     } while (0)
 
     APPEND("{\"v\":\"%s\"", VERSION_STR);
-    APPEND(",\"uptime_ms\":%" PRIu32, st->last_cycle_ms);
+    // V2.8.27: uptime at publish time in 64 bits (the state goes out right
+    // after a cycle). The old 32-bit last-cycle value wrapped after 49.7 days.
+    APPEND(",\"uptime_ms\":%" PRIu64, (uint64_t)(esp_timer_get_time() / 1000));
     APPEND(",\"cycles\":%" PRIu32,    st->cycles);
     APPEND(",\"reconnects\":%" PRIu32, st->reconnects);
     APPEND(",\"i2c_err\":%" PRIu32,   st->i2c_errors);   // V2.4.28

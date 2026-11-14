@@ -202,10 +202,10 @@ bool tx_is_idle(void);
  *  circuit breaker re-closes (0 = closed / normal).
  */
 typedef struct {
+    int64_t  last_at;               // first: no padding (V2.8.27, 32 -> 24 bytes)
     uint32_t attempted;
     uint32_t succeeded;
     int      last_rc;
-    int64_t  last_at;
     int      breaker_open_cycles;
 } tx_target_stats_t;
 

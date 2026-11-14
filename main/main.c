@@ -1739,8 +1739,10 @@ void app_main(void) {
     // a 32-char ap_name into the 32-byte ssid field reported len 32 while the
     // buffer held 31 chars + NUL — the beacon then carried a trailing 0x00 as
     // its 32nd SSID byte.
-    safe_strcpy((char *)apc.ap.ssid, g_cfg.ap_name, sizeof(apc.ap.ssid));
-    apc.ap.ssid_len      = (uint8_t)strlen((const char *)apc.ap.ssid);
+    // V2.8.27: copy_fixed_field keeps a 32-char name complete (no terminator
+    // needed with ssid_len set); safe_strcpy cut it to 31. apc.ap.ssid is then
+    // not a C string — the log lines below print g_cfg.ap_name instead.
+    apc.ap.ssid_len      = (uint8_t)copy_fixed_field(apc.ap.ssid, sizeof(apc.ap.ssid), g_cfg.ap_name);
     apc.ap.channel       = 1;
     apc.ap.max_connection = 4;
     if (strlen(g_cfg.ap_password) >= 8) {
@@ -1880,11 +1882,11 @@ void app_main(void) {
     lorawan_setup();
 
     ESP_LOGI(TAG, "AP up: SSID=%s auth=%d (2-min boot window)",
-             (char *)apc.ap.ssid, apc.ap.authmode);
+             g_cfg.ap_name, apc.ap.authmode);
     if (!have_sta_creds) {
         ESP_LOGW(TAG, "no WiFi SSID configured — AP-only. "
                  "Join %s and browse to %s://192.168.4.1/config",
-                 (char *)apc.ap.ssid,
+                 g_cfg.ap_name,
                  (HAL_HAS_HTTPS && g_cfg.https_enable) ? "https" : "http");
     }
     ESP_LOGI(TAG, "esp_wifi_start()");
@@ -2323,8 +2325,10 @@ void app_main(void) {
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
             wifi_config_t wc = { 0 };
-            safe_strcpy((char *)wc.sta.ssid,     g_cfg.wifi_ssid,     sizeof(wc.sta.ssid));
-            safe_strcpy((char *)wc.sta.password, g_cfg.wifi_password, sizeof(wc.sta.password));
+            // V2.8.27: exact-size IDF fields — a 32-char SSID / 64-hex PSK must
+            // arrive complete (safe_strcpy cut them to 31/63: never connected).
+            (void)copy_fixed_field(wc.sta.ssid,     sizeof(wc.sta.ssid),     g_cfg.wifi_ssid);
+            (void)copy_fixed_field(wc.sta.password, sizeof(wc.sta.password), g_cfg.wifi_password);
             wc.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
             // All-channel scan + strongest-first. Default fast_scan picks
             // the first BSSID it finds matching the SSID, which on mesh /

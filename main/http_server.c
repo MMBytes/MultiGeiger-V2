@@ -857,7 +857,10 @@ static void format_cycle(char *out, size_t sz, unsigned long uptime_ms) {
     if (st.last_cycle_ms == 0) {
         snprintf(next_line, sizeof(next_line), "—");
     } else {
-        long remaining_ms = (long)(st.last_cycle_ms + interval_ms) - (long)uptime_ms;
+        // V2.8.27: difference in unsigned 32-bit, then signed — casting each
+        // operand to long first overflowed when they straddled 24.8 / 49.7 days.
+        long remaining_ms = (long)(int32_t)((uint32_t)(st.last_cycle_ms + interval_ms) -
+                                            (uint32_t)uptime_ms);
         if (remaining_ms < 0) remaining_ms = 0;
         snprintf(next_line, sizeof(next_line), "in %lds", remaining_ms / 1000);
     }

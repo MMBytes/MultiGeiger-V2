@@ -198,7 +198,9 @@ void tube_pcnt_read(uint32_t out[TUBE_PCNT_NWIDTHS]) {
             // history.c's, so both can read the same total without interfering.
             int total = 0;
             pcnt_unit_get_count(u, &total);
-            uint32_t t = (total < 0) ? 0u : (uint32_t)total;
+            // V2.8.27: plain cast — past INT_MAX the accumulator turns negative
+            // and the old clamp froze it at 0; the unsigned deltas are wrap-safe.
+            uint32_t t = (uint32_t)total;
             out[i] = t - s_last_read[i];
             s_last_read[i] = t;
         } else {
@@ -213,5 +215,5 @@ uint32_t tube_pcnt_filtered_total(void) {
     if (!u) return 0u;
     int total = 0;
     pcnt_unit_get_count(u, &total);
-    return (total < 0) ? 0u : (uint32_t)total;
+    return (uint32_t)total;   // V2.8.27: no clamp — callers take wrap-safe deltas
 }

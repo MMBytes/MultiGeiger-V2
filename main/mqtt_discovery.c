@@ -259,23 +259,26 @@ static const ha_entity_t ENTITIES[] = {
 // Hand-rolled JSON via snprintf to avoid pulling in cJSON for ~300 bytes
 // of per-entity output. Same pattern as mqtt.c's state builder.
 //
-// Buffer sizing: longest payload (env_p with device_class + xform + dev
-// block + 64-char prefix + 19-char chip-id) lands around ~400 bytes.
-// 512 leaves headroom for the longest realistic config. Truncation
-// (impossible in current sizing) would just produce invalid JSON that
-// HA would reject — safe-failure mode.
+// Buffer sizing (V2.8.27): the longest payloads (the heap_* entities with
+// the dev block and the longest board name) reach ~560-610 bytes with a long
+// prefix and chip id — 512 cut them, and a cut retained JSON made HA drop the
+// entity. The caller now uses 768 bytes, and a payload that still does not
+// fit is reported (return -1) and not published at all.
+/** @return payload length, or -1 if it did not fit in `bufsz` (V2.8.27). */
 static int build_payload(char *buf, size_t bufsz,
                          const ha_entity_t *e,
                          const char *chip_id,
                          const char *prefix) {
     size_t n = 0;
     int rem;
+    bool trunc = false;   // V2.8.27: set when any APPEND was clamped or failed
 #define APPEND(...)                                                     \
     do {                                                                \
         rem = (int)bufsz - (int)n;                                      \
-        if (rem <= 1) break;                                            \
+        if (rem <= 1) { trunc = true; break; }                          \
         int _w = snprintf(buf + n, rem, __VA_ARGS__);                   \
-        if (_w < 0) break;                                              \
+        if (_w < 0) { trunc = true; break; }                            \
+        if (_w >= rem) trunc = true;                                    \
         n += (size_t)((_w < rem) ? _w : (rem - 1));                     \
     } while (0)
 
@@ -315,7 +318,7 @@ static int build_payload(char *buf, size_t bufsz,
     APPEND(",\"mf\":\"MMBytes\"}");
     APPEND("}");
 #undef APPEND
-    return (int)n;
+    return trunc ? -1 : (int)n;
 }
 
 // --- Public API -------------------------------------------------------------
@@ -330,7 +333,10 @@ int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
     }
 
     char topic[128];
-    char payload[512];
+    // V2.8.27: 768 B (512 cut the longest entities). On the stack, NOT static:
+    // this runs on the MQTT task at CONNECTED and on the httpd task when
+    // /config is saved — a shared buffer could mix two payloads.
+    char payload[768];
     int published = 0;
 
     for (size_t i = 0; i < N_ENTITIES; i++) {
@@ -343,6 +349,11 @@ int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
                  chip_id, e->object_id);
         int payload_len = build_payload(payload, sizeof(payload),
                                         e, chip_id, prefix);
+        if (payload_len < 0) {
+            ESP_LOGW(TAG, "HA discovery for %s skipped: payload longer than %u bytes",
+                     e->object_id, (unsigned)sizeof(payload));
+            continue;
+        }
         // QoS 1 + retain so HA picks them up even if it joins the broker
         // later than us, AND so a fresh HA install discovers our entities
         // without needing to wait for our next reconnect.

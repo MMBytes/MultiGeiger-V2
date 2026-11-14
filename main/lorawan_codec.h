@@ -18,6 +18,7 @@
  *  layout keep working unchanged for V2 nodes.
  */
 
+#include <math.h>     // isfinite (V2.8.27)
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -179,21 +180,35 @@ static inline void lw_build_port1(uint8_t out[10], uint32_t gm_counts, uint32_t 
  *  saturates the packed pressure to the u16 range [0, 65535] since the
  *  field genuinely cannot represent more.
  *
- *  @return false (leaving *out untouched) only if @p out is NULL.
+ *  V2.8.27: a value that is not a number (NaN / infinity) is refused — no
+ *  port-2 frame — and temperature / humidity are clamped in the float domain
+ *  before any cast (a float->int cast of an out-of-range value is undefined).
+ *  Every physical value keeps the V1.9 bytes; only non-physical ones change
+ *  from wrap-around to saturation (e.g. humidity 130 % was 0x04, now 0xFF).
+ *
+ *  @return false (leaving *out untouched) if @p out is NULL or any input is
+ *          not a finite number.
  */
 static inline bool lw_build_port2(uint8_t out[5], float temp_c, float hum_pct, float press_pa) {
     if (out == NULL) return false;
+    if (!isfinite(temp_c) || !isfinite(hum_pct) || !isfinite(press_pa)) return false;
 
     // temp*10 as s16 BE — same formula as V1.9 (`(int)(temperature*10)`),
-    // truncated to 16 bits like V1.9's implicit int->int16 byte pack.
-    int32_t traw = (int32_t)(temp_c * 10.0f);
+    // truncating toward zero; clamped to the s16 range first (V2.8.27).
+    float tf = temp_c * 10.0f;
+    if (tf > 32767.0f)  tf = 32767.0f;
+    if (tf < -32768.0f) tf = -32768.0f;
+    int32_t traw = (int32_t)tf;
     uint16_t traw_u16 = (uint16_t)(int16_t)traw;
     out[0] = (uint8_t)((traw_u16 >> 8) & 0xFFu);
     out[1] = (uint8_t)(traw_u16 & 0xFFu);
 
-    // hum*2 truncated to one byte — V1.9 assigns `int` to `unsigned char`
-    // (implicit mod-256, not saturated); reproduced identically here.
-    int32_t hraw = (int32_t)(hum_pct * 2.0f);
+    // hum*2 as one byte — V1.9's `int` -> `unsigned char`, identical for
+    // 0..127.5 %; V2.8.27 saturates outside that range instead of wrapping.
+    float hf = hum_pct * 2.0f;
+    if (hf > 255.0f) hf = 255.0f;
+    if (hf < 0.0f)   hf = 0.0f;
+    int32_t hraw = (int32_t)hf;
     out[2] = (uint8_t)(hraw & 0xFF);
 
     // press_pa/10 as u16 BE, saturating (V1.9 had no such guard).

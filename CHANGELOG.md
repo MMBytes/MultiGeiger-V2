@@ -9,6 +9,41 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.27 — Long WiFi names and keys work, complete Home Assistant setup, small fixes
+
+For all boards.
+
+1. **A WiFi name of 32 characters and a 64-character hex key now work.**
+   Both were cut by one character before handing them to the WiFi driver,
+   so the node could never join such a network. A 32-character access-point
+   name is now broadcast complete as well.
+2. **Home Assistant gets every sensor.** The setup message for some sensors
+   (the memory values, on some boards, and more with a long MQTT prefix)
+   was longer than 512 bytes and was cut off, so Home Assistant ignored
+   those sensors. The limit is now 768 bytes; a message that still does not
+   fit is not sent and the log says `HA discovery for … skipped: payload
+   longer than 768 bytes`.
+3. **Some settings only accept characters that are safe where they are
+   used.** The MQTT prefix accepts letters, digits and `_ - . /` (spaces and
+   non-ASCII characters are refused); the openSenseMap box IDs and the
+   aqi.eco token accept letters and digits. A refused value is not saved,
+   the old one stays, and the page lists the field as not saved. A stored
+   value that breaks the rule keeps working, but is listed as not saved on
+   every save until it is corrected.
+4. **The MQTT value `uptime_ms` no longer wraps after 49.7 days.** It is now
+   the uptime when the message is sent.
+5. **LoRaWAN environment frames (port 2):** a reading that is not a number
+   is no longer packed (the log says `environment reading is not a number …
+   port 2 (environment) skipped …`), and out-of-range humidity or
+   temperature values are capped instead of wrapping around. Normal
+   readings produce exactly the same bytes as before.
+6. **Smaller fixes:** the "next cycle in …" countdown on the status page no
+   longer relies on an overflowing calculation after 24.8 days of uptime; the filtered pulse total no longer
+   sticks at 0 after 2³¹ pulses; the upload statistics use 72 bytes less
+   memory.
+
+---
+
 ## V2.8.26 — Login lockout, and the settings page no longer shows stored passwords
 
 For all boards.

@@ -1679,6 +1679,7 @@ static void log_duty_hold(GeigerNode &node) {
 static bool     s_p2_sent_once   = false;
 static uint32_t s_p2_last_s      = 0;
 static bool     s_nothing_logged = false;
+static bool     s_p2_nan_logged  = false;   // V2.8.27: "not a number" line logged once
 
 static void lorawan_task(void *arg) {
     (void)arg;
@@ -1949,12 +1950,31 @@ static void lorawan_task(void *arg) {
         uint8_t p2[5];
         const bool have_p2 = snap.env_valid &&
                              lw_build_port2(p2, snap.temperature_c, snap.humidity_pct, snap.pressure_pa);
+        // V2.8.27: lw_build_port2 refuses a reading that is not a number —
+        // say so once (until a valid reading comes back), not silently.
+        if (snap.env_valid && !have_p2) {
+            if (!s_p2_nan_logged) {
+                ESP_LOGW(TAG, "environment reading is not a number (T=%.1f H=%.1f P=%.0f) — "
+                              "port 2 (environment) skipped until a valid reading comes back",
+                         (double)snap.temperature_c, (double)snap.humidity_pct,
+                         (double)snap.pressure_pa);
+                s_p2_nan_logged = true;
+            }
+        } else if (have_p2) {
+            s_p2_nan_logged = false;
+        }
         const bool send_p2 = have_p2 && lw_sched_port2_due(send_p1, s_p2_sent_once, lw_uptime_s(),
                                                            s_p2_last_s);
         if (!send_p1 && !send_p2) {
             if (!s_nothing_logged) {
-                ESP_LOGW(TAG, "nothing to send: no Geiger tube enabled and no environment reading "
-                              "(logged once until a frame goes out again)");
+                // V2.8.27: name the real reason when a reading exists but was refused.
+                if (snap.env_valid && !have_p2) {
+                    ESP_LOGW(TAG, "nothing to send: no Geiger tube enabled and the environment "
+                                  "reading is not a number (logged once until a frame goes out again)");
+                } else {
+                    ESP_LOGW(TAG, "nothing to send: no Geiger tube enabled and no environment reading "
+                                  "(logged once until a frame goes out again)");
+                }
                 s_nothing_logged = true;
             }
             continue;

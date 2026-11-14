@@ -217,6 +217,36 @@ static size_t secret_field_size(const char *key) {
     return 0;
 }
 
+// --- V2.8.27: character rules ---------------------------------------------
+// Explicit range compares, not <ctype.h>: isalnum() on a plain char is
+// undefined for bytes >= 0x80, and UTF-8 text (e.g. an umlaut) does arrive.
+
+/** @brief ASCII letter or digit. */
+static bool ch_alnum(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+/** @brief Allowed in an MQTT topic prefix: letters, digits, _ - . / */
+static bool ch_topic(char c) {
+    return ch_alnum(c) || c == '_' || c == '-' || c == '.' || c == '/';
+}
+
+/** @brief True if every character of `s` passes `ok`. */
+static bool chars_all(const char *s, bool (*ok)(char)) {
+    for (; *s; s++)
+        if (!ok(*s)) return false;
+    return true;
+}
+
+/** @brief True if `val` is acceptable for `key`; keys without a rule always pass. */
+static bool charset_ok_for_key(const char *key, const char *val) {
+    if (strcmp(key, "mqtt_pfx") == 0) return chars_all(val, ch_topic);
+    if (strcmp(key, "osm_box") == 0 || strcmp(key, "osm_st_box") == 0 ||
+        strcmp(key, "aqi_tok") == 0)
+        return chars_all(val, ch_alnum);
+    return true;
+}
+
 bool config_form_is_secret_key(const char *key) {
     for (size_t i = 0; i < k_config_secret_keys_n; i++)
         if (strcmp(key, k_config_secret_keys[i]) == 0) return true;
@@ -315,6 +345,16 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
                 oor  = true;
                 skip = true;
             }
+        }
+
+        // V2.8.27: values that end up raw in MQTT topics / HA discovery JSON
+        // (mqtt_pfx) or in URL paths (openSenseMap box IDs, aqi.eco token)
+        // must not carry characters that break them. Runs after the secret
+        // block on the possibly cleared value; empty is always allowed (so an
+        // aqi_tok "-" still clears and "" still keeps).
+        if (!skip && val[0] != '\0' && !charset_ok_for_key(p, val)) {
+            oor  = true;
+            skip = true;
         }
 
         if (skip) {

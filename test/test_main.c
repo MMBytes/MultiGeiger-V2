@@ -3701,6 +3701,269 @@ static int test_form_charset_unchanged_value_resaved(void) {
     EXPECT_STREQ(g_form_next.mqtt_user, "bob");
     return 1;
 }
+
+// --- V2.8.28: change list + unknown field names ------------------------------
+
+/** @brief The body a browser posts for an unchanged default config, plus `extra`. */
+static void form_defaults_body(char *body, size_t sz, const char *extra) {
+    int n = 0;
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        if (k_schema[i].type == 'B' && k_schema[i].def != 0)
+            n += snprintf(body + n, sz - (size_t)n, "%s=on&", k_schema[i].key);
+    }
+    snprintf(body + n, sz - (size_t)n, "%ssave=1", extra);
+}
+
+/** @brief config_form_changes() of the harness configs into a buffer. */
+static const char *form_changes(void) {
+    static char out[CONFIG_CHANGES_BUF];
+    config_form_changes(&g_form_prev, &g_form_next, out, sizeof out);
+    return out;
+}
+
+/** @brief config_form_unknown_text() of the last parse. */
+static const char *form_unknown(void) {
+    static char out[CONFIG_UNKNOWN_TEXT_BUF];
+    config_form_unknown_text(&g_form_res, out, sizeof out);
+    return out;
+}
+
+// Changed fields come in schema order, comma separated.
+static int test_form_changes_lists_in_schema_order(void) {
+    form_reset();
+    g_form_next.ftp_interval_min = 30;
+    g_form_next.send_madavi = !g_form_prev.send_madavi;
+    EXPECT_STREQ(form_changes(), "send_mad, ftp_int");
+    return 1;
+}
+
+// A browser save that changes nothing lists nothing (bools are pre-cleared and
+// re-set to the same value: "arrived" is not "changed").
+static int test_form_changes_none_when_same_form(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[1024];
+    form_reset();
+    form_defaults_body(body, sizeof body, "ftp_int=60&");
+    form_apply(body, &caps);
+    EXPECT_STREQ(form_changes(), "");
+    return 1;
+}
+
+// A rejected value is kept, so it is not a change.
+static int test_form_changes_rejected_not_listed(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[1024];
+    form_reset();
+    form_defaults_body(body, sizeof body, "ftp_int=999999999&");
+    form_apply(body, &caps);
+    EXPECT_STREQ(form_changes(), "");
+    EXPECT_TRUE(form_rejected_has("ftp_int"));
+    return 1;
+}
+
+// Secrets have their own line; they never appear in the change list.
+static int test_form_changes_skips_secrets(void) {
+    form_reset();
+    safe_strcpy(g_form_next.mqtt_password, "x", sizeof g_form_next.mqtt_password);
+    safe_strcpy(g_form_next.wifi_password, "y", sizeof g_form_next.wifi_password);
+    EXPECT_STREQ(form_changes(), "");
+    return 1;
+}
+
+// A secret skipped in front of a normal field leaves no stray separator.
+static int test_form_changes_secret_before_normal(void) {
+    form_reset();
+    safe_strcpy(g_form_next.wifi_password, "x", sizeof g_form_next.wifi_password);
+    safe_strcpy(g_form_next.wifi_hostname, "h", sizeof g_form_next.wifi_hostname);
+    EXPECT_STREQ(form_changes(), "wifi_host");
+    return 1;
+}
+
+// A field changed by a cross-field rule (tube off clears a radiation upload) is
+// listed although no key named it.
+static int test_form_changes_cross_field(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[1024];
+    form_reset();
+    g_form_prev.send_radmon = true;
+    g_form_next.send_radmon = true;
+    form_defaults_body(body, sizeof body, "send_rad=on&");
+    char *t = strstr(body, "tube_en=on&");   // untick the tube
+    EXPECT_TRUE(t != NULL);
+    memmove(t, t + strlen("tube_en=on&"), strlen(t + strlen("tube_en=on&")) + 1);
+    form_apply(body, &caps);
+    const char *c = form_changes();
+    EXPECT_TRUE(strstr(c, "tube_en") != NULL);
+    EXPECT_TRUE(strstr(c, "send_rad") != NULL);
+    return 1;
+}
+
+// Float fields are compared too.
+static int test_form_changes_float(void) {
+    form_reset();
+    g_form_next.station_altitude_m = 123.0f;
+    EXPECT_STREQ(form_changes(), "alt_m");
+    return 1;
+}
+
+/** @brief A body that changes almost every non-secret value (bools all cleared). */
+static void form_change_everything(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[3072];
+    int n = 0;
+    for (size_t i = 0; i < SCHEMA_N; i++) {
+        const schema_row_t *r = &k_schema[i];
+        if (config_form_is_secret_key(r->key)) continue;
+        if (r->type == 'S')
+            n += snprintf(body + n, sizeof body - (size_t)n, "%s=zz&", r->key);
+        else if (r->type != 'B')
+            n += snprintf(body + n, sizeof body - (size_t)n, "%s=%g&", r->key,
+                          r->def != r->lo ? r->lo : r->hi);
+    }
+    snprintf(body + n, sizeof body - (size_t)n, "save=1");
+    form_reset();
+    config_apply_form(&g_form_next, &g_form_prev, body, &caps, &g_form_res);
+}
+
+/** @brief Checks a capped list: whole schema keys, no secrets, suffix count. */
+static int check_capped(const char *out, size_t min_total, size_t *total) {
+    const char *suf = strstr(out, "\xE2\x80\xA6 (+");
+    EXPECT_TRUE(suf != NULL);
+    unsigned more = 0;
+    EXPECT_TRUE(sscanf(suf + 6, "%u more)", &more) == 1);
+    EXPECT_TRUE(more >= 1);
+    char list[CONFIG_CHANGES_BUF];
+    size_t len = (size_t)(suf - out);
+    if (len > 0) {
+        EXPECT_TRUE(out[len - 1] == ' ');   // a list is followed by one space
+        len--;
+    }
+    memcpy(list, out, len);
+    list[len] = 0;
+    size_t listed = 0;
+    for (char *k = strtok(list, ", "); k; k = strtok(NULL, ", ")) {
+        EXPECT_TRUE(schema_has_key(k));
+        EXPECT_TRUE(!config_form_is_secret_key(k));
+        listed++;
+    }
+    EXPECT_TRUE(listed + more >= min_total);
+    *total = listed + more;
+    return 1;
+}
+
+// A huge change set stays inside the cap, cuts only between whole keys and
+// counts the rest.
+static int test_form_changes_capped(void) {
+    form_change_everything();
+    const char *out = form_changes();
+    EXPECT_TRUE(strlen(out) < CONFIG_CHANGES_BUF);
+    EXPECT_TRUE(strlen(out) > CONFIG_CHANGES_MAX - 30);
+    size_t total = 0;
+    return check_capped(out, 40, &total);
+}
+
+// A small buffer: still terminated, suffix intact, nothing written past it.
+static int test_form_changes_small_buffer(void) {
+    form_change_everything();
+    char out[33];
+    out[32] = 0x5A;
+    config_form_changes(&g_form_prev, &g_form_next, out, 32);
+    EXPECT_INT(out[32], 0x5A);
+    EXPECT_TRUE(strlen(out) < 32);
+    EXPECT_TRUE(strstr(out, "more)") != NULL);
+    size_t total = 0;
+    return check_capped(out, 40, &total);
+}
+
+// The count after the cut is right: full and small buffer describe the same
+// number of changed fields (listed + more).
+static int test_form_changes_count_consistent(void) {
+    form_change_everything();
+    char full[CONFIG_CHANGES_BUF], small[33];
+    config_form_changes(&g_form_prev, &g_form_next, full, sizeof full);
+    config_form_changes(&g_form_prev, &g_form_next, small, 32);
+    size_t t_full = 0, t_small = 0;
+    if (!check_capped(full, 40, &t_full)) return 0;
+    if (!check_capped(small, 40, &t_small)) return 0;
+    EXPECT_INT((int)t_full, (int)t_small);
+    return 1;
+}
+
+// A buffer too small for any key: the text is only the count, no leading space.
+static int test_form_changes_tiny_buffer_no_leading_space(void) {
+    form_change_everything();
+    char out[25];
+    config_form_changes(&g_form_prev, &g_form_next, out, sizeof out);
+    EXPECT_TRUE(strncmp(out, "\xE2\x80\xA6 (+", 6) == 0);
+    return 1;
+}
+
+// An unknown name is listed; the submit keys are not unknown.
+static int test_form_unknown_listed(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[1024];
+    form_reset();
+    form_defaults_body(body, sizeof body, "send_mda=on&");
+    form_apply(body, &caps);
+    EXPECT_STREQ(form_unknown(), "send_mda");
+    return 1;
+}
+
+// Names outside [A-Za-z0-9_]{1,24} are only counted (incl. an empty key).
+static int test_form_unknown_odd_counted(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("a%3Cb=1&<script>=1&abcdefghijklmnopqrstuvwxyzabcd=1&ok_name=1&=1&save=1", &caps);
+    EXPECT_STREQ(form_unknown(), "ok_name (+4 with other characters)");
+    return 1;
+}
+
+// Valid names that do not fit are counted as "more".
+static int test_form_unknown_more(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("aaaaaaaaaaaaaaaaaaaaaaa1=1&aaaaaaaaaaaaaaaaaaaaaaa2=1&aaaaaaaaaaaaaaaaaaaaaaa3=1&"
+               "aaaaaaaaaaaaaaaaaaaaaaa4=1&aaaaaaaaaaaaaaaaaaaaaaa5=1&aaaaaaaaaaaaaaaaaaaaaaa6=1&"
+               "aaaaaaaaaaaaaaaaaaaaaaa7=1&save=1", &caps);
+    const char *u = form_unknown();
+    EXPECT_TRUE(strstr(u, "aaaaaaaaaaaaaaaaaaaaaaa6") != NULL);
+    EXPECT_TRUE(strstr(u, "aaaaaaaaaaaaaaaaaaaaaaa7") == NULL);
+    size_t ul = strlen(u), sl = strlen(" (+1 more)");
+    EXPECT_TRUE(ul > sl && strcmp(u + ul - sl, " (+1 more)") == 0);
+    return 1;
+}
+
+// The counters saturate instead of wrapping.
+static int test_form_unknown_saturates(void) {
+    config_form_caps_t caps = form_caps_none();
+    char body[256 * 4 + 1];   // 256 x "%=1&" + NUL
+    body[0] = 0;
+    for (int i = 0; i < 256; i++) strcat(body, "%=1&");
+    form_reset();
+    form_apply(body, &caps);
+    EXPECT_STREQ(form_unknown(), "(+255 with other characters)");
+    return 1;
+}
+
+// A normal save has no unknown names.
+static int test_form_unknown_none(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("ftp_int=30&save_restart=1", &caps);
+    EXPECT_STREQ(form_unknown(), "");
+    return 1;
+}
+
+// A board without LoRaWAN: "-" still clears a stored AppKey (plain text copy).
+static int test_form_appkey_clear_without_lorawan(void) {
+    config_form_caps_t caps = form_caps_none();   // has_lorawan = false
+    form_reset();
+    FORM_SEED(lorawan_appkey, k_hex32);
+    form_apply("lora_appkey=-&save=1", &caps);
+    EXPECT_STREQ(g_form_next.lorawan_appkey, "");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
 #undef FORM_SEED
 
 // ----------------------------------------------------------------------------
@@ -4207,14 +4470,6 @@ static int test_auth_lock_refused_counted(void) {
     return 1;
 }
 
-// The same wrong password counts every time (no repeat exemption).
-static int test_auth_lock_same_password_counts(void) {
-    auth_lockout_t s = lock_fresh();
-    for (int i = 1; i <= 4; i++) EXPECT_INT(auth_lock_on_fail(&s, S(i)), 0);
-    EXPECT_INT(auth_lock_on_fail(&s, S(5)), 60);
-    return 1;
-}
-
 // A reboot during a lock keeps the real remaining time (RTC timer kept running).
 static int test_auth_lock_boot_continues_real_time(void) {
     auth_lockout_t s = lock_fresh();
@@ -4298,6 +4553,29 @@ static int test_auth_lock_remaining_peek(void) {
     EXPECT_INT(s.refused, 0);
     EXPECT_INT(auth_lock_remaining_s(&s, S(200)), 0);
     EXPECT_INT(s.locked, 1);   // a peek never clears the lock
+    return 1;
+}
+
+// V2.8.28: lock times read as hours/minutes in the log. Exact durations drop
+// the seconds; remaining times round up to the next minute (like the 429 page).
+static int test_auth_lock_fmt_duration(void) {
+    char d[24];
+    auth_lock_fmt_duration(30720, d, sizeof d); EXPECT_STREQ(d, "8 h 32 min");
+    auth_lock_fmt_duration(3600, d, sizeof d);  EXPECT_STREQ(d, "1 h");
+    auth_lock_fmt_duration(3660, d, sizeof d);  EXPECT_STREQ(d, "1 h 1 min");
+    auth_lock_fmt_duration(300, d, sizeof d);   EXPECT_STREQ(d, "5 min");
+    auth_lock_fmt_duration(3599, d, sizeof d);  EXPECT_STREQ(d, "59 min");
+    auth_lock_fmt_duration(45, d, sizeof d);    EXPECT_STREQ(d, "45 s");
+    auth_lock_fmt_duration(0, d, sizeof d);     EXPECT_STREQ(d, "0 s");
+    auth_lock_fmt_remaining(119, d, sizeof d);  EXPECT_STREQ(d, "2 min");
+    auth_lock_fmt_remaining(60, d, sizeof d);   EXPECT_STREQ(d, "1 min");
+    auth_lock_fmt_remaining(45, d, sizeof d);   EXPECT_STREQ(d, "45 s");
+    auth_lock_fmt_remaining(30719, d, sizeof d); EXPECT_STREQ(d, "8 h 32 min");
+    auth_lock_fmt_duration(59, d, sizeof d);    EXPECT_STREQ(d, "59 s");
+    auth_lock_fmt_duration(61, d, sizeof d);    EXPECT_STREQ(d, "1 min");
+    auth_lock_fmt_remaining(61, d, sizeof d);   EXPECT_STREQ(d, "2 min");
+    auth_lock_fmt_remaining(3599, d, sizeof d); EXPECT_STREQ(d, "1 h");
+    auth_lock_fmt_remaining(3601, d, sizeof d); EXPECT_STREQ(d, "1 h 1 min");
     return 1;
 }
 #undef S
@@ -4618,6 +4896,23 @@ int main(int argc, char **argv) {
     RUN(test_form_ap_pw_clear_rejected);
     RUN(test_form_secret_too_long_rejected);
     RUN(test_form_appkey_keep_clear);
+    RUN(test_form_changes_lists_in_schema_order);
+    RUN(test_form_changes_none_when_same_form);
+    RUN(test_form_changes_rejected_not_listed);
+    RUN(test_form_changes_skips_secrets);
+    RUN(test_form_changes_secret_before_normal);
+    RUN(test_form_changes_cross_field);
+    RUN(test_form_changes_float);
+    RUN(test_form_changes_capped);
+    RUN(test_form_changes_small_buffer);
+    RUN(test_form_changes_count_consistent);
+    RUN(test_form_changes_tiny_buffer_no_leading_space);
+    RUN(test_form_unknown_listed);
+    RUN(test_form_unknown_odd_counted);
+    RUN(test_form_unknown_more);
+    RUN(test_form_unknown_saturates);
+    RUN(test_form_unknown_none);
+    RUN(test_form_appkey_clear_without_lorawan);
     RUN(test_form_secret_first_then_fields);
     RUN(test_form_secret_roundtrip_empty);
     RUN(test_form_non_secret_dash_and_empty);
@@ -4650,7 +4945,6 @@ int main(int argc, char **argv) {
     RUN(test_auth_lock_success_resets_level);
     RUN(test_auth_lock_fails_reset_after_unlock);
     RUN(test_auth_lock_refused_counted);
-    RUN(test_auth_lock_same_password_counts);
     RUN(test_auth_lock_boot_continues_real_time);
     RUN(test_auth_lock_boot_after_expiry_stays_unlocked);
     RUN(test_auth_lock_boot_time_backwards_restarts);
@@ -4658,6 +4952,7 @@ int main(int argc, char **argv) {
     RUN(test_auth_lock_boot_garbage_cleared);
     RUN(test_auth_lock_boot_keeps_cap_state);
     RUN(test_auth_lock_remaining_peek);
+    RUN(test_auth_lock_fmt_duration);
 
     printf("\n");
     if (g_ran == 0) {

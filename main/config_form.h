@@ -41,7 +41,47 @@ typedef struct {
      *  kept), "" if none. Only known field keys and fixed text ever land here, so
      *  the caller may echo it into HTML unescaped. Truncated, never overrun. */
     char rejected[160];
+    /** V2.8.28: comma-separated keys nothing matched (the submit keys `save` /
+     *  `save_restart` excepted) that are 1–24 characters of [A-Za-z0-9_], "" if
+     *  none. Only such names land here, so it may be echoed unescaped. */
+    char unknown[160];
+    uint8_t unknown_odd;    ///< unknown keys failing that rule (counted only; saturates at 255)
+    uint8_t unknown_more;   ///< valid unknown keys that did not fit `unknown` (saturates at 255)
 } config_form_result_t;
+
+#define CONFIG_CHANGES_MAX 384   ///< chars of key list in the change summary before "… (+N more)"
+#define CONFIG_CHANGES_BUF (CONFIG_CHANGES_MAX + 24)   ///< list + " … (+N more)" + NUL
+/** Buffer for config_form_unknown_text(): list + " (+255 with other characters)" + " (+255 more)" + NUL. */
+#define CONFIG_UNKNOWN_TEXT_BUF (160 + 29 + 12 + 1)
+
+/** @brief Keys of the fields a save changes (names only, secrets excluded).
+ *
+ *  Compares every schema field of `prev` and `next` (generated from
+ *  config_fields.def) and writes the keys that differ, in schema order, as
+ *  "a, b, c"; "" if none. Secret keys are left out: they have their own
+ *  summary (config_form_secret_changes). A key is written only if it fits
+ *  whole within min(CONFIG_CHANGES_MAX, out_sz - 24); the rest is counted and
+ *  the text ends " … (+N more)" (just "… (+N more)" if no key fits).
+ *  Never overruns `out_sz`.
+ *
+ *  @param prev    the saved config
+ *  @param next    the config about to be saved
+ *  @param out     destination; CONFIG_CHANGES_BUF bytes hold the full summary
+ *  @param out_sz  size of `out`
+ */
+void config_form_changes(const config_t *prev, const config_t *next, char *out, size_t out_sz);
+
+/** @brief The "Unknown fields ignored" text of a parse result.
+ *
+ *  E.g. "send_mda, foo (+2 with other characters) (+1 more)"; "" if the parse
+ *  met no unknown key. Contains only names that passed the [A-Za-z0-9_]{1,24}
+ *  rule plus fixed text, so it may be echoed into HTML and the log unescaped.
+ *
+ *  @param res     a result filled by config_apply_form()
+ *  @param out     destination; CONFIG_UNKNOWN_TEXT_BUF bytes always suffice
+ *  @param out_sz  size of `out`
+ */
+void config_form_unknown_text(const config_form_result_t *res, char *out, size_t out_sz);
 
 /** @brief This build's capabilities, from hal.h. */
 static inline config_form_caps_t config_form_caps_from_hal(void) {

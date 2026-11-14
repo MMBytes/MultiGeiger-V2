@@ -14,8 +14,11 @@
  *  login resets everything. Every wrong attempt counts, repeats included.
  */
 
+#include <inttypes.h>   // PRIu32 (V2.8.28 duration text: uint32_t is long on the target)
 #include <stdbool.h>
+#include <stddef.h>     // size_t
 #include <stdint.h>
+#include <stdio.h>      // snprintf
 #include <string.h>
 
 #ifdef __cplusplus
@@ -134,6 +137,32 @@ static inline void auth_lock_on_success(auth_lockout_t *s) {
     s->locked = 0;
     s->refused = 0;
     s->lock_start_us = 0;
+}
+
+/** @brief A lock time for the log: "8 h 32 min", "1 h", "5 min" or "45 s".
+ *
+ *  V2.8.28. Below one minute in seconds; from one minute on in whole minutes
+ *  (seconds dropped), with hours split off. For an exact duration; a
+ *  remaining time goes through auth_lock_fmt_remaining().
+ *  @param s       seconds
+ *  @param out     destination; 24 bytes always suffice
+ *  @param out_sz  size of `out` */
+static inline void auth_lock_fmt_duration(uint32_t s, char *out, size_t out_sz) {
+    if (s < 60u) {
+        snprintf(out, out_sz, "%" PRIu32 " s", s);
+        return;
+    }
+    const uint32_t h = s / 3600u, m = (s % 3600u) / 60u;
+    if (h == 0)      snprintf(out, out_sz, "%" PRIu32 " min", m);
+    else if (m == 0) snprintf(out, out_sz, "%" PRIu32 " h", h);
+    else             snprintf(out, out_sz, "%" PRIu32 " h %" PRIu32 " min", h, m);
+}
+
+/** @brief A REMAINING lock time for the log: like auth_lock_fmt_duration(),
+ *         but from one minute on rounded UP to the next whole minute, so
+ *         119 s reads "2 min" (the 429 page rounds the same way). */
+static inline void auth_lock_fmt_remaining(uint32_t s, char *out, size_t out_sz) {
+    auth_lock_fmt_duration(s >= 60u ? s + 59u : s, out, out_sz);
 }
 
 #ifdef __cplusplus

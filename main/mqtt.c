@@ -153,6 +153,15 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
         // payloads at zero observable cost.
         if (s_ha_discovery_enabled) {
             mqtt_discovery_publish_all(s_client, s_chip_id, s_prefix);
+            // V2.8.28: this handler runs IN the MQTT task, and the discovery
+            // payloads (768-B buffer) sit on its stack. mqtt.c sets no
+            // task.stack_size, so esp-mqtt's default MQTT_TASK_STACK (6*1024,
+            // its private lib/include/mqtt_config.h) applies. The figure is the
+            // task's lifetime low-water mark: the task survives reconnects, so
+            // it includes every earlier publish and the TLS handshake.
+            ESP_LOGI(TAG, "MQTT task stack after the Home Assistant setup messages: "
+                          "%u of 6144 bytes never used",
+                     (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
         }
         break;
     case MQTT_EVENT_DISCONNECTED:

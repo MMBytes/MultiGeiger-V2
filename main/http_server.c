@@ -22,10 +22,7 @@
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_sntp.h"
-#include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
-#include "lwip/inet.h"
 #include "mbedtls/base64.h"
 #include "esp_tls_errors.h"   // V2.8.0: ESP_TLS_ERR_SSL_WANT_READ/_WRITE — how
                               // a TLS recv timeout reaches update_post
@@ -47,7 +44,9 @@
 #include "veml7700.h"          // V2.3.30: I²C ambient light sensor (any board)
 #include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "gnss.h"              // V2.5.8: I²C GNSS receiver (PA1010D / MAX-M10S)
+#if HAL_HAS_SD_CARD
 #include "sd_logger.h"         // V2.6.19: standalone-mode CSV logger status (/status card)
+#endif
 #include "tube.h"
 #include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
 #include "speaker.h"           // V2.7.5: silence the pulse tick in OTA teardown
@@ -56,7 +55,6 @@
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 #include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
-#include "syslog.h"            // V2.4.15: tear down UDP socket in OTA teardown
 #include "sysinfo.h"           // V2.4.26: reset_reason_str / chip_model_str (also used by mqtt.c)
 #include "ntp.h"               // ntp_time_valid — the clock-sane gate
 #include "util.h"              // V2.4.1+ (T1): ct_memcmp, html_esc, url_decode, safe_strcpy
@@ -263,16 +261,20 @@ static bool check_auth(httpd_req_t *req) {
     auth_lock_verdict_t v = auth_lock_check(&s_auth_lock, now);
     char ipstr[48];
     if (v.just_unlocked) {
-        ESP_LOGI(TAG, "admin login lock had ended before this request (it lasted %" PRIu32
-                      " min; %" PRIu32 " requests were refused during it since the last boot)",
-                 v.lock_s / 60u, v.refused);
+        char d[24];
+        auth_lock_fmt_duration(v.lock_s, d, sizeof(d));   // V2.8.28: "8 h 32 min", not "512 min"
+        ESP_LOGI(TAG, "admin login lock had ended before this request (it lasted %s; %" PRIu32
+                      " requests were refused during it since the last boot)",
+                 d, v.refused);
     }
     if (v.remaining_s > 0) {
         if (v.refused == 1) {
             peer_ipstr(req, ipstr, sizeof(ipstr));
-            ESP_LOGI(TAG, "admin login refused for %s from %s: still locked for %" PRIu32
-                          " s (the correct password is refused too until then)",
-                     req->uri, ipstr, v.remaining_s);
+            char d[24];
+            auth_lock_fmt_remaining(v.remaining_s, d, sizeof(d));   // rounded up, like the 429 page
+            ESP_LOGI(TAG, "admin login refused for %s from %s: still locked for %s "
+                          "(the correct password is refused too until then)",
+                     req->uri, ipstr, d);
         }
         send_locked(req, v.remaining_s);
         return false;
@@ -312,9 +314,11 @@ unauth:
         peer_ipstr(req, ipstr, sizeof(ipstr));
         uint32_t lock_s = auth_lock_on_fail(&s_auth_lock, now);
         if (lock_s > 0) {
-            ESP_LOGW(TAG, "admin login LOCKED for %" PRIu32 " min after %d wrong passwords in a row "
+            char d[24];
+            auth_lock_fmt_duration(lock_s, d, sizeof(d));
+            ESP_LOGW(TAG, "admin login LOCKED for %s after %d wrong passwords in a row "
                           "(last from %s); until then every login is refused, the correct password too",
-                     lock_s / 60u, AUTH_LOCK_FAILS, ipstr);
+                     d, AUTH_LOCK_FAILS, ipstr);
             send_locked(req, lock_s);
             return false;
         }
@@ -2771,12 +2775,36 @@ static esp_err_t config_post(httpd_req_t *req) {
     // from this copy of the saved config, pre-clears the bools, applies each
     // field, and reports the "Save and restart" button and any rejected values.
     // `buf` is decoded in place, so it is freed only afterwards.
-    config_form_result_t form_res;   // ~164 B: same stack cost as the old rejected[160]
+    // V2.8.28: static like cfg_next (~330 B with the unknown-name fields; httpd
+    // is serial), so the 8 KB httpd stack does not carry it.
+    static config_form_result_t form_res;
     const config_form_caps_t caps = config_form_caps_from_hal();
     config_apply_form(&cfg_next, s_cfg, buf, &caps, &form_res);
     free(buf);
     const bool restart_after_save = form_res.restart_requested;
     const char *rejected = form_res.rejected;
+
+    // V2.8.28: the result page is a heap buffer (was a 1280-B static), taken
+    // BEFORE the save so an allocation failure stores nothing — never an error
+    // page for a save that happened. Worst case: today's page ≤ ~1.05 KB
+    // (≤ 1280) + "Changed" paragraph + "Unknown" paragraph, each with its tags.
+    enum { RESULT_PAGE_SZ = 2048 };
+    _Static_assert(RESULT_PAGE_SZ >= 1280 + CONFIG_CHANGES_BUF + 24 + CONFIG_UNKNOWN_TEXT_BUF + 40,
+                   "result page buffer too small for the change summaries");
+    char *page = malloc(RESULT_PAGE_SZ);
+    if (!page) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom (nothing saved)");
+        return ESP_OK;
+    }
+
+    // V2.8.28: which settings this save changes (keys only, secrets excluded)
+    // and which field names nothing matched. Both hold only schema keys or
+    // names that passed the [A-Za-z0-9_]{1,24} rule plus fixed text, so they
+    // are safe to echo unescaped. Compared before *s_cfg is overwritten.
+    static char changed[CONFIG_CHANGES_BUF];
+    config_form_changes(s_cfg, &cfg_next, changed, sizeof(changed));
+    static char unknown[CONFIG_UNKNOWN_TEXT_BUF];
+    config_form_unknown_text(&form_res, unknown, sizeof(unknown));
 
     // V2.8.26: name the secrets this save changes or clears (names only, never
     // values) — on the result page and in the log, so an unexpected change
@@ -2791,14 +2819,22 @@ static esp_err_t config_post(httpd_req_t *req) {
     // and the user can retry without a RAM/NVS split-brain until next reboot.
     esp_err_t err = config_save(&cfg_next);
     if (err != ESP_OK) {
+        free(page);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
         return ESP_OK;
     }
     *s_cfg = cfg_next;
-    if (secrets_changed[0]) {
+    // V2.8.28: one line with everything the save did, spelled like the result
+    // page. Parts are separated by " | " because the secrets text itself uses
+    // "; " ("changed: a; cleared: b").
+    if (changed[0] || secrets_changed[0] || unknown[0]) {
         char ipstr[48];
         peer_ipstr(req, ipstr, sizeof(ipstr));
-        ESP_LOGI(TAG, "config saved from %s: secrets %s", ipstr, secrets_changed);
+        const bool c = changed[0], s = secrets_changed[0], u = unknown[0];
+        ESP_LOGI(TAG, "config saved from %s: %s%s%s%s%s%s%s%s", ipstr,
+                 c ? "Changed: " : "", c ? changed : "",
+                 (c && s) ? " | " : "", s ? "Secrets " : "", s ? secrets_changed : "",
+                 ((c || s) && u) ? " | " : "", u ? "Unknown fields ignored: " : "", u ? unknown : "");
     }
 
     // V2.3.30: live-apply OLED/SerLCD brightness (no reboot for this field).
@@ -2862,20 +2898,28 @@ static esp_err_t config_post(httpd_req_t *req) {
           "<p><a href=\"/config\">Back to configuration</a> &middot; "
           "<a href=\"/\">Back to status</a></p>";
 
-    static char page[1280];   // V2.8.26: +256 for the "Secrets …" line (worst case ~1.05 KB)
-    int n = append_safe(page, sizeof(page), 0,
+    // `page` (RESULT_PAGE_SZ, heap) was taken before the save, see above.
+    int n = append_safe(page, RESULT_PAGE_SZ, 0,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Saved</title></head><body><h1>%s</h1>", h1);
     if (rejected[0]) {
-        n = append_safe(page, sizeof(page), n,
+        n = append_safe(page, RESULT_PAGE_SZ, n,
             "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were invalid "
             "or out of range and were NOT saved (previous value kept): %s</p>", rejected);
     }
-    if (secrets_changed[0]) {
-        n = append_safe(page, sizeof(page), n, "<p>Secrets %s</p>", secrets_changed);
+    if (changed[0]) {
+        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Changed: %s</p>", changed);
     }
-    append_safe(page, sizeof(page), n, "%s</body></html>", body);
-    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    if (secrets_changed[0]) {
+        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Secrets %s</p>", secrets_changed);
+    }
+    if (unknown[0]) {
+        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Unknown fields ignored: %s</p>", unknown);
+    }
+    append_safe(page, RESULT_PAGE_SZ, n, "%s</body></html>", body);
+    esp_err_t sent = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    free(page);
+    return sent;
 }
 
 // --- POST /reboot (manual restart button) ----------------------------------
@@ -3847,9 +3891,11 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         auth_lock_on_boot(&s_auth_lock, now, esp_reset_reason() == ESP_RST_POWERON);
         const uint32_t r = auth_lock_remaining_s(&s_auth_lock, now);
         if (r > 0) {
-            ESP_LOGW(TAG, "admin login still LOCKED for %" PRIu32 " s after the reboot "
+            char d[24];
+            auth_lock_fmt_remaining(r, d, sizeof(d));   // V2.8.28: rounded up, "8 h 32 min" style
+            ESP_LOGW(TAG, "admin login still LOCKED for %s after the reboot "
                           "(a lock survives crashes, watchdog and software restarts; the reset "
-                          "button or a power cycle clears it)", r);
+                          "button or a power cycle clears it)", d);
         }
     }
 

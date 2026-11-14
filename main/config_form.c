@@ -277,6 +277,93 @@ void config_form_secret_changes(const config_t *prev, const config_t *next,
     }
 }
 
+// --- V2.8.28: change summary + unknown field names ----------------------------
+
+/** @brief Accumulates the change list: whole keys up to `limit`, then a count. */
+typedef struct {
+    char    *out;
+    size_t   out_sz;
+    int      n;       ///< chars written
+    size_t   limit;   ///< max chars of the key list
+    unsigned more;    ///< differing keys not written
+} changes_acc_t;
+
+/** @brief Add one differing key; secret keys are skipped here. */
+static void changes_add(changes_acc_t *a, const char *key) {
+    if (config_form_is_secret_key(key)) return;
+    const size_t need = (a->n ? 2u : 0u) + strlen(key);
+    // Checked BEFORE appending: form_append clamps on overflow, so checking
+    // afterwards would leave half a key in the text.
+    if (a->more || (size_t)a->n + need > a->limit) {
+        a->more++;
+        return;
+    }
+    a->n = form_append(a->out, a->out_sz, a->n, "%s%s", a->n ? ", " : "", key);
+}
+
+void config_form_changes(const config_t *prev, const config_t *next, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    // 24 chars stay free for " … (+N more)" (the ellipsis is 3 bytes in UTF-8).
+    changes_acc_t a = { out, out_sz, 0,
+                        out_sz > 24 ? out_sz - 24 : 0, 0 };
+    if (a.limit > CONFIG_CHANGES_MAX) a.limit = CONFIG_CHANGES_MAX;
+
+    // Generated compare — one line per schema field, so a new field is covered
+    // without an edit here. safe_strcpy zero-fills string tails, so a bounded
+    // strncmp compares exactly the stored text.
+    #define X_STR(name, size, key, def)                                   \
+        if (strncmp(prev->name, next->name, sizeof(prev->name)) != 0)     \
+            changes_add(&a, key);
+    #define X_BOOL(name, key, def)          if (prev->name != next->name) changes_add(&a, key);
+    #define X_U32(name, key, def, lo, hi)   if (prev->name != next->name) changes_add(&a, key);
+    #define X_F32(name, key, def, lo, hi)   if (prev->name != next->name) changes_add(&a, key);
+    #define X_U8(name, key, def, lo, hi)    if (prev->name != next->name) changes_add(&a, key);
+    #include "config_fields.def"
+    #undef X_STR
+    #undef X_BOOL
+    #undef X_U32
+    #undef X_F32
+    #undef X_U8
+
+    if (a.more)
+        form_append(out, out_sz, a.n, "%s\xE2\x80\xA6 (+%u more)", a.n ? " " : "", a.more);
+}
+
+/** @brief Count `*c` up by one, stopping at 255. */
+static void sat_inc(uint8_t *c) {
+    if (*c < 255u) (*c)++;
+}
+
+/** @brief Record a key nothing matched: list it if it passes the name rule. */
+static void unknown_add(config_form_result_t *res, int *un, const char *key) {
+    const size_t len = strlen(key);
+    bool ok = (len >= 1 && len <= 24);
+    for (size_t i = 0; ok && i < len; i++)
+        ok = ch_alnum(key[i]) || key[i] == '_';
+    if (!ok) {
+        sat_inc(&res->unknown_odd);   // never echoed: it is text from outside
+        return;
+    }
+    const size_t need = (*un ? 2u : 0u) + len;
+    if ((size_t)*un + need >= sizeof(res->unknown)) {
+        sat_inc(&res->unknown_more);
+        return;
+    }
+    *un = form_append(res->unknown, sizeof(res->unknown), *un, "%s%s", *un ? ", " : "", key);
+}
+
+void config_form_unknown_text(const config_form_result_t *res, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    out[0] = 0;
+    int n = form_append(out, out_sz, 0, "%s", res->unknown);
+    if (res->unknown_odd)
+        n = form_append(out, out_sz, n, "%s(+%u with other characters)", n ? " " : "",
+                        (unsigned)res->unknown_odd);
+    if (res->unknown_more)
+        form_append(out, out_sz, n, "%s(+%u more)", n ? " " : "", (unsigned)res->unknown_more);
+}
+
 // --- Form parser + cross-field rules -----------------------------------------
 
 void config_apply_form(config_t *next, const config_t *prev, char *body,
@@ -298,6 +385,12 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
     const size_t rejected_sz = sizeof(res->rejected);
     rejected[0] = 0;
     int rej_n = 0;
+
+    // V2.8.28: keys nothing matched — reported instead of ignored without a word.
+    res->unknown[0]   = 0;
+    res->unknown_odd  = 0;
+    res->unknown_more = 0;
+    int unk_n = 0;
 
     // Start from the current config (the caller's copy in `next`); pre-clear
     // every bool (forms only POST ticked checkboxes, so an absent key means
@@ -415,7 +508,9 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         else if (!config_post_apply_field(next, p, val, &oor)) {
             // Non-schema control keys.
             if (strcmp(p, "save_restart") == 0) res->restart_requested = true;
-            // Plain "save" and any unknown keys are silently ignored.
+            // Plain "save" does nothing; any other key is unknown (V2.8.28:
+            // reported, still not stored).
+            else if (strcmp(p, "save") != 0) unknown_add(res, &unk_n, p);
         }
 
         // V2.5.34: accumulate any rejected field's key (comma-separated).

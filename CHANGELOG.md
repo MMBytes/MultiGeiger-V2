@@ -9,6 +9,29 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.28 — The settings page says what a save changed
+
+For all boards.
+
+1. **After saving the settings, the result page and the node log list what
+   changed**, for example `Changed: send_mad, mqtt_int`. Passwords and keys
+   stay in their own `Secrets changed:` line, by name only. A long list ends
+   with `… (+N more)`.
+2. **Field names the node does not know are no longer ignored without a
+   word.** A misspelled or renamed field (from a script or a hand-made
+   request) is listed as `Unknown fields ignored: send_mda`; nothing is
+   stored for it. Only names made of letters, digits and `_` (up to 24
+   characters) are shown; any other name is only counted, for example
+   `(+2 with other characters)`.
+3. **Login lock times read in hours and minutes** in the log, for example
+   `LOCKED for 8 h 32 min` instead of `512 min`. A remaining time of a minute or
+   more is rounded up to the next minute, like the page the browser gets.
+4. **The MQTT task logs how much of its stack was never used** after it has
+   sent the Home Assistant setup messages:
+   `MQTT task stack after the Home Assistant setup messages: N of 6144 bytes never used`.
+
+---
+
 ## V2.8.27 — Long WiFi names and keys work, complete Home Assistant setup, small fixes
 
 For all boards.

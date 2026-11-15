@@ -168,7 +168,7 @@ X_STR (tz_posix,           CFG_TZ_POSIX_MAX + 1,  "tz_posix",   "AEST-10AEDT,M10
 
 // --- Web admin + transmission cadence ---------------------------------------
 
-X_STR (ap_password,        CFG_AP_PW_MAX    + 1,  "ap_pw",      "ESP32Geiger")
+X_STR (ap_password,        CFG_AP_PW_MAX    + 1,  "ap_pw",      CFG_AP_PW_DEFAULT)
 X_U32 (tx_interval_ms,         "tx_int_ms",  150000,   10000, 3600000)
 
 // --- BME / barometric configuration -----------------------------------------

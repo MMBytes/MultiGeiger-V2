@@ -657,13 +657,21 @@ static bool nvs_load_blob(const char *key, uint8_t *buf, size_t len) {
 }
 
 // Set by lorawan_forget_session() (httpd task), read by the worker's
-// per-exchange session save (worker task) — single bool, atomic on this
-// target either way. Once set it stays set until the imminent reboot, so
-// no uplink completing between the NVS erase and the actual restart can
-// re-save the just-erased session blob. The restart is NOT guaranteed to
-// happen within ~2 s: main.c defers it on the WiFi TX worker's idle check,
-// which on a WiFi+LoRa node can hold it for a full TLS upload cycle.
-static volatile bool s_forget_pending = false;
+// per-exchange save (worker task) — single bools, atomic on this target
+// either way. Once set they stay set until the next reboot, so no uplink
+// completing between the NVS erase and the restart can write the erased
+// blob back. The restart is NOT guaranteed to happen within ~2 s: main.c
+// defers it on the WiFi TX worker's idle check, which on a WiFi+LoRa node can
+// hold it for a full TLS upload cycle; and since V2.8.29 a plain /config save
+// that changes region or sub-band forgets the session WITHOUT a restart, so
+// the flags may stay set for days.
+// V2.8.29: two gates. s_forget_pending stops only the SESSION save; the
+// DevNonce history (persistence blob) keeps being saved unless the operator
+// also wiped it (s_wipe_nonces_pending). Otherwise a node still joining after
+// such a save would never store its DevNonces, reuse them after the restart,
+// and the network would drop those joins as replays.
+static volatile bool s_forget_pending      = false;
+static volatile bool s_wipe_nonces_pending = false;
 
 // --- Session persistence (RadioLib 8.0 buffer callbacks) ----------------------
 //
@@ -721,33 +729,47 @@ static void lw8_restore_sess(uint8_t *buf, size_t len) {
     if (!s_lw8_sess_found || s_lw8_sess_unfinished) memset(buf, 0, len);
 }
 
-// Session forget for /lorawan_reset (http_server.c). Erases only the NVS
-// blobs — the running worker's in-RAM session is untouched (it isn't built
-// for live restart), so the caller reboots right after. The s_forget_pending
-// flag above suppresses the worker's end-of-cycle session re-save until
-// that reboot lands, making the wipe deterministic.
-void lorawan_forget_session(bool wipe_nonces) {
-    s_forget_pending = true;   // BEFORE the erase — closes the save/erase race
+// Session forget for /lorawan_reset and (V2.8.29) a /config save that changes
+// region or sub-band (http_server.c). Erases only the NVS blobs — the running
+// worker's in-RAM session is untouched (it isn't built for live restart), so
+// it takes effect at the next boot. The gates above stop the worker from
+// writing the erased blobs back until then.
+bool lorawan_forget_session(bool wipe_nonces) {
+    // BEFORE the erase, so any save that checks the gate afterwards is
+    // skipped. Not a lock: a save already past its check when this runs can
+    // still land after the erase (a window of microseconds, never seen).
+    s_forget_pending = true;
+    if (wipe_nonces) s_wipe_nonces_pending = true;
     nvs_handle_t h;
     if (nvs_open("lorawan", NVS_READWRITE, &h) != ESP_OK) {
         ESP_LOGE(TAG, "forget session: nvs_open failed");
-        return;
+        return false;
     }
+    bool ok = true;
     // ESP_ERR_NVS_NOT_FOUND (blob never written) is success for an erase.
     esp_err_t e = nvs_erase_key(h, LW8_KEY_SESS);
     if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGE(TAG, "forget session: erase '%s': %s", LW8_KEY_SESS, esp_err_to_name(e));
+        ok = false;
     }
     if (wipe_nonces) {
         e = nvs_erase_key(h, LW8_KEY_PERS);
         if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGE(TAG, "forget session: erase '%s': %s", LW8_KEY_PERS, esp_err_to_name(e));
+            ok = false;
         }
     }
-    nvs_commit(h);
+    e = nvs_commit(h);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "forget session: commit: %s", esp_err_to_name(e));
+        ok = false;
+    }
     nvs_close(h);
-    ESP_LOGW(TAG, "session forgotten (%s) — fresh OTAA join on next boot",
-             wipe_nonces ? "incl. DevNonce history" : "DevNonce history kept");
+    if (ok) {
+        ESP_LOGW(TAG, "session forgotten (%s) — fresh OTAA join on next boot",
+                 wipe_nonces ? "incl. DevNonce history" : "DevNonce history kept");
+    }
+    return ok;
 }
 
 /** @brief Erase the RadioLib 7.x session blob V2.8.20 and older kept under
@@ -783,12 +805,17 @@ static void lw_erase_v2820_session(void) {
 
 // Write what RadioLib handed the store callbacks during the exchange or join
 // attempt that just ended (worker task, radio idle). The ONLY writer of the
-// two blobs; skipped once an operator's wipe is pending, so an exchange that
-// ends between the wipe and the restart can't write the session back.
+// two blobs; each skipped once its erase is pending (see the gates above), so
+// an exchange that ends between the erase and the restart can't write it back.
 static void lw8_flush(void) {
-    if (s_forget_pending) return;
-    if (s_lw8_pers_dirty) { s_lw8_pers_dirty = false; nvs_save_blob(LW8_KEY_PERS, s_lw8_pers, sizeof(s_lw8_pers)); }
-    if (s_lw8_sess_dirty) { s_lw8_sess_dirty = false; nvs_save_blob(LW8_KEY_SESS, s_lw8_sess, sizeof(s_lw8_sess)); }
+    if (s_lw8_pers_dirty && !s_wipe_nonces_pending) {
+        s_lw8_pers_dirty = false;
+        nvs_save_blob(LW8_KEY_PERS, s_lw8_pers, sizeof(s_lw8_pers));
+    }
+    if (s_lw8_sess_dirty && !s_forget_pending) {
+        s_lw8_sess_dirty = false;
+        nvs_save_blob(LW8_KEY_SESS, s_lw8_sess, sizeof(s_lw8_sess));
+    }
 }
 
 // --- Worker task --------------------------------------------------------------
@@ -1548,7 +1575,7 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
     }
     // Whatever RadioLib handed the store callbacks during this exchange
     // (nothing for a frame refused before TX); lw8_flush() keeps the
-    // s_forget_pending gate.
+    // save gates (s_forget_pending / s_wipe_nonces_pending).
     lw8_flush();
     exchange_end();
     // A downlink may have moved the DR (LinkADRReq; with ADR off RadioLib
@@ -1844,7 +1871,7 @@ static void lorawan_task(void *arg) {
         // request's air time and the duty-cycle limiter sees only it.
         const uint32_t join_air_ms = sent ? (uint32_t)node.getLastToA() : 0;
         // The DevNonce RadioLib stored before the request (persistence store
-        // callback). lw8_flush() keeps the s_forget_pending gate: a join attempt
+        // callback). lw8_flush() keeps the s_wipe_nonces_pending gate: a join attempt
         // completing between an operator's "wipe DevNonce history" and the
         // deferred restart must not write the nonces back.
         lw8_flush();
@@ -2051,13 +2078,11 @@ static void lorawan_task(void *arg) {
         }
         if (send_p1 || send_p2) log_duty_hold(node);   // after the round's LAST exchange
         // Session persistence: since V2.8.12 saved inside uplink_exchange()
-        // after EVERY exchange (A4), behind the same s_forget_pending gate —
-        // suppressed once lorawan_forget_session() has run, because the
-        // imminent-restart window can exceed the documented ~2 s on WiFi+LoRa
-        // nodes (the restart defers on the WiFi TX worker's idle check, i.e.
-        // up to a full TLS upload cycle, since V2.8.15 plus the round's wait
-        // for a LoRaWAN exchange), and an uplink completing in that window
-        // would silently re-save the just-erased session.
+        // after EVERY exchange (A4), behind the s_forget_pending gate —
+        // suppressed once lorawan_forget_session() has run until the next
+        // boot, so an uplink completing before then cannot re-save the
+        // just-erased session (why that can be long: see the gate flags'
+        // comment near the session-persistence block).
         //
         // V2.8.15: if exchange_begin() waited longer than one cycle for the
         // WiFi round, the snapshot sent was the older one and the newer one

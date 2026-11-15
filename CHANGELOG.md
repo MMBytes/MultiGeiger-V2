@@ -9,6 +9,27 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.29 — Password warning on the settings page, fresh LoRaWAN join after a sub-band change
+
+For all boards.
+
+1. **A red warning at the top of the settings page while the admin password
+   is still the default password.** It is only a warning; everything works
+   as before. The same warning, worded for the case, shows when the stored
+   password is shorter than 8 characters, because the setup WiFi then runs
+   without a password.
+2. **A new admin password needs at least 8 characters.** A shorter one is not
+   saved; the result page says `ap_pw (needs at least 8 characters)` and the old
+   password stays. The admin password is also the setup WiFi's key, which needs
+   at least 8 characters.
+3. **The settings page shows the running firmware version** in a small line
+   under the heading.
+4. **Changing the LoRaWAN region or sub-band now forgets the saved LoRaWAN
+   session**, so the node joins fresh on the new channels at its next restart
+   instead of carrying on with the session made for the old ones. The used
+   DevNonces are kept, so the network accepts the new join. The result page and
+   the node log say so.
+
 ## V2.8.28 — The settings page says what a save changed
 
 For all boards.

@@ -138,6 +138,22 @@ extern const size_t k_config_secret_keys_n;
 /** @brief True if `key` is the form key of a secret field. */
 bool config_form_is_secret_key(const char *key);
 
+/** @brief Why /config warns about the stored admin password (V2.8.29). */
+typedef enum {
+    ADMIN_PW_OK = 0,    ///< no warning
+    ADMIN_PW_DEFAULT,   ///< still the published default CFG_AP_PW_DEFAULT
+    ADMIN_PW_SHORT,     ///< shorter than CFG_AP_PW_MIN: the setup AP runs open
+} admin_pw_warning_t;
+
+/** @brief Which warning the stored admin password `pw` needs: the default
+ *         first, then too short (also ""), else none. */
+admin_pw_warning_t config_form_admin_pw_warning(const char *pw);
+
+/** @brief True if `next` uses another LoRaWAN region or sub-band than `prev`
+ *         — a session saved for the old channel plan must then not be
+ *         restored (V2.8.29). Other LoRaWAN fields do not count. */
+bool config_form_lorawan_plan_changed(const config_t *prev, const config_t *next);
+
 /** @brief Name the secret fields that differ between `prev` and `next`, never
  *         their values: "changed: wifi_pw; cleared: mqtt_pw" (set → empty =
  *         cleared, any other difference = changed). Empty string when nothing

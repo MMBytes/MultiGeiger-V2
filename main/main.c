@@ -1745,7 +1745,7 @@ void app_main(void) {
     apc.ap.ssid_len      = (uint8_t)copy_fixed_field(apc.ap.ssid, sizeof(apc.ap.ssid), g_cfg.ap_name);
     apc.ap.channel       = 1;
     apc.ap.max_connection = 4;
-    if (strlen(g_cfg.ap_password) >= 8) {
+    if (strlen(g_cfg.ap_password) >= CFG_AP_PW_MIN) {
         safe_strcpy((char *)apc.ap.password, g_cfg.ap_password, sizeof(apc.ap.password));
         apc.ap.authmode = WIFI_AUTH_WPA2_PSK;
     } else {

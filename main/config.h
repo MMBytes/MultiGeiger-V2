@@ -41,6 +41,8 @@
 #define CFG_NTP_HOST_MAX     63   // RFC 1123 single-label cap
 #define CFG_TZ_POSIX_MAX     47   // POSIX TZ string practical max
 #define CFG_AP_PW_MAX        32   // Web admin + AP password — WPA2 min 8
+#define CFG_AP_PW_MIN        8    // V2.8.29: shortest new admin password (WPA2 setup AP needs 8)
+#define CFG_AP_PW_DEFAULT    "ESP32Geiger"   // V2.8.29: published default (README); /config warns while set
 #define CFG_USER_NAME_MAX    32   // Radmon / FTP user
 #define CFG_PASSWORD_MAX     64   // Radmon / FTP password
 #define CFG_FTP_HOST_MAX     63   // FQDN or "host:port" — RFC 1123 cap

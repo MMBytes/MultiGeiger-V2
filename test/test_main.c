@@ -2692,7 +2692,13 @@ static int test_config_form_secret_members_only_as_placeholder(void) {
             const bool ok_login = strcmp(members[m], "ap_password") == 0 &&
                                   (size_t)(p - src) >= sizeof login - 1 &&
                                   strncmp(p - (sizeof login - 1), login, sizeof login - 1) == 0;
-            if (!ok_via && !ok_login) {
+            // V2.8.29: the default/short warning reads the admin password but
+            // prints only fixed texts.
+            static const char warn[] = "config_form_admin_pw_warning(";
+            const bool ok_warn  = strcmp(members[m], "ap_password") == 0 &&
+                                  (size_t)(p - src) >= sizeof warn - 1 &&
+                                  strncmp(p - (sizeof warn - 1), warn, sizeof warn - 1) == 0;
+            if (!ok_via && !ok_login && !ok_warn) {
                 printf("    %s used outside secret_placeholder(): %.60s\n", needle, p - 20);
                 ok = 0;
             }
@@ -3447,6 +3453,71 @@ static int test_form_ap_pw_clear_rejected(void) {
     form_apply("ap_pw=&save=1", &caps);
     EXPECT_STREQ(g_form_next.ap_password, g_form_prev.ap_password);
     EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// V2.8.29: which warning /config shows for a stored admin password.
+static int test_admin_pw_warning(void) {
+    EXPECT_INT(config_form_admin_pw_warning("ESP32Geiger"), ADMIN_PW_DEFAULT);
+    EXPECT_INT(config_form_admin_pw_warning("esp32geiger"), ADMIN_PW_OK);
+    EXPECT_INT(config_form_admin_pw_warning("1234567"), ADMIN_PW_SHORT);
+    EXPECT_INT(config_form_admin_pw_warning(""), ADMIN_PW_SHORT);
+    EXPECT_INT(config_form_admin_pw_warning("12345678"), ADMIN_PW_OK);
+    return 1;
+}
+
+// V2.8.29: a new admin password shorter than 8 is rejected with its reason;
+// the other fields of the same save are still applied.
+static int test_form_ap_pw_short_rejected_others_saved(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("ap_pw=1234567&ftp_int=30&save=1", &caps);
+    EXPECT_STREQ(g_form_next.ap_password, g_form_prev.ap_password);
+    EXPECT_TRUE(form_rejected_has("ap_pw (needs at least 8 characters)"));
+    EXPECT_INT(g_form_next.ftp_interval_min, 30);
+    return 1;
+}
+
+// V2.8.29: exactly 8 characters is accepted.
+static int test_form_ap_pw_eight_accepted(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    form_apply("ap_pw=12345678&save=1", &caps);
+    EXPECT_STREQ(g_form_next.ap_password, "12345678");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// V2.8.29: an empty field still keeps a stored password that is too short
+// (pre-V2.8.29 nodes) — a plain save must not fail on it.
+static int test_form_ap_pw_empty_keeps_short_stored(void) {
+    config_form_caps_t caps = form_caps_none();
+    form_reset();
+    FORM_SEED(ap_password, "short");
+    form_apply("ap_pw=&save=1", &caps);
+    EXPECT_STREQ(g_form_next.ap_password, "short");
+    EXPECT_STREQ(g_form_res.rejected, "");
+    return 1;
+}
+
+// V2.8.29: region or sub-band differ → the saved LoRaWAN session must go.
+static int test_form_lw_plan_changed(void) {
+    form_reset();
+    EXPECT_TRUE(!config_form_lorawan_plan_changed(&g_form_prev, &g_form_next));
+    g_form_next.lorawan_subband = (uint8_t)(g_form_prev.lorawan_subband + 1);
+    EXPECT_TRUE(config_form_lorawan_plan_changed(&g_form_prev, &g_form_next));
+    form_reset();
+    g_form_next.lorawan_region = (uint8_t)(g_form_prev.lorawan_region + 1);
+    EXPECT_TRUE(config_form_lorawan_plan_changed(&g_form_prev, &g_form_next));
+    return 1;
+}
+
+// V2.8.29: other LoRaWAN fields do not count as a channel-plan change.
+static int test_form_lw_plan_unchanged_other_lora_fields(void) {
+    form_reset();
+    safe_strcpy(g_form_next.lorawan_deveui, "0011223344556677", sizeof g_form_next.lorawan_deveui);
+    g_form_next.lorawan_dr = (uint8_t)(g_form_prev.lorawan_dr + 1);
+    EXPECT_TRUE(!config_form_lorawan_plan_changed(&g_form_prev, &g_form_next));
     return 1;
 }
 
@@ -4894,6 +4965,12 @@ int main(int argc, char **argv) {
     RUN(test_form_secret_new_value_sets);
     RUN(test_form_secret_long_values_complete);
     RUN(test_form_ap_pw_clear_rejected);
+    RUN(test_admin_pw_warning);
+    RUN(test_form_ap_pw_short_rejected_others_saved);
+    RUN(test_form_ap_pw_eight_accepted);
+    RUN(test_form_ap_pw_empty_keeps_short_stored);
+    RUN(test_form_lw_plan_changed);
+    RUN(test_form_lw_plan_unchanged_other_lora_fields);
     RUN(test_form_secret_too_long_rejected);
     RUN(test_form_appkey_keep_clear);
     RUN(test_form_changes_lists_in_schema_order);

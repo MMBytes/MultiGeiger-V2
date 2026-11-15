@@ -94,7 +94,7 @@ static inline void lorawan_get_status(lorawan_status_t *out) {
 }
 static inline const char *lorawan_state_name(lorawan_state_t st) { (void)st; return "disabled"; }
 static inline const char *lorawan_region_name(uint8_t region_idx) { (void)region_idx; return "?"; }
-static inline void lorawan_forget_session(bool wipe_nonces) { (void)wipe_nonces; }
+static inline bool lorawan_forget_session(bool wipe_nonces) { (void)wipe_nonces; return true; }
 static inline bool lorawan_fem_is_kct8103l(void) { return false; }
 static inline bool lorawan_fem_kct8103l_detected(void) { return false; }
 static inline bool lorawan_dl_rssi_includes_lna(void) { return false; }
@@ -166,8 +166,11 @@ const char *lorawan_state_name(lorawan_state_t st);
 const char *lorawan_region_name(uint8_t region_idx);
 
 /** @brief Erase the persisted LoRaWAN session so the next boot does a fresh
- *         OTAA join (the running worker keeps its in-RAM session — callers
- *         are expected to reboot right after, see /lorawan_reset).
+ *         OTAA join (the running worker keeps its in-RAM session until then).
+ *         Used by /lorawan_reset (reboots right after) and, since V2.8.29, by a
+ *         /config save that changes region or sub-band (no reboot). Returns
+ *         false if NVS could not be opened, erased or committed; session saves
+ *         stay stopped until the next boot either way.
  *
  *  `wipe_nonces=false` keeps the DevNonce history: LoRaWAN 1.0.4 requires
  *  each join-request's DevNonce to exceed the server's last-seen value, so
@@ -175,7 +178,7 @@ const char *lorawan_region_name(uint8_t region_idx);
  *  `true` ONLY for the device-re-registered case, after "Reset used
  *  DevNonces" in the TTN console.
  */
-void lorawan_forget_session(bool wipe_nonces);
+bool lorawan_forget_session(bool wipe_nonces);
 
 /** @brief V2.8.19: true if the LoRa front end is a KCT8103L (Heltec V4.3).
  *

@@ -1933,6 +1933,17 @@ static esp_err_t config_get(httpd_req_t *req) {
           "factor: SF7 4 min, SF8 7 min, SF9 12 min, SF10 22 min, SF11 and SF12 30 min.</p>"
         : "";
 
+    // V2.8.29: red banner while the admin password is the published default
+    // or too short for a WPA2 setup AP. Only a warning — nothing is refused.
+    const admin_pw_warning_t pw_warn = config_form_admin_pw_warning(s_cfg->ap_password);
+    const char *pw_banner =
+        pw_warn == ADMIN_PW_DEFAULT
+            ? "<p class=\"warn\">The admin password is still the default password.</p>"
+        : pw_warn == ADMIN_PW_SHORT
+            ? "<p class=\"warn\">The admin password is shorter than 8 characters, "
+              "so the setup WiFi is open.</p>"
+            : "";
+
     int n = snprintf(body, CFG_FORM_BUF_SIZE,
                      "<!doctype html><html><head><meta charset=\"utf-8\">"
                      "<title>Config — MultiGeiger V2</title>"
@@ -1957,8 +1968,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      // Stack the two submit buttons with a small gap; suppress the
                      // .8em label-style top margin browsers apply when an input lives
                      // inside a non-label parent.
-                     ".btns{margin-top:1.2em}.btns input{margin-right:.6em}</style>"
-                     "</head><body><h1>Configuration</h1>"
+                     ".btns{margin-top:1.2em}.btns input{margin-right:.6em}"
+                     ".warn{background:#c00;color:#fff;padding:.6em;font-weight:bold}</style>"
+                     "</head><body>%s<h1>Configuration</h1>"
+                     // V2.8.29: running firmware, compile-time literal like /update.
+                     "<p><small style=\"color:#777\">Firmware " VERSION_STR "</small></p>"
                      "<p><span class=\"r\">*</span> requires reboot to take effect &mdash; "
                      "use <b>Save and restart</b> at the bottom when changing these.</p>"
                      "<form method=\"post\" action=\"/config\">"
@@ -1974,7 +1988,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<input type=\"text\" name=\"ap_name\" value=\"%s\" maxlength=\"32\"></label>"
                      // V2.5.30: moved here (below AP SSID) from the old "Other" section.
                      "<label>Web admin and access point password"
-                     "<input type=\"password\" name=\"ap_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"32\"></label>"
+                     "<input type=\"password\" name=\"ap_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" minlength=\"8\" maxlength=\"32\"></label>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"wifi_11bg\" "
                      "id=\"wifi_11bg\" onchange=\"syncHt20()\" %s> Limit to 802.11b/g <span class=\"r\">*</span>"
                      "%s</label></div>"
@@ -2493,6 +2507,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<p><a href=\"/\">Back to status</a> &middot; "
                      "<a href=\"/update\">Firmware update</a></p>"
                      "</body></html>",
+                     pw_banner,   // V2.8.29: before <h1>, the first %s of the format
                      e->ssid, secret_placeholder(s_cfg->wifi_password), e->host, e->apn, secret_placeholder(s_cfg->ap_password),   // V2.5.30: ap_pw moved to Network
                      s_cfg->wifi_11bg_only ? "checked" : "",
     // V2.6.17: on dual-band chips (ESP32-C5 today) this checkbox only
@@ -2788,8 +2803,9 @@ static esp_err_t config_post(httpd_req_t *req) {
     // BEFORE the save so an allocation failure stores nothing — never an error
     // page for a save that happened. Worst case: today's page ≤ ~1.05 KB
     // (≤ 1280) + "Changed" paragraph + "Unknown" paragraph, each with its tags.
-    enum { RESULT_PAGE_SZ = 2048 };
-    _Static_assert(RESULT_PAGE_SZ >= 1280 + CONFIG_CHANGES_BUF + 24 + CONFIG_UNKNOWN_TEXT_BUF + 40,
+    // V2.8.29: + the LoRaWAN session paragraph (111 or 122 B, 128 reserved).
+    enum { RESULT_PAGE_SZ = 2304 };
+    _Static_assert(RESULT_PAGE_SZ >= 1280 + CONFIG_CHANGES_BUF + 24 + CONFIG_UNKNOWN_TEXT_BUF + 40 + 128,
                    "result page buffer too small for the change summaries");
     char *page = malloc(RESULT_PAGE_SZ);
     if (!page) {
@@ -2814,6 +2830,15 @@ static esp_err_t config_post(httpd_req_t *req) {
     static char secrets_changed[192];
     config_form_secret_changes(s_cfg, &cfg_next, secrets_changed, sizeof(secrets_changed));
 
+    // V2.8.29: a session saved for the old region/sub-band must not be
+    // restored on the new one (RadioLib would apply the old channel masks).
+    // Compared before *s_cfg is overwritten; acted on only after the save.
+    // Changing the sub-band and back without a restart also forgets the
+    // (still valid) session — one extra join, no harm.
+    const bool    lw_plan_changed = HAL_HAS_LORAWAN && config_form_lorawan_plan_changed(s_cfg, &cfg_next);
+    const uint8_t lw_old_region   = s_cfg->lorawan_region;
+    const uint8_t lw_old_subband  = s_cfg->lorawan_subband;
+
     // Persist to NVS before committing to s_cfg — if the write fails, s_cfg
     // stays unchanged so the device continues on the old in-memory config
     // and the user can retry without a RAM/NVS split-brain until next reboot.
@@ -2835,6 +2860,24 @@ static esp_err_t config_post(httpd_req_t *req) {
                  c ? "Changed: " : "", c ? changed : "",
                  (c && s) ? " | " : "", s ? "Secrets " : "", s ? secrets_changed : "",
                  ((c || s) && u) ? " | " : "", u ? "Unknown fields ignored: " : "", u ? unknown : "");
+    }
+
+    // V2.8.29: forget the saved LoRaWAN session after a region/sub-band
+    // change (DevNonce history kept). Not gated on LoRaWAN being enabled: a
+    // stale session must not come back when it is switched on later. No
+    // restart is forced; the node joins fresh at the next one.
+    bool lw_forgot = false;
+    if (lw_plan_changed) {
+        lw_forgot = lorawan_forget_session(false);
+        if (lw_forgot) {
+            ESP_LOGW(TAG, "LoRaWAN session forgotten because the region/sub-band changed "
+                          "(%s sub-band %u -> %s sub-band %u); the next join after a restart starts fresh",
+                     lorawan_region_name(lw_old_region), (unsigned)lw_old_subband,
+                     lorawan_region_name(s_cfg->lorawan_region), (unsigned)s_cfg->lorawan_subband);
+        } else {
+            ESP_LOGE(TAG, "LoRaWAN region/sub-band changed, but the saved LoRaWAN session could NOT "
+                          "be forgotten; use the LoRaWAN reset button on the settings page");
+        }
     }
 
     // V2.3.30: live-apply OLED/SerLCD brightness (no reboot for this field).
@@ -2916,6 +2959,13 @@ static esp_err_t config_post(httpd_req_t *req) {
     if (unknown[0]) {
         n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Unknown fields ignored: %s</p>", unknown);
     }
+    if (lw_plan_changed) {
+        n = append_safe(page, RESULT_PAGE_SZ, n, "%s", lw_forgot
+            ? "<p>LoRaWAN session forgotten because the region/sub-band changed; "
+              "the next join after a restart starts fresh.</p>"
+            : "<p style=\"color:#c00;font-weight:bold\">The saved LoRaWAN session could NOT be "
+              "forgotten; use the LoRaWAN reset button.</p>");
+    }
     append_safe(page, RESULT_PAGE_SZ, n, "%s</body></html>", body);
     esp_err_t sent = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     free(page);
@@ -2973,7 +3023,7 @@ static esp_err_t lorawan_reset_post(httpd_req_t *req) {
     int r = httpd_req_recv(req, body, sizeof(body) - 1);
     bool wipe_nonces = (r > 0) && (strstr(body, "wipe_nonces=") != NULL);
 
-    lorawan_forget_session(wipe_nonces);
+    const bool forgot = lorawan_forget_session(wipe_nonces);   // V2.8.29: result shown below
     (void)ota_guard_confirm_now("LoRaWAN reset");   // V2.8.20: see reboot_post()
     main_request_restart();
     ESP_LOGW(TAG, "LoRaWAN session reset requested via /lorawan_reset (wipe_nonces=%d)",
@@ -2985,9 +3035,17 @@ static esp_err_t lorawan_reset_post(httpd_req_t *req) {
         "<p>Device will restart in ~2 seconds and perform a fresh OTAA join.</p>"
         "<p><a href=\"/\">Back to status</a></p>"
         "</body></html>";
+    const char *fail =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>LoRaWAN session reset</title></head><body>"
+        "<h1>LoRaWAN session could NOT be forgotten</h1>"
+        "<p>The settings storage could not be changed (see the log). The device "
+        "restarts in ~2 seconds and may resume the old session; try again.</p>"
+        "<p><a href=\"/\">Back to status</a></p>"
+        "</body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     set_security_headers(req);
-    return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, forgot ? ok : fail, HTTPD_RESP_USE_STRLEN);
 }
 #endif // HAL_HAS_LORAWAN
 

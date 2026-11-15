@@ -192,7 +192,7 @@ The merged image bundles the bootloader, partition table, OTA slot pointer, and 
 
 The device comes up as a WPA2-protected WiFi access point named after its chip ID (`esp32-<number>`, e.g. `esp32-1234567`). The AP password is the configured AP password — `ESP32Geiger` on a fresh device. Join it, browse to `http://192.168.4.1/config`, and set WiFi credentials, the AP/admin password and your back-end choices. The AP stays up for about two minutes after boot; after that window, or a manual reboot, the device joins your network in STA mode.
 
-Default credentials (change these on first login — the same password protects the web UI and the setup AP):
+Default credentials (change these on first login — the same password protects the web UI and the setup AP; a new password needs at least 8 characters, and the settings page shows a red warning until the default is changed):
 
 | Field | Default |
 |---|---|

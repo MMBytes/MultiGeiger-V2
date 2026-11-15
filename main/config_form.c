@@ -247,6 +247,17 @@ static bool charset_ok_for_key(const char *key, const char *val) {
     return true;
 }
 
+admin_pw_warning_t config_form_admin_pw_warning(const char *pw) {
+    if (strcmp(pw, CFG_AP_PW_DEFAULT) == 0) return ADMIN_PW_DEFAULT;
+    if (strlen(pw) < CFG_AP_PW_MIN) return ADMIN_PW_SHORT;
+    return ADMIN_PW_OK;
+}
+
+bool config_form_lorawan_plan_changed(const config_t *prev, const config_t *next) {
+    return prev->lorawan_region != next->lorawan_region ||
+           prev->lorawan_subband != next->lorawan_subband;
+}
+
 bool config_form_is_secret_key(const char *key) {
     for (size_t i = 0; i < k_config_secret_keys_n; i++)
         if (strcmp(key, k_config_secret_keys[i]) == 0) return true;
@@ -413,6 +424,7 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         // V2.3.32: 0 (OFF) accepted — display_set_contrast interprets as
         // panel-dark (OLED 0xAE) / backlight-off (SerLCD).
         bool oor = false;   // matched a known field but value out of range/step
+        const char *oor_why = "";   // V2.8.29: optional reason after the key in `rejected`
 
         // V2.8.26: secret fields. /config sends them back empty, so empty means
         // "keep the stored value"; exactly "-" clears one (the admin password
@@ -431,6 +443,13 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
                 } else {
                     val[0] = '\0';                                  // clear
                 }
+            } else if (strcmp(p, "ap_pw") == 0 && strlen(val) < CFG_AP_PW_MIN) {
+                // V2.8.29: the admin password is also the setup AP's WPA2 key,
+                // which needs at least 8 characters; a shorter one would run
+                // the setup AP open. Old value kept, reason shown.
+                oor     = true;
+                oor_why = " (needs at least 8 characters)";
+                skip    = true;
             } else if (strlen(val) >= secret_field_size(p)) {
                 // Too long for its field: reject instead of storing a cut
                 // value nobody knows (a cut admin password would lock the
@@ -516,7 +535,7 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         // V2.5.34: accumulate any rejected field's key (comma-separated).
         if (oor) {
             rej_n = form_append(rejected, rejected_sz, rej_n,
-                                "%s%s", rej_n ? ", " : "", p);
+                                "%s%s%s", rej_n ? ", " : "", p, oor_why);
         }
 
         if (!amp) break;

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <time.h>
+#include <errno.h>             // V2.8.30: EAGAIN etc. — /log send-failure reason
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -26,6 +27,8 @@
 #include "mbedtls/base64.h"
 #include "esp_tls_errors.h"   // V2.8.0: ESP_TLS_ERR_SSL_WANT_READ/_WRITE — how
                               // a TLS recv timeout reaches update_post
+#include "mbedtls/net_sockets.h" // V2.8.30: MBEDTLS_ERR_NET_* — OTA failure reasons
+#include "mbedtls/ssl.h"         // V2.8.30: MBEDTLS_ERR_SSL_CONN_EOF — OTA failure reasons
 
 #include "version.h"
 #include "applog.h"
@@ -120,6 +123,27 @@ static void peer_ipstr(httpd_req_t *req, char *out, size_t outsz) {
                   &((struct sockaddr_in6 *)&addr)->sin6_addr,
                   out, outsz);
     }
+}
+
+/** @brief "WiFi rssi=-91dBm", or "WiFi not connected" when the STA is not
+ *         associated (a client on the setup AP, or right after a WiFi drop).
+ *
+ *  V2.8.30: put on every transfer-failure line (/log, OTA), because on a weak
+ *  link the first question is "how weak", and the node log must answer it on
+ *  its own. A text rather than a sentinel number, so "not connected" can never
+ *  be read as a measurement.
+ *  @param buf  output buffer, 24 bytes are enough
+ *  @param n    size of buf
+ *  @return buf
+ */
+static const char *wifi_rssi_str(char *buf, size_t n) {
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        snprintf(buf, n, "WiFi rssi=%ddBm", ap.rssi);
+    } else {
+        snprintf(buf, n, "WiFi not connected");
+    }
+    return buf;
 }
 
 #if HAL_HAS_HTTPS
@@ -3222,9 +3246,58 @@ fail:
     return ESP_FAIL;
 }
 
+// --- httpd socket timeouts (seconds) -------------------------------------------
+// One place for the values http_server_start() applies AND the code that has to
+// reason about them (the OTA retry budget, the failure lines), so they cannot
+// drift apart. Each bounds ONE send()/recv() call, not a whole transfer.
+//
+// Send: when a call is cut short after a partial write, lwIP returns the
+// partial count and mbedTLS / httpd_send_all call send() again with a fresh
+// timeout, so a client that stops reading is given up on after a multiple of
+// it. Bench 2026-11-16 (client stops reading, 4 MB /log): at 5 s a 25 s pause
+// was cut ~11 s in (two FeatherS3-D nodes); at 15 s a 25 s pause survived and a
+// 60 s pause was given up after 46 s.
+#define HTTPD_SEND_TIMEOUT_S      15
+// Receive, plain HTTP: V2.4.13 weak-WiFi OTA value (see http_server_start).
+#define HTTPD_RECV_TIMEOUT_S      30
+// Receive, TLS: shorter because the handshake runs on the single httpd task
+// (V2.8.0, see http_server_start); the OTA retry count makes up the budget.
+#define HTTPS_RECV_TIMEOUT_S      10
+// OTA: link silence ridden out AFTER the first receive timeout (retries x the
+// receive timeout above). Counting that first timeout, an upload is given up
+// after 160 s over TLS (16 x 10 s) or 180 s over plain HTTP (6 x 30 s); the
+// failure line prints that full figure. TCP keepalive reaping (180 s, see the
+// keep_alive_* settings in http_server_start) must stay at or above it.
+#define OTA_RECV_BUDGET_S         150
+
 // --- POST /update (stream body into OTA partition) --------------------------
 
 #define OTA_CHUNK 1024
+
+/** @brief Plain-words reason for a failed httpd_req_recv() during an OTA.
+ *
+ *  V2.8.30: the failure lines used to print only the raw code, which on
+ *  2026-11-15 read "r=-80" and "r=-26880" for two failed OTAs on weak WiFi — a
+ *  client reset and a stalled link, indistinguishable without a lookup. Plain
+ *  HTTP returns HTTPD_SOCK_ERR_* (or 0 for an orderly close); TLS passes the
+ *  mbedTLS code straight through (httpd_ssl_recv -> esp_tls_conn_read), except
+ *  a TLS close_notify, which esp-tls already turns into 0.
+ *  @param r  what httpd_req_recv() returned (<= 0)
+ *  @return a short constant phrase for the failure line
+ */
+static const char *ota_recv_reason(int r) {
+    switch (r) {
+    case 0:                                 return "the client closed the connection";
+    case HTTPD_SOCK_ERR_TIMEOUT:
+    case ESP_TLS_ERR_SSL_WANT_READ:
+    case ESP_TLS_ERR_SSL_WANT_WRITE:        return "nothing arrived within the receive timeout";
+    case MBEDTLS_ERR_NET_CONN_RESET:        return "the client reset the connection";
+    case MBEDTLS_ERR_SSL_CONN_EOF:          return "the connection ended mid-upload";
+    case MBEDTLS_ERR_NET_RECV_FAILED:
+    case HTTPD_SOCK_ERR_FAIL:               return "receive failed (connection lost)";
+    default:                                return "receive error";
+    }
+}
 
 // V2.8.5 (review 1.1): every failure inside update_post_inner() happens AFTER
 // the teardown at its top — MQTT, the FTP log push, the pulse tick and the
@@ -3457,7 +3530,8 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     size_t received = 0;
     // V2.4.13: weak-WiFi resilience — retry transient recv timeouts instead
     // of aborting the whole OTA. Combined with the recv_wait_timeout set in
-    // http_server_start, this gives ~150 s of TCP outage tolerance per chunk
+    // http_server_start, this gives OTA_RECV_BUDGET_S (150 s) of retries after
+    // the first timeout — 160 s (TLS) / 180 s (plain) of silence in total —
     // before we give up. Only timeouts are retried; HTTPD_SOCK_ERR_FAIL (-1)
     // and peer-close (0) are still fatal — there's no recovering from those.
     // The retry counter resets on every successful recv so a long upload over
@@ -3473,10 +3547,13 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // D9 fallback, which is why this is a runtime read of s_https_up and not the
     // compile-time HAL_HAS_HTTPS: keyed on the macro those nodes would wait 450 s.
 #if HAL_HAS_HTTPS
-    const int recv_max_retries = s_https_up ? 15 : 5;
+    const int recv_timeout_s = s_https_up ? HTTPS_RECV_TIMEOUT_S : HTTPD_RECV_TIMEOUT_S;
 #else
-    const int recv_max_retries = 5;
+    const int recv_timeout_s = HTTPD_RECV_TIMEOUT_S;
 #endif
+    // V2.8.30: derived instead of the literal 15 / 5, same values (150 / 10,
+    // 150 / 30), so a timeout change cannot silently change the budget.
+    const int recv_max_retries = OTA_RECV_BUDGET_S / recv_timeout_s;
     // V2.5.28: per-flash telemetry — wall-clock start + a 128 KB progress gate.
     const int64_t t_start  = esp_timer_get_time();
     size_t        next_log = 128 * 1024;
@@ -3502,15 +3579,19 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             ((r == ESP_TLS_ERR_SSL_WANT_READ ||
               r == ESP_TLS_ERR_SSL_WANT_WRITE) &&
              received > 0)) {
+            char wifi[24];
             if (recv_retries < recv_max_retries) {
                 recv_retries++;
-                ESP_LOGW(TAG, "recv timeout at %u/%u — retry %d/%d (r=%d)",
-                         (unsigned)received, (unsigned)total,
-                         recv_retries, recv_max_retries, r);
+                ESP_LOGW(TAG, "OTA: nothing arrived for %d s at %u/%u KB, waiting again (%d/%d); %s",
+                         recv_timeout_s, (unsigned)(received / 1024), (unsigned)(total / 1024),
+                         recv_retries, recv_max_retries, wifi_rssi_str(wifi, sizeof(wifi)));
                 continue;
             }
-            ESP_LOGE(TAG, "OTA FAILED: recv timed out %d× at %u/%u KB",
-                     recv_max_retries, (unsigned)(received / 1024), (unsigned)(total / 1024));
+            // +1: the first timeout is the one that started the retries.
+            ESP_LOGE(TAG, "OTA FAILED at %u/%u KB: nothing arrived for %d s (%d receive timeouts in a row); %s",
+                     (unsigned)(received / 1024), (unsigned)(total / 1024),
+                     (recv_max_retries + 1) * recv_timeout_s, recv_max_retries + 1,
+                     wifi_rssi_str(wifi, sizeof(wifi)));
             free(buf);
             esp_ota_abort(ota);
             ota_send_fail(req, "500 Internal Server Error", "recv timeout");
@@ -3529,8 +3610,10 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
             return ESP_OK;
         }
         if (r <= 0) {
-            ESP_LOGE(TAG, "OTA FAILED: recv at %u/%u KB (r=%d)",
-                     (unsigned)(received / 1024), (unsigned)(total / 1024), r);
+            char wifi[24];
+            ESP_LOGE(TAG, "OTA FAILED at %u/%u KB: %s (r=%d); %s",
+                     (unsigned)(received / 1024), (unsigned)(total / 1024),
+                     ota_recv_reason(r), r, wifi_rssi_str(wifi, sizeof(wifi)));
             free(buf);
             esp_ota_abort(ota);
             ota_send_fail(req, "500 Internal Server Error", "recv failed");
@@ -3705,7 +3788,132 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
 
 // --- GET /log (auth'd, streams the ring buffer as text/plain) ---------------
 
-#define LOG_CHUNK 2048
+// V2.8.30: 2 KB -> 32 KB. Every httpd_resp_send_chunk() is THREE socket writes
+// (size line, data, "\r\n"), and over TLS each write is its own record; the two
+// tiny framing records cost ~3 ms each on the wire. The data itself is cut into
+// 4 KB records by esp-tls regardless (MBEDTLS_SSL_OUT_CONTENT_LEN = 4096), so a
+// bigger chunk only means fewer framing records. Measured on a FeatherS3-D with
+// a full 4 MB ring, HTTPS from a LAN host: 2 KB 19.6 s, 16 KB 11.1 s, 32 KB
+// 10.3 s; plain HTTP 7.4 s -> 4.1 s. No RAM cost: the chunk is sent straight
+// from the ring (no copy), and what lwIP buffers is capped by the 16 KB TCP
+// send buffer on every board. A rate-limited (30 KiB/s) reader behaved
+// identically at 16 and 32 KB.
+#define LOG_CHUNK (32 * 1024)
+
+// --- /log send-failure line (V2.8.30) -----------------------------------------
+// When a chunk send fails, httpd and esp-tls only log raw codes ("uri handler
+// execution failed", "error in send : N", "write error :-0x..."), which do not
+// say WHY in words — and on a weak link that is the one thing worth knowing.
+// errno and SO_ERROR are NOT reliable after the fact (bench
+// 2026-11-16): on a client reset esp-tls logs "write error" at ERROR on the way
+// out, and that console write overwrites errno (seen: EIO), and lwIP's write
+// path may already have consumed the netconn's pending error, so SO_ERROR can
+// read 0 (seen once as 0, once as 104 for the same client reset).
+// What survives is the return code, the state of the socket and the time
+// spent. Checked in this order:
+//   * the chunk call failed without touching the socket (no memory for the
+//     first chunk's headers, invalid request): its esp_err_t. Every socket
+//     failure returns ESP_ERR_HTTPD_RESP_SEND (httpd_txrx.c), anything else
+//     never reached the socket, whatever errno says;
+//   * a pending SO_ERROR, when one is left: reset by the client (ECONNRESET);
+//     aborted (ECONNABORTED — inside a /log send practically always the
+//     node's own address going away, since the send timeout fires long before
+//     TCP's retransmission or keepalive give-up); any other code is printed
+//     as "connection closed (socket error N)";
+//   * connection gone (getpeername fails) with no code left.
+//   For both of the last two: if the node's STA was associated when the
+//   download started and is not now, lwIP aborted the connection when the
+//   address went away (tcp_netif_ip_addr_changed) — not the client's doing.
+//   "STA not associated" alone proves nothing: in the boot setup-AP window
+//   the node runs AP-only and a client on that AP is the normal case. So the
+//   STA state is captured at the start of the download and compared;
+//   * connection still up and the failing chunk took >= the send timeout: the
+//     send stalled. SO_SNDTIMEO guarantees a timed-out call blocked the whole
+//     timeout, so the time alone identifies it (errno does not: stale). The
+//     node cannot tell a client that stopped reading from a link that went
+//     silent (TCP only gives up after LWIP_TCP_MAXRTX = 12 retransmissions,
+//     minutes later), so the line names both and the WiFi signal strength
+//     next to it points at the link. The time covers the whole chunk (three
+//     socket writes), so on a very slow link some of it may have moved data;
+//   * anything else: errno for what it is worth.
+// Times are printed as integer tenths, not %.1f: this also runs on the :80
+// redirect task, whose stack is sized tight (see http_server_start), and
+// float formatting is the deepest printf path.
+
+/** @brief Log one human-readable line explaining why a /log download stopped.
+ *
+ *  Called after the stream is released, before httpd closes the socket.
+ *  @param req      the request whose send failed
+ *  @param ipstr    client address, captured when the download started (the
+ *                  socket may no longer know its peer by now)
+ *  @param sent     bytes of log body in the chunks completed before the failure
+ *  @param total    bytes the full body would have had
+ *  @param t0_us    esp_timer time when the download started
+ *  @param call_us  esp_timer time when the failing chunk send started
+ *  @param ret      what httpd_resp_send_chunk returned
+ *  @param err      errno captured right after the failing call (may be stale)
+ *  @param sta_at_start  whether the node's STA was associated when the
+ *                       download started (see the comment block above)
+ */
+static void log_send_failure(httpd_req_t *req, const char *ipstr, size_t sent,
+                             size_t total, int64_t t0_us, int64_t call_us,
+                             esp_err_t ret, int err, bool sta_at_start) {
+    const int64_t  now_us   = esp_timer_get_time();
+    const unsigned stall_ds = (unsigned)((now_us - call_us) / 100000);   // tenths of a second
+    const unsigned total_ds = (unsigned)((now_us - t0_us) / 100000);
+
+    const int fd = httpd_req_to_sockfd(req);
+    int so_err = 0;
+    socklen_t so_len = sizeof(so_err);
+    if (fd >= 0) getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len);
+    // Still connected? After a reset lwIP has dropped the connection and
+    // getpeername() fails; after a send timeout the connection is still up.
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    const bool connected = (fd >= 0) &&
+                           (getpeername(fd, (struct sockaddr *)&peer, &peer_len) == 0);
+
+    // ONE read of the STA state for both the reason and the RSSI, so a
+    // reconnect in between cannot make the line contradict itself.
+    wifi_ap_record_t ap;
+    const bool sta_up       = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK);
+    const bool wifi_dropped = sta_at_start && !sta_up;   // see the comment block
+    char wifi[24];
+    if (sta_up) {
+        snprintf(wifi, sizeof(wifi), "WiFi rssi=%ddBm", ap.rssi);
+    } else {
+        snprintf(wifi, sizeof(wifi), "WiFi not connected");
+    }
+
+    char why[112];
+    if (ret != ESP_ERR_HTTPD_RESP_SEND) {
+        snprintf(why, sizeof(why), "send failed before reaching the socket: %s", esp_err_to_name(ret));
+    } else if (so_err == ECONNRESET) {
+        snprintf(why, sizeof(why), "connection reset by the client");
+    } else if (so_err == ECONNABORTED) {
+        snprintf(why, sizeof(why), wifi_dropped ? "connection dropped (the node's WiFi went down)"
+                                                : "connection aborted (link lost)");
+    } else if (so_err != 0 && so_err != EAGAIN && so_err != EWOULDBLOCK) {
+        snprintf(why, sizeof(why), "connection closed (socket error %d)", so_err);
+    } else if (!connected) {
+        snprintf(why, sizeof(why), wifi_dropped ? "connection dropped (the node's WiFi went down)"
+                                                : "connection closed or reset by the client");
+    } else if (stall_ds >= (HTTPD_SEND_TIMEOUT_S - 1) * 10) {
+        // One second under the per-send timeout: a timed-out chunk has spent at
+        // least one whole timeout inside it.
+        snprintf(why, sizeof(why),
+                 "the send stalled for %u.%u s (send timeout: client stopped reading, or link lost)",
+                 stall_ds / 10, stall_ds % 10);
+    } else {
+        snprintf(why, sizeof(why), "send error (errno %d)", err);
+    }
+
+    // KB, not bytes: `sent` counts whole chunks only (part of the failing chunk
+    // may also have gone out), so byte precision would be false precision.
+    ESP_LOGW(TAG, "/log download to %s stopped after %u of %u KB (%u.%u s): %s; %s",
+             ipstr, (unsigned)(sent / 1024), (unsigned)(total / 1024),
+             total_ds / 10, total_ds % 10, why, wifi);
+}
 
 // V2.3.17: streams directly from the ring via applog_stream_begin/end — no
 // 60 KB malloc. Pre-V2.3.17 used applog_snapshot which mallocs the entire
@@ -3716,8 +3924,8 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
 // momentarily dropped free heap to single-digit-KB territory (min_free=316
 // observed). Streaming via chunked Transfer-Encoding eliminates the body
 // malloc entirely. Browser doesn't care about missing Content-Length —
-// chunked is HTTP/1.1 standard. Memory cost: ~0 KB (just the existing
-// 2 KB chunk-sized stack copy in httpd_resp_send_chunk).
+// chunked is HTTP/1.1 standard. Memory cost: ~0 KB — httpd_resp_send_chunk
+// sends from the caller's pointer; its only buffer is a 10-byte size line.
 //
 // V2.3.24: snapshot returns up to three segments now (scratch copy of the
 // danger zone + tail remainder + newer pre-wrap half) — see applog.h. The
@@ -3738,7 +3946,10 @@ static esp_err_t log_get(httpd_req_t *req) {
         // Retry-After rather than a 500 that looks like a broken node.
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_hdr(req, "Retry-After", "2");
-        httpd_resp_set_type(req, "text/plain");
+        // charset: the message has a UTF-8 em dash; without it a browser
+        // guessed Windows-1252 and showed the dash's three UTF-8 bytes as
+        // three separate characters (seen 2026-11-16).
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
         httpd_resp_send(req, "log snapshot busy or applog not initialised — retry\n", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
@@ -3752,20 +3963,42 @@ static esp_err_t log_get(httpd_req_t *req) {
     // handles HTTP/1.1 chunked-encoding framing.
     const char  *segs[3]  = { s.seg_a, s.seg_b, s.seg_c };
     const size_t sizes[3] = { s.len_a, s.len_b, s.len_c };
+    const size_t total    = sizes[0] + sizes[1] + sizes[2];
+    const int64_t t0_us   = esp_timer_get_time();
+    char ipstr[48];                        // for the failure line: after a reset
+    peer_ipstr(req, ipstr, sizeof(ipstr)); // the socket no longer knows its peer
+    wifi_ap_record_t ap0;                  // ...and only a STA that was up can "go down"
+    const bool sta_at_start = (esp_wifi_sta_get_ap_info(&ap0) == ESP_OK);
+    size_t done = 0;                       // body bytes delivered so far (all segments)
     for (int i = 0; i < 3; i++) {
         size_t sent = 0;
         while (sent < sizes[i]) {
             size_t n = sizes[i] - sent;
             if (n > LOG_CHUNK) n = LOG_CHUNK;
-            if (httpd_resp_send_chunk(req, segs[i] + sent, n) != ESP_OK) {
-                applog_stream_end();
+            const int64_t call_us = esp_timer_get_time();
+            const esp_err_t sret = httpd_resp_send_chunk(req, segs[i] + sent, n);
+            if (sret != ESP_OK) {
+                const int err = errno;     // capture before anything else can touch it
+                applog_stream_end();       // release first: logging appends to the ring
+                log_send_failure(req, ipstr, done, total, t0_us, call_us, sret, err, sta_at_start);
                 return ESP_FAIL;
             }
             sent += n;
+            done += n;
         }
     }
-    httpd_resp_send_chunk(req, NULL, 0);  // terminate
+    // The terminating zero-length chunk no longer reads the ring: release the
+    // snapshot first. It can still fail (up to 16 KB of body may sit unsent in
+    // lwIP's buffer when the link stalls at the very end), so it gets the same
+    // failure line instead of failing silently (V2.8.30).
     applog_stream_end();
+    const int64_t end_us = esp_timer_get_time();
+    const esp_err_t eret = httpd_resp_send_chunk(req, NULL, 0);
+    if (eret != ESP_OK) {
+        const int err = errno;
+        log_send_failure(req, ipstr, done, total, t0_us, end_us, eret, err, sta_at_start);
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
@@ -3985,11 +4218,32 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // default 5 s window meant a single TCP gap >5 s killed the entire
     // upload mid-flash. 30 s rides through most transient drops while
     // leaving plenty of headroom against a truly dead connection (the
-    // retry-on-timeout loop in update_post then gives 6× more on top).
+    // retry-on-timeout loop in update_post then waits 5 more timeouts).
     // Harmless for other routes: the timeout only ticks during ACTIVE
     // recv calls (request body reads); idle keep-alive connections don't
-    // consume it. Send-side keeps the default — responses are tiny.
-    hc.recv_wait_timeout = 30;
+    // consume it.
+    hc.recv_wait_timeout = HTTPD_RECV_TIMEOUT_S;   // 30 s
+    // V2.8.30: send side 5 s (IDF default) -> HTTPD_SEND_TIMEOUT_S. The
+    // "responses are tiny" assumption stopped holding with the 4 MB /log
+    // rings, and a weak link really cut a download short: a node at -91 dBm
+    // lost /log after 320 KB with WiFi still associated (2026-11-16).
+    // lwIP's retransmit timer doubles after every unanswered try (from 1.5 s
+    // before the first RTT sample, from the measured RTT after it), so a
+    // 5 s limit per send() only rode out a few seconds of silence. The limit
+    // is per call and a partial write starts a fresh one (see
+    // HTTPD_SEND_TIMEOUT_S): at 15 s a client that stopped reading for 25 s
+    // still got the whole log, one gone for 60 s was dropped after 46 s.
+    // (Measured give-up: ~46 s over TLS, ~31 s over plain HTTP, i.e. about
+    // 3x and 2x the limit; a reader that keeps trickling bytes can stretch it
+    // further, since every partial write restarts it.) The cost of the longer
+    // wait: HTTPS is ONE task, so every other HTTPS request waits that long;
+    // the log snapshot stays taken, so a /log on the other port gets 503, an
+    // FTP log push in that window is skipped and syslog's one-shot boot replay
+    // (it waits only 400 ms) is skipped with a warning. (A failed OTA's short
+    // reply is not affected: the node has sent nothing during the upload, so
+    // the send buffer has room and the reply never waits.)
+    // Inherited by :443 through `sc.httpd = hc` below.
+    hc.send_wait_timeout = HTTPD_SEND_TIMEOUT_S;
     // V2.8.2: TCP keepalive on every accepted socket (IDF sets SO_KEEPALIVE +
     // TCP_KEEPIDLE/INTVL/CNT in httpd_accept_conn). Without it a session whose
     // peer vanished without a FIN — a browser on a VPN that dropped, a phone
@@ -3999,11 +4253,13 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     // apiece, held 26 h until LRU purge (max_open_sockets) happened to need the
     // slot. A live peer answers probes in its kernel, so a healthy idle browser
     // is never dropped; only an unreachable one, after idle + interval x count.
-    //   REAP TIME MUST STAY ABOVE THE OTA WEAK-WIFI BUDGET: update_post rides
-    //   through recv_max_retries x recv_wait_timeout = 150 s of link outage
-    //   per chunk. A stalled upload is a SILENT socket, so a reap below 150 s
-    //   would kill an OTA the retry loop was about to save. 120 + 4 x 15 =
-    //   180 s. Raise these together with that budget, never independently.
+    //   REAP TIME MUST NOT BE BELOW THE OTA WEAK-WIFI BUDGET: update_post
+    //   gives up after the first receive timeout plus OTA_RECV_BUDGET_S of
+    //   retries — 160 s over TLS, 180 s over plain HTTP. A stalled upload is a
+    //   SILENT socket, so a shorter reap would kill an OTA the retry loop was
+    //   about to save. 120 + 4 x 15 = 180 s: above TLS, equal to plain HTTP,
+    //   where it only decides which of the two failure lines appears at 180 s.
+    //   Raise these together with that budget, never independently.
     // hc is copied wholesale into sc.httpd below, so :443 inherits it too.
     hc.keep_alive_enable   = true;
     hc.keep_alive_idle     = 120;   // s of silence before the first probe
@@ -4044,13 +4300,13 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         // before any handler runs. 10 s bounds that; the OTA keeps its
         // weak-WiFi budget via the transport-aware recv_max_retries above.
         // The plain :80 path (hc) is untouched and stays at 30 s.
-        sc.httpd.recv_wait_timeout = 10;
+        sc.httpd.recv_wait_timeout = HTTPS_RECV_TIMEOUT_S;   // 10 s
         // Bounds the handshake loop itself, not just one recv inside it. Must
         // be BELOW the recv timeout above: esp-tls only tests its handshake
         // deadline after a WANT_READ returns, and with a strict `>`, so a
         // budget equal to the recv timeout still lets a second 10 s recv start
         // (20 s measured on the bench). 9 s makes the true bound one recv.
-        sc.tls_handshake_timeout_ms = 9000;
+        sc.tls_handshake_timeout_ms = HTTPS_RECV_TIMEOUT_S * 1000 - 1000;   // 9 s
         // V2.8.1: per-session accounting — see tls_sess_user_cb above.
         sc.user_cb = tls_sess_user_cb;
         sc.servercert     = (const uint8_t *)tls_cert_pem();
@@ -4183,15 +4439,20 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         // assignment ever becomes a field-by-field copy, :443 keeps the +1 and
         // collides with this instance — move this one to +2 then.
         rc.ctrl_port        = ESP_HTTPD_DEF_CTRL_PORT + 1;
-        // log_get sends LOG_CHUNK (2 KB) slices straight from the ring (no
-        // copy); api_env_get holds a 192 B buffer; the redirect path holds
-        // Host + ~600 B Location plus one ESP_LOGI. 6 KB covers the worst
-        // of the three with margin; 4 KB is httpd's floor.
+        // log_get sends LOG_CHUNK (32 KB) slices straight from the ring (no
+        // copy, so the slice size costs no stack); on a failed send it adds
+        // log_send_failure (~0.4 KB of locals, integer-only formatting, one
+        // ESP_LOGW) — V2.8.30. api_env_get holds a 192 B buffer; the redirect
+        // path holds Host + ~600 B Location plus one ESP_LOGI. 6 KB covers
+        // the worst of these with margin; 4 KB is httpd's floor.
         rc.stack_size       = 6144;
         rc.max_uri_handlers = 4;         // /cert.pem /log /api/env + ANY /*
         rc.max_open_sockets = 3;         // scripts polling /log + a redirect round trip
         rc.lru_purge_enable = true;
         rc.uri_match_fn     = httpd_uri_match_wildcard;
+        // rc starts from a fresh default, not from hc, so the /log send
+        // timeout must be set here too or plain-HTTP /log stays at 5 s.
+        rc.send_wait_timeout = HTTPD_SEND_TIMEOUT_S;
         esp_err_t rerr = httpd_start(&s_redirect, &rc);
         if (rerr != ESP_OK) {
             ESP_LOGW(TAG, ":80 instance failed to start (%s) — HTTPS-only", esp_err_to_name(rerr));

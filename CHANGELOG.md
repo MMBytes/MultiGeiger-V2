@@ -9,6 +9,35 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.30 — The node log downloads twice as fast and rides out short stalls
+
+For all boards.
+
+1. **The node log (`/log`) downloads about twice as fast.** It is now sent in
+   32 KB pieces instead of 2 KB pieces. A full 4 MB log takes about 10 s
+   over HTTPS instead of about 20 s, and about 4 s instead of 7 s over plain
+   HTTP. Smaller logs gain in proportion. Memory use does not change.
+2. **A download no longer breaks off when the connection stalls for a few
+   seconds.** The node now waits at least 15 s (was 5 s) for the other side
+   to take more data, which in practice means it gives up after about 30 s
+   over plain HTTP and about 45 s over HTTPS. In a test, a reader that
+   stopped for 25 s still got the whole log; before, the download broke off
+   after about 11 s. This applies to every page the node sends, on both
+   ports.
+3. **When a log download does stop, the node log says why**, for example
+   `/log download to ::FFFF:192.0.2.10 stopped after 112 of 4095 KB (45.9 s): the send stalled for 45.7 s (send timeout: client stopped reading, or link lost); WiFi rssi=-56dBm`,
+   `... connection closed or reset by the client` or
+   `... connection dropped (the node's WiFi went down)`. Before, the log did
+   not say why the download stopped.
+4. **A failed firmware update says why in plain words**, with the WiFi signal
+   strength, for example
+   `OTA FAILED at 15/1485 KB: the client reset the connection (r=-80); WiFi rssi=-95dBm`
+   or `OTA FAILED at 15/1485 KB: nothing arrived for 160 s (16 receive timeouts in a row); WiFi rssi=-95dBm`.
+   The lines while the update waits for data read
+   `OTA: nothing arrived for 10 s at 15/1485 KB, waiting again (1/15); WiFi rssi=-95dBm`.
+5. **The "log snapshot busy" message shows its dash correctly** in the
+   browser.
+
 ## V2.8.29 — Password warning on the settings page, fresh LoRaWAN join after a sub-band change
 
 For all boards.

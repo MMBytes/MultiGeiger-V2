@@ -682,8 +682,10 @@ void syslog_emit(const char *line, size_t len) {
 // the ≤3 s it runs, with a wide margin (a typical boot logs ~9 KB in 2 min).
 #define BOOT_REPLAY_HEADROOM  (8 * 1024)
 // A /log request holding the snapshot (FTPS can't: it runs on the main task,
-// which is in here) is over in milliseconds; wait that out instead of losing
-// the replay.
+// which is in here) usually ends within seconds, often sooner; this short
+// wait covers the common case. One whose client stalls can hold it for tens
+// of seconds (V2.8.30: ~45 s before the send timeout gives up); then the
+// replay is skipped with the warning below rather than hold up boot.
 #define BOOT_REPLAY_BUSY_TRIES 5
 #define BOOT_REPLAY_BUSY_MS    100
 

@@ -67,7 +67,6 @@ static uint64_t          s_total       = 0;
 static bool              s_wrapped     = false; // has the ring wrapped at least once
 static size_t            s_valid_end   = 0;     // high-water when not wrapped; == size when wrapped
 static SemaphoreHandle_t s_mtx         = NULL;
-static vprintf_like_t    s_prev_hook   = NULL;
 static bool              s_initialized = false;
 
 // Exclusion list — lines containing any of these substrings are echoed to UART
@@ -292,7 +291,9 @@ void applog_init(void) {
         if (s_snap_scratch) { free(s_snap_scratch); s_snap_scratch = NULL; }
         return;
     }
-    s_prev_hook   = esp_log_set_vprintf(applog_vprintf);
+    // The previous hook (IDF's default vprintf) is not chained: applog_vprintf
+    // writes the console itself, so the return value is not kept.
+    (void)esp_log_set_vprintf(applog_vprintf);
     s_initialized = true;
 
     // V2.3.15: one-shot diagnostic so the boot log explicitly says where the

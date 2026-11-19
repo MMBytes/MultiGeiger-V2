@@ -39,9 +39,15 @@
  *  @param chip_id    Per-device identifier ("esp32-<decimal>") used in topic +
  *                    HA unique_id / device.identifiers. Caller-owned pointer
  *                    must remain valid for the duration of this call.
- *  @param prefix     The user's `mqtt_topic_prefix` — used to build
- *                    state_topic / availability_topic references inside
- *                    each config payload so HA knows where to subscribe.
+ *  @param state_topic  The topic mqtt.c publishes the state JSON on
+ *                    ("<prefix>/<chip_id>/state"), copied into every config
+ *                    payload so HA knows where to subscribe.
+ *  @param avail_topic  The LWT / availability topic, same purpose.
+ *
+ *  V2.8.31: takes mqtt.c's own pre-built topic strings instead of the
+ *  prefix. Before, discovery rebuilt them from the LIVE config, so a /config
+ *  Save with a new prefix (without the restart the field asks for) pointed
+ *  HA at "<new>/…" while the node kept publishing on "<old>/…".
  *
  *  Iterates the static entity table internally; each present entity
  *  produces one retained QoS-1 publish. Returns the count of entities
@@ -55,4 +61,24 @@
  */
 int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
                                const char *chip_id,
-                               const char *prefix);
+                               const char *state_topic,
+                               const char *avail_topic);
+
+/** @brief Seed the tube-enabled predicate that gates the radiation entities.
+ *
+ *  Internal to the MQTT module: only mqtt.c calls it (at init and on a
+ *  /config Save). V2.8.31: declared here instead of a hand-written extern
+ *  in mqtt.c, so a signature change fails the build.
+ */
+void mqtt_discovery_set_tube_enabled(bool enabled);
+
+/** @brief Seed the per-target upload predicates for the upload-stat entities.
+ *
+ *  Internal to the MQTT module, like mqtt_discovery_set_tube_enabled(). Only
+ *  defined on HAL_MQTT_RICH_STATE (PSRAM) boards; the declaration is
+ *  unconditional so this header needs no hal.h.
+ */
+void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
+                                     bool osm, bool aqi, bool gmc,
+                                     bool thingspeak, bool thingspeak_pm,
+                                     bool ftp);

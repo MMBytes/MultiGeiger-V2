@@ -5,7 +5,7 @@
  *
  *  Global atomic counter for I²C sensor read failures, surfaced on the
  *  status page, in the CYCLE log line (which lands in /log via applog),
- *  and in MQTT (under MQTT_RICH_STATE on PSRAM boards). Sensor read sites
+ *  and in MQTT (under HAL_MQTT_RICH_STATE on PSRAM boards). Sensor read sites
  *  in main.c::do_tx_cycle() call `diag_i2c_error_inc()` once on each
  *  failed top-level read (env / PM / noise / light) — one increment per
  *  failed read regardless of how many underlying I²C transactions were

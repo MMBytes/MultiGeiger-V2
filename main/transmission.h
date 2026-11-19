@@ -1,7 +1,9 @@
 #pragma once
 
 /** @file
- *  @brief Upload pipeline for Madavi, sensor.community, and Radmon.
+ *  @brief Upload pipeline for all HTTP(S) targets (Madavi, sensor.community,
+ *         Radmon, openSenseMap + staging, aqi.eco, GMC, ThingSpeak x2 —
+ *         see tx_target_id_t).
  *
  *  tx_transmit() enqueues a snapshot onto a worker task — CPU1-pinned on
  *  every dual-core board so mbedTLS handshakes don't starve the CPU0 idle
@@ -22,9 +24,10 @@
 #include "noise_sensor.h"   // noise_sample_t
 #include "tube_types.h"     // V2.6.1: tube_type_t + tube_cps_to_usvph() (dose factor)
 
-// Circuit breaker applied to all three upload targets (Madavi, sensor.community,
-// Radmon): 3 consecutive all-retry failures trip the breaker; the target is then
-// skipped for 20 cycles (~50 min at 150 s interval) before being retried.
+// Circuit breaker applied to every upload target (per-target streak, see
+// tx_run()): 3 consecutive all-retry failures trip the breaker; the target is
+// then skipped for 20 cycles (~50 min at the default 150 s tx_interval_ms)
+// before being retried.
 #define TX_CB_FAIL_THRESHOLD 3
 #define TX_CB_SKIP_CYCLES    20
 
@@ -77,7 +80,7 @@ typedef struct {
     // Sensirion SPS30 particulate-matter readings. pm_valid = false means
     // either no PM sensor is attached or the last read failed — skip all
     // SPS30_* fields in the payloads. Madavi picks them up in the env body
-    // alongside BME280_*; sensor.community gets them as a separate X-PIN 12
+    // alongside BME280_*; sensor.community gets them as a separate X-PIN 1
     // POST.
     bool        pm_valid;
     pm_sample_t pm;
@@ -151,8 +154,8 @@ typedef struct {
     char gmc_geiger_id[CFG_USER_NAME_MAX + 1];
 
     // ThingSpeak — generic GET channel update keyed by the channel write API
-    // key. field1=CPM, field2=µSv/h, field3/4=CPM (current; no rolling
-    // windows), +field5/6/7=T/H/P when bme_valid. HTTPS supported. V2.5.1.
+    // key. field1=CPM, field2=µSv/h, field3/4=cpm5/cpm15 (rolling 5/15 min,
+    // = CPM during ramp-up), +field5/6/7=T/H/P when bme_valid. HTTPS supported. V2.5.1.
     tx_target_t thingspeak;
     char thingspeak_api_key[CFG_TOKEN_MAX + 1];
 

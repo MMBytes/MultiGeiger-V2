@@ -6,7 +6,8 @@
 //
 // Build + run locally: `_test.cmd [filter]` from the repo root (Windows) or
 // `gcc -I test/shim -I main -DBOARD_HELTEC_V2=1 -Wall -Wextra -Werror -std=c11
-// -o test/run test/test_main.c main/history.c && ./test/run [filter]`
+// -o test/run test/test_main.c main/history.c main/config_form.c
+// main/ota_guard_logic.c && ./test/run [filter]`
 // (Linux/macOS) — the flags and sources are HOST_TEST_CFLAGS / HOST_TEST_SRCS
 // in .github/workflows/_host-test.yml, which CI runs four ways (native,
 // valgrind, ASan+UBSan, -m32) for both build.yml and release.yml.

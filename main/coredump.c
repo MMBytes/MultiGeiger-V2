@@ -90,10 +90,6 @@ bool coredump_have_dump(void) {
     return s_have_dump;
 }
 
-size_t coredump_get_size(void) {
-    return s_dump_size;
-}
-
 void coredump_get_summary_html(char *out, size_t sz) {
     if (!out || sz == 0) return;
     if (!s_have_dump) {

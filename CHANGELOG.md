@@ -9,6 +9,48 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.31 — Home Assistant follows a changed topic prefix correctly, code clean-up
+
+For all boards. Two small fixes and a downgrade note for LoRaWAN nodes;
+everything else is internal clean-up with no change in behaviour.
+
+1. **Home Assistant no longer loses the sensor values after the MQTT topic
+   prefix is changed without a restart.** The prefix only takes effect after
+   a restart (the settings page marks it with `*`), but a save already sent
+   the Home Assistant discovery messages with the NEW prefix while the node
+   kept publishing under the OLD one, so the entities showed "unavailable"
+   until the restart. Discovery now always names the topics the node
+   actually publishes on; after the restart both change together.
+2. **Adafruit ESP32-S3 TFT Feather: particle counts from 9950 to 9999 show as `10k`**
+   on the PM number page, like the OLED boards since V2.8.5. Before, the TFT
+   showed `10.0k`, one character wider than the other rows.
+3. **Downgrade note for LoRaWAN nodes:** V2.8.31 no longer deletes the
+   LoRaWAN session that V2.8.20 and older saved. This matters only for a node
+   that goes straight from V2.8.20 or older to V2.8.31 and is later put back
+   on V2.8.20 or older: that firmware would try to resume its old session
+   instead of joining. Use "Forget session and reboot" on the settings page
+   in that case.
+4. **Internal changes, no change in behaviour:**
+   - The I²C, display and sensor-probe code reads each board's capabilities
+     from its block in `hal.h` (`HAL_I2C2_KIND`, `HAL_HAS_I2C_POWER_GATE`,
+     `HAL_DISPLAY_AUTO_MULTIPAGE`) instead of checking the board name. Every
+     board must set them, and the build stops if one is missing or
+     contradicts the board's pins.
+   - The extended MQTT state (system and upload statistics) now follows
+     `HAL_HAS_PSRAM` (`HAL_MQTT_RICH_STATE` in `hal.h`) instead of a
+     `MQTT_RICH_STATE` define per board in the build files; a leftover
+     `-DMQTT_RICH_STATE` stops the build. Same boards as before: all except
+     the Heltec WiFi Kit 32 V2.
+   - `HAL_HAS_NATIVE_USB` is gone: every board had to set it, but nothing
+     read it. The console route is set in the sdkconfig files as before.
+   - Unused functions and variables removed; functions that other files
+     declared by hand now come from a header, so a changed signature fails
+     the build.
+   - Code comments that no longer matched the code were corrected.
+   - `.clang-format` is advisory now: apply it to new code where it helps,
+     not inside `hal.h` or other hand-aligned blocks, where it re-aligns the
+     whole block around an edited line.
+
 ## V2.8.30 — The node log downloads twice as fast and rides out short stalls
 
 For all boards.

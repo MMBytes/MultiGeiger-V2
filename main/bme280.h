@@ -37,11 +37,3 @@ bool bme280_present(void);
  *  NULL. Returns ESP_OK on success; ESP_FAIL if not present or I2C failed.
  */
 esp_err_t bme280_read(float *temperature_c, float *humidity_pct, float *pressure_pa);
-
-/** @brief Shared I2C master bus (for the OLED and other on-board devices).
- *
- *  Returns NULL if bme280_init() was never called or the bus couldn't be
- *  created. Safe to call even if the BME280 chip wasn't detected — the bus
- *  is brought up before the probe.
- */
-i2c_master_bus_handle_t bme280_get_i2c_bus(void);

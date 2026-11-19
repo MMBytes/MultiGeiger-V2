@@ -49,7 +49,7 @@ static bool          s_mounted;
 // ON the httpd task itself, serialized with its own select() loop, so our
 // mount/unmount can never overlap httpd's select() mid-body.
 // Two escape hatches: before httpd_start() (the very first boot-time mount,
-// main.c ~line 1308) there's no httpd task yet to race, and if we're
+// sd_card_mount() from app_main) there's no httpd task yet to race, and if we're
 // somehow already ON the httpd task (no caller does this today, but a
 // future admin-triggered remount endpoint might) queuing to ourselves
 // would deadlock — both cases just call straight through instead.

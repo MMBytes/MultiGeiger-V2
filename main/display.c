@@ -8,7 +8,7 @@
 //                               (SDA=GPIO4, SCL=GPIO15, RST=GPIO16).
 //   FeatherS3-D               : external SSD1309 breakout (Core Electronics
 //                               CE09964) on STEMMA2 (SDA=IO16, SCL=IO15),
-//                               powered from LDO2 — see bring_up_stemma2_bus.
+//                               powered from LDO2 — see i2c_bus_get_secondary().
 //   Heltec WiFi LoRa 32 V4-R2 : onboard SSD1315 on a bus dedicated
 //                               permanently to the display (SDA=GPIO17,
 //                               SCL=GPIO18, RST=GPIO21) — module-internal,
@@ -16,7 +16,7 @@
 //                               (unlike every board above). Always present
 //                               (on-module, not a plug-in breakout) — this
 //                               board probes the secondary bus FIRST (see
-//                               the BOARD_HELTEC_WIFI_LORA32_V4_R2 branch in
+//                               the HAL_I2C2_ONBOARD_OLED branch in
 //                               display_setup() below), since the primary
 //                               bus can never have a display on it.
 //
@@ -543,12 +543,13 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     // before the SECONDARY probe (bus 1 has been powered since boot, by
     // display_setup time the SerLCD has had hundreds of ms to wake).
     //
-    // Boards without a secondary bus (Heltec, QT Py): i2c_bus_get_secondary()
-    // returns NULL and the bus-2 branch is silently skipped.
+    // Boards without a secondary bus (HAL_I2C2_NONE in hal.h):
+    // i2c_bus_get_secondary() returns NULL and the bus-2 branch is silently
+    // skipped.
     //
-    // Heltec WiFi LoRa 32 V4-R2 is the one exception to "probe primary
-    // first": its OLED lives EXCLUSIVELY on the secondary bus — the
-    // primary/env-sensor bus never has a display on it — so probing
+    // HAL_I2C2_ONBOARD_OLED (Heltec WiFi LoRa 32 V4-R2) is the one exception
+    // to "probe primary first": its OLED lives EXCLUSIVELY on the secondary
+    // bus — the primary/env-sensor bus never has a display on it — so probing
     // primary first would pay a guaranteed probe-timeout plus the SerLCD
     // 500 ms wake delay on every single boot for no possible benefit. This
     // board skips straight to the secondary bus and skips the 500 ms
@@ -558,7 +559,7 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     i2c_master_bus_handle_t bus;
     const char *bus_label;
 
-#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+#if HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
     bus = i2c_bus_get_secondary();
     if (!bus) {
         ESP_LOGW(TAG, "no secondary I²C bus — display disabled");
@@ -635,7 +636,7 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
         }
     }
 
-#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+#if HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
     ESP_LOGW(TAG, "no display found on %s — display disabled", bus_label);
 #else
     ESP_LOGW(TAG, "no display found on either I2C bus — display disabled");
@@ -648,8 +649,9 @@ task_spawn:;
     //   - SerLCD backend       → rotation (typical 20x4 char display has
     //                            room for the multi-page content)
     //   - Big OLED (SSD1309)   → rotation (per-board compile-time hint
-    //                            — BOARD_FEATHERS3_D ships with a 2.42"
-    //                            SSD1309 from Core Electronics)
+    //                            HAL_DISPLAY_AUTO_MULTIPAGE — FeatherS3-D
+    //                            ships with a 2.42" SSD1309 from Core
+    //                            Electronics)
     //   - Small OLED (SSD1306 / SSD1315) → radiation (Heltec onboard
     //                            0.96", Adafruit 326 plugged into STEMMA
     //                            QT, or Heltec WiFi LoRa 32 V4-R2's onboard
@@ -670,12 +672,13 @@ task_spawn:;
         if (s_backend == BACKEND_SERLCD) {
             resolved_multipage = true;
         } else {
-#if defined(BOARD_FEATHERS3_D)
+            // V2.8.31: hal.h HAL_DISPLAY_AUTO_MULTIPAGE (was three board-name
+            // branches; Heltec V4-R2's SSD1315 0.96" and the SSD1306 boards
+            // both resolve to the single radiation page).
+#if HAL_DISPLAY_AUTO_MULTIPAGE
             resolved_multipage = true;   // SSD1309 2.42" — big enough for rotation
-#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
-            resolved_multipage = false;  // SSD1315 0.96" (assumed) — radiation single page
 #else
-            resolved_multipage = false;  // SSD1306 0.96" — radiation single page
+            resolved_multipage = false;  // 0.96" SSD1306 / SSD1315 — radiation single page
 #endif
         }
         s_is_multipage = resolved_multipage;
@@ -952,10 +955,6 @@ void display_update_snapshot(const display_snapshot_t *snap) {
 #include "transmission.h"
 #include "util.h"             // V2.8.5: fmt_kilo4 (PM number-concentration cells)
 
-// main.c-defined accessor (separate from main_status — controls per-target
-// row visibility on the Uploads page).
-extern bool main_target_enabled(int target_id);
-
 typedef enum {
     PAGE_ENV = 0,
     PAGE_PM_MASS,
@@ -1155,7 +1154,7 @@ static void render_page(display_page_t page) {
 static void display_task(void *arg) {
     (void)arg;
     // Boot splash is drawn once by display_boot_screen() at startup. Let
-    // it remain visible for 5 s before rotation kicks off.
+    // it remain visible for one page dwell (PAGE_DWELL_MS) before rotation kicks off.
     vTaskDelay(pdMS_TO_TICKS(PAGE_DWELL_MS));
 
     int page_idx = 0;
@@ -1243,14 +1242,10 @@ static void display_task(void *arg) {
 #include "freertos/task.h"
 
 #include "env_sensor.h"     // env_sensor_present() for page-skip logic
+#include "main_status.h"    // main_target_enabled() gating for PAGE_UPLOADS
 #include "pm_sensor.h"      // pm_sensor_present() for page-skip logic
-#include "transmission.h"   // main_target_enabled() gating for PAGE_UPLOADS
+#include "transmission.h"   // TX_TARGET_* ids for PAGE_UPLOADS
 #include "version.h"
-
-// main.c-defined accessor (separate from main_status — controls per-target
-// row visibility on the Uploads page). Same declaration as the HAL_HAS_OLED
-// branch above.
-extern bool main_target_enabled(int target_id);
 
 static const char *TAG = "display";
 static bool s_show = false;

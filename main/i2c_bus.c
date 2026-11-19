@@ -11,10 +11,10 @@
 static const char *TAG = "i2c_bus";
 
 static i2c_master_bus_handle_t s_bus_primary    = NULL;
-#if defined(BOARD_FEATHERS3_D) || defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
-// Only boards with a real second I²C controller ever bring this online; on
-// the other boards the declaration would trip -Wunused-variable. Keep the
-// declaration scoped to the boards that actually read/write it.
+#if HAL_I2C2_KIND != HAL_I2C2_NONE
+// Only boards whose hal.h block wires up a second I²C bus (HAL_I2C2_KIND,
+// V2.8.31) ever bring this online; on the others the declaration would trip
+// -Wunused-variable, so it exists only where something reads/writes it.
 static i2c_master_bus_handle_t s_bus_secondary  = NULL;
 #endif
 static bool                    s_secondary_kept = false;
@@ -23,7 +23,7 @@ static bool                    s_secondary_kept = false;
 // defines HAL_HAS_I2C_PINOUT_SWITCH (QT Py); set from g_cfg.i2c_pinout by
 // main.c before the first i2c_bus_get_primary(). Guarded to the switch boards
 // so the static doesn't trip -Wunused-variable where it's never read (same
-// reason s_bus_secondary is BOARD_FEATHERS3_D-scoped above).
+// reason s_bus_secondary is HAL_I2C2_KIND-scoped above).
 #if HAL_HAS_I2C_PINOUT_SWITCH
 static bool                    s_primary_pinout = false;
 #endif
@@ -71,22 +71,21 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
     vTaskDelay(pdMS_TO_TICKS(50));                     // rail settle + OLED charge-pump warm-up
 #endif
 
-#if defined(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER) || defined(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM)
-    // V2.6.11 review fix: this board's shared TFT/I2C peripheral rail
-    // (Adafruit's own "TFT_I2C_POWER" net, GPIO21) is active-HIGH direct
-    // GPIO — opposite polarity from Heltec's active-LOW P-MOSFET Vext gate
-    // above, so it can't reuse HAL_HAS_VEXT_GATE. Originally driven inside
-    // display_tft_init(), which runs too late (after fuel_gauge_init() and
+#if HAL_HAS_I2C_POWER_GATE
+    // V2.8.31: selected by the hal.h capability instead of the two board names.
+    // Today: Adafruit ESP32-S3 TFT Feather #5483 (PIN_I2C_POWER_GATE = GPIO21,
+    // Adafruit's "TFT_I2C_POWER" net, also powers the TFT) and ESP32-S3
+    // Feather #5477 (GPIO7, "PIN_I2C_POWER", no TFT).
+    // V2.6.11 review fix: the TFT Feather's shared TFT/I2C peripheral rail
+    // is active-HIGH direct GPIO — opposite polarity from Heltec's active-LOW
+    // P-MOSFET Vext gate above, so it can't reuse HAL_HAS_VEXT_GATE.
+    // Originally driven inside display_tft_init(), which runs too late (after fuel_gauge_init() and
     // every env/PM/noise/GNSS/VEML I2C probe in main.c) — every one of
     // those NACK'd on a dead bus. i2c_bus_get_primary() is the first I2C
     // consumer main.c calls, so gating here (mirroring HAL_HAS_VEXT_GATE's
     // pattern) guarantees the rail is up before any probe, including the
     // TFT's own SPI bring-up which runs later via display_setup().
-    //
-    // BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM (#5477) shares this same
-    // active-HIGH gate pattern on its own PIN_I2C_POWER_GATE (GPIO7,
-    // Adafruit's "PIN_I2C_POWER" net) — no TFT on that board, but the same
-    // "gate the only I2C bus before any probe" requirement applies.
+    // #5477 has the same "gate the only I2C bus before any probe" need.
     ESP_ERROR_CHECK(gpio_reset_pin(PIN_I2C_POWER_GATE));
     ESP_ERROR_CHECK(gpio_set_direction(PIN_I2C_POWER_GATE, GPIO_MODE_OUTPUT));
     ESP_ERROR_CHECK(gpio_set_level(PIN_I2C_POWER_GATE, 1));   // 1 = rail ON
@@ -117,21 +116,23 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void) {
 }
 
 i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
-#if defined(BOARD_FEATHERS3_D)
+// --- Plug-in connector on a switchable rail (HAL_I2C2_CONNECTOR) ----------------
+// FeatherS3-D STEMMA2. V2.8.31: pins come from hal.h (were literals here).
+#if HAL_I2C2_KIND == HAL_I2C2_CONNECTOR
     if (s_bus_secondary) return s_bus_secondary;
 
     // Enable LDO2 (powers 3V3.2 → STEMMA2 + onboard NeoPixel rail).
     // Default state of IO39 is hi-Z + internal pull-down → LDO2 OFF →
     // STEMMA2 V+ pin dead, no device can ACK there. Drive HIGH to wake.
-    ESP_ERROR_CHECK(gpio_reset_pin(GPIO_NUM_39));
-    ESP_ERROR_CHECK(gpio_set_direction(GPIO_NUM_39, GPIO_MODE_OUTPUT));
-    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_39, 1));
+    ESP_ERROR_CHECK(gpio_reset_pin(PIN_I2C2_LDO_EN));
+    ESP_ERROR_CHECK(gpio_set_direction(PIN_I2C2_LDO_EN, GPIO_MODE_OUTPUT));
+    ESP_ERROR_CHECK(gpio_set_level(PIN_I2C2_LDO_EN, 1));
     vTaskDelay(pdMS_TO_TICKS(10));                     // 3V3.2 rail settle (LDO2 turn-on ~1 ms)
 
     i2c_master_bus_config_t cfg = {
         .i2c_port             = I2C_NUM_1,
-        .sda_io_num           = 16,                    // FeatherS3-D STEMMA2 SDA
-        .scl_io_num           = 15,                    // FeatherS3-D STEMMA2 SCL
+        .sda_io_num           = PIN_I2C2_SDA,          // FeatherS3-D STEMMA2 SDA (IO16)
+        .scl_io_num           = PIN_I2C2_SCL,          // FeatherS3-D STEMMA2 SCL (IO15)
         .clk_source           = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt    = 7,
         .flags.enable_internal_pullup = true,          // STEMMA2 has no PCB pull-ups
@@ -140,12 +141,16 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "secondary bus init failed: %s", esp_err_to_name(err));
         s_bus_secondary = NULL;
-        gpio_set_level(GPIO_NUM_39, 0);                // back off — don't burn LDO2 for nothing
+        gpio_set_level(PIN_I2C2_LDO_EN, 0);            // back off — don't burn LDO2 for nothing
         return NULL;
     }
-    ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=16 SCL=15) — LDO2 enabled");
+    ESP_LOGI(TAG, "secondary bus up (I2C_NUM_1, SDA=%d SCL=%d) — LDO2 enabled",
+             PIN_I2C2_SDA, PIN_I2C2_SCL);
     return s_bus_secondary;
-#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+
+// --- Bus dedicated to the on-module OLED (HAL_I2C2_ONBOARD_OLED) ----------------
+// Heltec WiFi LoRa 32 V4-R2.
+#elif HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
     if (s_bus_secondary) return s_bus_secondary;
 
     // V2.6.20 (see hal.h's HAL_HAS_VEXT_GATE comment on this board):
@@ -178,7 +183,7 @@ i2c_master_bus_handle_t i2c_bus_get_secondary(void) {
              PIN_OLED_SDA, PIN_OLED_SCL);
     return s_bus_secondary;
 #else
-    return NULL;   // Heltec / QT Py: no second bus on this board
+    return NULL;   // HAL_I2C2_NONE: this board has no second I²C bus
 #endif
 }
 
@@ -187,17 +192,17 @@ void i2c_bus_secondary_keep_alive(void) {
 }
 
 void i2c_bus_finalize(void) {
-#if defined(BOARD_FEATHERS3_D)
+#if HAL_I2C2_KIND == HAL_I2C2_CONNECTOR
     if (s_bus_secondary && !s_secondary_kept) {
         i2c_del_master_bus(s_bus_secondary);
         s_bus_secondary = NULL;
-        gpio_set_level(GPIO_NUM_39, 0);                // LDO2 off — saves ~5–10 mA quiescent
+        gpio_set_level(PIN_I2C2_LDO_EN, 0);            // LDO2 off — saves ~5–10 mA quiescent
         ESP_LOGI(TAG, "secondary bus torn down — no consumer (LDO2 off)");
     } else if (s_bus_secondary) {
         ESP_LOGI(TAG, "secondary bus kept alive — at least one consumer is using it");
     }
     // s_bus_secondary == NULL && !kept: secondary was never requested, nothing to do.
-#elif defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+#elif HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
     // Vext (GPIO36, driven in i2c_bus_get_secondary() since V2.6.20) is
     // deliberately left ON even when no consumer claimed the bus — unlike
     // FeatherS3-D above, which sheds LDO2 by design when STEMMA2 is

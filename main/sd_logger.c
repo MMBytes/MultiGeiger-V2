@@ -93,7 +93,7 @@ static size_t      s_ncols;
 // out-of-bounds write). Same clamp as http_server.c::append_safe /
 // transmission.c::tx_append / mqtt.c::APPEND; not shared via util.h because
 // each of those already carries its own file-local copy (house convention —
-// see transmission.c:334-337).
+// see the comment above tx_append() in transmission.c).
 __attribute__((format(printf, 4, 5)))
 static int append_safe(char *out, size_t sz, int n, const char *fmt, ...) {
     if (n < 0 || (size_t)n >= sz) return (int)sz;

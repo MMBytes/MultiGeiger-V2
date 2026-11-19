@@ -66,7 +66,7 @@ static bool fuel_gauge_present_(void)    { return fuel_gauge_present(); }
 static bool s_tube_enabled = false;
 static bool tube_enabled_(void)          { return s_tube_enabled; }
 
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
 // V2.4.26: per-target upload entities ride on cached cfg.send_* flags
 // seeded by mqtt_discovery_set_upload_flags() at init. Same pattern as
 // s_tube_enabled — keeps presence predicates as plain function pointers
@@ -125,9 +125,9 @@ static const ha_entity_t ENTITIES[] = {
     { "cpm",        "cpm",        "CPM",             NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
     { "usvph",      "dose_rate",  "Dose rate",       NULL,             "µSv/h", "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
     { "hv_pulses",  "hv_pulses",  "HV pulses",       NULL,             NULL,    "total_increasing", "mdi:flash",         NULL, tube_enabled_, NULL },
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     // V2.5.6: rolling CPM means — rich/PSRAM boards only (mqtt.c emits cpm5/
-    // cpm15 only under MQTT_RICH_STATE), so the entities are #ifdef-gated too
+    // cpm15 only under HAL_MQTT_RICH_STATE), so the entities are #if-gated too
     // to avoid phantom "unavailable" entities on Heltec.
     { "cpm5",       "cpm5",       "CPM (5-min avg)", NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
     { "cpm15",      "cpm15",      "CPM (15-min avg)",NULL,             "CPM",   "measurement",      "mdi:radioactive",   NULL, tube_enabled_, NULL },
@@ -187,7 +187,7 @@ static const ha_entity_t ENTITIES[] = {
     { "heap_free",     "heap_free",     "Heap free",      "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "heap_min",      "heap_min",      "Heap min free",  "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
     { "heap_max_alloc","heap_max_alloc","Heap max alloc", "data_size",       "B",   "measurement", "mdi:memory",         NULL, always_present, "diagnostic" },
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     // V2.4.33: internal/DMA-RAM split (PSRAM boards only — see mqtt.c). The
     // heap_* above are PSRAM totals; these expose the internal/DMA pool that
     // actually gates sustained inbound TLS/OTA, so HA graphs the multi-day
@@ -200,7 +200,7 @@ static const ha_entity_t ENTITIES[] = {
     // V2.4.28: I²C sensor-read-error counter — diagnostic, cumulative.
     { "i2c_err",       "i2c_err",       "I2C errors",     NULL,              NULL,  "total_increasing", "mdi:bus-alert", NULL, always_present, "diagnostic" },
 
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     // --- V2.4.26: Per-target upload counters (PSRAM boards only) ----------
     // Primary entities (no diagnostic category) — user can graph success
     // rates / alert on _err climbing. Counters use total_increasing so HA's
@@ -268,7 +268,8 @@ static const ha_entity_t ENTITIES[] = {
 static int build_payload(char *buf, size_t bufsz,
                          const ha_entity_t *e,
                          const char *chip_id,
-                         const char *prefix) {
+                         const char *state_topic,
+                         const char *avail_topic) {
     size_t n = 0;
     int rem;
     bool trunc = false;   // V2.8.27: set when any APPEND was clamped or failed
@@ -285,14 +286,14 @@ static int build_payload(char *buf, size_t bufsz,
     APPEND("{\"name\":\"%s\"", e->friendly_name);
     APPEND(",\"uniq_id\":\"geiger_%s_%s\"", chip_id, e->object_id);
     APPEND(",\"obj_id\":\"geiger_%s_%s\"",  chip_id, e->object_id);
-    APPEND(",\"stat_t\":\"%s/%s/state\"",   prefix, chip_id);
+    APPEND(",\"stat_t\":\"%s\"",   state_topic);
     if (e->value_template_xform) {
         APPEND(",\"val_tpl\":\"{{ (value_json.%s %s) | round(1) }}\"",
                e->json_field, e->value_template_xform);
     } else {
         APPEND(",\"val_tpl\":\"{{ value_json.%s }}\"", e->json_field);
     }
-    APPEND(",\"avty_t\":\"%s/%s/availability\"", prefix, chip_id);
+    APPEND(",\"avty_t\":\"%s\"", avail_topic);
     if (e->unit) {
         APPEND(",\"unit_of_meas\":\"%s\"", e->unit);
     }
@@ -325,10 +326,11 @@ static int build_payload(char *buf, size_t bufsz,
 
 int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
                                const char *chip_id,
-                               const char *prefix) {
-    if (!client || !chip_id || !prefix) {
-        ESP_LOGW(TAG, "publish_all: null args (client=%p chip=%p prefix=%p)",
-                 client, chip_id, prefix);
+                               const char *state_topic,
+                               const char *avail_topic) {
+    if (!client || !chip_id || !state_topic || !avail_topic) {
+        ESP_LOGW(TAG, "publish_all: null args (client=%p chip=%p state=%p avail=%p)",
+                 client, chip_id, state_topic, avail_topic);
         return 0;
     }
 
@@ -348,7 +350,7 @@ int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
                  "homeassistant/sensor/geiger_%s/%s/config",
                  chip_id, e->object_id);
         int payload_len = build_payload(payload, sizeof(payload),
-                                        e, chip_id, prefix);
+                                        e, chip_id, state_topic, avail_topic);
         if (payload_len < 0) {
             ESP_LOGW(TAG, "HA discovery for %s skipped: payload longer than %u bytes",
                      e->object_id, (unsigned)sizeof(payload));
@@ -372,21 +374,15 @@ int mqtt_discovery_publish_all(esp_mqtt_client_handle_t client,
     return published;
 }
 
-// Internal hook used by mqtt.c::mqtt_init to seed the tube-enabled
-// predicate. Declared here (not in header) because no other caller has
-// reason to touch it — keeps the public surface narrow.
-void mqtt_discovery_set_tube_enabled(bool enabled);
+// Internal hook used by mqtt.c to seed the tube-enabled predicate
+// (declared in mqtt_discovery.h since V2.8.31).
 void mqtt_discovery_set_tube_enabled(bool enabled) {
     s_tube_enabled = enabled;
 }
 
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
 // V2.4.26: companion to set_tube_enabled — seeds the per-target upload
 // predicates so the entity catalog knows which targets to advertise.
-void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
-                                     bool osm, bool aqi, bool gmc,
-                                     bool thingspeak, bool thingspeak_pm,
-                                     bool ftp);
 void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
                                      bool osm, bool aqi, bool gmc,
                                      bool thingspeak, bool thingspeak_pm,

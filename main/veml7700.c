@@ -136,11 +136,11 @@ esp_err_t veml7700_read(uint16_t *raw_als, uint16_t *raw_white, float *lux) {
     esp_err_t err = i2c_dev_read_u16_le(s_dev, REG_ALS_DATA, &als_count);
     if (err != ESP_OK) return err;
 
+    // WHITE is read on every call, also when raw_white is NULL: a failed
+    // read fails the whole call like an ALS failure does.
     uint16_t white_count = 0;
-    if (raw_white || true) {
-        err = i2c_dev_read_u16_le(s_dev, REG_WHITE_DATA, &white_count);
-        if (err != ESP_OK) return err;
-    }
+    err = i2c_dev_read_u16_le(s_dev, REG_WHITE_DATA, &white_count);
+    if (err != ESP_OK) return err;
 
     if (raw_als)   *raw_als   = als_count;
     if (raw_white) *raw_white = white_count;

@@ -3786,7 +3786,7 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     return httpd_resp_send(req, ok, HTTPD_RESP_USE_STRLEN);
 }
 
-// --- GET /log (auth'd, streams the ring buffer as text/plain) ---------------
+// --- GET /log (no auth, streams the ring buffer as text/plain) --------------
 
 // V2.8.30: 2 KB -> 32 KB. Every httpd_resp_send_chunk() is THREE socket writes
 // (size line, data, "\r\n"), and over TLS each write is its own record; the two

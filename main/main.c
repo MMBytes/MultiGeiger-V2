@@ -151,7 +151,6 @@ static uint32_t n_attempts = 0, n_connects = 0, n_got_ip = 0;
 // Xtensa a uint64_t store is two instructions (torn-read hazard). Wraps after
 // 4.3 billion disconnects (~136 years at 1/s) — sufficient for display use.
 static uint32_t n_disconnects = 0;
-static uint32_t last_disconnect_reason = 0;
 static float    last_dhcp_s = 0.0f, last_assoc_s = 0.0f;
 
 // V2.4.19: set in the main loop when EV_GOT_IP fires; cleared after the
@@ -492,7 +491,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
     case WIFI_EVENT_STA_DISCONNECTED: {
         wifi_event_sta_disconnected_t *e = (wifi_event_sta_disconnected_t *)data;
-        last_disconnect_reason = e->reason;
         n_disconnects++;
         ESP_LOGW(TAG, "STA_DISCONNECTED #%" PRIu32 ": reason=%d",
                  n_disconnects, e->reason);
@@ -1146,7 +1144,7 @@ static void do_tx_cycle(void) {
     g_last_hv_pulses_delta = hv_pulses_delta;  // per-cycle — status page + HTTPS uploads
     g_last_hv_error  = hv_error;
     // V2.4.1 (B1): 64-bit store on a 32-bit core isn't atomic — wrap to
-    // pair with the spinlock'd read in main_status_last_cycle_at.
+    // pair with the spinlock'd read under g_last_cycle_at_mux (main_status_snapshot).
     int64_t cycle_at = (int64_t)time(NULL);
     portENTER_CRITICAL(&g_last_cycle_at_mux);
     g_last_cycle_at  = cycle_at;
@@ -1230,7 +1228,7 @@ static void do_tx_cycle(void) {
     }
 
     // Particulate-matter sample — uploaded to Madavi (combined env body) and
-    // sensor.community (X-PIN 12 POST) when pm_valid. Driver's data-ready
+    // sensor.community (X-PIN 1 POST) when pm_valid. Driver's data-ready
     // poll keeps this safe even if the sensor missed an internal 1 Hz tick
     // (drops to ESP_FAIL after ~1 s).
     pm_sample_t pm = { 0 };
@@ -1446,7 +1444,7 @@ static void do_tx_cycle(void) {
     // reads cleanly as:
     //   CYCLE #N → heap → mqtt publish ok → Sending to Madavi → ...
     //
-    // Built from the g_last_* cache written at line ~385 via
+    // Built from the g_last_* cache written earlier in this function, via
     // main_status_snapshot() so the JSON includes uptime / cycles /
     // reconnects without re-reading state here.
     {
@@ -1569,19 +1567,19 @@ void app_main(void) {
     // i2c_bus.c owns both buses (primary always-on, secondary lazy +
     // sheddable). For each sensor module we try the primary bus first;
     // if no device was found, we ask for the secondary bus (which
-    // lazily enables LDO2 on FeatherS3-D, returns NULL on Heltec / QT Py)
-    // and probe again. On a hit, mark the secondary bus as kept-alive
-    // so i2c_bus_finalize() below doesn't tear it down.
+    // lazily enables LDO2 on FeatherS3-D, returns NULL on every
+    // HAL_I2C2_NONE board) and probe again. On a hit, mark the secondary
+    // bus as kept-alive so i2c_bus_finalize() below doesn't tear it down.
     //
     // Display does its own dual-bus auto-detect inside display_setup()
     // (and calls i2c_bus_secondary_keep_alive() itself if it lands on
     // the secondary). After all init, i2c_bus_finalize() drops LDO2 if
     // nothing — sensor or display — ended up on STEMMA2.
     //
-    // Heltec WiFi LoRa 32 V4-R2 is the one exception: its secondary bus is
-    // permanently and exclusively the onboard OLED, never a general-purpose
-    // STEMMA-style connector — see PROBE_ON_BOTH_BUSES below, which skips
-    // the secondary-bus fallback entirely on this board.
+    // HAL_I2C2_ONBOARD_OLED (Heltec WiFi LoRa 32 V4-R2) is the one exception:
+    // its secondary bus is permanently and exclusively the onboard OLED, never
+    // a general-purpose STEMMA-style connector — see PROBE_ON_BOTH_BUSES below,
+    // which skips the secondary-bus fallback entirely on such a board.
     //
     // V2.5.19: select the primary-bus pin route from config BEFORE the first
     // i2c_bus_get_primary() below caches the bus. No-op except on QT Py
@@ -1601,11 +1599,12 @@ void app_main(void) {
     // Helper macro: try a sensor's init on bus 1; if no device bound,
     // try bus 2; if a device was found there, keep the bus alive.
     //
-    // Heltec WiFi LoRa 32 V4-R2: the secondary bus is the onboard OLED,
-    // never a pluggable sensor connector, so the fallback probe is
-    // compiled out entirely for this board — it would otherwise probe the
-    // display's bus on every sensor driver, every boot, for no reason.
-#if defined(BOARD_HELTEC_WIFI_LORA32_V4_R2)
+    // HAL_I2C2_ONBOARD_OLED (Heltec WiFi LoRa 32 V4-R2): the secondary bus is
+    // the onboard OLED, never a pluggable sensor connector, so the fallback
+    // probe is compiled out entirely — it would otherwise probe the display's
+    // bus on every sensor driver, every boot, for no reason. (HAL_I2C2_NONE
+    // boards keep the fallback; i2c_bus_get_secondary() returns NULL there.)
+#if HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
     #define PROBE_ON_BOTH_BUSES(init_fn, present_fn, bus1)                  \
         do {                                                                \
             init_fn(bus1);                                                  \

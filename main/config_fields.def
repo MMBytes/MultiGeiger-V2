@@ -20,8 +20,9 @@
 //   X_F32(name, nvs_key, default, min, max)
 //   X_U8(name, nvs_key, default, min, max)
 //
-// Any X_* an include does not care about must still be #define'd to nothing
-// (the X_NOP macro at the bottom of each include block handles this).
+// Any X_* an include does not care about must still be #define'd (to nothing
+// if unused); #undef all five X_* after the #include so the next block starts
+// clean (see config.c).
 //
 // CONVENTIONS:
 //   * `nvs_key` is also the HTML form field name (used by config_post). When

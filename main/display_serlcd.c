@@ -21,10 +21,6 @@
 #include "main_status.h"    // V2.4.1 (A4): consolidated status snapshot
 #include "transmission.h"   // V2.3.29: tx_get_stats() for the Uploads page
 
-// main.c-defined accessor (separate from main_status — controls per-target
-// row visibility on the Uploads page).
-extern bool main_target_enabled(int target_id);
-
 static const char *TAG = "serlcd";
 
 // I²C address + protocol prefixes (OpenLCD firmware constants —

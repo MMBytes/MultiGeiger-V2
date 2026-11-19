@@ -23,8 +23,8 @@ void log_ftp_init(const char *chip_id, const config_t *cfg);
 
 /** @brief Call from the main loop with the current uptime in ms.
  *
- *  First upload fires one hour after boot; subsequent uploads every
- *  cfg->ftp_interval_min minutes. No-op if disabled, WiFi down, time
+ *  First upload fires one full interval after boot, then every
+ *  cfg->ftp_interval_min minutes (60 if unset). No-op if disabled, WiFi down, time
  *  invalid, or not yet due.
  */
 void log_ftp_loop(uint32_t now_ms);

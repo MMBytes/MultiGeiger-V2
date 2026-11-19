@@ -58,7 +58,6 @@ static const char *TAG = "bmp581";
 
 static i2c_master_dev_handle_t s_dev   = NULL;
 static bool                    s_ready = false;
-static uint8_t                 s_addr  = 0;     // actual address we bound to (0x46 or 0x47)
 
 // V2.6.19: last-read cache consumed by the telemetry read callbacks below.
 // Written ONLY by bmp581_read(); read ONLY by sd_logger's row build on the
@@ -163,7 +162,6 @@ esp_err_t bmp581_init(i2c_master_bus_handle_t bus) {
         return err;
     }
 
-    s_addr  = addr;
     s_ready = true;
 
     // Prime the oversampling chain with 10 throwaway samples before the first

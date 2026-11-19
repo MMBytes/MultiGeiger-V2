@@ -421,9 +421,10 @@ static bool tls_ctx_init(ftp_tls_ctx_t *t) {
     // phenomenon — triggered by write stalls leaking PSA crypto state on
     // the WANT_WRITE-then-abandon tear-down path. Three bugs in total.
     //
-    // V2.3.15 ships with TLS 1.2 cap DEFAULT-ON via the /config "Limit FTPS
-    // to TLS 1.2" checkbox (NVS key ftp_t12only, defaults to true). Users
-    // with TLS 1.3-capable FTPS servers can untick to opt back in. HTTPS
+    // The TLS 1.2 cap is the /config "Limit FTPS to TLS 1.2" checkbox (NVS
+    // key ftp_t12only). It shipped default-on in V2.3.15; the default is
+    // now OFF (config_fields.def), so tick it for a server that misbehaves
+    // on TLS 1.3. HTTPS
     // targets (Madavi / SC / Radmon / OSM / aqi.eco) are unaffected — they
     // always negotiate 1.3 freely via esp_tls (separate code path).
     if (s_cfg && s_cfg->ftp_tls12_only) {
@@ -562,7 +563,7 @@ static int io_recv1(ftp_io_t *io, char *out) {
                 // boilerplate now that TLS 1.3 ticket handling is settled.
                 // Re-enable via esp_log_level_set("ftp", ESP_LOG_DEBUG) when
                 // investigating a session-resumption regression.
-                ESP_LOGD(TAG, "TLS 1.3 NewSessionTicket received (ignored — V2.3.16 will save)");
+                ESP_LOGD(TAG, "TLS 1.3 NewSessionTicket received (ignored)");
                 continue;
             }
             if (r == MBEDTLS_ERR_SSL_TIMEOUT) return 0;

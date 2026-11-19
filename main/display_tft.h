@@ -28,8 +28,10 @@
 #include "esp_err.h"
 #include "display.h"      // display_snapshot_t
 
-/** @brief Power the shared TFT/I2C rail (PIN_I2C_POWER_GATE) and bring up
- *  the ST7789 panel: SPI bus init, esp_lcd panel IO + driver creation,
+/** @brief Bring up the ST7789 panel (its shared TFT/I2C rail,
+ *  PIN_I2C_POWER_GATE, is already on: i2c_bus_get_primary() drives it since
+ *  V2.6.11, guarded by HAL_HAS_I2C_POWER_GATE): SPI bus init, esp_lcd panel
+ *  IO + driver creation,
  *  reset, orientation (swap_xy/mirror/gap), display-on, and PSRAM
  *  framebuffer allocation.
  *

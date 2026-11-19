@@ -8,7 +8,12 @@
  *  live here. Sensor and display modules become pure consumers — they
  *  receive bus handles from main.c via the accessors below.
  *
- *  Per-board behaviour:
+ *  Per-board behaviour. V2.8.31: the code no longer tests board names — it
+ *  reads hal.h capabilities: HAL_I2C2_KIND (HAL_I2C2_NONE / _CONNECTOR /
+ *  _ONBOARD_OLED) for the second bus, HAL_HAS_VEXT_GATE (active-LOW) and
+ *  HAL_HAS_I2C_POWER_GATE (active-HIGH) for the primary bus's power pin. The
+ *  boards below are examples of each; a new board sets those macros (and
+ *  adds a branch in i2c_bus.c only if its wiring differs — see hal.h).
  *    Heltec V2 (+ 4 MB clone): primary bus on PIN_I2C_SDA / PIN_I2C_SCL
  *      (GPIO 4 / 15) with the Vext active-LOW gate driven LOW to power
  *      the OLED + I²C pull-up rail (older modules ignore the drive,
@@ -67,9 +72,11 @@ void i2c_bus_set_primary_pinout(bool use_pinout);
  *  failure logs an error and returns NULL — only seen if I2C peripheral
  *  init itself fails, which is fatal).
  *
- *  On Heltec, this also drives Vext LOW and waits for the rail to
- *  settle before creating the bus. Subsequent calls return the cached
- *  handle without re-initialising.
+ *  On Heltec (HAL_HAS_VEXT_GATE), this also drives Vext LOW and waits for
+ *  the rail to settle before creating the bus; on the two Adafruit ESP32-S3
+ *  Feathers (HAL_HAS_I2C_POWER_GATE) it drives PIN_I2C_POWER_GATE HIGH the
+ *  same way. Subsequent calls return the cached handle without
+ *  re-initialising.
  */
 i2c_master_bus_handle_t i2c_bus_get_primary(void);
 
@@ -88,9 +95,10 @@ i2c_master_bus_handle_t i2c_bus_get_primary(void);
  *  I²C_NUM_1 / IO17 / IO18. Always non-NULL once created; never torn
  *  down (see i2c_bus_finalize()'s log-only branch for this board).
  *
- *  On Heltec V2 / QT Py / any board without a second bus: always returns
- *  NULL. Callers should treat NULL as "no second bus on this board"
- *  and skip secondary-bus probing gracefully.
+ *  On HAL_I2C2_NONE boards (V2.8.31 hal.h capability): always returns NULL.
+ *  The FeatherS3-D path above is HAL_I2C2_CONNECTOR, the Heltec V4-R2 path
+ *  HAL_I2C2_ONBOARD_OLED. Callers should treat NULL as "no second bus on
+ *  this board" and skip secondary-bus probing gracefully.
  *
  *  Calling this on FeatherS3-D enables LDO2 — adds ~5–10 mA continuous draw
  *  (LDO2 quiescent + onboard NeoPixel idle). If no consumer subsequently

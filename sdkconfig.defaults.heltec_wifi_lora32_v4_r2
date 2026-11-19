@@ -31,7 +31,7 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # ("PSRAM heap policy" section).
 
 # Console / flashing path: UART0 via the module's USB-UART bridge (this SKU
-# has no native USB peripheral wired out — see hal.h HAL_HAS_NATIVE_USB=0).
+# has no native USB peripheral wired out — see the USB / console note in hal.h).
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # Wi-Fi roaming app + other shared PSRAM-board config: see sdkconfig.defaults.psram

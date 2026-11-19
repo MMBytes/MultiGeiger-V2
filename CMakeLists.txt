@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.16)
 #     idf.py -DBOARD=feathers3_d           build   (UM FeatherS3-D, ESP32-S3 + 8 MB QSPI PSRAM)
 #     idf.py -DBOARD=adafruit_qtpy_esp32_pico  build (ESP32-PICO SiP, 2 MB QSPI PSRAM)
 #     idf.py -DBOARD=seeed_xiao_esp32s3    build   (Seeed XIAO ESP32-S3, 8 MB OPI PSRAM — I²C sensor host)
+#     idf.py -DBOARD=seeed_xiao_esp32s3_wio  build (Seeed XIAO ESP32-S3 + Wio-SX1262 LoRa kit, LoRaWAN)
 #     idf.py -DBOARD=heltec_wifi_lora32_v4_r2  build (Heltec WiFi LoRa 32 V4 base/R2, ESP32-S3R2 + 2 MB PSRAM)
 #     idf.py -DBOARD=sparkfun_thing_plus_esp32s3  build (SparkFun Thing Plus ESP32-S3, ESP32-S3-MINI-1 + 2 MB PSRAM)
 #     idf.py -DBOARD=sparkfun_thing_plus_esp32c5  build (SparkFun Thing Plus ESP32-C5, ESP32-C5-WROOM-1 + 8 MB PSRAM, first RISC-V target)
@@ -38,17 +39,16 @@ elseif(BOARD STREQUAL "heltec_v2_4mb")
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.heltec_v2_4mb")
 elseif(BOARD STREQUAL "feathers3_d")
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    # MQTT_RICH_STATE: opt in to the extended state JSON (system + per-target
-    # upload stats). PSRAM-equipped board, heap headroom is plenty. See
-    # mqtt.c::mqtt_publish_state() and mqtt_discovery.c for the gated sections.
-    add_compile_definitions(BOARD_FEATHERS3_D=1 MQTT_RICH_STATE=1)
+    # The extended MQTT state JSON follows PSRAM since V2.8.31
+    # (HAL_MQTT_RICH_STATE in hal.h), no per-board define here.
+    add_compile_definitions(BOARD_FEATHERS3_D=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.feathers3_d")
 elseif(BOARD STREQUAL "adafruit_qtpy_esp32_pico")
     # Adafruit QT Py ESP32-PICO (PID 5395). Original ESP32 LX6 SiP with
     # in-package 8 MB flash + 2 MB PSRAM. NeoPixel-equipped, no piezo, drops
     # OLED + speaker via HAL_HAS_OLED=0 / HAL_HAS_SPEAKER=0 in hal.h.
     set(IDF_TARGET "esp32" CACHE STRING "")
-    add_compile_definitions(BOARD_ADAFRUIT_QTPY_ESP32_PICO=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_ADAFRUIT_QTPY_ESP32_PICO=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_qtpy_esp32_pico")
 elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     # Seeed Studio XIAO ESP32-S3 (SKU 113991054). ESP32-S3 LX7 dual-core, 8 MB
@@ -56,7 +56,7 @@ elseif(BOARD STREQUAL "seeed_xiao_esp32s3")
     # I²C-only sensor host — Geiger tube not wired. See hal.h block under
     # BOARD_SEEED_XIAO_ESP32S3 for pin map and the "intended use" rationale.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3")
 elseif(BOARD STREQUAL "seeed_xiao_esp32s3_wio")
     # V2.8.11: Seeed XIAO ESP32-S3 + Wio-SX1262 kit (SX1262 LoRa on the XIAO's
@@ -65,7 +65,7 @@ elseif(BOARD STREQUAL "seeed_xiao_esp32s3_wio")
     # pulse pad), LoRaWAN via lorawan.cpp. See hal.h under
     # BOARD_SEEED_XIAO_ESP32S3_WIO.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3_WIO=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_SEEED_XIAO_ESP32S3_WIO=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.seeed_xiao_esp32s3_wio")
 elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")
     # Heltec WiFi LoRa 32 V4 — base/R2 variant (ESP32-S3R2, 2 MB in-package
@@ -76,7 +76,7 @@ elseif(BOARD STREQUAL "heltec_wifi_lora32_v4_r2")
     # BOARD_HELTEC_WIFI_LORA32_V4_R2 for the pin map and full design
     # rationale.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_HELTEC_WIFI_LORA32_V4_R2=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_HELTEC_WIFI_LORA32_V4_R2=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.heltec_wifi_lora32_v4_r2")
 elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32s3")
     # SparkFun Thing Plus ESP32-S3 (WRL-24408). ESP32-S3-MINI-1 SiP, 2 MB
@@ -85,7 +85,7 @@ elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32s3")
     # hal.h under BOARD_SPARKFUN_THING_PLUS_ESP32S3 for the full pin map and
     # design rationale).
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32S3=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32S3=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.sparkfun_thing_plus_esp32s3")
 elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32c5")
     # SparkFun Thing Plus ESP32-C5 (WRL-30678). ESP32-C5-WROOM-1 SiP — single-
@@ -99,7 +99,7 @@ elseif(BOARD STREQUAL "sparkfun_thing_plus_esp32c5")
     # docs/superpowers/specs/2026-07-09-sparkfun-thing-plus-esp32-c5-board-port-design.md
     # for the full design rationale.
     set(IDF_TARGET "esp32c5" CACHE STRING "")
-    add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32C5=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_SPARKFUN_THING_PLUS_ESP32C5=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.sparkfun_thing_plus_esp32c5")
 elseif(BOARD STREQUAL "adafruit_esp32s3_tft_feather")
     # Adafruit ESP32-S3 TFT Feather (product #5483). ESP32-S3 LX7 dual-core,
@@ -114,7 +114,7 @@ elseif(BOARD STREQUAL "adafruit_esp32s3_tft_feather")
     # docs/superpowers/specs/2026-07-10-adafruit-esp32s3-tft-feather-board-port-design.md
     # for the full design rationale.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_esp32s3_tft_feather")
 elseif(BOARD STREQUAL "adafruit_esp32_feather_v2")
     # Adafruit ESP32 Feather V2 (product #5400 / #5900 — identical, #5900 just
@@ -126,7 +126,7 @@ elseif(BOARD STREQUAL "adafruit_esp32_feather_v2")
     # docs/superpowers/specs/2026-07-10-adafruit-esp32-feather-v2-board-port-design.md
     # for the full design rationale.
     set(IDF_TARGET "esp32" CACHE STRING "")
-    add_compile_definitions(BOARD_ADAFRUIT_ESP32_FEATHER_V2=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_ADAFRUIT_ESP32_FEATHER_V2=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_esp32_feather_v2")
 elseif(BOARD STREQUAL "adafruit_esp32s3_feather_4mb_2mbpsram")
     # Adafruit ESP32-S3 Feather, 4MB Flash / 2MB PSRAM, STEMMA QT (#5477).
@@ -140,7 +140,7 @@ elseif(BOARD STREQUAL "adafruit_esp32s3_feather_4mb_2mbpsram")
     # docs/superpowers/specs/2026-07-11-adafruit-esp32s3-feather-board-port-design.md
     # for the full pin map.
     set(IDF_TARGET "esp32s3" CACHE STRING "")
-    add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 MQTT_RICH_STATE=1)
+    add_compile_definitions(BOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1)
     set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.psram;sdkconfig.defaults.adafruit_esp32s3_feather_4mb_2mbpsram")
 else()
     message(FATAL_ERROR "Unknown BOARD '${BOARD}'. Valid: heltec_v2 | heltec_v2_4mb | feathers3_d | adafruit_qtpy_esp32_pico | seeed_xiao_esp32s3 | seeed_xiao_esp32s3_wio | heltec_wifi_lora32_v4_r2 | sparkfun_thing_plus_esp32s3 | sparkfun_thing_plus_esp32c5 | adafruit_esp32s3_tft_feather | adafruit_esp32_feather_v2 | adafruit_esp32s3_feather_4mb_2mbpsram")

@@ -40,6 +40,7 @@
 #include "mqtt_client.h"
 
 #include "als.h"
+#include "hal.h"              // V2.8.31: HAL_MQTT_RICH_STATE (an #if on an undefined macro is silently 0)
 #include "log_ftp.h"
 #include "history.h"
 #include "mqtt_discovery.h"
@@ -48,17 +49,6 @@
 #include "veml7700.h"
 #include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "version.h"
-
-// Internal hook from mqtt_discovery.c — used at init to seed the
-// tube-enabled predicate without exposing cfg through the discovery
-// public API. Declared local so other modules can't accidentally use it.
-extern void mqtt_discovery_set_tube_enabled(bool enabled);
-#ifdef MQTT_RICH_STATE
-extern void mqtt_discovery_set_upload_flags(bool madavi, bool sensorc, bool radmon,
-                                            bool osm, bool aqi, bool gmc,
-                                            bool thingspeak, bool thingspeak_pm,
-                                            bool ftp);
-#endif
 
 static const char *TAG = "mqtt";
 
@@ -69,7 +59,6 @@ static const char *TAG = "mqtt";
 // dance for callers).
 static esp_mqtt_client_handle_t s_client = NULL;
 static const char *s_chip_id  = NULL;      // pointer borrowed from main.c
-static const char *s_prefix   = NULL;      // pointer borrowed from g_cfg
 static volatile bool s_connected = false;
 static volatile uint32_t s_publish_count = 0;
 static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_discovery
@@ -78,7 +67,7 @@ static bool s_ha_discovery_enabled = false;   // V2.4.3: cached cfg->mqtt_ha_dis
 // per-target stat blocks for targets actually configured. Captured at init
 // (and again on /config Save → mqtt_init re-entry path) so the publish hot
 // path doesn't need to reach into the global cfg.
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
 static bool s_send_madavi  = false;
 static bool s_send_sensorc = false;
 static bool s_send_radmon  = false;
@@ -152,7 +141,7 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
         // entities. Cheap — broker just overwrites identical retained
         // payloads at zero observable cost.
         if (s_ha_discovery_enabled) {
-            mqtt_discovery_publish_all(s_client, s_chip_id, s_prefix);
+            mqtt_discovery_publish_all(s_client, s_chip_id, s_topic_state, s_topic_avail);
             // V2.8.28: this handler runs IN the MQTT task, and the discovery
             // payloads (768-B buffer) sit on its stack. mqtt.c sets no
             // task.stack_size, so esp-mqtt's default MQTT_TASK_STACK (6*1024,
@@ -194,12 +183,12 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
 // read — HA-discovery enable, the tube-enabled predicate, and (rich boards)
 // the per-target upload-enable flags. Shared by mqtt_init() and
 // mqtt_apply_config() so adding an upload target only touches ONE place.
-// Deliberately does NOT touch s_chip_id / s_prefix (init-/reconnect-level —
+// Deliberately does NOT touch s_chip_id / the topic strings (init-level —
 // a broker/prefix change is reboot-required, not live-tunable).
 static void mqtt_cache_cfg_gates(const config_t *cfg) {
     s_ha_discovery_enabled = cfg->mqtt_ha_discovery;
     mqtt_discovery_set_tube_enabled(cfg->tube_enabled);
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     s_send_madavi     = cfg->send_madavi;
     s_send_sensorc    = cfg->send_sensorc;
     s_send_radmon     = cfg->send_radmon;
@@ -235,7 +224,7 @@ void mqtt_apply_config(const config_t *cfg) {
     // teardown's mqtt_stop() that mqtt_publish_state() uses.
     if (s_state_mux) xSemaphoreTake(s_state_mux, portMAX_DELAY);
     if (s_client && s_connected && s_ha_discovery_enabled) {
-        mqtt_discovery_publish_all(s_client, s_chip_id, s_prefix);
+        mqtt_discovery_publish_all(s_client, s_chip_id, s_topic_state, s_topic_avail);
         ESP_LOGI(TAG, "config applied live — HA discovery republished");
     }
     if (s_state_mux) xSemaphoreGive(s_state_mux);
@@ -271,7 +260,6 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     }
 
     s_chip_id = chip_id;
-    s_prefix  = cfg->mqtt_topic_prefix;
     // V2.5.3: cache the config-derived publish/discovery gates (HA-discovery
     // enable, tube-enabled predicate, rich-state upload flags). Shared with
     // mqtt_apply_config() so a /config Save can refresh them live.
@@ -280,11 +268,13 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     // Pre-build the per-device topic strings so the publish path doesn't
     // re-snprintf every cycle. snprintf return ignored — the buffers are
     // sized for the documented field maxes (CFG_MQTT_PFX_MAX=31 +
-    // chip-id 19 + suffix), can't overflow.
+    // chip-id 19 + suffix), can't overflow. V2.8.31: built ONCE from the
+    // prefix as of init and also handed to HA discovery, so discovery and
+    // the publishes cannot disagree after a prefix Save without restart.
     snprintf(s_topic_state, sizeof(s_topic_state),
-             "%s/%s/state", s_prefix, s_chip_id);
+             "%s/%s/state", cfg->mqtt_topic_prefix, s_chip_id);
     snprintf(s_topic_avail, sizeof(s_topic_avail),
-             "%s/%s/availability", s_prefix, s_chip_id);
+             "%s/%s/availability", cfg->mqtt_topic_prefix, s_chip_id);
 
     // Build the broker URI. esp-mqtt accepts "mqtt://host:port" for plain
     // TCP and "mqtts://host:port" for TLS — the scheme alone selects the
@@ -468,7 +458,7 @@ void mqtt_publish_state(const main_status_t *st,
     // Buffer sizing (V2.4.26 base; rich grown V2.5.2):
     //   - Base 768 B covers all sensor blocks + the always-on system block
     //     (worst case ~365 B on Heltec, ~580 B on FeatherS3-D PM+DNMS).
-    //   - Rich (MQTT_RICH_STATE) adds the per-target upload stats + V2.4.33's
+    //   - Rich (HAL_MQTT_RICH_STATE) adds the per-target upload stats + V2.4.33's
     //     3 internal/DMA heap fields. Worst case on a fully-loaded FeatherS3-D
     //     (tube + env + PM + DNMS + lux + ALL 7 upload targets + FTP, uint32-max
     //     counters) ≈ 1.27 KB — which the old 1280 B sized to (5 targets) could
@@ -486,7 +476,7 @@ void mqtt_publish_state(const main_status_t *st,
     //   - V2.6.15 added nox_index (~20 B worst case, "int32_t" min value).
     //     Well within existing slack; 1792 B ceiling still unchanged.
     // Stack-allocated — cycle task has 4 KB+ stack, so 1792 / 768 B both fit.
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     char buf[1792];   // 8 upload targets + heap split + cpm5/15 + all sensors + FTP
 #else
     char buf[768];
@@ -518,7 +508,7 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"usvph\":%.4f",     st->last_usvph);
         APPEND(",\"hv_pulses\":%" PRIu32, st->last_hv_pulses);
         APPEND(",\"hv_err\":%s",      st->last_hv_error ? "true" : "false");
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
         // V2.5.6: rolling 5-/15-min CPM means (history.c). Rich/PSRAM boards
         // only; suppressed during ramp-up so HA shows unavailable, not 0.
         {
@@ -617,7 +607,7 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"heap_free\":%" PRIu32,      esp_get_free_heap_size());
         APPEND(",\"heap_min\":%" PRIu32,       esp_get_minimum_free_heap_size());
         APPEND(",\"heap_max_alloc\":%" PRIu32, (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
         // V2.4.33: internal/DMA-RAM split — PSRAM (rich-state) boards only.
         // The heap_* above are PSRAM-dominated totals; WiFi + lwIP RX buffers
         // live in INTERNAL/DMA RAM, so the contiguous-block ceiling THERE (not
@@ -633,7 +623,7 @@ void mqtt_publish_state(const main_status_t *st,
         APPEND(",\"reset_reason\":\"%s\"",     reset_reason_str(esp_reset_reason()));
     }
 
-#ifdef MQTT_RICH_STATE
+#if HAL_MQTT_RICH_STATE
     // --- V2.4.26: per-target upload stats (PSRAM boards only) -------------
     // Mirror of the /status page's Uploads block — same accessors, same
     // gating on cfg.send_*. Per-target keys use the same short names used

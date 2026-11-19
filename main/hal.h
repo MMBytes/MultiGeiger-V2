@@ -52,7 +52,6 @@
  *                            multi-page rotation (no I²C probe needed, the
  *                            panel is always present). 0 elsewhere.
  *    HAL_HAS_PSRAM           applog.c picks PSRAM vs internal DRAM ring
- *    HAL_HAS_NATIVE_USB      console routing in sdkconfig overlay
  *    HAL_HAS_VEXT_GATE       Heltec-style active-LOW power gate
  *    HAL_HAS_ANTENNA_SWITCH  external u.FL antenna toggle in /config UI
  *    HAL_HAS_I2C_PINOUT_SWITCH  V2.5.19: 1 = the board exposes a SECOND set of
@@ -98,6 +97,36 @@
  *                            lands (http_server.c UPLOAD_PROMPT_BOARD)
  *    HAL_OLED_CHIP_NAME      V2.8.11: OLED controller named in the boot log
  *                            ("SSD1306" / "SSD1309" / "SSD1315")
+ *    HAL_I2C2_KIND           V2.8.31: what the second I²C controller (I2C_NUM_1)
+ *                            is wired to, one of the HAL_I2C2_* values below:
+ *                            HAL_I2C2_NONE = no second bus (i2c_bus_get_secondary()
+ *                            returns NULL); HAL_I2C2_CONNECTOR = a plug-in
+ *                            connector on a switchable rail, brought up only when
+ *                            a probe asks for it, sensors AND display may live
+ *                            there, rail switched off again if nothing answered
+ *                            (FeatherS3-D STEMMA2, needs PIN_I2C2_SDA/SCL/LDO_EN;
+ *                            the i2c_bus.c branch is FeatherS3-D's as written:
+ *                            active-HIGH regulator enable, 10 ms settle, internal
+ *                            pull-ups, "LDO2" in its log lines — a connector on an
+ *                            always-on rail would need a new branch);
+ *                            HAL_I2C2_ONBOARD_OLED = a bus that only carries the
+ *                            on-module OLED, probed first for the display, never
+ *                            for sensors, rail never switched off (Heltec V4-R2,
+ *                            uses PIN_OLED_SDA/SCL + PIN_VEXT, which it drives
+ *                            LOW = rail on, 50 ms settle; not combinable with
+ *                            HAL_HAS_VEXT_GATE, which drives the same pin for
+ *                            the primary bus).
+ *    HAL_HAS_I2C_POWER_GATE  V2.8.31: 1 = the primary I²C bus sits behind an
+ *                            active-HIGH power pin (PIN_I2C_POWER_GATE) that
+ *                            i2c_bus_get_primary() drives high before the first
+ *                            probe (Adafruit "TFT_I2C_POWER" / "PIN_I2C_POWER").
+ *                            The active-LOW Heltec rail is HAL_HAS_VEXT_GATE.
+ *    HAL_DISPLAY_AUTO_MULTIPAGE  V2.8.31: display_mode AUTO with an OLED found:
+ *                            1 = rotate through all pages (the big 2.42" SSD1309
+ *                            this board is deployed with), 0 = radiation page
+ *                            only (0.96" panels; boards without an I²C OLED path
+ *                            set 0 too, it is never read there). A SerLCD always
+ *                            rotates, whatever this says.
  *
  *  Required where HAL_HAS_LORAWAN is 1 (V2.8.11, see "LoRa radio values"
  *  after the board chain): HAL_HAS_LORA_FEM, HAL_LORA_TCXO_V.
@@ -109,10 +138,30 @@
  *    PIN_LORA_RF_SW_RX       V2.8.11: extra RF-switch line, HIGH in receive
  *    HAL_REVC_CARRIER_FIXED  V2.8.11: the one Rev C carrier a board is built for
  *
+ *  Required by the V2.8.31 capabilities (checked after the board chain, both
+ *  ways: the pins without the capability are refused too, so a copied block
+ *  cannot keep a pin and silently lose its bus):
+ *    HAL_I2C2_CONNECTOR      PIN_I2C2_SDA, PIN_I2C2_SCL, PIN_I2C2_LDO_EN
+ *                            (active-HIGH enable of the connector's regulator)
+ *    HAL_I2C2_ONBOARD_OLED   PIN_OLED_SDA, PIN_OLED_SCL, PIN_VEXT
+ *    HAL_HAS_I2C_POWER_GATE 1  PIN_I2C_POWER_GATE
+ *
  *  V2.8.10: these are now ENFORCED — the block right after the board chain's
  *  #endif stops the build with #error if a branch forgets one. (`#if FLAG` on an
  *  undefined FLAG is silently `#if 0`, so a missed define used to compile.)
  */
+
+// --- Second I²C bus kinds (values for HAL_I2C2_KIND) -------------------------
+// V2.8.31: defined before the board chain so every branch can name them.
+// All three are nonzero on purpose: the preprocessor reads any unknown name as
+// 0 in `#if`, so a misspelt value (HAL_I2C2_CONECTOR) evaluates to 0, matches
+// no kind and stops the build in the check after the board chain, instead of
+// silently meaning "no second bus". Test HAL_I2C2_KIND only in files that
+// include hal.h: without it the kind AND these values all read as 0, and
+// `HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED` would be true.
+#define HAL_I2C2_NONE           1   // no second bus on this board
+#define HAL_I2C2_CONNECTOR      2   // plug-in connector, switchable rail, shared by sensors + display
+#define HAL_I2C2_ONBOARD_OLED   3   // dedicated to the on-module OLED, rail on at first use, never off
 
 #if defined(BOARD_HELTEC_V2)
 
@@ -132,8 +181,11 @@
     #define HAL_HAS_OLED            1   // SSD1306 on shared I2C bus
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           0
-    #define HAL_HAS_NATIVE_USB      0   // Console via CP2102 UART0
+    // USB / console: Console via CP2102 UART0
     #define HAL_HAS_VEXT_GATE       1   // GPIO 21 = active-LOW MOSFET on V2+ Heltec carriers
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -213,8 +265,14 @@
     #define HAL_HAS_ALS             1   // V2.3.29: onboard ALS-PT19 ambient-light sensor on PIN_ALS
     #define HAL_HAS_FUEL_GAUGE      1   // V2.6.6: onboard MAX17048 fuel gauge at I2C 0x36
     #define HAL_HAS_PSRAM           1   // 8 MB QSPI PSRAM
-    #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
+    // USB / console: Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No Vext gate — sensors powered via Qwiic 3V3
+    #define HAL_I2C2_KIND              HAL_I2C2_CONNECTOR    // V2.8.31: STEMMA2 on I2C_NUM_1, powered by LDO2
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 1                     // V2.8.31: AUTO + OLED = rotate pages (2.42" SSD1309)
+    #define PIN_I2C2_SDA               16                    // STEMMA2 SDA (was a literal in i2c_bus.c)
+    #define PIN_I2C2_SCL               15                    // STEMMA2 SCL
+    #define PIN_I2C2_LDO_EN            39                    // LDO2 enable, active-HIGH; also powers the NeoPixel rail (see IO39 note below)
     #define HAL_HAS_ANTENNA_SWITCH  1   // u.FL external antenna + onboard SPDT RF switch
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (STEMMA1 + STEMMA2 are separate buses, not a pinout toggle)
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -361,8 +419,11 @@
     #define HAL_HAS_OLED            1   // External display via STEMMA QT (optional — probe-detected)
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 2 MB in-package SiP PSRAM
-    #define HAL_HAS_NATIVE_USB      0   // USB-C via CH9102F or CP2102N UART bridge (NOT native — original ESP32 has no USB-OTG)
+    // USB / console: USB-C via CH9102F or CP2102N UART bridge (NOT native — original ESP32 has no USB-OTG)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — STEMMA QT bus always powered
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on this board)
     #define HAL_HAS_I2C_PINOUT_SWITCH 1 // V2.5.19: STEMMA QT (IO22/19) ↔ SDA/SCL pads (IO4/33) via i2c_pinout
     #define HAL_HAS_CARRIER_REV_SWITCH 1 // V2.8.10: Rev C V2/V3 carrier select (`revc_carrier`) — see PIN_GMC_COUNT_INPUT_V3
@@ -483,8 +544,11 @@
     #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
-    #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
+    // USB / console: Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH  0   // PCB antenna only (no u.FL on standard XIAO ESP32-S3)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
     #define HAL_HAS_CARRIER_REV_SWITCH 1 // V2.8.10: Rev C V2/V3 carrier select (`revc_carrier`) — see PIN_GMC_COUNT_INPUT_V3
@@ -583,8 +647,11 @@
     #define HAL_HAS_OLED            1   // External OLED via D4/D5 I²C (probe-detected — dormant if absent)
     #define HAL_HAS_TFT             0
     #define HAL_HAS_PSRAM           1   // 8 MB OPI PSRAM (octal mode — see sdkconfig overlay)
-    #define HAL_HAS_NATIVE_USB      1   // Console via USB-Serial-JTAG (USB-C)
+    // USB / console: Console via USB-Serial-JTAG (USB-C)
     #define HAL_HAS_VEXT_GATE       0   // No power gate — 3V3 / 5V always live
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH  0   // WiFi: PCB antenna only (the u.FL on the Wio is the LoRa antenna)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0 // Single fixed I²C route (D4/D5)
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Fixed to Rev C V3 — see HAL_REVC_CARRIER_FIXED
@@ -666,7 +733,7 @@
     #define HAL_HAS_ALS               0   // No onboard ambient-light sensor
     #define HAL_HAS_FUEL_GAUGE        0   // No onboard fuel gauge
     #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
-    #define HAL_HAS_NATIVE_USB        0   // Console via USB-UART bridge on GPIO43/44 (TX/RX), not native USB
+    // USB / console: Console via USB-UART bridge on GPIO43/44 (TX/RX), not native USB
     // V2.6.20: the datasheet's §3.3 "Power Output" was read at port time
     // (V2.6.7) as GPIO36 (Vext_Ctrl) only gating the external "Ve" header,
     // not the OLED — never bench-verified, since no physical unit existed
@@ -674,7 +741,7 @@
     // OLED's I²C bus (I2C_NUM_1, GPIO17/18) timing out on every
     // transaction — the classic unpowered-target signature — and driving
     // Vext_Ctrl LOW before the OLED bus comes up (see PIN_VEXT below and
-    // i2c_bus_get_secondary()'s BOARD_HELTEC_WIFI_LORA32_V4_R2 branch)
+    // i2c_bus_get_secondary()'s HAL_I2C2_ONBOARD_OLED branch)
     // confirmed it: the display now enumerates (SSD1315 @ 0x3C) and shows
     // correctly. The datasheet reading was wrong; this board's Vext_Ctrl
     // behaves like Heltec V3's, gating the OLED rail.
@@ -687,6 +754,9 @@
     // the fix belongs where it now lives, scoped to the OLED bus in
     // i2c_bus_get_secondary(). PIN_VEXT is driven directly there.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_ONBOARD_OLED // V2.8.31: I2C_NUM_1 carries only the onboard OLED
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only (no u.FL / no RF switch)
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed route per bus
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -763,7 +833,7 @@
     // on V1.9 the comparator input and the radio control contended for one
     // pin (see PIN_LORA_FEM_EN below). V1.10 leaves GPIO2 unwired, which
     // dissolves the contention: FEM_EN gets the pin to itself, always driven
-    // by lorawan_setup(). V1.9-mainboard units must stay ≤ V2.6.33 — this
+    // by radio_init() in lorawan.cpp. V1.9-mainboard units must stay ≤ V2.6.33 — this
     // firmware would read "cap full" off a floating pin and drive FEM_EN
     // into their comparator.
     //
@@ -788,7 +858,7 @@
     // SPI-boot-vs-download-mode decision (that's GPIO0 + GPIO46, per
     // Table 3-3) and no effect on this board's console/flashing path, which
     // runs over a separate USB-UART bridge chip on GPIO43/44, not native
-    // USB-Serial-JTAG (see HAL_HAS_NATIVE_USB=0 above). The datasheet also
+    // USB-Serial-JTAG (see the USB / console note above). The datasheet also
     // states the eFuse bits that make the chip act on this strap at all
     // (EFUSE_DIS_PAD_JTAG, EFUSE_DIS_USB_JTAG, EFUSE_STRAP_JTAG_SEL)
     // default to 0/not-burnt on every stock chip, so in practice GPIO3's
@@ -863,14 +933,15 @@
     #define PIN_LORA_BUSY           13
     #define PIN_LORA_DIO1           14
     // VFEM_Control (J3 pin18): switches power to the LoRa RF front end.
-    // Driven HIGH by lorawan_setup() before radio init (V1.9 precedent).
+    // Driven HIGH by the first lorawan_fem_is_kct8103l() call, before any
+    // SPI traffic to the radio (V1.9 precedent).
     #define PIN_LORA_VFEM            7
     // FEM_EN = GC1109 FEM enable/CSD. V2.6.34: on the V1.10 mainboard the
     // old double-booking with the HV cap-full comparator is GONE — the
     // comparator moved off this pin (to GPIO3 as built; see
     // PIN_HV_CAP_FULL_INPUT above) and the mainboard leaves GPIO2 unwired,
     // so FEM_EN finally owns this pin.
-    // Always driven HIGH by lorawan_setup() (the former g_cfg.lorawan_fem_en
+    // Always driven HIGH by radio_init() (the former g_cfg.lorawan_fem_en
     // opt-in was removed with the V1.9 hazard that justified it): per
     // RadioLib discussion #1665 the GC1109 must be enabled for RX, so with
     // LoRaWAN on there is no valid "FEM off" configuration.
@@ -907,13 +978,13 @@
     //                 else could claim these pins anyway.
     //   GPIO7         VFEM_Control (LoRa front-end enable, J3 pin18 per the
     //                 datasheet's own Table 2.2.2). Now driven HIGH by
-    //                 lorawan_setup() — see PIN_LORA_VFEM above.
+    //                 lorawan_fem_is_kct8103l() — see PIN_LORA_VFEM above.
     //   GPIO2         FEM_EN (LoRa front-end enable, J3 pin13 per Table
     //                 2.2.2 — a second, distinct front-end control signal
     //                 from GPIO7/VFEM_Control). See PIN_LORA_FEM_EN above:
     //                 formerly double-booked with PIN_HV_CAP_FULL_INPUT;
     //                 V1.10 leaves the header pad unwired so FEM_EN owns
-    //                 the pin (always driven by lorawan_setup()).
+    //                 the pin (always driven by radio_init()).
     //   GPIO46        FEM_PA (LoRa PA control) per Heltec's own pin-mapping
     //                 diagram — dropped from the datasheet PDF's own summary
     //                 table (same class of gap as GPIO34/VGNSS_Ctrl below),
@@ -985,7 +1056,7 @@
     //                 per Table 2.2.2 row 4 (J3 pin4). Function: gates the
     //                 VBAT_Read (GPIO1) voltage divider — must be pulled
     //                 high before reading GPIO1's ADC. NOT a free/spare GPIO.
-    //   GPIO43/44     UART0 console (USB-UART bridge, HAL_HAS_NATIVE_USB=0)
+    //   GPIO43/44     UART0 console (USB-UART bridge)
     //                 — not free GPIO
     //   GPIO0         BOOT strap
 
@@ -1017,13 +1088,16 @@
     #define HAL_HAS_ALS               0   // ALS-PT19 is onboard the FeatherS3-D module itself (GPIO4, not header-routed) — the shared carrier PCB carries no ALS, and this board has no onboard equivalent. Confirmed by user (PCB designer).
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36 — same chip/address/driver as FeatherS3-D
     #define HAL_HAS_PSRAM             1   // 2 MB in-package, quad
-    #define HAL_HAS_NATIVE_USB        1   // USB-C, USB-Serial-JTAG console
+    // USB / console: USB-C, USB-Serial-JTAG console
     // Shared-PCB sensors are powered from L2 (the carrier PCB's primary,
     // always-on Feather 3V3 pin), not from this board's own onboard Qwiic
     // connector (J4). J4's rail IS gated on-board (RT9080 LDO + GPIO45/Q_EN,
     // see the reserved-pin note below) — but we don't use J4, so no firmware
     // gating applies to our sensor path.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -1169,7 +1243,7 @@
     #define HAL_HAS_ALS               0   // No onboard ALS on this board
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36 — schematic-confirmed, same chip/address/driver as S3
     #define HAL_HAS_PSRAM             1   // 8 MB in-package, quad (this chip's Kconfig.spiram has no Octal option at all)
-    #define HAL_HAS_NATIVE_USB        1   // USB-C, IO13/IO14 wired to USB_D-/D+
+    // USB / console: USB-C, IO13/IO14 wired to USB_D-/D+
     // Regulator U4 (produces the "3.3V_P" peripheral rail feeding Qwiic,
     // microSD, and the NeoPixel) has its EN pin tied to the IO26/LP net
     // through a 100k pull-up (R6) to 3.3V. Since GPIO26 is left undriven by
@@ -1179,6 +1253,9 @@
     // board's GPIO45/Q_EN pull-up pattern, via a single resistor instead of
     // a divider. Bench-confirm at first boot — design spec §9 item 3.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -1311,7 +1388,7 @@
     #define HAL_HAS_ALS               0   // No onboard ALS on this board
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard fuel gauge @ 0x36 — MAX17048 assumed, confirm chip at bring-up (design spec §12 item 5)
     #define HAL_HAS_PSRAM             1   // 2 MB, external QSPI (feathers3_d-class)
-    #define HAL_HAS_NATIVE_USB        1   // USB-C, USB-Serial-JTAG console
+    // USB / console: USB-C, USB-Serial-JTAG console
     // No always-on peripheral rail on this board — unlike every other
     // PSRAM board's VEXT/Q_EN-style pull-up-defaults-on pattern, this
     // board's ONLY I2C bus (env sensors + fuel gauge) and its TFT are both
@@ -1320,11 +1397,14 @@
     // to be driven inside display_tft_init(), which runs too late (after
     // fuel_gauge_init() and every I2C sensor probe in main.c); it now
     // lives in i2c_bus_get_primary() (main/i2c_bus.c), the first I2C
-    // consumer main.c calls, guarded by `#if defined(BOARD_ADAFRUIT_...)`
+    // consumer main.c calls, guarded by HAL_HAS_I2C_POWER_GATE (V2.8.31)
     // rather than HAL_HAS_VEXT_GATE (that flag's Heltec-style
     // active-LOW-gate semantics don't fit this board's active-HIGH gate).
     // See design spec §2.1.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     1                     // V2.8.31: PIN_I2C_POWER_GATE must go high before any I²C probe
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -1431,7 +1511,7 @@
     #define HAL_HAS_ALS               0   // No onboard ALS-PT19, carrier PCB carries none
     #define HAL_HAS_FUEL_GAUGE        0   // No I2C fuel-gauge IC on this board (only a raw ADC BAT_VOLT_PIN/GPIO35 divider) — FIRST board on this shared carrier without one. New ADC-battery-voltage feature is out of scope (design spec §8), not "same as the others."
     #define HAL_HAS_PSRAM             1   // 2 MB in-package PSRAM (internal SDIO, ESP32-PICO-MINI-02 SiP)
-    #define HAL_HAS_NATIVE_USB        0   // USB-C via CH9102F/CP2102N bridge — classic ESP32 has no USB-OTG
+    // USB / console: USB-C via CH9102F/CP2102N bridge — classic ESP32 has no USB-OTG
     // NEOPIXEL_I2C_POWER (GPIO2) switches only the STEMMA QT connector's own
     // 3.3V regulator (per Adafruit's Learn guide). Our shared-carrier sensor
     // I2C bus rides the header SDA/SCL pins off the board's main, always-on
@@ -1439,6 +1519,9 @@
     // gate-is-irrelevant case, NOT adafruit_esp32s3_tft_feather's
     // only-I2C-bus-is-gated case. No i2c_bus.c pre-gate needed.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     0                     // V2.8.31: no active-HIGH I²C power pin
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route (header SDA/SCL)
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -1526,7 +1609,7 @@
     #define HAL_HAS_ALS               0   // No onboard ALS
     #define HAL_HAS_FUEL_GAUGE        1   // Onboard MAX17048 @ 0x36, user-confirmed 2026-07-11
     #define HAL_HAS_PSRAM             1   // 2 MB, external QSPI (feathers3_d-class, not in-package SiP)
-    #define HAL_HAS_NATIVE_USB        1   // USB-C, USB-Serial-JTAG console
+    // USB / console: USB-C, USB-Serial-JTAG console
     // No always-on I2C bus on this board — same as BOARD_ADAFRUIT_ESP32S3_TFT_FEATHER:
     // the single STEMMA QT bus (also the onboard fuel gauge's bus) is dead
     // until PIN_I2C_POWER_GATE (GPIO7, Adafruit's "PIN_I2C_POWER" net) is
@@ -1534,9 +1617,12 @@
     // own product documentation: "There is an I2C power pin that needs to be
     // pulled high for the STEMMA QT connector ... to work properly." Reuses
     // the TFT Feather's i2c_bus_get_primary() gate plumbing (main/i2c_bus.c)
-    // with its own GPIO7 guarded by `#if defined(BOARD_ADAFRUIT_...)`. See
+    // with its own GPIO7, guarded by HAL_HAS_I2C_POWER_GATE (V2.8.31). See
     // design spec §2.1.
     #define HAL_HAS_VEXT_GATE         0
+    #define HAL_I2C2_KIND              HAL_I2C2_NONE         // V2.8.31: no second I²C bus
+    #define HAL_HAS_I2C_POWER_GATE     1                     // V2.8.31: PIN_I2C_POWER_GATE must go high before any I²C probe
+    #define HAL_DISPLAY_AUTO_MULTIPAGE 0                     // V2.8.31: AUTO + OLED = radiation page only
     #define HAL_HAS_ANTENNA_SWITCH    0   // PCB antenna only
     #define HAL_HAS_I2C_PINOUT_SWITCH 0   // Single fixed I2C route
     #define HAL_HAS_CARRIER_REV_SWITCH 0 // Not a Rev C socket board — GMC pin fixed
@@ -1600,7 +1686,7 @@
     //   GPIO43/44     UART0 / "DB" debug-console pin (hardware UART debug
     //                 TX, per Adafruit's own docs — NOT where Serial.print()/
     //                 ESP_LOGx output goes; that's native USB-Serial-JTAG).
-    //                 Not used — console is USB-C (HAL_HAS_NATIVE_USB=1).
+    //                 Not used — console is USB-C (USB-Serial-JTAG).
 
 #else
     #error "No board defined. Set -DBOARD_HELTEC_V2=1 / -DBOARD_FEATHERS3_D=1 / -DBOARD_ADAFRUIT_QTPY_ESP32_PICO=1 / -DBOARD_SEEED_XIAO_ESP32S3=1 / -DBOARD_SEEED_XIAO_ESP32S3_WIO=1 / -DBOARD_HELTEC_WIFI_LORA32_V4_R2=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32S3=1 / -DBOARD_SPARKFUN_THING_PLUS_ESP32C5=1 / -DBOARD_ADAFRUIT_ESP32S3_TFT_FEATHER=1 / -DBOARD_ADAFRUIT_ESP32_FEATHER_V2=1 / -DBOARD_ADAFRUIT_ESP32S3_FEATHER_4MB_2MBPSRAM=1 via CMake."
@@ -1622,9 +1708,6 @@
 #endif
 #ifndef HAL_HAS_PSRAM
 #error "hal.h: this board branch does not define HAL_HAS_PSRAM"
-#endif
-#ifndef HAL_HAS_NATIVE_USB
-#error "hal.h: this board branch does not define HAL_HAS_NATIVE_USB"
 #endif
 #ifndef HAL_HAS_VEXT_GATE
 #error "hal.h: this board branch does not define HAL_HAS_VEXT_GATE"
@@ -1674,6 +1757,51 @@
 #ifndef HAL_OLED_CHIP_NAME
 #error "hal.h: this board branch does not define HAL_OLED_CHIP_NAME"
 #endif
+// V2.8.31: board capabilities that i2c_bus.c, display.c and main.c used to
+// read from board names (`#if defined(BOARD_...)`). A port that leaves one out
+// would otherwise silently get "no second bus" / "no power gate" / "single page".
+#ifndef HAL_I2C2_KIND
+#error "hal.h: this board branch does not define HAL_I2C2_KIND"
+#endif
+#ifndef HAL_HAS_I2C_POWER_GATE
+#error "hal.h: this board branch does not define HAL_HAS_I2C_POWER_GATE"
+#endif
+#ifndef HAL_DISPLAY_AUTO_MULTIPAGE
+#error "hal.h: this board branch does not define HAL_DISPLAY_AUTO_MULTIPAGE"
+#endif
+#if HAL_I2C2_KIND == HAL_I2C2_CONNECTOR
+    #if !defined(PIN_I2C2_SDA) || !defined(PIN_I2C2_SCL) || !defined(PIN_I2C2_LDO_EN)
+    #error "hal.h: HAL_I2C2_CONNECTOR needs PIN_I2C2_SDA, PIN_I2C2_SCL and PIN_I2C2_LDO_EN"
+    #endif
+#elif HAL_I2C2_KIND == HAL_I2C2_ONBOARD_OLED
+    #if !defined(PIN_OLED_SDA) || !defined(PIN_OLED_SCL) || !defined(PIN_VEXT)
+    #error "hal.h: HAL_I2C2_ONBOARD_OLED needs PIN_OLED_SDA, PIN_OLED_SCL and PIN_VEXT"
+    #endif
+    // i2c_bus_get_secondary() resets and drives PIN_VEXT for the OLED bus;
+    // HAL_HAS_VEXT_GATE drives the same pin for the primary bus earlier.
+    // No board has both today — a port that does must decide who owns it.
+    #if HAL_HAS_VEXT_GATE
+    #error "hal.h: HAL_I2C2_ONBOARD_OLED and HAL_HAS_VEXT_GATE both drive PIN_VEXT"
+    #endif
+#elif HAL_I2C2_KIND != HAL_I2C2_NONE
+// Also catches a misspelt value: an unknown name reads as 0, and no kind is 0.
+#error "hal.h: HAL_I2C2_KIND must be HAL_I2C2_NONE, HAL_I2C2_CONNECTOR or HAL_I2C2_ONBOARD_OLED"
+#endif
+// Reverse checks: a block copied from another board can keep the pins but set
+// the capability off; that would build fine and leave the bus unpowered.
+#if HAL_I2C2_KIND != HAL_I2C2_CONNECTOR && \
+    (defined(PIN_I2C2_SDA) || defined(PIN_I2C2_SCL) || defined(PIN_I2C2_LDO_EN))
+#error "hal.h: PIN_I2C2_* are only used with HAL_I2C2_KIND HAL_I2C2_CONNECTOR"
+#endif
+#if HAL_I2C2_KIND != HAL_I2C2_ONBOARD_OLED && (defined(PIN_OLED_SDA) || defined(PIN_OLED_SCL))
+#error "hal.h: PIN_OLED_SDA/SCL are only used with HAL_I2C2_KIND HAL_I2C2_ONBOARD_OLED"
+#endif
+#if HAL_HAS_I2C_POWER_GATE && !defined(PIN_I2C_POWER_GATE)
+#error "hal.h: HAL_HAS_I2C_POWER_GATE 1 needs PIN_I2C_POWER_GATE"
+#endif
+#if !HAL_HAS_I2C_POWER_GATE && defined(PIN_I2C_POWER_GATE)
+#error "hal.h: PIN_I2C_POWER_GATE is only driven with HAL_HAS_I2C_POWER_GATE 1"
+#endif
 
 // V2.8.11: LoRa radio values, needed only where HAL_HAS_LORAWAN is 1.
 //   HAL_HAS_LORA_FEM   1 = Heltec-style GC1109 front end: lorawan.cpp powers
@@ -1721,3 +1849,18 @@
  *  CONFIG_MBEDTLS_X509_CREATE_C off, tls_cert.c fails to link.
  */
 #define HAL_HAS_HTTPS   HAL_HAS_PSRAM
+
+/** @brief Extended MQTT state JSON + HA entities (system and per-target
+ *         upload stats, cpm5/cpm15) — mqtt.c / mqtt_discovery.c.
+ *
+ *  V2.8.31: derived here instead of a MQTT_RICH_STATE=1 define per board in
+ *  CMakeLists.txt and the cppcheck matrix (it was set on exactly the PSRAM
+ *  boards). Tied to PSRAM for heap headroom: the lean JSON exists for the
+ *  Heltec V2's small internal heap.
+ */
+#define HAL_MQTT_RICH_STATE   HAL_HAS_PSRAM
+// A leftover -DMQTT_RICH_STATE (old local build script, old cppcheck line)
+// would no longer do anything; stop instead of silently ignoring it.
+#ifdef MQTT_RICH_STATE
+#error "MQTT_RICH_STATE is derived in hal.h now (HAL_MQTT_RICH_STATE) — remove the -D"
+#endif

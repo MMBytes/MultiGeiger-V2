@@ -129,3 +129,16 @@ void main_ota_end(void);
 
 /** @brief Read the V2.4.24 OTA-in-progress flag. */
 bool main_ota_in_progress(void);
+
+/** @brief True if the given upload target is enabled in /config.
+ *
+ *  @param target_id  A tx_target_id_t value. Covers MADAVI, SENSORC, RADMON,
+ *                    OSM, OSM_STAGING and AQI only; every other id (GMC,
+ *                    THINGSPEAK, THINGSPEAK_PM, unknown) returns false.
+ *
+ *  Used by the display backends to hide disabled rows on the Uploads page
+ *  (and skip the page when none is enabled). V2.8.31: declared here instead
+ *  of four hand-written externs in display.c / display_serlcd.c /
+ *  display_tft.c, so a signature change fails the build.
+ */
+bool main_target_enabled(int target_id);

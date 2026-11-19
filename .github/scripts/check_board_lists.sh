@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Board-list consistency check.
 #
-# The build targets (twelve since V2.8.11) are named in nine places that nothing ties
+# The build targets (twelve since V2.8.11) are named in ten places that nothing ties
 # together: the CMake selector, both reusable workflow matrices, the release
 # artefact count, the per-board sdkconfig overlays, the web-flasher manifests
-# and its <select>, the README board table and the .gitignore list of
-# generated sdkconfig caches. Adding or renaming a board has repeatedly
+# and its <select>, the README board table, the .gitignore list of
+# generated sdkconfig caches and _build-boards.yml's chip-target ternary
+# (checks 1-10 below). Adding or renaming a board has repeatedly
 # missed one of them (the XIAO cache was committed in V2.5.20 because the
 # .gitignore list was not extended; the OTA label chain in http_server.c
 # missed three ports). This script takes CMakeLists.txt as the source of
@@ -96,6 +97,6 @@ done < <(awk '
 ' CMakeLists.txt)
 
 if [ "$fail" -eq 0 ]; then
-  echo "board lists consistent: ${#CMAKE[@]} boards in all nine places"
+  echo "board lists consistent: ${#CMAKE[@]} boards in all ten places"
 fi
 exit "$fail"

@@ -521,7 +521,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         // dusty-code's SDS011 driver (sds011.cpp:524-526) and matches Madavi's
         // data.php:49 detection: `isset($values["SDS_P1"]) && isset($values["SDS_P2"])`.
         // This is a Madavi-specific workaround — sensor.community gets the
-        // proper SPS30 fields on X-PIN 12; openSenseMap and aqi.eco continue
+        // proper SPS30 fields on X-PIN 1; openSenseMap and aqi.eco continue
         // to receive SPS30_* only (their parsers handle the prefix natively).
         // Mirror of the existing BME280_* relabel hack for SHT45+BMP581 data.
         n = tx_append(buf, cap, n,

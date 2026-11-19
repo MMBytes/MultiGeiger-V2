@@ -22,11 +22,7 @@
 #include "esp_timer.h"
 #include "main_status.h"    // V2.4.1 (A4): consolidated status snapshot
 #include "transmission.h"   // tx_get_stats() for the Uploads page
-
-// main.c-defined accessor (separate from main_status — controls per-target
-// row visibility on the Uploads page). Same declaration as display.c/
-// display_serlcd.c use for the identical Uploads-page gating logic.
-extern bool main_target_enabled(int target_id);
+#include "util.h"           // V2.8.31: fmt_kilo4 (PM number-concentration cells)
 
 static const char *TAG = "tft";
 
@@ -308,19 +304,12 @@ void display_tft_render_pm_mass(const display_snapshot_t *snap) {
     fb_push();
 }
 
-// Same value formatting as fmt_n_value() in display.c (kept as a local
-// copy — both are tiny, static, and per-backend; not worth a shared
-// helper header for one 7-line function).
+// V2.8.31: same 4-char cell as display.c — both call util.h fmt_kilo4()
+// (host-tested). The local copy kept here before still switched to "k"
+// at 10000, so 9950..9999 printed the 5-char "10.0k" that V2.8.5 fixed
+// on the OLED path only (SerLCD prints plain %5d, no "k" cell).
 static void fmt_n_value(char *out, size_t outsz, float v) {
-    if (v < 1000.0f) {
-        snprintf(out, outsz, "%4d", (int)(v + 0.5f));
-    } else if (v < 10000.0f) {
-        snprintf(out, outsz, "%3.1fk", v / 1000.0f);
-    } else {
-        int k = (int)(v / 1000.0f + 0.5f);
-        if (k > 99) k = 99;
-        snprintf(out, outsz, "%2dk ", k);
-    }
+    fmt_kilo4(out, outsz, v);
 }
 
 void display_tft_render_pm_number(const display_snapshot_t *snap) {
@@ -382,8 +371,8 @@ void display_tft_render_uploads(void) {
     fb_push();
 }
 
-// Local copy of display.c's format_time() — same tiny-static-per-backend
-// reasoning as fmt_n_value() above (7 lines, not worth a shared header).
+// Local copy of display.c's format_time() (tiny, static, per-backend; not
+// worth a shared header for 7 lines).
 static void fmt_uptime(int secs, char *out, size_t outsz) {
     int mins  = secs / 60;
     int hours = secs / 3600;

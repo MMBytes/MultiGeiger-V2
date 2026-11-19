@@ -218,10 +218,6 @@ bool bme280_present(void) {
     return s_ready;
 }
 
-i2c_master_bus_handle_t bme280_get_i2c_bus(void) {
-    return s_bus;
-}
-
 // --- Compensation (Bosch reference, datasheet 8.2) --------------------------
 
 static int32_t  compensate_T_int32(int32_t adc_T, int32_t *t_fine_out) {

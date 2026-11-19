@@ -17,8 +17,8 @@
  *    - `coredump_init()` called once at boot. Probes the partition, runs
  *      `esp_core_dump_image_check()`, populates the cached summary
  *      (task name, PC, panic reason) for cheap status-page reads.
- *    - HTTP server calls `coredump_have_dump()` / `coredump_get_size()` /
- *      `coredump_get_summary_html()` per /status render — all cheap.
+ *    - HTTP server calls `coredump_have_dump()` /
+ *      `coredump_get_summary_html()` per /status render — both cheap.
  *    - HTTP server calls `coredump_stream_to_http()` on GET
  *      /coredump.elf — reads the partition in chunks and writes to the
  *      response. Single 64 KB partition; chunked TCP write keeps RAM
@@ -56,9 +56,6 @@ void coredump_init(void);
 
 /** @brief True if a valid core dump is currently stored in flash. */
 bool coredump_have_dump(void);
-
-/** @brief Total dump size in bytes (incl. checksum). 0 if no dump. */
-size_t coredump_get_size(void);
 
 /** @brief Render a one-line HTML summary into `out`.
  *

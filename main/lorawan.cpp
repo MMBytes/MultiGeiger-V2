@@ -333,7 +333,6 @@ static bool s_suspended = false;
 #define TURN_POLL_MS     100
 #define TURN_WAIT_MAX_MS (5UL * 60UL * 1000UL)   // a round with several HTTPS targets, or FTPS, can take minutes
 
-// Enter one radio exchange. False = suspended for OTA: do not touch the radio.
 // Which WiFi transfer(s) held an exchange back, for its log line.
 static const char *turn_what(bool round, bool ftps) {
     if (round && ftps) return "the upload round and the FTPS log upload";
@@ -341,6 +340,7 @@ static const char *turn_what(bool round, bool ftps) {
     return "the upload round";
 }
 
+// Enter one radio exchange. False = suspended for OTA: do not touch the radio.
 static bool exchange_begin(void) {
     const int64_t t0 = esp_timer_get_time();
     bool held_by_round = false, held_by_ftps = false;   // what we waited for (log only)
@@ -639,8 +639,10 @@ static bool parse_creds(lw_creds_t *c) {
 // reuse across reboots permanently locks a device out of a LoRaWAN 1.0.4
 // network. Session after every uplink exchange (V2.8.12; was once per cycle)
 // — lets a rebooted node resume without rejoin at an FCnt the network
-// accepts. Wear math: ~300 B blob, 2 exchanges per 150 s cycle, over the
-// wear-leveled 24 KB nvs partition ≈ still decades; fine.
+// accepts. Wear math: ~300 B blob, one exchange per 4 min cycle at SF7
+// (lw_sched_interval_ms) plus one more per hour for port 2
+// (LW_PORT2_MIN_GAP_S) = ~16 saves/h worst case, over the wear-leveled 24 KB
+// nvs partition ≈ still decades; fine.
 static void nvs_save_blob(const char *key, const uint8_t *buf, size_t len) {
     nvs_handle_t h;
     if (nvs_open("lorawan", NVS_READWRITE, &h) != ESP_OK) return;
@@ -770,37 +772,6 @@ bool lorawan_forget_session(bool wipe_nonces) {
                  wipe_nonces ? "incl. DevNonce history" : "DevNonce history kept");
     }
     return ok;
-}
-
-/** @brief Erase the RadioLib 7.x session blob V2.8.20 and older kept under
- *         "session" (V2.8.21). Called once the RadioLib 8.0 session is active
- *         (joined or resumed): the old session is dead on the network from
- *         then on. Left in place, a node put back on V2.8.20 (by hand, or by
- *         V2.8.20's own crash rollback) would resume it and send into a
- *         session the network no longer accepts, without ever re-joining.
- *         Without it, V2.8.20 joins afresh. Its DevNonce history ("nonces")
- *         is kept on purpose: V2.8.20 loads it independently, so that join
- *         continues the old counter, which is normally above every DevNonce
- *         V2.8.21 used since restarting at 0 (unless V2.8.21 sent more join
- *         requests than the whole earlier history) — TTN then accepts it
- *         without another reset. Not found = nothing to do, silent. */
-static void lw_erase_v2820_session(void) {
-    nvs_handle_t h;
-    const esp_err_t o = nvs_open("lorawan", NVS_READWRITE, &h);
-    if (o != ESP_OK) {
-        // Logged: the old session stays, and a return to V2.8.20 would resume it.
-        ESP_LOGW(TAG, "could not remove the LoRaWAN session saved by V2.8.20 or older: %s", esp_err_to_name(o));
-        return;
-    }
-    const esp_err_t e = nvs_erase_key(h, "session");
-    if (e == ESP_OK) nvs_commit(h);
-    nvs_close(h);
-    if (e == ESP_OK) {
-        ESP_LOGI(TAG, "removed the LoRaWAN session saved by V2.8.20 or older (a return to that firmware "
-                      "now joins afresh)");
-    } else if (e != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "could not remove the LoRaWAN session saved by V2.8.20 or older: %s", esp_err_to_name(e));
-    }
 }
 
 // Write what RadioLib handed the store callbacks during the exchange or join
@@ -1264,8 +1235,9 @@ static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEve
 // Log a DR / TX-power change between consecutive uplinks and its likely
 // cause. A change shows up on the uplink AFTER the exchange that caused it:
 // a received LinkADRReq (previous exchange had a downlink) or RadioLib's ADR
-// backoff (applied at the end of an exchange without one). NbTrans is not
-// readable through RadioLib's API, so only DR and power are tracked.
+// backoff (applied at the end of an exchange without one). Only DR and power
+// are tracked here; NbTrans is read per exchange for the rx-windows line
+// (nbTransNow() -> rxobs_begin()).
 static void adr_track(const LoRaWANEvent_t *ev, int16_t st) {
     if (s_prev_valid && (ev->datarate != s_prev_dr || ev->power != s_prev_power)) {
         ESP_LOGW(TAG, "ADR: DR%u -> DR%u, %d -> %d dBm (%s)",
@@ -1390,9 +1362,7 @@ static void log_mac_exchange(const GeigerNode &node, int16_t st) {
 // (join/resume + a full TX interval come first), and even if it somehow
 // did, the cost is one extra harmless request. Worker-task-private, so no
 // cross-task atomicity concern either way — this is purely width hygiene.
-static uint32_t timesync_now_s(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000000LL);
-}
+// Stamped with lw_uptime_s() (link-health section above).
 static uint32_t s_timesync_last_s   = 0;   // uptime s at last DeviceTimeAns (or give-up); 0 = never
 static uint32_t s_timesync_attempts = 0;   // consecutive unanswered requests in the current window
 
@@ -1412,7 +1382,7 @@ static void timesync_give_up(void) {
     ESP_LOGW(TAG, "DeviceTime sync unsuccessful after %u attempts (unanswered "
              "or not queued) — deferring further requests to the daily window",
              (unsigned)s_timesync_attempts);
-    s_timesync_last_s   = timesync_now_s();
+    s_timesync_last_s   = lw_uptime_s();
     s_timesync_attempts = 0;
 }
 
@@ -1617,7 +1587,7 @@ static void poll_device_time(GeigerNode &node, bool *want) {
     const bool fresh = node.getMacDeviceTimeAns(&unix_s, &ms, true) == RADIOLIB_ERR_NONE && unix_s != 0;
     if (fresh) {
         timesync_apply(unix_s, ms);
-        s_timesync_last_s   = timesync_now_s();
+        s_timesync_last_s   = lw_uptime_s();
         s_timesync_attempts = 0;
     } else if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) {
         timesync_give_up();
@@ -1781,8 +1751,8 @@ static void lorawan_task(void *arg) {
         case LW_RESTORE_OK:
             break;
         case LW_RESTORE_NO_PERS:
-            ESP_LOGI(TAG, "no saved DevNonce history (new board, first start after the update to V2.8.21, or "
-                          "after a full LoRaWAN reset) — joining, DevNonce starts at 0");
+            ESP_LOGI(TAG, "no saved DevNonce history (new board, or after a full LoRaWAN reset) — "
+                          "joining, DevNonce starts at 0");
             break;
         case LW_RESTORE_PERS_BAD:
             ESP_LOGW(TAG, "saved DevNonce history not usable: %d (%s) — joining, DevNonce restarts at 0 "
@@ -1931,7 +1901,6 @@ static void lorawan_task(void *arg) {
             }
             portEXIT_CRITICAL(&s_status_mux);
             apply_fixed_dr(node);   // ADR off + the fixed DR (no-op in ADR mode)
-            lw_erase_v2820_session();   // the old session is dead from here on
             {
                 bool by_network = false;
                 const uint32_t dc_ms = node.applyBandDutyCycle(&by_network);
@@ -2015,7 +1984,7 @@ static void lorawan_task(void *arg) {
         // an answer lands is safe.
         bool want_time = (ntp_boot_epoch() == 0) &&
                          (s_timesync_last_s == 0 ||
-                          (timesync_now_s() - s_timesync_last_s) >= TIMESYNC_INTERVAL_S);
+                          (lw_uptime_s() - s_timesync_last_s) >= TIMESYNC_INTERVAL_S);
         // V2.8.14: not while the request (1 B) would push the cycle's first
         // frame plus the queued MAC answers over the DR's limit (AU915/AS923
         // DR2, US915 DR0: 11 B) — the answers go first, the request rides a

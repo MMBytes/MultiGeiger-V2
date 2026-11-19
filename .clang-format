@@ -1,6 +1,7 @@
 # Geiger V2 house formatting style.
 #
-# APPLIED TO CHANGED LINES ONLY -- never sweep the whole tree.
+# ADVISORY, CHANGED LINES ONLY -- never sweep the whole tree, never a required
+# step (see ADVISORY ONLY below).
 #
 # Use `git clang-format` (or the machine-local `_format.cmd` wrapper, gitignored
 # because it pins an absolute toolchain path), which reformats only the lines
@@ -22,8 +23,20 @@
 #   main/gnss.c        UBX frame parser (inline enum + state-transition ladder)
 #   main/neopixel.c    RMT symbol timing (.level/.duration pairs)
 # The last three are data tables whose meaning lives in the column layout.
-# Changed-lines-only formatting leaves all of it alone for free, which is why
-# this project has no `// clang-format off` markers and no .git-blame-ignore-revs.
+# This project has no `// clang-format off` markers and no .git-blame-ignore-revs.
+#
+# ADVISORY ONLY (2026-11-19): preview with `_format.cmd`, apply only where the
+# result is an improvement (typically new code), never as a required step.
+# Changed-lines-only does NOT leave aligned blocks alone: an edited line pulls
+# its whole run of aligned #defines / declarations / trailing comments into
+# realignment (one comment line edited in hal.h -> ~70 lines re-indented), so
+# do not apply it inside hal.h or any hand-aligned block. Tuning this config
+# does not fix that: re-measured at 8d2de1b, the full sweep is 5,863 lines with
+# this file and 3,829 with the best tuned variant, 92 % of it whitespace. The
+# hand style aligns at fixed columns per block; clang-format can only align to
+# the longest name in a run, or not at all. (`IndentPPDirectives: BeforeHash`
+# fixes hal.h but indents every #include inside #if in the .c files - worse
+# overall.)
 #
 # (Commit 6072f32's message quotes an earlier "~330 lines across 28 files" for
 #  this sweep. That figure was measured with `diff -w`, so it counted only
@@ -31,8 +44,9 @@
 #  supersede it; the pushed commit message can no longer be corrected.)
 #
 # ColumnLimit 0 = never re-wrap and never re-join; the author owns where lines
-# break, clang-format owns indent + spacing + column alignment. That keeps a
-# formatted diff limited to what you actually edited.
+# break, clang-format owns indent + spacing + column alignment. That stops
+# re-wrapping, but column alignment still reaches the neighbouring lines of an
+# edit (see ADVISORY ONLY above).
 #
 # Two settings are load-bearing and must not be "tidied up":
 #   SortIncludes: Never   -- not a correctness guard: clang-format only reorders

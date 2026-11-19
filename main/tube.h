@@ -143,9 +143,9 @@ typedef struct {
 
 // V2.6.9: coincidence window (µs after the START of an HV charge pulse,
 // see tube.c's recharge_tick S_PULSE_H) used to tag a counted edge as
-// HV-correlated rather than a genuine tube pulse. Lower bound clears the
-// ~190µs dead-time gate itself plus the FET's own 1500µs H-phase so a
-// pulse right on the gate edge isn't misattributed; upper bound covers the
+// HV-correlated rather than a genuine tube pulse. Lower bound (200 µs) clears
+// the ~190µs dead-time gate itself so a pulse right on the gate edge isn't
+// misattributed; upper bound covers the
 // 2.5ms (1500+1000µs) full charge-pulse period plus margin — the field
 // evidence (the 2026 phantom-count investigation) shows spurious
 // counts landing ~2.5-3ms after HV activity starts, matching the firmware's

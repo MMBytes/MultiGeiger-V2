@@ -9,6 +9,69 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.32 — LoRaWAN log lines say what happened and whether it matters
+
+Only the node log changes; the node behaves as before. On all boards, two
+log lines are no longer glued together at boot. LoRaWAN nodes (Heltec WiFi
+LoRa 32 V4, XIAO ESP32-S3 with Wio-SX1262) also get log lines that explain
+themselves without LoRaWAN background knowledge or a network-server console
+next to them.
+
+1. **"64 uplinks without a downlink" says it is normal and what comes next.**
+   The old line ("no downlink for the last 64 uplinks … ADR backoff (one step
+   every 32 uplinks: TX power to max, then DR-1, …) continues …") read as if
+   the network had told the node to change something. It now says that this
+   is normal while the network has nothing to send, that the node starts
+   asking for an answer (ADRACKReq), and that nothing changes unless the
+   network stays silent for about 32 more uplinks. After a reboot it says
+   that a change can come sooner, because RadioLib keeps counting silent
+   uplinks across the reboot. With a fixed data rate it says that the node
+   neither asks nor changes anything.
+2. **ADR changes say what changed, what stayed and who decided.** For example
+   `ADR: TX power 10 -> 18 dBm, data rate stays DR5 — ordered by the network
+   in the downlink after the previous uplink`, or `… — RadioLib's ADR backoff
+   (the network stayed silent)` (was `ADR: DR5 -> DR5, 10 -> 18 dBm (network,
+   after downlink)`).
+3. **The receive-window line uses plain words.** `nothing received`,
+   `received`, `damaged LoRa header` instead of the radio's IRQ names; each
+   window shows when it opened and how long it could stay open; RX2 reads
+   `not needed` when RX1 already delivered a valid downlink. A received frame
+   says whom it was for: `received: downlink for this node (260b1234), 14 B`,
+   `… for another device (…) — ignored`, or `… possibly this node (…) with
+   bit errors` when the address is a few bits off.
+4. **Downlink lines:** an empty downlink reads `empty frame (no data, no MAC
+   commands)` and says whether it answers the node's ADRACKReq; `signal` is
+   marked as an estimate without noise.
+5. **The 4-minute `LORA:` status line spells out its fields**
+   (`uplinks=`, `failed=`, `refused_before_tx=`, `activation_attempts=`,
+   `last_downlink=12 min ago`, `uplinks_since_downlink=`, `airtime_24h=`,
+   `cycle=240 s at SF7`; was `up=`, `fail=`, `duty_skip=`, `joins=`,
+   `dl_ago=12min`, `ul_since_dl=`, `air24h=`, `cycle=240s@SF7`).
+   `last_downlink` says which "none" it is: `none yet`, `none since the join`
+   or `none since boot`. Scripts that parse this line need the new names.
+6. **Join and start lines:** `session resumed (no new join)` instead of
+   `session resumed`; `sub-band N` appears only for regions that have
+   sub-bands (US915, AU915, CN470) and a sub-band set, no more `sub-band 0`
+   on EU868. Clearer texts for a missing DevEUI/JoinEUI/AppKey, an invalid
+   stored region, a frame RadioLib refused before sending, the RF switch,
+   and the waits between LoRaWAN, uploads and an OTA update.
+7. **Settings dump at boot:** the LoRaWAN line shows names instead of
+   numbers (`enabled=yes region=AU915 (2) subband=2 … lna=off/bypass
+   (KCT8103L only)`; was `enabled=1 region=2 subband=2 … lna=0`). On boards
+   without a LoRa front end it says that high_power and lna do not apply.
+8. **All boards: no more glued log lines.** When two tasks logged at the
+   same moment (mostly at boot, while WiFi starts), the end of one line could
+   be joined to the next one in the node log (/log) and in the boot part the
+   syslog server receives (`… 4 min from nowI (…) esp_netif_lwip: DHCP server
+   started …`). Both lines now come out whole; at most a line is split in
+   two, as before, but never glued.
+9. **Internal:** the receive-window line may now be up to 960 characters
+   (was 640), so six received frames no longer cut off the timing at its
+   end; a cut line never ends in half a UTF-8 character; the build checks
+   that the line fits the log's 1024-byte line limit. The log-line assembly
+   moved into `applog_asm.h`. New host tests cover the new window texts and
+   the line assembly.
+
 ## V2.8.31 — Home Assistant follows a changed topic prefix correctly, code clean-up
 
 For all boards. Two small fixes and a downgrade note for LoRaWAN nodes;

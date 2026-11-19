@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 
 #include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH / _CARRIER_REV_SWITCH — gate their dump lines
+#include "lorawan.h"   // V2.8.32: region name + has-sub-bands for the lorawan dump line
 #include "tube_types.h"   // V2.6.1: tube_type_name() for the boot config dump
 #include "util.h"
 #include "tube_logic.h"   // guard_effective_us() — single-source guard on/off policy
@@ -259,9 +260,31 @@ void config_log_summary(const config_t *cfg) {
     // V2.8.14: dr=ADR or dr=DR<n> (fixed, see config_fields.def lorawan_dr).
     char lora_dr[8] = "ADR";
     if (cfg->lorawan_dr) snprintf(lora_dr, sizeof(lora_dr), "DR%u", (unsigned)(cfg->lorawan_dr - 1));
-    LOG_PACED("  lorawan:          enabled=%d region=%u subband=%u high_power=%d lna=%d dr=%s",
-             cfg->lorawan_enabled, (unsigned)cfg->lorawan_region,
-             (unsigned)cfg->lorawan_subband, cfg->lorawan_high_power, cfg->lorawan_lna, lora_dr);
+    // V2.8.32: names instead of numbers (was "region=0 subband=0 ... lna=0").
+    // The sub-band only exists in the fixed channel plans (0 = all channels);
+    // high_power and lna only act on the Heltec V4 front ends (GC1109 PA /
+    // KCT8103L LNA), so other boards say so instead of showing a value that
+    // does nothing.
+    char lora_sb[12] = "n/a";
+    if (lorawan_region_has_subbands(cfg->lorawan_region)) {
+        if (cfg->lorawan_subband) snprintf(lora_sb, sizeof(lora_sb), "%u", (unsigned)cfg->lorawan_subband);
+        else                      snprintf(lora_sb, sizeof(lora_sb), "all");
+    }
+#if HAL_HAS_LORA_FEM
+    // Which setting acts depends on the front end the board carries, probed
+    // only when LoRaWAN starts: high_power on a GC1109 (V4.2), lna on a
+    // KCT8103L (V4.3) — the "front end:" line of the LoRaWAN start says which.
+    LOG_PACED("  lorawan:          enabled=%s region=%s (%u) subband=%s high_power=%s (GC1109 only) "
+             "lna=%s (KCT8103L only) dr=%s",
+             cfg->lorawan_enabled ? "yes" : "no", lorawan_region_name(cfg->lorawan_region),
+             (unsigned)cfg->lorawan_region, lora_sb, cfg->lorawan_high_power ? "on" : "off",
+             cfg->lorawan_lna ? "on" : "off/bypass", lora_dr);
+#else
+    LOG_PACED("  lorawan:          enabled=%s region=%s (%u) subband=%s dr=%s (high_power/lna: no front end "
+             "on this board)",
+             cfg->lorawan_enabled ? "yes" : "no", lorawan_region_name(cfg->lorawan_region),
+             (unsigned)cfg->lorawan_region, lora_sb, lora_dr);
+#endif
     LOG_PACED("  lorawan:          deveui=%s joineui=%s appkey=%s",
              cfg->lorawan_deveui[0]  ? cfg->lorawan_deveui  : "<empty>",
              cfg->lorawan_joineui[0] ? cfg->lorawan_joineui : "<empty>",

@@ -46,7 +46,8 @@ typedef struct {
     uint32_t dev_addr;         // 0 until joined
     uint32_t join_attempts;
     uint32_t uplinks_sent;     // successful sendReceive calls (port-1 AND port-2 frames)
-    uint32_t duty_skipped;     // cycles dropped by duty-cycle/dwell guard
+    uint32_t duty_skipped;     // frames not sent: RadioLib refused them before TX (duty cycle, dwell
+                               // time; no-channel only from a join in RadioLib 8.0) or the worker skipped one for the duty cycle; LORA: refused_before_tx=
     uint32_t failed;           // sendReceive hard errors
     int16_t  last_error;       // last RadioLib status code (0 = none)
     int64_t  last_uplink_at;   // unix epoch, 0 = never
@@ -94,6 +95,7 @@ static inline void lorawan_get_status(lorawan_status_t *out) {
 }
 static inline const char *lorawan_state_name(lorawan_state_t st) { (void)st; return "disabled"; }
 static inline const char *lorawan_region_name(uint8_t region_idx) { (void)region_idx; return "?"; }
+static inline bool lorawan_region_has_subbands(uint8_t region_idx) { (void)region_idx; return false; }
 static inline bool lorawan_forget_session(bool wipe_nonces) { (void)wipe_nonces; return true; }
 static inline bool lorawan_fem_is_kct8103l(void) { return false; }
 static inline bool lorawan_fem_kct8103l_detected(void) { return false; }
@@ -164,6 +166,13 @@ const char *lorawan_state_name(lorawan_state_t st);
  *         NULL); used by the /config dropdown and /status.
  */
 const char *lorawan_region_name(uint8_t region_idx);
+
+/** @brief True if the region (config-table index) has sub-bands: the fixed
+ *         channel plans US915, AU915 and CN470 (V2.8.32). Out-of-range index
+ *         = false. Used to leave "sub-band" out of log lines where it means
+ *         nothing (EU868 and the other dynamic plans).
+ */
+bool lorawan_region_has_subbands(uint8_t region_idx);
 
 /** @brief Erase the persisted LoRaWAN session so the next boot does a fresh
  *         OTAA join (the running worker keeps its in-RAM session until then).

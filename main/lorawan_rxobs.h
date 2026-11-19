@@ -57,8 +57,11 @@
 #define OBS_MAX_REP 4
 
 /** Buffer size for the "rx windows:" line (verdict first, so truncation
- *  only ever drops detail). */
-#define LW_RXOBS_LINE_MAX 640
+ *  only ever drops detail). V2.8.32: 640 -> 960 for the longer plain-word
+ *  window texts (NbTrans 3 with a foreign frame in all six windows is ~740
+ *  bytes, six frames with bit errors ~930); with the "rx windows: " prefix
+ *  still under applog's 1024-byte line. */
+#define LW_RXOBS_LINE_MAX 960
 
 /** One RX window over all repeats of an exchange (folded). */
 typedef struct {
@@ -348,29 +351,44 @@ static inline void rxobs_cat(char *buf, size_t sz, int *n, const char *fmt, ...)
     if (r > 0) *n += r;
 }
 
-/** @brief Describe a frame a window received, e.g. " (data down for 260b1234 (not
- *         ours), 33 B)". MType = MHDR bits 7..5: 1 join accept, 3/5 (un)confirmed
- *         data down. A DevAddr within 4 bits of ours is most likely OUR frame
- *         with bit errors (a foreign one differs in ~16 bits on average). */
+/** @brief Drop a multi-byte UTF-8 character that truncation cut in half at
+ *         the end of @p buf (the texts carry "—", 3 bytes), so syslog and /log
+ *         never get an invalid byte. A complete character at the end stays. */
+static inline void rxobs_utf8_trim(char *buf) {
+    size_t i = strlen(buf), k = 0;
+    while (i > 0 && k < 4 && ((uint8_t)buf[i - 1] & 0xC0) == 0x80) { i--; k++; }   // continuation bytes
+    if (i == 0) return;
+    const uint8_t lead = (uint8_t)buf[i - 1];
+    if (lead < 0xC0) return;   // ends in ASCII: nothing was cut
+    const size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+    if (k + 1 < need) buf[i - 1] = '\0';
+}
+
+/** @brief Describe a frame a window received, e.g. ": downlink for another device
+ *         (260b1234), 33 B" (V2.8.32: was " (data down for 260b1234 (not ours), 33 B)").
+ *         MType = MHDR bits 7..5: 1 join accept, 3/5 (un)confirmed data down.
+ *         A DevAddr within 4 bits of the node's own reads "possibly this node
+ *         with bit errors": a random address differs in ~16 bits, but devices
+ *         of the same network share the address prefix, so a few percent of
+ *         their frames also land within 4 bits — hence "possibly". */
 static inline void rxobs_frame(const rxobs_t *o, uint8_t mhdr, uint8_t len, uint32_t addr, char *out, size_t sz) {
     const uint8_t mtype = mhdr >> 5;
     if (mtype == 1) {
-        snprintf(out, sz, " (join accept, %u B)", (unsigned)len);
+        snprintf(out, sz, ": join accept, %u B", (unsigned)len);
     } else if (mtype == 3 || mtype == 5) {
-        const char *whose;
-        if (o->own_addr == 0) {
-            whose = "";
+        if (o->own_addr == 0) {  // joining: no session address yet, RadioLib drops data frames
+            snprintf(out, sz, ": data downlink for %08lx while joining, %u B", (unsigned long)addr, (unsigned)len);
         } else if (addr == o->own_addr) {
-            whose = " (ours)";
+            snprintf(out, sz, ": downlink for this node (%08lx), %u B", (unsigned long)addr, (unsigned)len);
         } else if (__builtin_popcount(addr ^ o->own_addr) <= 4) {
-            whose = " (likely ours, corrupted)";
+            snprintf(out, sz, ": downlink for %08lx, possibly this node (%08lx) with bit errors, %u B",
+                     (unsigned long)addr, (unsigned long)o->own_addr, (unsigned)len);
         } else {
-            whose = " (not ours)";
+            snprintf(out, sz, ": downlink for another device (%08lx), %u B", (unsigned long)addr, (unsigned)len);
         }
-        snprintf(out, sz, " (data down for %08lx%s, %u B)", (unsigned long)addr, whose, (unsigned)len);
     } else {
         // Uplink MTypes or Proprietary in a downlink window: garbage or foreign.
-        snprintf(out, sz, " (MHDR 0x%02x, %u B — not a downlink, likely corrupted)", (unsigned)mhdr,
+        snprintf(out, sz, ": MHDR 0x%02x, %u B (not a downlink, likely corrupted)", (unsigned)mhdr,
                  (unsigned)len);
     }
 }
@@ -381,16 +399,19 @@ static inline void rxobs_frame(const rxobs_t *o, uint8_t mhdr, uint8_t len, uint
  *         a symbol-count preamble timeout: TIMEOUT = no preamble found;
  *         neither TIMEOUT nor RX_DONE = a detected preamble held the window
  *         open but no frame followed. The CRC_ERR and HEADER_VALID branches
- *         only fire if a future RadioLib latches those flags again. */
+ *         only fire if a future RadioLib latches those flags again.
+ *         V2.8.32: plain words instead of the IRQ names (were "RX_DONE",
+ *         "timeout, no preamble", "CRC_ERR", "HDR_ERR", "header, then timeout",
+ *         "header, no end", "no timeout (preamble?)"). */
 static inline const char *rxobs_result(uint16_t irq) {
-    if (irq & OBS_IRQ_CRC_ERR)    return "CRC_ERR";
-    if (irq & OBS_IRQ_RX_DONE)    return "RX_DONE";
-    if (irq & OBS_IRQ_HEADER_ERR) return "HDR_ERR";
+    if (irq & OBS_IRQ_CRC_ERR)    return "frame with CRC error";
+    if (irq & OBS_IRQ_RX_DONE)    return "received";
+    if (irq & OBS_IRQ_HEADER_ERR) return "damaged LoRa header";
     if (irq & OBS_IRQ_TIMEOUT) {
-        return (irq & OBS_IRQ_HEADER_VALID) ? "header, then timeout" : "timeout, no preamble";
+        return (irq & OBS_IRQ_HEADER_VALID) ? "header, then nothing" : "nothing received";
     }
-    if (irq & OBS_IRQ_HEADER_VALID) return "header, no end";
-    return "no timeout (preamble?)";
+    if (irq & OBS_IRQ_HEADER_VALID) return "header, frame never ended";
+    return "held open, no frame (preamble heard?)";
 }
 
 /** @brief Plain words for a RadioLib status code, for every LoRaWAN log line
@@ -489,15 +510,20 @@ static inline bool rxobs_hit_dropped(const rxobs_hit_t *h) {
     return h->opened && (h->ignored || ((h->irq & OBS_IRQ_RX_DONE) && !h->rx_seen));
 }
 
-/** @brief One window of one repeat: "RX1 timeout, no preamble", "RX2 not opened",
- *         "RX1 RX_DONE (data down for 260b1234 (not ours), 14 B) ignored, repeats go on". */
-static inline void rxobs_hit_cat(const rxobs_t *o, char *buf, size_t sz, int *n, int i, const rxobs_hit_t *h) {
-    if (!h->opened) { rxobs_cat(buf, sz, n, "RX%d not opened", i + 1); return; }
-    char frame[72] = "";
+/** @brief One window of one repeat: "RX1 nothing received", "RX2 not opened",
+ *         "RX1 received: downlink for another device (260b1234), 14 B — ignored,
+ *         repeats go on".
+ *  @param not_needed  V2.8.32: an unopened window reads "not needed" instead of
+ *                     "not opened" — RX2 of the repeat whose RX1 delivered the
+ *                     valid downlink that ended the exchange (caller decides). */
+static inline void rxobs_hit_cat(const rxobs_t *o, char *buf, size_t sz, int *n, int i, const rxobs_hit_t *h,
+                                 bool not_needed) {
+    if (!h->opened) { rxobs_cat(buf, sz, n, "RX%d %s", i + 1, not_needed ? "not needed" : "not opened"); return; }
+    char frame[96] = "";
     if (h->rx_seen) rxobs_frame(o, h->rx_mhdr, h->rx_len, h->rx_addr, frame, sizeof(frame));
-    else if (h->irq & OBS_IRQ_RX_DONE) snprintf(frame, sizeof(frame), " (not read: RadioLib dropped it, too long/short)");
+    else if (h->irq & OBS_IRQ_RX_DONE) snprintf(frame, sizeof(frame), ": frame not read (too long or too short for RadioLib)");
     rxobs_cat(buf, sz, n, "RX%d %s%s%s", i + 1, rxobs_result(h->irq), frame,
-              rxobs_hit_dropped(h) ? " ignored, repeats go on" : "");
+              rxobs_hit_dropped(h) ? " — ignored, repeats go on" : "");
 }
 
 /** @brief Which repeat's window ended the exchange, and how many TX were the
@@ -570,9 +596,9 @@ static inline bool rxobs_rep_same(const rxobs_rep_t *a, const rxobs_rep_t *b) {
 /** @brief The NbTrans > 1 form: verdict first, then every repeat's channel and
  *         window results, then the window timing of the last TX. Examples:
  *   NbTrans 3 (set by network) | all 3 sent | #1 867.100, #2 868.500, #3 867.300:
- *     RX1 timeout, no preamble; RX2 timeout, no preamble | last TX: RX1 ...
+ *     RX1 nothing received; RX2 nothing received | last TX: RX1 ...
  *   NbTrans 3 (set by network) | stopped after 1 of 3: valid downlink in RX1 of
- *     #1 — a downlink ends the repeats (LoRaWAN) | #1 867.900: RX1 RX_DONE (...) */
+ *     #1 — a downlink ends the repeats (LoRaWAN) | #1 867.900: RX1 received: ... */
 static inline void rxobs_format_multi(const rxobs_t *o, char *buf, size_t sz, int16_t st) {
     int n = 0;
     *buf = '\0';
@@ -623,60 +649,82 @@ static inline void rxobs_format_multi(const rxobs_t *o, char *buf, size_t sz, in
                       k < s.own_tx ? k + 1 : k - s.own_tx + 1, rxobs_mhz(o->rep[k].tx_freq_raw));
         }
         rxobs_cat(buf, sz, &n, ": ");
-        rxobs_hit_cat(o, buf, sz, &n, 0, &o->rep[i].w[0]);
+        rxobs_hit_cat(o, buf, sz, &n, 0, &o->rep[i].w[0], false);
         rxobs_cat(buf, sz, &n, "; ");
-        rxobs_hit_cat(o, buf, sz, &n, 1, &o->rep[i].w[1]);
+        // A repeat with a kept frame never groups with another (rxobs_rep_same).
+        rxobs_hit_cat(o, buf, sz, &n, 1, &o->rep[i].w[1], valid && s.end_rep == i && s.end_win == 1);
         rxobs_cat(buf, sz, &n, " |");
         i = j;
     }
     if (o->n_tx > OBS_MAX_REP) rxobs_cat(buf, sz, &n, " +%u more TX not listed |", (unsigned)(o->n_tx - OBS_MAX_REP));
 
     // Window timing once, from the last TX (same delays every repeat).
+    // V2.8.32: the second number is the window's programmed timeout, an upper
+    // limit — an empty window closes much earlier, on the preamble (symbol)
+    // timeout, and the observer keeps no close time.
     const int64_t ref = o->tx_done_us ? o->tx_done_us : o->tx_us;
+    const bool last_rx2_not_needed = valid && s.end_win == 1 && s.end_rep == (int)o->n_tx - 1;
     rxobs_cat(buf, sz, &n, " last TX:");
     for (int i = 0; i < 2; i++) {
         const rxobs_win_t *w = &o->win[i];
         if (i < o->n_win) {
-            rxobs_cat(buf, sz, &n, "%s RX%d %.3f SF%u @+%ld ms to=%lu ms", i ? ";" : "", i + 1, rxobs_mhz(w->freq_raw),
-                      (unsigned)w->sf, (long)((w->open_us - ref) / 1000), (unsigned long)(w->timeout_us / 1000));
+            rxobs_cat(buf, sz, &n, "%s RX%d %.3f MHz SF%u opened +%ld ms (open for up to %lu ms)", i ? ";" : "", i + 1,
+                      rxobs_mhz(w->freq_raw), (unsigned)w->sf, (long)((w->open_us - ref) / 1000),
+                      (unsigned long)(w->timeout_us / 1000));
         } else {
-            rxobs_cat(buf, sz, &n, "%s RX%d not opened", i ? ";" : "", i + 1);
+            rxobs_cat(buf, sz, &n, "%s RX%d %s", i ? ";" : "", i + 1,
+                      (i == 1 && last_rx2_not_needed) ? "not needed" : "not opened");
         }
     }
 }
 
 /** @brief Render the "rx windows:" text of one exchange into @p buf.
- *         One TX: "RX1 868.100 SF9 @+4989 ms to=113 ms timeout, no preamble | RX2 ...";
+ *         One TX: "RX1 868.100 MHz SF9 opened +4989 ms after TX (open for up to 113 ms):
+ *         nothing received | RX2 ..." (V2.8.32: was "RX1 868.100 SF9 @+4989 ms
+ *         to=113 ms timeout, no preamble"). "open for up to" = the programmed timeout, an
+ *         upper limit: an empty window closes on the preamble (symbol) timeout,
+ *         much earlier. "RX2 not needed" only when RX1 received a frame RadioLib
+ *         kept AND the exchange succeeded (@p st >= 0); a kept frame that then
+ *         failed to parse (MIC, FPort ...) still skips RX2, which reads "not
+ *         opened" then.
  *         NbTrans > 1 or more than one TX: rxobs_format_multi(). Window offsets are
  *         from TX end of the LAST TX, so they read as the RX1/RX2 delay minus
  *         RadioLib's early-open margin (from SetTx, incl. the ToA, if TX end was
- *         not seen). @p st = the exchange's result (0 for a join). */
+ *         not seen). @p st = the exchange's result; for a join the caller passes
+ *         0 for an accepted join and the error code otherwise. */
 static inline void rxobs_format(const rxobs_t *o, char *buf, size_t sz, int16_t st) {
     if (sz == 0) return;
     if (o->tx_us == 0) { snprintf(buf, sz, "no TX seen"); return; }
-    if (o->nb_trans > 1 || o->n_tx > 1) { rxobs_format_multi(o, buf, sz, st); return; }
+    if (o->nb_trans > 1 || o->n_tx > 1) { rxobs_format_multi(o, buf, sz, st); rxobs_utf8_trim(buf); return; }
     const int64_t ref = o->tx_done_us ? o->tx_done_us : o->tx_us;
     int n = 0;
     *buf = '\0';
+    bool rx1_kept = false;   // RX1 received a frame RadioLib kept: RX2 is then skipped
     for (int i = 0; i < 2; i++) {
         const rxobs_win_t *w = &o->win[i];
         if (w->n_open == 0) {
             // RX2 is skipped when RX1 received a frame RadioLib kept — normal.
-            rxobs_cat(buf, sz, &n, "%sRX%d not opened", i ? " | " : "", i + 1);
+            rxobs_cat(buf, sz, &n, "%sRX%d %s", i ? " | " : "", i + 1,
+                      (i == 1 && rx1_kept && st >= 0) ? "not needed" : "not opened");
             continue;
         }
-        char when[24];
-        if (i < o->n_win) snprintf(when, sizeof(when), "@+%ld ms", (long)((w->open_us - ref) / 1000));
-        else              snprintf(when, sizeof(when), "@earlier TX");
-        char frame[72] = "";
+        char when[40];
+        if (i < o->n_win) {
+            snprintf(when, sizeof(when), "opened +%ld ms%s", (long)((w->open_us - ref) / 1000), i ? "" : " after TX");
+        } else {
+            snprintf(when, sizeof(when), "opened after an earlier TX");
+        }
+        char frame[96] = "";
         const uint16_t irq = rxobs_final(w);
         if (w->rx_seen) rxobs_frame(o, w->rx_mhdr, w->rx_len, w->rx_addr, frame, sizeof(frame));
-        else if (irq & OBS_IRQ_RX_DONE) snprintf(frame, sizeof(frame), " (not read: RadioLib dropped it, too long/short)");
+        else if (irq & OBS_IRQ_RX_DONE) snprintf(frame, sizeof(frame), ": frame not read (too long or too short for RadioLib)");
         const bool dropped = w->ignored || ((irq & OBS_IRQ_RX_DONE) && !w->rx_seen);
-        rxobs_cat(buf, sz, &n, "%sRX%d %.3f SF%u %s to=%lu ms %s%s%s", i ? " | " : "", i + 1, rxobs_mhz(w->freq_raw),
-                  (unsigned)w->sf, when, (unsigned long)(w->timeout_us / 1000), rxobs_result(irq), frame,
-                  dropped ? " ignored (RadioLib dropped it, the window counts as empty)" : "");
+        if (i == 0) rx1_kept = w->rx_seen && !dropped;
+        rxobs_cat(buf, sz, &n, "%sRX%d %.3f MHz SF%u %s (open for up to %lu ms): %s%s%s", i ? " | " : "", i + 1,
+                  rxobs_mhz(w->freq_raw), (unsigned)w->sf, when, (unsigned long)(w->timeout_us / 1000),
+                  rxobs_result(irq), frame, dropped ? " — ignored (RadioLib dropped it, the window counts as empty)" : "");
     }
+    rxobs_utf8_trim(buf);
 }
 
 /** @brief The per-exchange parts of the "uplink OK:" line: @p freqs = the

@@ -3431,7 +3431,8 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // reset on 2026-10-18 — the OTA had started mid port-2 exchange. The stub
     // returns true at once on boards without the radio / with LoRaWAN off.
     if (!lorawan_suspend(60000)) {
-        ESP_LOGW(TAG, "OTA prep: LoRaWAN exchange still running after 60s — proceeding anyway");
+        ESP_LOGW(TAG, "OTA prep: LoRaWAN transmission (with its repeats and receive windows) still running after 60 s — "
+                      "proceeding anyway");
     }
     // V2.8.5 (review 1.8): suspend FIRST. The main loop polls every ~1 s and
     // re-inits MQTT whenever it is down and services are not suspended; with

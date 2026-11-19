@@ -34,6 +34,11 @@ extern "C" {
 #include "lorawan_mac.h"     // V2.8.23: MAC commands + answers in plain words
 #include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
 #include "transmission.h"    // tx_is_idle()
+#include "applog.h"          // APPLOG_LINE_MAX
+
+// "I (date time) lorawan: rx windows: " is ~47 B; the rx-window text must fit
+// behind it in one applog line, or applog cuts the end off (after the UTF-8 trim).
+static_assert(LW_RXOBS_LINE_MAX + 56 <= APPLOG_LINE_MAX, "rx windows line would not fit applog's line");
 #include "log_ftp.h"         // log_ftp_is_busy()
 #include "tube.h"            // tube_isr_service_installed()
 #include "config.h"
@@ -355,7 +360,7 @@ static bool exchange_begin(void) {
         const bool ftps_busy  = log_ftp_is_busy();
         if (rt_lorawan_may_start(round_idle, ftps_busy)) {
             if (waited_ms >= 1000) {
-                ESP_LOGI(TAG, "waited %.1f s for %s to finish", (double)waited_ms / 1000.0,
+                ESP_LOGI(TAG, "waited %.1f s for %s to finish before using the radio", (double)waited_ms / 1000.0,
                          turn_what(held_by_round, held_by_ftps));
             }
             return true;
@@ -363,7 +368,7 @@ static bool exchange_begin(void) {
         held_by_round = held_by_round || !round_idle;
         held_by_ftps  = held_by_ftps || ftps_busy;
         if (waited_ms >= (int64_t)TURN_WAIT_MAX_MS) {
-            ESP_LOGW(TAG, "%s still running after %lu s — going ahead anyway",
+            ESP_LOGW(TAG, "%s still running after %lu s — using the radio anyway",
                      turn_what(held_by_round, held_by_ftps), (unsigned long)(TURN_WAIT_MAX_MS / 1000));
             return true;
         }
@@ -517,7 +522,7 @@ static bool radio_init(void) {
     // setRfSwitchPins), alongside DIO2. Same wiring as Meshtastic's
     // seeed_xiao_s3 variant (SX126X_RXEN 38).
     s_radio.setRfSwitchPins(PIN_LORA_RF_SW_RX, RADIOLIB_NC);
-    ESP_LOGI(TAG, "RF switch: DIO2 + GPIO%d (RX high)", PIN_LORA_RF_SW_RX);
+    ESP_LOGI(TAG, "RF switch: TX via SX1262 DIO2, RX via GPIO%d (high while receiving)", PIN_LORA_RF_SW_RX);
 #endif
 #if HAL_HAS_LORA_FEM
     if (pa_gain) {
@@ -594,6 +599,13 @@ const char *lorawan_region_name(uint8_t region_idx) {
 static const LoRaWANBand_t *const k_bands[] = {
     &EU868, &US915, &AU915, &AS923, &IN865, &KR920, &EU433, &CN470,
 };
+
+bool lorawan_region_has_subbands(uint8_t region_idx) {
+    // Fixed channel plans (US915, AU915, CN470) split their 64/96 uplink
+    // channels into sub-bands of 8; dynamic plans (EU868 ...) have none.
+    if (region_idx >= sizeof(k_bands) / sizeof(k_bands[0])) return false;
+    return k_bands[region_idx]->bandType == RADIOLIB_LORAWAN_BAND_FIXED;
+}
 
 const char *lorawan_state_name(lorawan_state_t st) {
     switch (st) {
@@ -1019,7 +1031,7 @@ static bool    s_prev_had_dl = false;   // previous exchange received a downlink
 
 // Receive-side-only errors after a real TX: lw_downlink_unusable()
 // (lorawan_rxobs.h, host-tested). Counting them as "uplink failed" would
-// inflate fail=/last_err= with events that say nothing about the uplink.
+// inflate failed=/last_err= (LORA: line) with events that say nothing about the uplink.
 // Only used when a TX was actually seen.
 static bool downlink_unusable(int16_t st) { return lw_downlink_unusable(st); }
 
@@ -1064,13 +1076,16 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
         if (ev->confirmed) {
             const rxobs_split_t sp = rxobs_split(&s_obs, st);
             conf = (s_obs.n_tx > sp.own_tx)
-                       ? ", confirmed (the network asks for an ACK; it went out in the MAC-only uplink sent inside "
-                         "this exchange)"
+                       ? ", confirmed (the network asks for an ACK; it went out in the MAC-only uplink RadioLib sent "
+                         "right after this one)"
                        : ", confirmed (the network asks for an ACK; it goes out with the next uplink)";
         }
         if (dl_len > 0) {
-            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u %s%s, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, "
-                          "signal %.0f dBm%s",
+            // V2.8.32: "signal" explained once per line — SignalRssiPkt, the
+            // radio's estimate of the signal power without the noise (it
+            // tells a weak signal from a high noise floor at negative SNR).
+            ESP_LOGI(TAG, "downlink (RX%d): port %u, %u %s%s; FCntDown=%lu, RSSI %.0f dBm, SNR %.1f dB, "
+                          "signal %.0f dBm (estimate without noise)%s",
                      (int)st, (unsigned)ev->fPort, (unsigned)dl_len, (dl_len == 1) ? "byte" : "bytes", conf,
                      (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
         } else {
@@ -1099,24 +1114,27 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
                 // session RadioLib stops setting ADRACKReq once all backoff
                 // steps are done, so ">= 64" overstates it there (both of our
                 // TTN nodes run 1.0.x).
+                // V2.8.32: shorter texts; "empty" = no data and no MAC commands.
                 if (__atomic_load_n(&s_fixed_dr, __ATOMIC_RELAXED)) {
-                    what = "empty (no data, no MAC commands) — nothing to change on the node";
+                    what = "empty frame (no data, no MAC commands) — the network hears the node, nothing to change";
                 } else if (s_ul_since_dl >= ADR_ACK_LIMIT) {
-                    what = "empty (no data, no MAC commands) — the network's answer to the node's ADRACKReq: "
-                           "it hears the node, nothing to change";
+                    what = "empty frame (no data, no MAC commands) — the network answers the node's ADRACKReq: link OK, "
+                           "nothing to change";
                 } else if (s_dl_seen) {
                     snprintf(buf, sizeof(buf),
-                             "empty (no data, no MAC commands) — the node had not asked for an answer (%lu %s "
-                             "since the last downlink; ADRACKReq starts after 64); nothing to change",
+                             "empty frame (no data, no MAC commands) — the network hears the node, nothing to change (%lu "
+                             "%s without a downlink before this one; the node asks for an answer after about 64)",
                              (unsigned long)s_ul_since_dl, (s_ul_since_dl == 1) ? "uplink" : "uplinks");
                     what = buf;
                 } else {
-                    what = "empty (no data, no MAC commands) — the network confirms it hears the node (first "
-                           "downlink since boot; RadioLib's own count survives reboots, so this may answer its "
-                           "ADRACKReq); nothing to change";
+                    what = "empty frame (no data, no MAC commands) — the network confirms it hears the node, nothing to "
+                           "change (first downlink "
+                           "since boot; may answer an ADRACKReq, as RadioLib counts silent uplinks across the "
+                           "reboot)";
                 }
             }
-            ESP_LOGI(TAG, "downlink (RX%d): %s%s, FCntDown=%lu, RSSI %.0f dBm SNR %.1f dB, signal %.0f dBm%s",
+            ESP_LOGI(TAG, "downlink (RX%d): %s%s; FCntDown=%lu, RSSI %.0f dBm, SNR %.1f dB, "
+                          "signal %.0f dBm (estimate without noise)%s",
                      (int)st, what, conf, (unsigned long)ev->fCnt, (double)rssi, (double)snr, (double)signal, lna);
         }
     }
@@ -1139,8 +1157,8 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
             // Fixed DR = ADR off: RadioLib sets neither the ADR bit nor
             // ADRACKReq and skips adrBackoff() (LoRaWAN.cpp composeUplink /
             // sendReceive), so nothing changes on the node's side.
-            ESP_LOGW(TAG, "no downlink for the last %u uplinks (counted since the last downlink or boot; "
-                     "fixed data rate, ADR off: no ADRACKReq, no backoff)", (unsigned)ADR_ACK_LIMIT);
+            ESP_LOGW(TAG, "%u uplinks without a downlink (normal while the network has nothing to send) — "
+                     "fixed data rate: the node does not ask and changes nothing", (unsigned)ADR_ACK_LIMIT);
         } else if (s_ul_since_dl == ADR_ACK_LIMIT) {
             // Our count restarts at every downlink AND at boot; RadioLib's own
             // counter lives in the NVS session and survives reboots, so after a
@@ -1151,12 +1169,29 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
             // and "is asking" — but RadioLib sets ADRACKReq only from the NEXT
             // uplink (composeUplink: fCntUp - adrFCnt >= 64; this, the 64th,
             // had 63).
-            ESP_LOGW(TAG, "no downlink for the last %u uplinks (counted since the last downlink or "
-                     "boot) — from the next uplink on, the node asks the network for an answer (ADRACKReq; "
-                     "RadioLib's own count survives reboots, so it may be asking already); ADR backoff (one step every "
-                     "32 uplinks: TX power to max, then DR-1, last the default channels with one transmission "
-                     "per frame) continues while the network stays silent",
-                     (unsigned)ADR_ACK_LIMIT);
+            // V2.8.32: shortened. The old text spelled out RadioLib's whole
+            // backoff ladder and read as if the node had already changed
+            // something; nothing changes until 32 more silent uplinks
+            // (RADIOLIB_LORAWAN_ADR_ACK_DELAY_EXP = 5). The power and data-rate
+            // steps get their own "ADR: ... RadioLib's ADR backoff ..." line;
+            // the last step (default channels, NbTrans 1) usually changes
+            // neither and then logs nothing of its own — if the default
+            // channels allow a lower DR it lowers it, and the ADR line shows it.
+            // In step with RadioLib only when a downlink was seen this boot:
+            // after a reboot RadioLib's count (in the restored session) is
+            // ahead of ours by the silent uplinks before the reboot, so it may
+            // be asking already and its next backoff step can come sooner.
+            if (s_dl_seen) {
+                ESP_LOGW(TAG, "%u uplinks without a downlink (normal while the network has nothing to send) — "
+                         "from about the next uplink on, the node asks the network to answer (ADRACKReq); nothing changes "
+                         "unless it stays silent for about 32 more uplinks", (unsigned)ADR_ACK_LIMIT);
+            } else {
+                ESP_LOGW(TAG, "%u uplinks since boot without a downlink (normal while the network has nothing to "
+                         "send) — the node asks the network to answer (ADRACKReq), from the next uplink on or already "
+                         "for a while: "
+                         "RadioLib counts silent uplinks across the reboot, so a change (ADR backoff) can come "
+                         "within the next 32 uplinks", (unsigned)ADR_ACK_LIMIT);
+            }
         }
     }
 
@@ -1180,11 +1215,13 @@ static void record_uplink_result(int16_t st, size_t dl_len, const LoRaWANEvent_t
         // Regulatory guard: RadioLib itself refused the send before TX (duty
         // cycle, no enabled channel, or a frame over the 400 ms dwell limit),
         // not a radio/network failure — counted as skipped, not as failed.
-        // duty_skip= counts refused attempts, not lost frames.
+        // refused_before_tx= (LORA: line; duty_skip= before V2.8.32) counts
+        // refused attempts, not lost frames.
         portENTER_CRITICAL(&s_status_mux);
         s_status.duty_skipped++;
         portEXIT_CRITICAL(&s_status_mux);
-        ESP_LOGI(TAG, "frame skipped by the regulatory guard: %d (%s)", (int)st, lw_err_text(st));
+        ESP_LOGI(TAG, "frame not sent: RadioLib refused it before transmitting, %d (%s) — counted as "
+                      "refused_before_tx, not as a failure", (int)st, lw_err_text(st));
     } else if (st == RADIOLIB_ERR_MAC_ANSWERS_PENDING) {
         // Refused before TX: the payload fits the DR, but not together with the
         // queued MAC answers. send_app_frame() recovers (MAC answers alone,
@@ -1240,10 +1277,26 @@ static void log_uplink_ok(const char *what, uint32_t fcnt_wire, const LoRaWANEve
 // (nbTransNow() -> rxobs_begin()).
 static void adr_track(const LoRaWANEvent_t *ev, int16_t st) {
     if (s_prev_valid && (ev->datarate != s_prev_dr || ev->power != s_prev_power)) {
-        ESP_LOGW(TAG, "ADR: DR%u -> DR%u, %d -> %d dBm (%s)",
-                 (unsigned)s_prev_dr, (unsigned)ev->datarate, (int)s_prev_power, (int)ev->power,
-                 s_prev_had_dl ? "network, after downlink"
-                               : "ADR backoff — no downlink heard");
+        // V2.8.32: says what changed and what stayed (was "ADR: DR5 -> DR5,
+        // 10 -> 18 dBm (network, after downlink)"). A change the network
+        // ordered is normal operation (I); RadioLib's own backoff after a
+        // silent network stays a warning (W).
+        char what[64];
+        if (ev->datarate != s_prev_dr && ev->power != s_prev_power) {
+            snprintf(what, sizeof(what), "data rate DR%u -> DR%u, TX power %d -> %d dBm", (unsigned)s_prev_dr,
+                     (unsigned)ev->datarate, (int)s_prev_power, (int)ev->power);
+        } else if (ev->datarate != s_prev_dr) {
+            snprintf(what, sizeof(what), "data rate DR%u -> DR%u, TX power stays %d dBm", (unsigned)s_prev_dr,
+                     (unsigned)ev->datarate, (int)ev->power);
+        } else {
+            snprintf(what, sizeof(what), "TX power %d -> %d dBm, data rate stays DR%u", (int)s_prev_power,
+                     (int)ev->power, (unsigned)ev->datarate);
+        }
+        if (s_prev_had_dl) {
+            ESP_LOGI(TAG, "ADR: %s — ordered by the network in the downlink after the previous uplink", what);
+        } else {
+            ESP_LOGW(TAG, "ADR: %s — RadioLib's ADR backoff (the network stayed silent)", what);
+        }
     }
     s_prev_valid  = true;
     s_prev_dr     = ev->datarate;
@@ -1537,7 +1590,7 @@ static int16_t uplink_exchange(GeigerNode &node, const uint8_t *data, size_t len
     if (sent) {
         // Also (especially) after a failed exchange: which window saw what is
         // the first question for "uplink failed: <code>".
-        // Static, not on the worker's stack (~600 B with NbTrans 3 and frames);
+        // Static, not on the worker's stack (up to LW_RXOBS_LINE_MAX = 960 B);
         // this task is the only user.
         static char rx[LW_RXOBS_LINE_MAX];
         rxobs_format(&s_obs, rx, sizeof(rx), st);
@@ -1706,13 +1759,14 @@ static void lorawan_task(void *arg) {
     // (the bad value persists). Fall back to the AU915 default instead — the
     // radio must never brick the node (Geiger core stays alive regardless).
     if (region >= (sizeof(k_bands) / sizeof(k_bands[0]))) {
-        ESP_LOGW(TAG, "lorawan_region %u out of range — defaulting to AU915", region);
+        ESP_LOGW(TAG, "stored LoRaWAN region %u is invalid — using AU915", region);
         region = 2;
     }
 
     if (!radio_init()) { set_state(LORAWAN_ST_HW_FAIL); vTaskDelete(NULL); }
     if (!have_creds) {
-        ESP_LOGW(TAG, "credentials missing/malformed — LoRaWAN idle (NO_CONFIG)");
+        ESP_LOGW(TAG, "LoRaWAN not started: DevEUI, JoinEUI or AppKey missing or malformed (check the settings "
+                      "page; state no_config)");
         set_state(LORAWAN_ST_NO_CONFIG); vTaskDelete(NULL);
     }
 
@@ -1830,7 +1884,8 @@ static void lorawan_task(void *arg) {
         if (join_dr_steps && !session_pending) {
             const int16_t dst = node.setDatarate(join_dr);
             if (dst != RADIOLIB_ERR_NONE) {
-                ESP_LOGW(TAG, "join DR%u not set: %d (%s)", (unsigned)join_dr, (int)dst, lw_err_text(dst));
+                ESP_LOGW(TAG, "join data rate DR%u could not be set: %d (%s) — this attempt keeps the data rate "
+                              "it had", (unsigned)join_dr, (int)dst, lw_err_text(dst));
             }
         }
         int16_t st = node.activateOTAA();
@@ -1850,7 +1905,8 @@ static void lorawan_task(void *arg) {
 
         // V2.8.12 per-attempt line: what went on air and what each RX window
         // saw, e.g. "join attempt 3 (DR1): SF11 868.300 MHz air=741 ms ->
-        // no accept (-1116) | RX1 ... timeout, no preamble | RX2 ...".
+        // no accept: -1116 (no join accept received) | RX1 ...: nothing
+        // received | RX2 ...".
         uint32_t attempts;
         portENTER_CRITICAL(&s_status_mux); attempts = s_status.join_attempts; portEXIT_CRITICAL(&s_status_mux);
         int accept_win = 0;   // RX window (1/2) that delivered the accept, 0 = none
@@ -1863,7 +1919,10 @@ static void lorawan_task(void *arg) {
                 }
             }
             static char rx[LW_RXOBS_LINE_MAX];   // worker task only, like the uplink line's
-            rxobs_format(&s_obs, rx, sizeof(rx), 0);   // one TX: the single-TX form
+            // One TX: the single-TX form. V2.8.32: an accepted join passes 0,
+            // anything else its code, so a join accept that failed its checks
+            // (MIC ...) does not read "RX2 not needed" (rxobs_format()).
+            rxobs_format(&s_obs, rx, sizeof(rx), st == RADIOLIB_LORAWAN_NEW_SESSION ? 0 : st);
             char drs[12] = "";   // " (DR255)" worst case for a uint8_t
             if (join_dr_steps) snprintf(drs, sizeof(drs), " (DR%u)", (unsigned)join_dr);
             char res[96];
@@ -1879,12 +1938,23 @@ static void lorawan_task(void *arg) {
             uint32_t dev_addr = node.getDevAddr();   // RadioLib getter — before the lock
             char via[20] = "";   // " via RX%d" sized for any int, keeps -Wformat-truncation quiet
             if (accept_win) snprintf(via, sizeof(via), " via RX%d", accept_win);
-            ESP_LOGI(TAG, "%s%s — DevAddr %08lx, region %s sub-band %u",
-                     st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed" : "joined (OTAA)",
-                     via, (unsigned long)dev_addr, lorawan_region_name(region), (unsigned)subband);
+            // V2.8.32: the sub-band only where the region has them (fixed
+            // channel plans: US915, AU915, CN470); "sub-band 0" on EU868 read
+            // like a setting that mattered; sub-band 0 (join on all channels) is
+            // left out too.
+            char sb[24] = "";
+            if (lorawan_region_has_subbands(region)) {
+                // Sub-band 0 is the SETTING "join on all channels"; the join
+                // accept's CFList then sets the network's channel mask, so no
+                // "(all channels)" claim about the session (as the boot line).
+                if (subband) snprintf(sb, sizeof(sb), " sub-band %u", (unsigned)subband);
+            }
+            ESP_LOGI(TAG, "%s%s — DevAddr %08lx, region %s%s",
+                     st == RADIOLIB_LORAWAN_SESSION_RESTORED ? "session resumed (no new join)" : "joined (OTAA)",
+                     via, (unsigned long)dev_addr, lorawan_region_name(region), sb);
             // V2.8.25: a fresh join starts RadioLib's ADR counter in step with
-            // ours (beginOTAA -> clearSession: adrFCnt = 0, fCntUp = 0), so the "may answer
-            // an ADRACKReq from before the reboot" hint is only true after a
+            // ours (beginOTAA -> clearSession: adrFCnt = 0, fCntUp = 0), so the "RadioLib counts
+            // silent uplinks across the reboot" hints are only true after a
             // resumed session. The join accept is a downlink, too.
             if (st == RADIOLIB_LORAWAN_NEW_SESSION) s_dl_seen = true;
             const uint32_t ok_khz = (uint32_t)(rxobs_mhz(s_obs.tx_freq_raw) * 1000.0 + 0.5);
@@ -1998,7 +2068,8 @@ static void lorawan_task(void *arg) {
             int16_t tst = node.sendMacCommandReq(RADIOLIB_LORAWAN_MAC_DEVICE_TIME);
             s_timesync_attempts++;   // queue failures count too — see timesync_give_up()
             if (tst != RADIOLIB_ERR_NONE) {
-                ESP_LOGW(TAG, "DeviceTimeReq not queued: %d (%s)", (int)tst, lw_err_text(tst));
+                ESP_LOGW(TAG, "network time request (DeviceTimeReq) not queued: %d (%s) — counts as an "
+                              "unanswered attempt", (int)tst, lw_err_text(tst));
                 want_time = false;   // nothing went on air — don't poll for an answer
                 if (s_timesync_attempts >= TIMESYNC_MAX_ATTEMPTS) timesync_give_up();
             }
@@ -2114,7 +2185,7 @@ void lorawan_setup(void) {
     BaseType_t ok = xTaskCreatePinnedToCore(
         lorawan_task, "lorawan", 8192, NULL, (tskIDLE_PRIORITY + 1), NULL, 1);
     configASSERT(ok == pdPASS);
-    ESP_LOGI(TAG, "LoRaWAN worker task created (join runs in the background)");
+    ESP_LOGI(TAG, "LoRaWAN worker task created (session restore or join runs in the background)");
 }
 
 // Enqueue one uplink snapshot into the depth-1 mailbox. Non-blocking and
@@ -2172,7 +2243,7 @@ bool lorawan_suspend(uint32_t timeout_ms) {
     // after the exchange's "uplink OK", with the WiFi TX worker already idle.
     const int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
     if (waited_ms >= 100) {
-        ESP_LOGI(TAG, "OTA: waited %.1f s for the running LoRaWAN exchange — radio quiet now",
+        ESP_LOGI(TAG, "OTA: waited %.1f s for the running LoRaWAN transmission and its receive windows — radio quiet now",
                  (double)waited_ms / 1000.0);
     }
     return true;

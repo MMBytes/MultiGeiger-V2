@@ -1110,26 +1110,45 @@ static void do_tx_cycle(void) {
         // V2.8.12 link-health tail: minutes since the last downlink (uptime
         // based — valid with a 1970 clock), uplinks sent without one (64 =
         // ADRACKReq, then ADR backoff), and ~24 h air time vs TTN Fair Use (30 s).
-        char dl_ago[16];
+        char dl_ago[24];
         if (lst.last_dl_uptime_s == 0) {
-            snprintf(dl_ago, sizeof(dl_ago), "never");
+            // V2.8.32: a join accept is a downlink too, but last_dl_uptime_s
+            // only counts downlinks after uplinks; say which "none" it is.
+            const char *none = "none yet";
+            if (lst.state == LORAWAN_ST_JOINED) none = lst.boot_resumed ? "none since boot" : "none since the join";
+            snprintf(dl_ago, sizeof(dl_ago), "%s", none);
         } else {
             const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
-            snprintf(dl_ago, sizeof(dl_ago), "%lumin",
+            snprintf(dl_ago, sizeof(dl_ago), "%lu min ago",
                      (unsigned long)((up_s - lst.last_dl_uptime_s) / 60u));
         }
         // V2.8.14: cycle = the TX-cycle interval LoRaWAN imposes and the SF it
         // follows; dr = ADR or the fixed DR from /config.
+        // V2.8.32: spelled-out keys (were up= fail= duty_skip= joins= dl_ago=
+        // ul_since_dl= air24h=); refused_before_tx = frames not sent because RadioLib
+        // refused them before TX (duty cycle, dwell time) or the
+        // worker skipped one for the duty cycle; activation_attempts = join
+        // attempts plus session restores since boot, failed ones included (a
+        // resumed session is 1). last_downlink and uplinks_since_downlink are
+        // this-boot values.
         char dr_mode[8] = "ADR";
         if (lst.fixed_dr) snprintf(dr_mode, sizeof(dr_mode), "DR%u", (unsigned)lst.fixed_dr_value);
-        ESP_LOGI(TAG, "LORA: state=%s up=%lu fail=%lu duty_skip=%lu joins=%lu last_err=%d "
-                 "dl_ago=%s ul_since_dl=%lu air24h=%.1fs cycle=%lus@SF%u dr=%s",
+        // cycle=none: no LoRaWAN interval applies (no_config / hw_fail), the
+        // configured upload interval runs instead.
+        char cycle[24] = "none";
+        if (lst.cycle_interval_ms) {
+            snprintf(cycle, sizeof(cycle), "%lu s at SF%u", (unsigned long)(lst.cycle_interval_ms / 1000),
+                     (unsigned)lst.cycle_sf);
+        }
+        ESP_LOGI(TAG, "LORA: state=%s uplinks=%lu failed=%lu refused_before_tx=%lu activation_attempts=%lu "
+                 "last_err=%d last_downlink=%s uplinks_since_downlink=%lu airtime_24h=%.1f s "
+                 "cycle=%s dr=%s",
                  lorawan_state_name(lst.state), (unsigned long)lst.uplinks_sent,
                  (unsigned long)lst.failed, (unsigned long)lst.duty_skipped,
                  (unsigned long)lst.join_attempts, (int)lst.last_error,
                  dl_ago, (unsigned long)lst.uplinks_since_dl,
                  (double)lst.airtime_24h_ms / 1000.0,
-                 (unsigned long)(lst.cycle_interval_ms / 1000), (unsigned)lst.cycle_sf, dr_mode);
+                 cycle, dr_mode);
     }
 
     // Cache for /status — see g_last_* declarations + accessors above.

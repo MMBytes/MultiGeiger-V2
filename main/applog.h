@@ -15,6 +15,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/** Longest log line applog formats (prefix included); longer lines are cut.
+ *  V2.8.32: public so callers with long lines can assert they fit. */
+#define APPLOG_LINE_MAX 1024
+
 /** @brief Install the log hook and create the mutex. Idempotent. */
 void applog_init(void);
 

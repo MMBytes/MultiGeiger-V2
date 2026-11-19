@@ -252,7 +252,7 @@ static void wait_for_lorawan_quiet(void) {
     const int64_t t0 = esp_timer_get_time();
     while (!rt_tx_round_may_start(lorawan_on_air())) {
         if (esp_timer_get_time() - t0 >= (int64_t)TX_LORA_WAIT_MAX_S * 1000000LL) {
-            ESP_LOGW(TAG, "LoRaWAN exchange still on air after %d s — uploading anyway",
+            ESP_LOGW(TAG, "LoRaWAN transmission (with its repeats and receive windows) still running after %d s — uploading anyway",
                      TX_LORA_WAIT_MAX_S);
             return;
         }
@@ -260,7 +260,9 @@ static void wait_for_lorawan_quiet(void) {
     }
     const int64_t waited_ms = (esp_timer_get_time() - t0) / 1000;
     if (waited_ms >= 1000) {
-        ESP_LOGI(TAG, "waited %.1f s for the LoRaWAN exchange to finish", (double)waited_ms / 1000.0);
+        // V2.8.32: "exchange" spelled out (was "for the LoRaWAN exchange to finish").
+        ESP_LOGI(TAG, "uploads waited %.1f s for the LoRaWAN transmission (uplink or join request) and its receive windows",
+                 (double)waited_ms / 1000.0);
     }
 #endif
 }

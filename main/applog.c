@@ -1,6 +1,7 @@
 #include "applog.h"
 #include "hal.h"
 #include "syslog.h"   // V2.4.15: per-line UDP forward in applog_vprintf
+#include "applog_asm.h" // V2.8.32: line reassembly (host-tested)
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -33,7 +34,7 @@ static const char *TAG = "applog";
 // time scaling with body length (~5 s per MB on the LAN).
 
 #define LOG_RING_SIZE   HAL_LOG_RING_BYTES
-#define LOG_LINE_MAX    1024
+#define LOG_LINE_MAX    APPLOG_LINE_MAX
 
 // V2.3.24: snapshot scratch buffer size — sourced from hal.h per board so
 // internal-DRAM-only boards (Heltec) can run a tight 6 KB and PSRAM boards
@@ -177,31 +178,28 @@ static void ring_append(const char *data, size_t len) {
 // s_mtx → single-threaded by construction (same BSS-not-stack justification as
 // the old per-call line[] buffer: a 1 KB stack buffer in a logger any task can
 // call from any path overflowed the 8 KB httpd stack, V2.4.20).
+// V2.8.32: the rules live in applog_asm.h (host-tested).
 static char         s_line[LOG_LINE_MAX];
-static size_t       s_line_len   = 0;
-static TaskHandle_t s_line_owner = NULL;
+static applog_asm_t s_asm = { .buf = s_line, .sz = sizeof(s_line) };
 
-// Forward the assembled line to the /log ring + UDP syslog, then reset.
-// strip_ansi + rewrite_boot_ts run on the WHOLE line here (they used to run per
-// fragment). Must be called under s_mtx.
-static void applog_flush_line(void) {
-    if (s_line_len == 0) return;
-    strip_ansi(s_line);                       // drop colour codes from ring/syslog
-    rewrite_boot_ts(s_line, sizeof(s_line));
-    if (!is_excluded(s_line)) {
-        size_t len = strlen(s_line);
-        if (len > 0) {
-            ring_append(s_line, len);
+// Forward one assembled line to the /log ring + UDP syslog. strip_ansi +
+// rewrite_boot_ts run on the WHOLE line here (they used to run per fragment).
+// Called under s_mtx (from applog_asm_*), on s_line.
+static void applog_emit_line(char *line, size_t len) {
+    (void)len;   // strip_ansi() may shorten it: measured again below
+    strip_ansi(line);                         // drop colour codes from ring/syslog
+    rewrite_boot_ts(line, sizeof(s_line));
+    if (!is_excluded(line)) {
+        size_t n = strlen(line);
+        if (n > 0) {
+            ring_append(line, n);
             // V2.4.15: also ship to UDP syslog (no-op if disabled or pre-init).
             // Inside applog's mutex but safe — sendto is non-blocking
             // (MSG_DONTWAIT) and syslog_emit's s_in_emit guard + its
             // NEVER-call-ESP_LOG rule prevent any re-entry into vprintf.
-            syslog_emit(s_line, len);
+            syslog_emit(line, n);
         }
     }
-    s_line_len   = 0;
-    s_line[0]    = 0;
-    s_line_owner = NULL;
 }
 
 static int applog_vprintf(const char *fmt, va_list args) {
@@ -224,40 +222,24 @@ static int applog_vprintf(const char *fmt, va_list args) {
 
     // V2.5.29: reassemble the ~3 vprintf fragments IDF v6 emits per ESP_LOG
     // into one logical line in s_line, and forward only the COMPLETE line to
-    // the ring + syslog. This kills cross-task fragment interleaving on BOTH
-    // surfaces: pre-V2.5.29 each fragment was forwarded immediately, so a
-    // different task logging between our fragments spliced its line into the
-    // middle of ours — and the /log ring showed the same splice (ring_append
-    // concatenates fragments verbatim) while syslog.c re-joined them in its
-    // own accumulator, leaving the two surfaces disagreeing. (UART echo above
-    // stays per fragment — the mutex prevents char-level interleave there.)
-    TaskHandle_t me = xTaskGetCurrentTaskHandle();
-    // A different task interrupting our partial line → flush ITS pending
-    // fragment(s) first so they don't mix with ours. The interrupted line
-    // still splits into a prefix stub + an orphan tail, but it is no longer
-    // MIXED and the ring + syslog now agree. Whole-line reassembly across an
-    // interruption would need per-task buffers — deliberately not worth the
-    // RAM on the tight-DRAM Heltec for a cosmetic, boot-mostly defect.
-    // (Stale-handle corner: if the owner task is deleted mid-line and its TCB
-    // address is reused before the next fragment, the mismatch flush is
-    // skipped once — degrades to the old single mixed line, never a crash.)
-    if (s_line_len > 0 && s_line_owner != me) {
-        applog_flush_line();
-    }
-    s_line_owner = me;
-
+    // the ring + syslog, so a different task logging between our fragments
+    // cannot splice its line into the middle of ours. (UART echo above stays
+    // per fragment — the mutex prevents char-level interleave there.)
+    // A different task interrupting a half line gets that line ended and
+    // forwarded first; V2.8.32: ended WITH "\n" (before, the ring glued the
+    // next line onto it) and the interrupted task's lone "\n" is dropped —
+    // applog_asm.h. Whole-line reassembly across an interruption would need
+    // per-task buffers — not worth the RAM on the tight-DRAM Heltec. (Stale-
+    // handle corner: if the owner task is deleted mid-line and its TCB
+    // address is reused before the next fragment, the interruption is missed
+    // once — one mixed line, never a crash.)
+    const void *me = xTaskGetCurrentTaskHandle();
+    applog_asm_begin(&s_asm, me, applog_emit_line);
     // Append this fragment in place — no second buffer. vsnprintf NUL-
-    // terminates within `remain` and returns the would-be length.
-    size_t remain = sizeof(s_line) - s_line_len;
-    int n = vsnprintf(s_line + s_line_len, remain, fmt, args);
-    if (n > 0) {
-        s_line_len += ((size_t)n >= remain) ? (remain - 1) : (size_t)n;
-        // Flush on end-of-line, or when a single line overran the buffer
-        // (pathological > LOG_LINE_MAX — emit the truncated head).
-        if (s_line[s_line_len - 1] == '\n' || s_line_len >= sizeof(s_line) - 1) {
-            applog_flush_line();
-        }
-    }
+    // terminates within the rest of s_line and returns the would-be length.
+    const size_t start = s_asm.len;
+    int n = vsnprintf(s_line + start, sizeof(s_line) - start, fmt, args);
+    applog_asm_end(&s_asm, me, start, n, applog_emit_line);
 
     xSemaphoreGive(s_mtx);
     return rc;
@@ -435,7 +417,7 @@ void applog_stream_end(void) {
 }
 
 // V2.8.17: boot replay cut-off (see applog.h). Running publish() under the same mutex
-// applog_flush_line() holds while it appends a line and forwards it to
+// applog_emit_line() runs under while it appends a line and forwards it to
 // syslog makes the split exact: every line appended before the returned
 // offset was flushed while syslog was still down, every later one was
 // forwarded live. A line half-assembled at this moment is appended later,

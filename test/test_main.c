@@ -55,6 +55,7 @@
 #include "tube_pcnt.h"
 #include "ota_guard_logic.h"  // V2.8.20: OTA rollback probation rule
 #include "auth_lockout.h"     // V2.8.26: admin login lockout rule
+#include "applog_asm.h"       // V2.8.32: log-line reassembly
 
 static int g_failures = 0;
 
@@ -1036,7 +1037,8 @@ static void rxt_frame(uint8_t mhdr, uint32_t addr, size_t len) {
     rxt_spi(o, 3 + len, i);   // i[8] = FCtrl 0 (no FOpts)
 }
 // One TX as RadioLib 8.0 drives it. rx1/rx2: 0 = window not opened, 1 = timeout,
-// 2 = our frame, 3 = foreign frame (read, then dropped), 4 = RX_DONE not read.
+// 2 = our frame, 3 = foreign frame (read, then dropped), 4 = RX_DONE not read,
+// 5 = our address with one bit flipped, 6 = with five bits flipped (both read, then dropped).
 static void rxt_tx(double mhz, int rx1, int rx2) {
     rxt_sf(12); rxt_freq(mhz);
     const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
@@ -1054,7 +1056,13 @@ static void rxt_tx(double mhz, int rx1, int rx2) {
         g_rxt_now += 50000;
         if (rx[w] == 1) { rxt_irq(OBS_IRQ_TIMEOUT); continue; }
         rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
-        if (rx[w] != 4) rxt_frame(0x60, rx[w] == 2 ? RXT_OWN : RXT_FOREIGN, w ? 18 : 14);
+        if (rx[w] != 4) {
+            const uint32_t a = rx[w] == 2   ? RXT_OWN
+                               : rx[w] == 5 ? (RXT_OWN ^ 0x10u)
+                               : rx[w] == 6 ? (RXT_OWN ^ 0x1Fu)
+                                            : RXT_FOREIGN;
+            rxt_frame(0x60, a, w ? 18 : 14);
+        }
     }
     g_rxt_now += 3000000;
 }
@@ -1072,11 +1080,14 @@ static int rxt_check(int16_t st, const char *windows, const char *freqs, const c
     EXPECT_STREQ(t, tx);
     return 1;
 }
-#define RXT_LAST_BOTH(f) " | last TX: RX1 " f " SF12 @+4991 ms to=2996 ms; RX2 869.525 SF9 @+6041 ms to=708 ms"
-#define RXT_LAST_RX1(f)  " | last TX: RX1 " f " SF12 @+4991 ms to=2996 ms; RX2 not opened"
-#define RXT_TT "RX1 timeout, no preamble; RX2 timeout, no preamble"
-#define RXT_FOREIGN14 "RX_DONE (data down for 66492766 (not ours), 14 B) ignored, repeats go on"
-#define RXT_UNREAD "RX_DONE (not read: RadioLib dropped it, too long/short) ignored, repeats go on"
+#define RXT_LAST_BOTH(f) " | last TX: RX1 " f " MHz SF12 opened +4991 ms (open for up to 2996 ms); RX2 869.525 MHz SF9 " \
+                         "opened +6041 ms (open for up to 708 ms)"
+#define RXT_LAST_RX1(f)  " | last TX: RX1 " f " MHz SF12 opened +4991 ms (open for up to 2996 ms); RX2 not opened"
+// V2.8.32: RX2 skipped because RX1 delivered the valid downlink that ended the exchange.
+#define RXT_LAST_RX1_DL(f) " | last TX: RX1 " f " MHz SF12 opened +4991 ms (open for up to 2996 ms); RX2 not needed"
+#define RXT_TT "RX1 nothing received; RX2 nothing received"
+#define RXT_FOREIGN14 "received: downlink for another device (66492766), 14 B — ignored, repeats go on"
+#define RXT_UNREAD "received: frame not read (too long or too short for RadioLib) — ignored, repeats go on"
 
 static int test_rxobs_all_timeouts(void) {   // A
     rxt_begin(3); rxt_tx(867.1, 1, 1); rxt_tx(868.5, 1, 1); rxt_tx(867.3, 1, 1);
@@ -1086,84 +1097,130 @@ static int test_rxobs_all_timeouts(void) {   // A
 static int test_rxobs_own_dl_rx1_first_repeat(void) {   // B
     rxt_begin(3); rxt_tx(867.9, 2, 0);
     return rxt_check(1, "NbTrans 3 (set by network) | stopped after 1 of 3: valid downlink in RX1 of #1 — a downlink "
-                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 RX_DONE (data down for 260b1234 (ours), 14 B); "
-                     "RX2 not opened" RXT_LAST_RX1("867.900"), "867.9", "1/3");
+                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 received: downlink for this node (260b1234), 14 B; "
+                     "RX2 not needed" RXT_LAST_RX1_DL("867.900"), "867.9", "1/3");
 }
 static int test_rxobs_foreign_frame_repeats_go_on(void) {   // C (RadioLib 8.0: dropped, st 0)
     rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 3, 1); rxt_tx(868.1, 1, 1);
     return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900: " RXT_TT " | #2 868.300: RX1 "
-                     RXT_FOREIGN14 "; RX2 timeout, no preamble | #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"),
+                     RXT_FOREIGN14 "; RX2 nothing received | #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"),
                      "867.9/868.3/868.1", "3/3");
 }
 static int test_rxobs_foreign_then_own_dl(void) {   // C2: the later repeat is named
     rxt_begin(3); rxt_tx(867.9, 3, 1); rxt_tx(868.3, 2, 0);
     return rxt_check(1, "NbTrans 3 (set by network) | stopped after 2 of 3: valid downlink in RX1 of #2 — a downlink "
-                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 " RXT_FOREIGN14 "; RX2 timeout, no preamble | "
-                     "#2 868.300: RX1 RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened"
-                     RXT_LAST_RX1("868.300"), "867.9/868.3", "2/3");
+                     "ends the repeats (LoRaWAN) | #1 867.900: RX1 " RXT_FOREIGN14 "; RX2 nothing received | "
+                     "#2 868.300: RX1 received: downlink for this node (260b1234), 14 B; RX2 not needed"
+                     RXT_LAST_RX1_DL("868.300"), "867.9/868.3", "2/3");
 }
 static int test_rxobs_own_malformed_ends_exchange(void) {   // C3: the -1102 left on RadioLib 8.0
     rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 2, 0);
     return rxt_check(-1102, "NbTrans 3 (set by network) | stopped after 2 of 3: unusable frame in RX1 of #2, -1102 "
                      "(downlink addressed to us but malformed (bad FPort or FOpts), dropped), ended them early — "
                      "LoRaWAN says only a valid downlink ends the repeats | #1 867.900: " RXT_TT " | #2 868.300: RX1 "
-                     "RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened" RXT_LAST_RX1("868.300"),
+                     "received: downlink for this node (260b1234), 14 B; RX2 not opened" RXT_LAST_RX1("868.300"),
                      "867.9/868.3", "2/3");
 }
 static int test_rxobs_own_dl_rx2_last_repeat(void) {   // D
     rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 1, 2);
     return rxt_check(2, "NbTrans 3 (set by network) | all 3 sent, valid downlink in RX2 of #3 | #1 867.900, "
-                     "#2 868.300: " RXT_TT " | #3 868.100: RX1 timeout, no preamble; RX2 RX_DONE (data down for "
-                     "260b1234 (ours), 18 B)" RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1", "3/3");
+                     "#2 868.300: " RXT_TT " | #3 868.100: RX1 nothing received; RX2 received: downlink for "
+                     "this node (260b1234), 18 B" RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1", "3/3");
 }
 static int test_rxobs_single_tx(void) {   // E
     rxt_begin(1); rxt_tx(867.5, 1, 1);
-    return rxt_check(0, "RX1 867.500 SF12 @+4991 ms to=2996 ms timeout, no preamble | RX2 869.525 SF9 @+6041 ms "
-                     "to=708 ms timeout, no preamble", "867.5", "1");
+    return rxt_check(0, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): nothing received | "
+                     "RX2 869.525 MHz SF9 opened +6041 ms (open for up to 708 ms): nothing received", "867.5", "1");
 }
 static int test_rxobs_single_tx_foreign(void) {   // F (RadioLib 8.0: dropped, RX2 opens, st 0)
     rxt_begin(1); rxt_tx(867.5, 3, 1);
-    return rxt_check(0, "RX1 867.500 SF12 @+4991 ms to=2996 ms RX_DONE (data down for 66492766 (not ours), 14 B) "
-                     "ignored (RadioLib dropped it, the window counts as empty) | RX2 869.525 SF9 @+6041 ms "
-                     "to=708 ms timeout, no preamble", "867.5", "1");
+    return rxt_check(0, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: downlink for "
+                     "another device (66492766), 14 B — ignored (RadioLib dropped it, the window counts as empty) | "
+                     "RX2 869.525 MHz SF9 opened +6041 ms (open for up to 708 ms): nothing received", "867.5", "1");
+}
+// V2.8.32: the single-TX form says "RX2 not needed" only after a valid downlink
+// in RX1; a kept frame that then failed its checks (here -1112 MIC) also makes
+// RadioLib skip RX2, and that reads "not opened".
+static int test_rxobs_single_tx_own_dl(void) {   // F2
+    rxt_begin(1); rxt_tx(867.5, 2, 0);
+    return rxt_check(1, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: downlink for "
+                     "this node (260b1234), 14 B | RX2 not needed", "867.5", "1");
+}
+static int test_rxobs_single_tx_own_dl_unusable(void) {   // F3
+    rxt_begin(1); rxt_tx(867.5, 2, 0);
+    return rxt_check(-1112, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: downlink for "
+                     "this node (260b1234), 14 B | RX2 not opened", "867.5", "1");
+}
+// V2.8.32: a DevAddr one bit off our own reads as our frame with bit errors.
+static int test_rxobs_single_tx_own_bit_error(void) {   // F4 (RadioLib drops it, RX2 opens, st 0)
+    rxt_begin(1); rxt_tx(867.5, 5, 1);
+    return rxt_check(0, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: downlink for "
+                     "260b1224, possibly this node (260b1234) with bit errors, 14 B — ignored (RadioLib dropped it, "
+                     "the window counts as empty) | RX2 869.525 MHz SF9 opened +6041 ms (open for up to 708 ms): "
+                     "nothing received", "867.5", "1");
+}
+// V2.8.32: five bits off is past the 4-bit threshold: another device.
+static int test_rxobs_single_tx_five_bits_off(void) {   // F5
+    rxt_begin(1); rxt_tx(867.5, 6, 1);
+    return rxt_check(0, "RX1 867.500 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: downlink for "
+                     "another device (260b122b), 14 B — ignored (RadioLib dropped it, the window counts as "
+                     "empty) | RX2 869.525 MHz SF9 opened +6041 ms (open for up to 708 ms): nothing received",
+                     "867.5", "1");
+}
+// V2.8.32: a truncated line never ends in half a "—" (3 bytes in UTF-8).
+static int test_rxobs_truncation_keeps_utf8_whole(void) {
+    rxt_begin(1); rxt_tx(867.5, 6, 1);
+    char full[LW_RXOBS_LINE_MAX], cut[LW_RXOBS_LINE_MAX];
+    rxobs_format(&g_rxt, full, sizeof(full), 0);
+    const char *dash = strstr(full, "\xe2\x80\x94");
+    EXPECT_TRUE(dash != NULL);
+    const size_t pos = (size_t)(dash - full);
+    for (size_t extra = 1; extra <= 2; extra++) {   // 1 or 2 of the dash's 3 bytes would fit
+        rxobs_format(&g_rxt, cut, pos + extra + 1, 0);
+        EXPECT_TRUE(strlen(cut) == pos);
+        EXPECT_TRUE(strncmp(cut, full, pos) == 0);
+    }
+    rxobs_format(&g_rxt, cut, pos + 4, 0);   // the whole dash fits: kept
+    EXPECT_TRUE(strlen(cut) == pos + 3);
+    return 1;
 }
 static int test_rxobs_rx_window_missed(void) {   // G
     rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 0);
     return rxt_check(-1105, "NbTrans 3 (set by network) | stopped at TX 2 of 3: -1105 (RX window missed: RX1 held "
-                     "open past RX2, or too late) | #1 867.900: " RXT_TT " | #2 868.300: RX1 timeout, no preamble; "
+                     "open past RX2, or too late) | #1 867.900: " RXT_TT " | #2 868.300: RX1 nothing received; "
                      "RX2 not opened" RXT_LAST_RX1("868.300"), "867.9/868.3", "2/3");
 }
 static int test_rxobs_nested_mac_only(void) {   // K
     rxt_begin(3); rxt_tx(867.9, 2, 0); rxt_tx(868.3, 1, 1); rxt_tx(868.5, 1, 1); rxt_tx(867.1, 1, 1);
     return rxt_check(1, "NbTrans 3 (set by network) | stopped after 1 of 3: valid downlink in RX1 of #1 — a downlink "
                      "ends the repeats (LoRaWAN); then 3 TX of a MAC-only uplink (M1..: RadioLib sends MAC answers "
-                     "that do not fit the next frame on their own) | #1 867.900: RX1 RX_DONE (data down for 260b1234 "
-                     "(ours), 14 B); RX2 not opened | M1 868.300, M2 868.500, M3 867.100: " RXT_TT
+                     "that do not fit the next frame on their own) | #1 867.900: RX1 received: downlink for this node "
+                     "(260b1234), 14 B; RX2 not needed | M1 868.300, M2 868.500, M3 867.100: " RXT_TT
                      RXT_LAST_BOTH("867.100"), "867.9", "1/3 +3 MAC-only (from FCnt 1128)");
 }
 static int test_rxobs_nested_mac_only_nbtrans1(void) {   // K2
     rxt_begin(1); rxt_tx(867.9, 2, 0); rxt_tx(868.3, 1, 1);
     return rxt_check(1, "NbTrans 1 | all 1 sent, valid downlink in RX1 of #1; then 1 TX of a MAC-only uplink (M1..: "
                      "RadioLib sends MAC answers that do not fit the next frame on their own) | #1 867.900: RX1 "
-                     "RX_DONE (data down for 260b1234 (ours), 14 B); RX2 not opened | M1 868.300: " RXT_TT
+                     "received: downlink for this node (260b1234), 14 B; RX2 not needed | M1 868.300: " RXT_TT
                      RXT_LAST_BOTH("868.300"), "867.9", "1 +1 MAC-only (from FCnt 1128)");
 }
 static int test_rxobs_foreign_on_last_repeat(void) {   // L (RadioLib 8.0: st 0)
     rxt_begin(3); rxt_tx(867.9, 1, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 3, 1);
     return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900, #2 868.300: " RXT_TT " | #3 868.100: "
-                     "RX1 " RXT_FOREIGN14 "; RX2 timeout, no preamble" RXT_LAST_BOTH("868.100"),
+                     "RX1 " RXT_FOREIGN14 "; RX2 nothing received" RXT_LAST_BOTH("868.100"),
                      "867.9/868.3/868.1", "3/3");
 }
 static int test_rxobs_unread_frame_repeats_go_on(void) {   // M2
     rxt_begin(3); rxt_tx(867.9, 4, 1); rxt_tx(868.3, 1, 1); rxt_tx(868.1, 1, 1);
-    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900: RX1 " RXT_UNREAD "; RX2 timeout, "
-                     "no preamble | #2 868.300, #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1",
+    return rxt_check(0, "NbTrans 3 (set by network) | all 3 sent | #1 867.900: RX1 " RXT_UNREAD "; RX2 nothing "
+                     "received | #2 868.300, #3 868.100: " RXT_TT RXT_LAST_BOTH("868.100"), "867.9/868.3/868.1",
                      "3/3");
 }
 static int test_rxobs_unread_frames_two_repeats(void) {   // P (formatter robustness; st 0 on RadioLib 8.0)
     rxt_begin(3); rxt_tx(867.9, 4, 1); rxt_tx(868.3, 1, 4);
     return rxt_check(0, "NbTrans 3 (set by network) | stopped after 2 of 3, no downlink (cause not seen) | #1 867.900: "
-                     "RX1 " RXT_UNREAD "; RX2 timeout, no preamble | #2 868.300: RX1 timeout, no preamble; RX2 "
+                     "RX1 " RXT_UNREAD "; RX2 nothing received | #2 868.300: RX1 nothing received; RX2 "
                      RXT_UNREAD RXT_LAST_BOTH("868.300"), "867.9/868.3", "2/3");
 }
 static int test_rxobs_tx_timeout(void) {   // N
@@ -1179,9 +1236,9 @@ static int test_rxobs_unread_both_windows(void) {   // Q (formatter robustness; 
     return rxt_check(0, "NbTrans 3 (set by network) | stopped after 1 of 3, no downlink (cause not seen) | #1 867.900: "
                      "RX1 " RXT_UNREAD "; RX2 " RXT_UNREAD RXT_LAST_BOTH("867.900"), "867.9", "1/3");
 }
-#define RXT_I_LINE "NbTrans 15 (set by network) | all 15 sent | #1 867.100: RX1 timeout, no preamble; RX2 RX_DONE " \
-    "(data down for 66492766 (not ours), 18 B) ignored, repeats go on | #2 867.300: " RXT_TT " | #3 867.500: RX1 "      \
-    "timeout, no preamble; RX2 RX_DONE (data down for 66492766 (not ours), 18 B) ignored, repeats go on | #4 867.700: " \
+#define RXT_I_LINE "NbTrans 15 (set by network) | all 15 sent | #1 867.100: RX1 nothing received; RX2 received" \
+    ": downlink for another device (66492766), 18 B — ignored, repeats go on | #2 867.300: " RXT_TT " | #3 867.500: RX1 "      \
+    "nothing received; RX2 received: downlink for another device (66492766), 18 B — ignored, repeats go on | #4 867.700: " \
     RXT_TT " | +11 more TX not listed" RXT_LAST_BOTH("868.300")
 static void rxt_fifteen(void) {
     rxt_begin(15);
@@ -1362,8 +1419,148 @@ static int test_rxobs_join_accept_not_ignored(void) {   // joining: own_addr 0
     g_rxt_now += 50000; rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
     rxt_frame(0x20, 0, 17);
     rxobs_format(&g_rxt, g_rxt_buf, sizeof(g_rxt_buf), 0);
-    EXPECT_STREQ(g_rxt_buf, "RX1 868.100 SF12 @+4991 ms to=2996 ms RX_DONE (join accept, 17 B) | RX2 not opened");
+    EXPECT_STREQ(g_rxt_buf, "RX1 868.100 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: join accept, "
+                            "17 B | RX2 not needed");
     EXPECT_TRUE(!g_rxt.win[0].ignored);
+    return 1;
+}
+// V2.8.32: a data frame while joining (no session address yet) says so.
+static int test_rxobs_data_frame_while_joining(void) {
+    g_rxt.own_addr = 0;
+    rxobs_begin(&g_rxt, 1);
+    rxt_sf(12); rxt_freq(868.1);
+    const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
+    rxt_spi(tx, 4, NULL);
+    g_rxt_now += 1482000;
+    const uint8_t c[3] = { OBS_CMD_CLEAR_IRQ, 0, 0 };
+    rxt_spi(c, 3, NULL);
+    g_rxt_now += 4991000; rxt_rx(2996);
+    g_rxt_now += 50000; rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
+    rxt_frame(0x60, RXT_FOREIGN, 14);
+    rxobs_format(&g_rxt, g_rxt_buf, sizeof(g_rxt_buf), 0);
+    EXPECT_STREQ(g_rxt_buf, "RX1 868.100 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: data downlink "
+                            "for 66492766 while joining, 14 B — ignored (RadioLib dropped it, the window counts as "
+                            "empty) | RX2 not opened");
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// applog_asm (V2.8.32): log-line reassembly across task interruptions
+// ----------------------------------------------------------------------------
+static char g_asm_out[512];
+static int  g_asm_bad_len;
+static void asm_emit(char *line, size_t len) {
+    if (len != strlen(line)) g_asm_bad_len++;
+    strncat(g_asm_out, line, sizeof(g_asm_out) - strlen(g_asm_out) - 1);
+}
+static const int g_task_a = 1, g_task_b = 2;
+static void asm_frag(applog_asm_t *a, const void *me, const char *text) {   // one vprintf fragment
+    applog_asm_begin(a, me, asm_emit);
+    const size_t start = a->len;
+    const int n = snprintf(a->buf + start, a->sz - start, "%s", text);
+    applog_asm_end(a, me, start, n, asm_emit);
+}
+static void asm_reset(applog_asm_t *a, char *buf, size_t sz) {
+    g_asm_out[0] = 0; g_asm_bad_len = 0;
+    buf[0] = 0;
+    applog_asm_t z = { .buf = buf, .sz = sz };
+    *a = z;
+}
+static int test_applog_asm_whole_line(void) {
+    char buf[128]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: "); asm_frag(&a, &g_task_a, "one"); asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "I (1) a: one\n");
+    EXPECT_TRUE(a.len == 0 && g_asm_bad_len == 0);
+    return 1;
+}
+// The case seen at boot: B logs between A's text and A's "\n". Up to V2.8.31
+// this gave "I (1) a: oneI (2) b: two\n\n".
+static int test_applog_asm_cut_after_text(void) {
+    char buf[128]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: "); asm_frag(&a, &g_task_a, "one");
+    asm_frag(&a, &g_task_b, "I (2) b: "); asm_frag(&a, &g_task_b, "two"); asm_frag(&a, &g_task_b, "\n");
+    asm_frag(&a, &g_task_a, "\n");   // A's late newline: dropped
+    asm_frag(&a, &g_task_a, "I (3) a: "); asm_frag(&a, &g_task_a, "three"); asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "I (1) a: one\nI (2) b: two\nI (3) a: three\n");
+    EXPECT_TRUE(g_asm_bad_len == 0);
+    return 1;
+}
+// B logs between A's prefix and A's text: the prefix stub is a line of its
+// own and A's text follows as one (never mixed, never glued).
+static int test_applog_asm_cut_after_prefix(void) {
+    char buf[128]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: ");
+    asm_frag(&a, &g_task_b, "I (2) b: "); asm_frag(&a, &g_task_b, "two"); asm_frag(&a, &g_task_b, "\n");
+    asm_frag(&a, &g_task_a, "one"); asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "I (1) a: \nI (2) b: two\none\n");
+    return 1;
+}
+// A line longer than the buffer: its head is forwarded ending in "\n", the
+// line's own "\n" is dropped, the next line is unaffected.
+static int test_applog_asm_overflow(void) {
+    char buf[16]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "0123456789abcdefXYZ"); asm_frag(&a, &g_task_a, "\n");
+    asm_frag(&a, &g_task_a, "ok"); asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "0123456789abcd\nok\n");
+    EXPECT_TRUE(g_asm_bad_len == 0);
+    return 1;
+}
+// An empty fragment changes nothing (and leaves no owner behind).
+static int test_applog_asm_empty_fragment(void) {
+    char buf[64]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "");
+    EXPECT_TRUE(a.len == 0 && a.owner == NULL);
+    asm_frag(&a, &g_task_b, "x"); asm_frag(&a, &g_task_b, ""); asm_frag(&a, &g_task_b, "\n");
+    EXPECT_STREQ(g_asm_out, "x\n");
+    return 1;
+}
+
+// The drop is one-shot: after the dropped "\n", a further lone "\n" from the
+// same task is a real (empty) line; and a task whose first fragment after the
+// cut is text keeps its own "\n".
+static int test_applog_asm_drop_is_one_shot(void) {
+    char buf[128]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: "); asm_frag(&a, &g_task_a, "one");
+    asm_frag(&a, &g_task_b, "I (2) b: two\n");
+    asm_frag(&a, &g_task_a, "\n");   // dropped
+    asm_frag(&a, &g_task_a, "\n");   // kept
+    EXPECT_STREQ(g_asm_out, "I (1) a: one\nI (2) b: two\n\n");
+    asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: ");
+    asm_frag(&a, &g_task_b, "I (2) b: two\n");
+    asm_frag(&a, &g_task_a, "x"); asm_frag(&a, &g_task_a, "\n");
+    asm_frag(&a, &g_task_a, "\n");   // not the late one: kept
+    EXPECT_STREQ(g_asm_out, "I (1) a: \nI (2) b: two\nx\n\n");
+    return 1;
+}
+// Double interruption: A's late "\n" itself cuts B's half line; both late
+// newlines are still recognised (more than one interrupted task remembered).
+static int test_applog_asm_double_interruption(void) {
+    char buf[128]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: "); asm_frag(&a, &g_task_a, "one");
+    asm_frag(&a, &g_task_b, "I (2) b: ");
+    asm_frag(&a, &g_task_a, "\n");
+    asm_frag(&a, &g_task_b, "two"); asm_frag(&a, &g_task_b, "\n");
+    EXPECT_STREQ(g_asm_out, "I (1) a: one\nI (2) b: \ntwo\n");
+    // Two tasks taking turns fragment by fragment: no empty line, nothing glued.
+    asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "I (1) a: "); asm_frag(&a, &g_task_b, "I (2) b: ");
+    asm_frag(&a, &g_task_a, "one");       asm_frag(&a, &g_task_b, "two");
+    asm_frag(&a, &g_task_a, "\n");        asm_frag(&a, &g_task_b, "\n");
+    EXPECT_STREQ(g_asm_out, "I (1) a: \nI (2) b: \none\ntwo\n");
+    EXPECT_TRUE(a.len == 0 && g_asm_bad_len == 0);
+    return 1;
+}
+// Overflow boundaries: sz-2 characters plus "\n" fit whole; a line that
+// overflows over two fragments loses only its own "\n".
+static int test_applog_asm_overflow_boundaries(void) {
+    char buf[16]; applog_asm_t a; asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "0123456789abcd"); asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "0123456789abcd\n");
+    asm_reset(&a, buf, sizeof(buf));
+    asm_frag(&a, &g_task_a, "0123456789"); asm_frag(&a, &g_task_a, "abcdefgh"); asm_frag(&a, &g_task_a, "\n");
+    asm_frag(&a, &g_task_a, "\n");
+    EXPECT_STREQ(g_asm_out, "0123456789abcd\n\n");
     return 1;
 }
 
@@ -4790,6 +4987,11 @@ int main(int argc, char **argv) {
     RUN(test_rxobs_own_dl_rx2_last_repeat);
     RUN(test_rxobs_single_tx);
     RUN(test_rxobs_single_tx_foreign);
+    RUN(test_rxobs_single_tx_own_dl);
+    RUN(test_rxobs_single_tx_own_dl_unusable);
+    RUN(test_rxobs_single_tx_own_bit_error);
+    RUN(test_rxobs_single_tx_five_bits_off);
+    RUN(test_rxobs_truncation_keeps_utf8_whole);
     RUN(test_rxobs_rx_window_missed);
     RUN(test_rxobs_nested_mac_only);
     RUN(test_rxobs_nested_mac_only_nbtrans1);
@@ -4801,6 +5003,15 @@ int main(int argc, char **argv) {
     RUN(test_rxobs_nbtrans_above_max_rep);
     RUN(test_rxobs_truncation_keeps_verdict);
     RUN(test_rxobs_join_accept_not_ignored);
+    RUN(test_applog_asm_whole_line);
+    RUN(test_applog_asm_cut_after_text);
+    RUN(test_applog_asm_cut_after_prefix);
+    RUN(test_applog_asm_overflow);
+    RUN(test_applog_asm_empty_fragment);
+    RUN(test_applog_asm_drop_is_one_shot);
+    RUN(test_applog_asm_double_interruption);
+    RUN(test_applog_asm_overflow_boundaries);
+    RUN(test_rxobs_data_frame_while_joining);
     RUN(test_lw_err_text);
     RUN(test_lw_next_uplink_line);
     RUN(test_lw_downlink_unusable);

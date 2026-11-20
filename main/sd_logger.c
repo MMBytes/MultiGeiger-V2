@@ -1,7 +1,6 @@
 #include "sd_logger.h"
 
 #include <errno.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -85,27 +84,8 @@ static char        s_path[96];               // SD_MOUNT_POINT + '/' + filename
 static uint16_t    s_order[TELEMETRY_MAX_COLUMNS];
 static size_t      s_ncols;
 
-// Defensive helper: vsnprintf into a buffer at offset n with bounds check.
-// Returns updated n. Stops growing once the buffer is full (further calls
-// no-op) — the non-negotiable fix for the bare `n += snprintf(...)`
-// accumulation pattern, which lets one truncating call push n past the
-// buffer size and turn the next call's `sz - n` into a huge size_t (i.e. an
-// out-of-bounds write). Same clamp as http_server.c::append_safe /
-// transmission.c::tx_append / mqtt.c::APPEND; not shared via util.h because
-// each of those already carries its own file-local copy (house convention —
-// see the comment above tx_append() in transmission.c).
-__attribute__((format(printf, 4, 5)))
-static int append_safe(char *out, size_t sz, int n, const char *fmt, ...) {
-    if (n < 0 || (size_t)n >= sz) return (int)sz;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(out + n, sz - n, fmt, ap);
-    va_end(ap);
-    if (w < 0) return n;
-    n += w;
-    if ((size_t)n > sz) n = (int)sz;
-    return n;
-}
+// Row building uses util.h's buf_append() (bounded append; never the bare
+// `n += snprintf` pattern). V2.8.33: was a file-local append_safe copy.
 
 static int order_cmp(const void *a, const void *b) {
     const telemetry_desc_t *da = telemetry_get(*(const uint16_t *)a);
@@ -190,12 +170,12 @@ static bool create_file(void) {
     // V2.6.21: no longer hardcoded UTC — DateTime is local time with its own
     // numeric offset per row (ntp_localtime_str() in write_row() below), so
     // the header can't bake in a fixed zone label.
-    n = append_safe(row, sizeof(row), n,
+    n = buf_append(row, sizeof(row), n,
                     "DateTime,Uptime [s],GPS Lat,GPS Lon,GPS Alt [m],GPS Sats,GPS HDOP");
     for (size_t i = 0; i < s_ncols; i++) {
-        n = append_safe(row, sizeof(row), n, ",%s", telemetry_get(s_order[i])->header);
+        n = buf_append(row, sizeof(row), n, ",%s", telemetry_get(s_order[i])->header);
     }
-    append_safe(row, sizeof(row), n, "\n");
+    buf_append(row, sizeof(row), n, "\n");
     if (fputs(row, s_f) == EOF || fflush(s_f) == EOF || fsync(fileno(s_f)) != 0) {
         ESP_LOGE(TAG, "header write failed: errno %d", errno);
         return false;
@@ -220,30 +200,30 @@ static bool write_row(void) {
     // boot in main.c so this reflects tz_posix even though standalone mode
     // never runs ntp_setup()/NTP itself.
     char ts[NTP_LOCALTIME_STR_LEN];   // V2.8.5: caller-owned (was shared static)
-    n = append_safe(row, sizeof(row), n, "%s,%llu", ntp_localtime_str(ts, sizeof(ts)),
+    n = buf_append(row, sizeof(row), n, "%s,%llu", ntp_localtime_str(ts, sizeof(ts)),
                     (unsigned long long)(esp_timer_get_time() / 1000000LL));
 
     // GPS cells: empty on fix loss, while DateTime above keeps running on
     // the (GPS-synced) system clock — spec §5.
     gnss_fix_t gf = { 0 };
     if (gnss_get_fix(&gf) && gf.valid) {
-        n = append_safe(row, sizeof(row), n, ",%.6f,%.6f,%.0f,%u,%.1f",
+        n = buf_append(row, sizeof(row), n, ",%.6f,%.6f,%.0f,%u,%.1f",
                         gf.lat, gf.lon, (double)gf.alt_m,
                         (unsigned)gf.sats, (double)gf.hdop);
     } else {
-        n = append_safe(row, sizeof(row), n, ",,,,,");
+        n = buf_append(row, sizeof(row), n, ",,,,,");
     }
 
     for (size_t i = 0; i < s_ncols; i++) {
         const telemetry_desc_t *d = telemetry_get(s_order[i]);
         char cell[CELL_MAX];
         if (d->read(cell, sizeof(cell), d->arg)) {
-            n = append_safe(row, sizeof(row), n, ",%s", cell);
+            n = buf_append(row, sizeof(row), n, ",%s", cell);
         } else {
-            n = append_safe(row, sizeof(row), n, ",");
+            n = buf_append(row, sizeof(row), n, ",");
         }
     }
-    append_safe(row, sizeof(row), n, "\n");
+    buf_append(row, sizeof(row), n, "\n");
 
     if (fputs(row, s_f) == EOF || fflush(s_f) == EOF || fsync(fileno(s_f)) != 0) {
         ESP_LOGE(TAG, "row write failed: errno %d", errno);
@@ -253,7 +233,7 @@ static bool write_row(void) {
     return true;
 }
 
-#endif  // HAL_HAS_SD_CARD (append_safe .. write_row)
+#endif  // HAL_HAS_SD_CARD (order_cmp .. write_row)
 
 void sd_logger_cycle(void) {
 #if HAL_HAS_SD_CARD

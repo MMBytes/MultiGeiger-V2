@@ -63,36 +63,32 @@
  *  still under applog's 1024-byte line. */
 #define LW_RXOBS_LINE_MAX 960
 
-/** One RX window over all repeats of an exchange (folded). */
+/** Timing of one RX window of the CURRENT transmission (what the window saw is
+ *  kept per repeat in rxobs_rep_t). V2.8.33: was also a "folded over repeats"
+ *  result record (irq, best_irq, has_best, n_open, frame fields), removed as
+ *  a duplicate: the single-TX text read it but runs only with one TX, where it
+ *  was identical to rep[0] (which it reads now), and the multi-TX text always
+ *  read rep[]. */
 typedef struct {
     int64_t  open_us;        // time of the SetRx that opened the window
     uint32_t timeout_us;     // SX126x RX timeout programmed for it
     uint32_t freq_raw;       // SetRfFrequency word in force when it opened
     uint8_t  sf;             // LoRa SF in force when it opened
-    uint16_t irq;            // OR of the GetIrqStatus replies of the CURRENT repeat
-    uint16_t best_irq;       // most informative earlier repeat (rxobs_rank()); valid
-    bool     has_best;       //   only if has_best — see rxobs_fold()
-    // Frame read out of the FIFO in this window (RadioLib's readData() after
-    // RX_DONE): MHDR + DevAddr are plaintext in a data downlink, enough to
-    // tell "for us" from "someone else's" from "ours, corrupted" (LoRaWAN
-    // downlinks carry NO PHY CRC).
-    bool     rx_seen;
-    uint8_t  rx_len;
-    uint8_t  rx_mhdr;
-    uint32_t rx_addr;        // little-endian on air (LoRaWAN FHDR)
-    uint8_t  n_open;         // how many repeats opened this window
-    bool     ignored;        // RadioLib dropped the frame (not ours / unreadable)
 } rxobs_win_t;
 
 /** What ONE repeat's window saw. */
 typedef struct {
     bool     opened;
+    // Frame read out of the FIFO in this window (RadioLib's readData() after
+    // RX_DONE): MHDR + DevAddr are plaintext in a data downlink, enough to
+    // tell "for us" from "someone else's" from "ours, corrupted" (LoRaWAN
+    // downlinks carry NO PHY CRC).
     bool     rx_seen;        // a frame was read out of the FIFO (fields below valid)
     bool     ignored;        // RadioLib dropped the frame: the window counts as empty
     uint8_t  rx_len;
     uint8_t  rx_mhdr;
     uint16_t irq;            // OR of this window's GetIrqStatus replies
-    uint32_t rx_addr;
+    uint32_t rx_addr;        // little-endian on air (LoRaWAN FHDR)
     // V2.8.23: the MAC part of a data downlink (rxobs_note_mac()). FOpts are
     // plaintext in LoRaWAN 1.0.x (encrypted in 1.1); an FPort-0 payload is
     // always encrypted, so only its length is kept.
@@ -126,7 +122,7 @@ typedef struct {
     uint8_t  tx_sf;
     uint8_t  n_tx;           // transmissions in this exchange
     int      n_win;          // windows opened after the CURRENT transmission (0..2)
-    rxobs_win_t win[2];      // [0] = RX1, [1] = RX2 (Class A), folded over repeats
+    rxobs_win_t win[2];      // [0] = RX1, [1] = RX2 (Class A) timing, current TX
     uint8_t  nb_trans;       // NbTrans in force when the exchange started
     rxobs_rep_t rep[OBS_MAX_REP];   // per transmission, [n_tx - 1] = current
     uint32_t own_addr;       // this node's DevAddr; 0 = not joined (join accepts expected)
@@ -141,31 +137,12 @@ typedef struct {
     int end_win;   // 1 = RX1, 2 = RX2 of that repeat, 0 = none
 } rxobs_split_t;
 
-/** @brief How informative one window result is, highest first: a frame (clean >
- *         CRC error > header error > header only) beats a bare preamble ("no
- *         timeout"), which beats a plain timeout. "No timeout" is the ABSENCE of
- *         a bit, so OR-ing raw flags over repeats would let one repeat's TIMEOUT
- *         hide another repeat's preamble. */
-static inline int rxobs_rank(uint16_t irq) {
-    if ((irq & OBS_IRQ_RX_DONE) && !(irq & OBS_IRQ_CRC_ERR)) return 6;
-    if (irq & OBS_IRQ_CRC_ERR)      return 5;
-    if (irq & OBS_IRQ_HEADER_ERR)   return 4;
-    if (irq & OBS_IRQ_HEADER_VALID) return 3;
-    if (!(irq & OBS_IRQ_TIMEOUT))   return 2;   // preamble kept the window open
-    return 1;                                   // plain timeout
-}
-
-/** @brief Fold a window's current-repeat flags into its best-so-far result. */
-static inline void rxobs_fold(rxobs_win_t *w) {
-    if (!w->has_best || rxobs_rank(w->irq) >= rxobs_rank(w->best_irq)) w->best_irq = w->irq;
-    w->has_best = true;
-}
-
-/** @brief A window's final result over all repeats (the current repeat's flags
- *         are not folded until the window reopens). */
-static inline uint16_t rxobs_final(const rxobs_win_t *w) {
-    if (!w->has_best || rxobs_rank(w->irq) >= rxobs_rank(w->best_irq)) return w->irq;
-    return w->best_irq;
+/** @brief The window received a frame with a good PHY CRC (RX_DONE, no CRC
+ *         error) — what the join-accept check in lorawan.cpp counts as
+ *         "delivered". V2.8.33: replaces "rxobs_rank(...) == 6"; the rest of
+ *         that rank order only served the removed fold over repeats. */
+static inline bool rxobs_clean_frame(uint16_t irq) {
+    return (irq & OBS_IRQ_RX_DONE) && !(irq & OBS_IRQ_CRC_ERR);
 }
 
 /** @brief Arm the observer for one exchange. Keeps cur_freq/cur_sf (RadioLib
@@ -259,10 +236,8 @@ static inline void rxobs_note(rxobs_t *o, int64_t now_us, const uint8_t *out, si
         if (len >= 2) o->cur_sf = out[1];
         break;
     case OBS_CMD_SET_TX:
-        // A repeat (or a MAC-only uplink) starts a new window pair. The folded
-        // win[] keeps each window's MOST INFORMATIVE result over all repeats
-        // (the network answers whichever repeat the gateway heard); rep[]
-        // keeps every repeat separately.
+        // A repeat (or a MAC-only uplink) starts a new window pair: win[]
+        // holds its window timing, rep[] keeps what every repeat's windows saw.
         o->tx_us = now_us;
         o->tx_done_us = 0;
         o->tx_freq_raw = o->cur_freq_raw;
@@ -282,9 +257,6 @@ static inline void rxobs_note(rxobs_t *o, int64_t now_us, const uint8_t *out, si
             w->timeout_us = ((((uint32_t)out[1] << 16) | ((uint32_t)out[2] << 8) | out[3]) * 125u) / 8u;
             w->freq_raw = o->cur_freq_raw;
             w->sf = o->cur_sf;
-            if (w->n_open > 0) rxobs_fold(w);   // keep the earlier repeat's result
-            w->irq = 0;
-            if (w->n_open < 255) w->n_open++;
             rxobs_hit_t *h = rxobs_hit(o, o->n_win - 1);
             if (h) h->opened = true;
         }
@@ -302,33 +274,26 @@ static inline void rxobs_note(rxobs_t *o, int64_t now_us, const uint8_t *out, si
     case OBS_CMD_GET_IRQ:
         if (len >= 4 && in && o->n_win > 0) {
             const uint16_t irq = (uint16_t)(((uint16_t)in[2] << 8) | in[3]);
-            o->win[o->n_win - 1].irq |= irq;
             rxobs_hit_t *h = rxobs_hit(o, o->n_win - 1);
             if (h) h->irq |= irq;
         }
         break;
     case OBS_CMD_READ_BUFFER:
         // The frame is read after the window that received it closed, so it
-        // belongs to win[n_win - 1]. 3 header bytes (cmd, offset, status),
+        // belongs to window n_win - 1. 3 header bytes (cmd, offset, status),
         // then the frame. RadioLib 8.0's checkDownlink() reads every frame it
         // did not reject on length; one it then rejects on MType/DevAddr/FOpts
         // is dropped silently (the window counts as empty, RX2 and the repeats
         // go on) — lw_sched_frame_is_ours() mirrors that decision.
         if (len >= 3 + 5 && in && o->n_win > 0) {
-            rxobs_win_t *w = &o->win[o->n_win - 1];
-            w->rx_seen = true;
-            w->rx_len  = (uint8_t)((len - 3) > 255 ? 255 : (len - 3));
-            w->rx_mhdr = in[3];
-            w->rx_addr = (uint32_t)in[4] | ((uint32_t)in[5] << 8) |
-                         ((uint32_t)in[6] << 16) | ((uint32_t)in[7] << 24);
-            w->ignored = !lw_sched_frame_is_ours(o->own_addr != 0, o->own_addr, &in[3], len - 3);
             rxobs_hit_t *h = rxobs_hit(o, o->n_win - 1);
             if (h) {
                 h->rx_seen = true;
-                h->rx_len  = w->rx_len;
-                h->rx_mhdr = w->rx_mhdr;
-                h->rx_addr = w->rx_addr;
-                h->ignored = w->ignored;
+                h->rx_len  = (uint8_t)((len - 3) > 255 ? 255 : (len - 3));
+                h->rx_mhdr = in[3];
+                h->rx_addr = (uint32_t)in[4] | ((uint32_t)in[5] << 8) |
+                             ((uint32_t)in[6] << 16) | ((uint32_t)in[7] << 24);
+                h->ignored = !lw_sched_frame_is_ours(o->own_addr != 0, o->own_addr, &in[3], len - 3);
                 rxobs_note_mac(h, &in[3], len - 3);   // V2.8.23
             }
         }
@@ -701,25 +666,22 @@ static inline void rxobs_format(const rxobs_t *o, char *buf, size_t sz, int16_t 
     *buf = '\0';
     bool rx1_kept = false;   // RX1 received a frame RadioLib kept: RX2 is then skipped
     for (int i = 0; i < 2; i++) {
-        const rxobs_win_t *w = &o->win[i];
-        if (w->n_open == 0) {
+        const rxobs_win_t *w = &o->win[i];       // timing (the one TX's windows)
+        const rxobs_hit_t *h = &o->rep[0].w[i];  // what it saw: n_tx == 1 here
+        if (!h->opened) {
             // RX2 is skipped when RX1 received a frame RadioLib kept — normal.
             rxobs_cat(buf, sz, &n, "%sRX%d %s", i ? " | " : "", i + 1,
                       (i == 1 && rx1_kept && st >= 0) ? "not needed" : "not opened");
             continue;
         }
         char when[40];
-        if (i < o->n_win) {
-            snprintf(when, sizeof(when), "opened +%ld ms%s", (long)((w->open_us - ref) / 1000), i ? "" : " after TX");
-        } else {
-            snprintf(when, sizeof(when), "opened after an earlier TX");
-        }
+        snprintf(when, sizeof(when), "opened +%ld ms%s", (long)((w->open_us - ref) / 1000), i ? "" : " after TX");
         char frame[96] = "";
-        const uint16_t irq = rxobs_final(w);
-        if (w->rx_seen) rxobs_frame(o, w->rx_mhdr, w->rx_len, w->rx_addr, frame, sizeof(frame));
+        const uint16_t irq = h->irq;
+        if (h->rx_seen) rxobs_frame(o, h->rx_mhdr, h->rx_len, h->rx_addr, frame, sizeof(frame));
         else if (irq & OBS_IRQ_RX_DONE) snprintf(frame, sizeof(frame), ": frame not read (too long or too short for RadioLib)");
-        const bool dropped = w->ignored || ((irq & OBS_IRQ_RX_DONE) && !w->rx_seen);
-        if (i == 0) rx1_kept = w->rx_seen && !dropped;
+        const bool dropped = h->ignored || ((irq & OBS_IRQ_RX_DONE) && !h->rx_seen);
+        if (i == 0) rx1_kept = h->rx_seen && !dropped;
         rxobs_cat(buf, sz, &n, "%sRX%d %.3f MHz SF%u %s (open for up to %lu ms): %s%s%s", i ? " | " : "", i + 1,
                   rxobs_mhz(w->freq_raw), (unsigned)w->sf, when, (unsigned long)(w->timeout_us / 1000),
                   rxobs_result(irq), frame, dropped ? " — ignored (RadioLib dropped it, the window counts as empty)" : "");

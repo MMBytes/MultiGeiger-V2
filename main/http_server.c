@@ -3,14 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdarg.h>
 #include <time.h>
 #include <errno.h>             // V2.8.30: EAGAIN etc. — /log send-failure reason
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_chip_info.h"     // V2.3.13: chip-model lookup for OTA target validation
+#include "esp_chip_info.h"     // chip model + revision for the status page
 #include "esp_app_format.h"    // V2.3.13: ESP_CHIP_ID_* constants for OTA validation
 #include "esp_app_desc.h"
 #include "esp_flash.h"
@@ -181,7 +180,12 @@ static void log_access(httpd_req_t *req, const char *what) {
 // session only when the request arrived on that instance (req->handle ==
 // s_server) — the :80 handlers also call log_access() but never reach the
 // table — so every access is from ONE task and it needs no lock.
-#define TLS_SESS_SLOTS 8   // > max_open_sockets (5) + the accept in flight
+#define TLS_MAX_OPEN_SOCKETS 5   // sc.httpd.max_open_sockets (see http_server_start)
+#define TLS_SESS_SLOTS 8         // > max_open_sockets + the accept in flight
+// V2.8.33: was two unrelated literals. A full table only loses the "closed
+// before any request" accounting, but it would do so silently.
+_Static_assert(TLS_SESS_SLOTS > TLS_MAX_OPEN_SOCKETS,
+               "TLS session table must hold every open socket plus the accept in flight");
 static struct { int fd; bool served; } s_tls_sess[TLS_SESS_SLOTS];
 
 static void tls_sess_mark_served(int fd) {
@@ -985,12 +989,10 @@ static void format_environment(char *out, size_t sz) {
         st.env_p / 100.0f);
 }
 
-// Defensive append helper — defined below near format_uploads; forward-declared
-// here so the multi-segment formatters above it (ALS / GNSS / PM) can use the
-// clamped accumulation instead of bare `n += snprintf` (V2.5.20 review R4:
-// on truncation the bare pattern pushes n past sz and `sz - n` underflows).
-__attribute__((format(printf, 4, 5)))
-static int append_safe(char *out, size_t sz, int n, const char *fmt, ...);
+// The multi-segment formatters below (ALS / GNSS / PM / ...) accumulate with
+// util.h's buf_append(), never the bare `n += snprintf` pattern (V2.5.20
+// review R4: on truncation it pushes n past sz and `sz - n` underflows).
+// V2.8.33: was a file-local append_safe copy, forward-declared here.
 
 // --- Ambient light block ----------------------------------------------------
 // Two possible sources, both shown when present:
@@ -1006,39 +1008,39 @@ static void format_als(char *out, size_t sz) {
     bool have_pt19 = als_present();
     if (!have_veml && !have_pt19) { out[0] = 0; return; }
 
-    int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Ambient light</h3>");
+    int n = buf_append(out, sz, 0, "<div class=\"info\"><h3>Ambient light</h3>");
 
     if (have_veml) {
         uint16_t als_raw = 0, white_raw = 0;
         float    lux = 0.0f;
         if (veml7700_read(&als_raw, &white_raw, &lux) == ESP_OK) {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>"
                 "<b>Reading:</b> %.1f lux (raw ALS=%u, white=%u, %s)",
                 (double)lux, (unsigned)als_raw, (unsigned)white_raw,
                 als_brightness_label(lux));
         } else {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<b>Sensor:</b> VEML7700 (I²C, 0x10)<br>read failed");
         }
-        if (have_pt19) n = append_safe(out, sz, n, "<br><br>");
+        if (have_pt19) n = buf_append(out, sz, n, "<br><br>");
     }
 
     if (have_pt19) {
         uint32_t mv = 0;
         float    lux = 0.0f;
         if (als_read(NULL, &mv, &lux) == ESP_OK) {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>"
                 "<b>Reading:</b> %lu mV (~%d lux, %s)",
                 (unsigned long)mv, (int)lux, als_brightness_label(lux));
         } else {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<b>Sensor:</b> ALS-PT19 (analog, GPIO 4)<br>read failed");
         }
     }
 
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 
 // --- Battery (MAX17048 fuel gauge, FeatherS3-D only) -----------------------
@@ -1052,20 +1054,20 @@ static void format_battery(char *out, size_t sz) {
 
     float volts = 0.0f, soc = 0.0f, rate = 0.0f;
     if (fuel_gauge_read(&volts, &soc, &rate) != ESP_OK) {
-        int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
-        append_safe(out, sz, n, "<b>Sensor:</b> MAX17048 (I²C, 0x36)<br>read failed</div>");
+        int n = buf_append(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
+        buf_append(out, sz, n, "<b>Sensor:</b> MAX17048 (I²C, 0x36)<br>read failed</div>");
         return;
     }
 
-    int n = append_safe(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
-    n = append_safe(out, sz, n,
+    int n = buf_append(out, sz, 0, "<div class=\"info\"><h3>Battery</h3>");
+    n = buf_append(out, sz, n,
         "<b>Sensor:</b> MAX17048 (I²C, 0x36)<br>"
         "<b>Voltage:</b> %.3f V<br>"
         "<b>Charge:</b> %.1f %%<br>"
         "<b>Rate:</b> %+.2f %%/hr (%s)",
         (double)volts, (double)soc, (double)rate,
         rate > 0.0f ? "charging" : (rate < 0.0f ? "discharging" : "idle"));
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 
 // --- GNSS / position block --------------------------------------------------
@@ -1079,7 +1081,7 @@ static void format_gnss(char *out, size_t sz) {
     gnss_fix_t f;
     gnss_get_fix(&f);
 
-    int n = append_safe(out, sz, 0,
+    int n = buf_append(out, sz, 0,
         "<div class=\"info\"><h3>GNSS / Position</h3>"
         "<b>Sensor:</b> %s (I²C, 0x%02X)<br>",
         gnss_chip_name(), gnss_i2c_addr());
@@ -1087,11 +1089,11 @@ static void format_gnss(char *out, size_t sz) {
     // Unique chip ID — MAX-M10S only (UBX-SEC-UNIQID); empty for the PA1010D.
     const char *serial = gnss_serial();
     if (serial[0]) {
-        n = append_safe(out, sz, n, "<b>Serial:</b> 0x%s<br>", serial);
+        n = buf_append(out, sz, n, "<b>Serial:</b> 0x%s<br>", serial);
     }
 
     if (!f.valid) {
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<b>Fix:</b> acquiring… (%u satellites visible)", (unsigned)f.sats);
     } else {
         char utc[32] = "—";
@@ -1100,7 +1102,7 @@ static void format_gnss(char *out, size_t sz) {
             gmtime_r(&f.utc, &tm_utc);
             strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
         }
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<b>Fix:</b> %s, %u satellites, HDOP %.1f<br>"
             "<b>Position:</b> %.6f, %.6f "
             "(<a href=\"https://www.openstreetmap.org/?mlat=%.6f&amp;mlon=%.6f"
@@ -1114,7 +1116,7 @@ static void format_gnss(char *out, size_t sz) {
 
     // V2.5.11: no "system time source" line — GNSS no longer sets the clock
     // (NTP is the sole source). The UTC above is the receiver's reported time.
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 
 // --- SD logger block (standalone mode) --------------------------------------
@@ -1132,7 +1134,7 @@ static void format_sd_logger(char *out, size_t sz) {
     sd_logger_status_t sd;
     sd_logger_get_status(&sd);
 
-    int n = append_safe(out, sz, 0,
+    int n = buf_append(out, sz, 0,
         "<div class=\"info\"><h3>SD Logger</h3>"
         "<b>SD card:</b> %s<br>",
         sd.mounted ? "mounted" : "NOT MOUNTED");
@@ -1141,15 +1143,15 @@ static void format_sd_logger(char *out, size_t sz) {
         // Device-generated (chip-id + UTC timestamp, sd_logger.h) — same
         // no-escape treatment as the GNSS serial/chip-id strings above,
         // not user-supplied config text.
-        n = append_safe(out, sz, n, "<b>CSV file:</b> %s<br>", sd.filename);
+        n = buf_append(out, sz, n, "<b>CSV file:</b> %s<br>", sd.filename);
     } else if (sd.mounted) {
         // File creation waits for the first GNSS clock sync (sd_logger.h) —
         // an empty name while mounted means "no fix yet", not a fault.
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<b>CSV file:</b> &mdash; (waiting for GPS fix)<br>");
     }
 
-    n = append_safe(out, sz, n,
+    n = buf_append(out, sz, n,
         "<b>Rows written:</b> %lu", (unsigned long)sd.rows_written);
 
     if (sd.last_err != 0) {
@@ -1157,18 +1159,18 @@ static void format_sd_logger(char *out, size_t sz) {
         // render differently — one bare %d showed ESP_ERR_TIMEOUT (0x107)
         // as a baffling "263" that reads like an errno.
         if (sd.last_err_is_esp) {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<br><b>Last error:</b> %s (streak %lu)",
                 esp_err_to_name(sd.last_err), (unsigned long)sd.fail_streak);
         } else {
-            n = append_safe(out, sz, n,
+            n = buf_append(out, sz, n,
                 "<br><b>Last error:</b> errno %d (%s) (streak %lu)",
                 sd.last_err, strerror(sd.last_err),
                 (unsigned long)sd.fail_streak);
         }
     }
 
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 #endif
 
@@ -1304,21 +1306,6 @@ static bool target_enabled(tx_target_id_t id) {
     }
 }
 
-// Defensive helper: snprintf into a buffer at offset n with bounds check.
-// Returns updated n. Stops growing once the buffer is full (further calls
-// no-op). Prevents the `sz - n` underflow if a caller miscounted.
-static int append_safe(char *out, size_t sz, int n, const char *fmt, ...) {
-    if (n < 0 || (size_t)n >= sz) return (int)sz;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(out + n, sz - n, fmt, ap);
-    va_end(ap);
-    if (w < 0) return n;
-    n += w;
-    if ((size_t)n > sz) n = (int)sz;
-    return n;
-}
-
 // --- CPM history graph data (V2.5.6) -----------------------------------------
 // Emits the minute + hour rings as a JS object for the inline SVG graph
 // (STATUS_GRAPH). Empty when the tube is disabled — the dust node has no
@@ -1327,17 +1314,17 @@ static void format_history_data(char *out, size_t sz) {
     if (!tube_is_enabled()) { out[0] = 0; return; }
     history_snapshot_t h;
     history_get(&h);
-    int n = append_safe(out, sz, 0, "<script>var H={min:[");
+    int n = buf_append(out, sz, 0, "<script>var H={min:[");
     for (uint8_t i = 0; i < h.min_count; i++)
-        n = append_safe(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_min[i]);
-    n = append_safe(out, sz, n, "],hour:[");
+        n = buf_append(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_min[i]);
+    n = buf_append(out, sz, n, "],hour:[");
     for (uint8_t i = 0; i < h.hour_count; i++)
-        n = append_safe(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_hour[i]);
-    append_safe(out, sz, n, "]};</script>");
+        n = buf_append(out, sz, n, "%s%u", i ? "," : "", (unsigned)h.cpm_hour[i]);
+    buf_append(out, sz, n, "]};</script>");
 }
 
 static void format_uploads(char *out, size_t sz) {
-    int n = append_safe(out, sz, 0,
+    int n = buf_append(out, sz, 0,
         "<div class=\"info\"><h3>Uploads</h3>"
         "<table class=u>"
         "<tr><th align=left>Target</th>"
@@ -1367,7 +1354,7 @@ static void format_uploads(char *out, size_t sz) {
         if (s.attempted == 0) snprintf(rc_buf, sizeof(rc_buf), "—");
         else                  snprintf(rc_buf, sizeof(rc_buf), "%d", s.last_rc);
 
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<tr><td>%s</td>"
             "<td class=ar>%lu / %lu</td>"
             "<td class=\"ar %s\">%s</td>"
@@ -1377,7 +1364,7 @@ static void format_uploads(char *out, size_t sz) {
             rc_class, rc_buf,
             breaker_html);
     }
-    n = append_safe(out, sz, n, "</table>");
+    n = buf_append(out, sz, n, "</table>");
 
     // FTPS line — separate from the table because it has its own cadence.
     if (s_cfg->ftp_enabled) {
@@ -1408,7 +1395,7 @@ static void format_uploads(char *out, size_t sz) {
         else if (f.last_ok)       result_html = "<span class=g>OK</span>";
         else                      result_html = "<span class=r>FAIL</span>";
 
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<br><b>FTP%s:</b> last %s%s%s &middot; %lu bytes &middot; result %s &middot; next %s",
             s_cfg->ftp_tls ? "S" : "",
             wall,
@@ -1418,10 +1405,10 @@ static void format_uploads(char *out, size_t sz) {
             result_html,
             next_buf);
         if (f.have_last) {
-            n = append_safe(out, sz, n, ")");
+            n = buf_append(out, sz, n, ")");
         }
     }
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 
 // --- LoRaWAN block (V2.6.23, T8; HAL_HAS_LORAWAN boards only) ----------------
@@ -1441,7 +1428,7 @@ static void format_lorawan(char *out, size_t sz) {
         (st.state == LORAWAN_ST_JOINING)  ? "o" :
         (st.state == LORAWAN_ST_DISABLED) ? "d" : "r";   // no_config / hw_fail
 
-    int n = append_safe(out, sz, 0,
+    int n = buf_append(out, sz, 0,
         "<div class=\"info\"><h3>LoRaWAN (TTN)</h3>"
         "<b>State:</b> <span class=\"%s\">%s</span><br>"
         "<b>Region:</b> %s, sub-band %u<br>",
@@ -1449,10 +1436,10 @@ static void format_lorawan(char *out, size_t sz) {
         lorawan_region_name(st.region), (unsigned)st.subband);
 
     if (st.state == LORAWAN_ST_JOINED) {
-        n = append_safe(out, sz, n, "<b>DevAddr:</b> %08lx<br>", (unsigned long)st.dev_addr);
+        n = buf_append(out, sz, n, "<b>DevAddr:</b> %08lx<br>", (unsigned long)st.dev_addr);
     }
 
-    n = append_safe(out, sz, n,
+    n = buf_append(out, sz, n,
         "<b>Join attempts:</b> %lu<br>"
         "<b>Uplinks sent:</b> %lu<br>"
         "<b>Duty-skipped:</b> %lu<br>"
@@ -1462,14 +1449,14 @@ static void format_lorawan(char *out, size_t sz) {
         (unsigned long)st.duty_skipped,
         (unsigned long)st.failed);
     if (st.last_error != 0) {
-        n = append_safe(out, sz, n, " (last error %d)", (int)st.last_error);
+        n = buf_append(out, sz, n, " (last error %d)", (int)st.last_error);
     }
 
     // format_ago() already renders "never" for a <=0 timestamp — matches
     // last_uplink_at's "0 = never" contract (lorawan.h).
     char ago[24];
     format_ago((int64_t)time(NULL), st.last_uplink_at, ago, sizeof(ago));
-    n = append_safe(out, sz, n, "<br><b>Last uplink:</b> %s", ago);
+    n = buf_append(out, sz, n, "<br><b>Last uplink:</b> %s", ago);
 
     // last_dl_rssi == 0 means no downlink has ever been seen (lorawan.h).
     // V2.8.12: MAC-only downlinks count too; age is uptime-based, so it is
@@ -1480,7 +1467,7 @@ static void format_lorawan(char *out, size_t sz) {
             const uint32_t up_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
             ago_min = (up_s - st.last_dl_uptime_s) / 60u;
         }
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<br><b>Last downlink:</b> RSSI %.0f dBm%s, SNR %.1f dB, %lu min ago",
             (double)st.last_dl_rssi,
             lorawan_dl_rssi_includes_lna() ? " (incl. ~24 dB LNA gain)" : "",   // V2.8.19
@@ -1490,7 +1477,7 @@ static void format_lorawan(char *out, size_t sz) {
         // 64 = the node starts asking "do you hear me?" (ADRACKReq); RadioLib's
         // ADR backoff then (from 96) restores max TX power if it was lowered,
         // and lowers the data rate one step every 32 further uplinks.
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<br><b>Uplinks since last downlink:</b> %lu"
             "<br><b>Air time (24 h):</b> %.1f s (TTN Fair Use: 30 s)",
             (unsigned long)st.uplinks_since_dl, (double)st.airtime_24h_ms / 1000.0);
@@ -1499,12 +1486,12 @@ static void format_lorawan(char *out, size_t sz) {
     if (st.cycle_interval_ms != 0) {
         char dr_mode[24] = "ADR";
         if (st.fixed_dr) snprintf(dr_mode, sizeof(dr_mode), "fixed DR%u", (unsigned)st.fixed_dr_value);
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<br><b>Uplink interval:</b> %lu min (SF%u, %s)",
             (unsigned long)(st.cycle_interval_ms / 60000u), (unsigned)st.cycle_sf, dr_mode);
     }
 
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 #endif
 
@@ -1555,7 +1542,7 @@ static void format_pm_info(char *out, size_t sz) {
         st.laser_fail           ? "<span style='color:#c00;font-weight:bold'>FAULT</span>" :
                                   "<span style='color:#080'>OK</span>";
 
-    int n = append_safe(out, sz, 0,
+    int n = buf_append(out, sz, 0,
         "<div class=\"info\"><h3>Particulate matter</h3>"
         "<b>Sensor:</b> %s<br>"
         "<b>Fan:</b> %s<br>"
@@ -1565,16 +1552,16 @@ static void format_pm_info(char *out, size_t sz) {
         have_status ? (unsigned long)st.raw : 0UL);
 
     if (have_sample) {
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<b>PM1.0 / PM2.5 / PM4.0 / PM10:</b> "
             "%.1f / %.1f / %.1f / %.1f µg/m³<br>"
             "<b>Typical particle size:</b> %.2f µm<br>",
             pm.pm1_0, pm.pm2_5, pm.pm4_0, pm.pm10, pm.typ_size_um);
     } else {
-        n = append_safe(out, sz, n,
+        n = buf_append(out, sz, n,
             "<b>PM readings:</b> awaiting first cycle...<br>");
     }
-    append_safe(out, sz, n, "</div>");
+    buf_append(out, sz, n, "</div>");
 }
 
 // Static page chrome — wrapper HTML that doesn't change between requests.
@@ -1881,25 +1868,26 @@ static esp_err_t config_get(httpd_req_t *req) {
     // V2.4.22: br_opts also static — same justification as the e_* block above.
     static char br_opts[512];
     int br_n = 0;
-    br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
-                     "<option value=\"0\"%s>OFF</option>",
-                     (s_cfg->oled_brightness_pct == 0) ? " selected" : "");
+    // V2.8.33: buf_append, not bare `n += snprintf` (fits today: ~350 of 512 B).
+    br_n = buf_append(br_opts, sizeof(br_opts), br_n,
+                      "<option value=\"0\"%s>OFF</option>",
+                      (s_cfg->oled_brightness_pct == 0) ? " selected" : "");
     for (int v = 10; v <= 100; v += 10) {
-        br_n += snprintf(br_opts + br_n, sizeof(br_opts) - br_n,
-                         "<option value=\"%d\"%s>%d%%</option>",
-                         v,
-                         (s_cfg->oled_brightness_pct == v) ? " selected" : "",
-                         v);
+        br_n = buf_append(br_opts, sizeof(br_opts), br_n,
+                          "<option value=\"%d\"%s>%d%%</option>",
+                          v,
+                          (s_cfg->oled_brightness_pct == v) ? " selected" : "",
+                          v);
     }
 
     // V2.6.1: tube-type dropdown options built from the shared tube_types table
     // (single source of truth) instead of hardcoded <option> lines + per-option
-    // selected-marker args. append_safe keeps the accumulation truncation-safe.
+    // selected-marker args. buf_append keeps the accumulation truncation-safe.
     // V2.6.4: static — same justification as e_* + br_opts (V2.4.22).
     static char tube_opts[384];
     int tube_n = 0;
     for (uint32_t t = 0; t < TUBE_TYPE_COUNT; t++) {
-        tube_n = append_safe(tube_opts, sizeof(tube_opts), tube_n,
+        tube_n = buf_append(tube_opts, sizeof(tube_opts), tube_n,
                              "<option value=\"%lu\"%s>%s%s</option>",
                              (unsigned long)t,
                              (s_cfg->tube_type == t) ? " selected" : "",
@@ -1919,7 +1907,7 @@ static esp_err_t config_get(httpd_req_t *req) {
         };
         int lora_rn = 0;
         for (uint8_t r = 0; r < 8; r++) {
-            lora_rn = append_safe(lora_region_opts, sizeof(lora_region_opts), lora_rn,
+            lora_rn = buf_append(lora_region_opts, sizeof(lora_region_opts), lora_rn,
                                  "<option value=\"%u\"%s>%s</option>",
                                  (unsigned)r,
                                  (s_cfg->lorawan_region == r) ? " selected" : "",
@@ -1930,11 +1918,11 @@ static esp_err_t config_get(httpd_req_t *req) {
     // fixed DR0..DR5 (config_fields.def lorawan_dr; lorawan_sched.h decodes it).
     static char lora_dr_opts[400];
     {
-        int lora_dn = append_safe(lora_dr_opts, sizeof(lora_dr_opts), 0,
+        int lora_dn = buf_append(lora_dr_opts, sizeof(lora_dr_opts), 0,
                                   "<option value=\"0\"%s>ADR &mdash; set by the network (recommended)</option>",
                                   (s_cfg->lorawan_dr == 0) ? " selected" : "");
         for (uint8_t d = 1; d <= 6; d++) {
-            lora_dn = append_safe(lora_dr_opts, sizeof(lora_dr_opts), lora_dn,
+            lora_dn = buf_append(lora_dr_opts, sizeof(lora_dr_opts), lora_dn,
                                   "<option value=\"%u\"%s>Fixed DR%u</option>",
                                   (unsigned)d, (s_cfg->lorawan_dr == d) ? " selected" : "",
                                   (unsigned)(d - 1));
@@ -2003,7 +1991,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "<p><small>Secret fields: leave empty to keep, enter - to clear.</small></p>"
                      "<h3>Network</h3>"
                      "<label>WiFi SSID <span class=\"r\">*</span>"
-                     "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\"></label>"
+                     "<input type=\"text\" name=\"wifi_ssid\" value=\"%s\" maxlength=\"32\"></label>"
                      "<label>WiFi password <span class=\"r\">*</span>"
                      "<input type=\"password\" name=\"wifi_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label>"
                      "<label>DHCP hostname (visible in router) <span class=\"r\">*</span>"
@@ -2300,7 +2288,7 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "Radmon &mdash; radiation-only</label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"rad_https\" %s> HTTPS</label></div>"
                      "<div class=\"cfg\">"
-                     "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\"></label>"
+                     "<label>Radmon user<input type=\"text\" name=\"rad_user\" value=\"%s\" maxlength=\"32\"></label>"
                      "<label>Radmon password<input type=\"password\" name=\"rad_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"send_osm\" %s> "
                      "openSenseMap (HTTPS only)</label></div>"
@@ -2350,10 +2338,10 @@ static esp_err_t config_get(httpd_req_t *req) {
                      "Enable FTP log upload</label></div>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_tls\" %s> "
                      "Use explicit TLS (AUTH TLS on port 21) &mdash; certificate NOT verified</label></div>"
-                     "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\"></label>"
-                     "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\"></label>"
+                     "<label>FTP host (or host:port if non-default)<input type=\"text\" name=\"ftp_host\" value=\"%s\" maxlength=\"63\"></label>"
+                     "<label>FTP user (blank = anonymous)<input type=\"text\" name=\"ftp_user\" value=\"%s\" maxlength=\"32\"></label>"
                      "<label>FTP password<input type=\"password\" name=\"ftp_pw\" value=\"\" placeholder=\"%s\" autocomplete=\"new-password\" maxlength=\"64\"></label>"
-                     "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\"></label>"
+                     "<label>Remote directory (e.g. /geiger)<input type=\"text\" name=\"ftp_path\" value=\"%s\" maxlength=\"63\"></label>"
                      "<label>Upload interval (minutes) (Max 10090)<input type=\"text\" inputmode=\"numeric\" name=\"ftp_int\" value=\"%lu\"></label>"
                      "<div class=\"chk\"><label><input type=\"checkbox\" name=\"ftp_ps_dis\" "
                      "id=\"ftp_ps_dis\" %s> Disable WiFi power save during FTP transfer "
@@ -2482,11 +2470,11 @@ static esp_err_t config_get(httpd_req_t *req) {
                      " <small>(live — applies on Save without reboot)</small></label>"
                      "<h3>Time</h3>"
                      "<label>NTP server 1 <span class=\"r\">*</span>"
-                     "<input type=\"text\" name=\"ntp\" value=\"%s\"></label>"
+                     "<input type=\"text\" name=\"ntp\" value=\"%s\" maxlength=\"63\"></label>"
                      "<label>NTP server 2 (optional) <span class=\"r\">*</span>"
-                     "<input type=\"text\" name=\"ntp2\" value=\"%s\"></label>"
+                     "<input type=\"text\" name=\"ntp2\" value=\"%s\" maxlength=\"63\"></label>"
                      "<label>NTP server 3 (optional) <span class=\"r\">*</span>"
-                     "<input type=\"text\" name=\"ntp3\" value=\"%s\"></label>"
+                     "<input type=\"text\" name=\"ntp3\" value=\"%s\" maxlength=\"63\"></label>"
                      "<label>Timezone (POSIX TZ) <span class=\"r\">*</span>"
                      "<input type=\"text\" name=\"tz_posix\" value=\"%s\" maxlength=\"47\">"
                      "<small>e.g. <code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney), "
@@ -2966,31 +2954,31 @@ static esp_err_t config_post(httpd_req_t *req) {
           "<a href=\"/\">Back to status</a></p>";
 
     // `page` (RESULT_PAGE_SZ, heap) was taken before the save, see above.
-    int n = append_safe(page, RESULT_PAGE_SZ, 0,
+    int n = buf_append(page, RESULT_PAGE_SZ, 0,
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         "<title>Saved</title></head><body><h1>%s</h1>", h1);
     if (rejected[0]) {
-        n = append_safe(page, RESULT_PAGE_SZ, n,
+        n = buf_append(page, RESULT_PAGE_SZ, n,
             "<p style=\"color:#c00;font-weight:bold\">&#9888; These fields were invalid "
             "or out of range and were NOT saved (previous value kept): %s</p>", rejected);
     }
     if (changed[0]) {
-        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Changed: %s</p>", changed);
+        n = buf_append(page, RESULT_PAGE_SZ, n, "<p>Changed: %s</p>", changed);
     }
     if (secrets_changed[0]) {
-        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Secrets %s</p>", secrets_changed);
+        n = buf_append(page, RESULT_PAGE_SZ, n, "<p>Secrets %s</p>", secrets_changed);
     }
     if (unknown[0]) {
-        n = append_safe(page, RESULT_PAGE_SZ, n, "<p>Unknown fields ignored: %s</p>", unknown);
+        n = buf_append(page, RESULT_PAGE_SZ, n, "<p>Unknown fields ignored: %s</p>", unknown);
     }
     if (lw_plan_changed) {
-        n = append_safe(page, RESULT_PAGE_SZ, n, "%s", lw_forgot
+        n = buf_append(page, RESULT_PAGE_SZ, n, "%s", lw_forgot
             ? "<p>LoRaWAN session forgotten because the region/sub-band changed; "
               "the next join after a restart starts fresh.</p>"
             : "<p style=\"color:#c00;font-weight:bold\">The saved LoRaWAN session could NOT be "
               "forgotten; use the LoRaWAN reset button.</p>");
     }
-    append_safe(page, RESULT_PAGE_SZ, n, "%s</body></html>", body);
+    buf_append(page, RESULT_PAGE_SZ, n, "%s</body></html>", body);
     esp_err_t sent = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     free(page);
     return sent;
@@ -3270,6 +3258,26 @@ fail:
 // keep_alive_* settings in http_server_start) must stay at or above it.
 #define OTA_RECV_BUDGET_S         150
 
+// TCP keepalive reaping of silent sessions (applied in http_server_start; why
+// it exists is explained there). Reap time = IDLE + INTERVAL x COUNT = 180 s.
+#define HTTPD_KEEPALIVE_IDLE_S     120   // s of silence before the first probe
+#define HTTPD_KEEPALIVE_INTERVAL_S  15   // s between unanswered probes
+#define HTTPD_KEEPALIVE_COUNT        4   // unanswered probes before lwIP drops it
+// Route slots of the main httpd instance (hc.max_uri_handlers, inherited by
+// :443). k_routes[] in http_server_start is _Static_assert'ed to fit.
+#define HTTPD_MAIN_URI_SLOTS        14
+// V2.8.33: the "reap time must not be below the OTA budget" rule used to live
+// in a comment only. The worst OTA stall is one receive timeout plus the
+// retry budget; plain HTTP has the longer timeout (30 s), so it is the binding
+// case: 120 + 4 x 15 = 180 >= 30 + 150 = 180. Equality is intended (it only
+// decides which of two failure lines appears at 180 s), hence >=.
+_Static_assert(HTTPD_KEEPALIVE_IDLE_S + HTTPD_KEEPALIVE_INTERVAL_S * HTTPD_KEEPALIVE_COUNT >=
+                   HTTPD_RECV_TIMEOUT_S + OTA_RECV_BUDGET_S,
+               "TCP keepalive would reap a stalled OTA before its retry budget runs out: "
+               "raise HTTPD_KEEPALIVE_* together with OTA_RECV_BUDGET_S");
+_Static_assert(HTTPD_RECV_TIMEOUT_S >= HTTPS_RECV_TIMEOUT_S,
+               "the keepalive check above assumes plain HTTP has the longer receive timeout");
+
 // --- POST /update (stream body into OTA partition) --------------------------
 
 #define OTA_CHUNK 1024
@@ -3318,6 +3326,60 @@ static void ota_send_fail(httpd_req_t *req, const char *status, const char *what
     httpd_resp_send_chunk(req, what, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, note, HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);
+}
+
+// Readable name for an image header's chip_id (esp_chip_id_t) — only the
+// families this firmware is built for; anything else prints as hex.
+static const char *ota_chip_name(uint16_t chip_id) {
+    switch (chip_id) {
+        case ESP_CHIP_ID_ESP32:   return "ESP32";
+        case ESP_CHIP_ID_ESP32S3: return "ESP32-S3";
+        case ESP_CHIP_ID_ESP32C5: return "ESP32-C5";
+        default:                  return NULL;
+    }
+}
+
+// V2.8.33: explain a wrong-chip upload. esp_ota_end() verifies the written
+// image (esp_image_verify -> bootloader_common_check_chip_validity) and fails
+// with ESP_ERR_OTA_VALIDATE_FAILED when the header's chip_id is not this
+// build's CONFIG_IDF_FIRMWARE_CHIP_ID — so our own chip check after it (V2.3.13)
+// could never run, and a wrong board's .bin got a bare "500
+// ESP_ERR_OTA_VALIDATE_FAILED". Called on that failure: re-reads the header
+// from the partition (still readable after the handle is freed) and, ONLY if
+// the chip really differs, sends the friendly 400. Returns true if it
+// answered; false = some other validation failure (bad SHA, chip revision,
+// truncated image), which keeps the generic 500.
+static bool ota_explain_wrong_chip(httpd_req_t *req, const esp_partition_t *target) {
+    esp_image_header_t hdr = {0};
+    if (esp_partition_read(target, 0, &hdr, sizeof(hdr)) != ESP_OK ||
+        hdr.magic != ESP_IMAGE_HEADER_MAGIC ||
+        hdr.chip_id == CONFIG_IDF_FIRMWARE_CHIP_ID) {
+        return false;
+    }
+    // Version is a nice-to-have: the app descriptor of a foreign-chip image
+    // is normally readable, but don't depend on it.
+    esp_app_desc_t desc = {0};
+    const bool have_desc = esp_ota_get_partition_description(target, &desc) == ESP_OK;
+    const char *img_chip = ota_chip_name(hdr.chip_id);
+    char img_label[24];
+    if (img_chip) snprintf(img_label, sizeof(img_label), "%s", img_chip);
+    else          snprintf(img_label, sizeof(img_label), "chip_id 0x%04x", (unsigned)hdr.chip_id);
+    const char *dev_chip = ota_chip_name(CONFIG_IDF_FIRMWARE_CHIP_ID);
+    ESP_LOGE(TAG, "OTA refused: binary is for %s (version=%.32s), this device is "
+             BOARD_NAME " (%s)", img_label, have_desc ? desc.version : "?",
+             dev_chip ? dev_chip : CONFIG_IDF_TARGET);
+    // 384 B: ~200 chars of text + BOARD_NAME (~40) + two chip labels + the
+    // 32-char version field + NUL, with margin; same size as the old message.
+    char msg[384];
+    snprintf(msg, sizeof(msg),
+             "OTA refused: this device is " BOARD_NAME " (%s) but the uploaded "
+             "binary (version %.32s) is for %s. Check that you uploaded the "
+             "correct geiger_v2_<board>.bin file from the GitHub release for "
+             "THIS board.",
+             dev_chip ? dev_chip : CONFIG_IDF_TARGET, have_desc ? desc.version : "?",
+             img_label);
+    ota_send_fail(req, "400 Bad Request", msg);
+    return true;
 }
 
 // V2.4.24: split the auth + flag-management front-end into a thin wrapper
@@ -3648,25 +3710,27 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     err = esp_ota_end(ota);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA FAILED: esp_ota_end — %s", esp_err_to_name(err));
+        // A wrong-chip image lands here (IDF validates the chip ID inside
+        // esp_ota_end); say so in plain words instead of the bare error code.
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED && ota_explain_wrong_chip(req, target)) {
+            return ESP_OK;
+        }
         ota_send_fail(req, "500 Internal Server Error", esp_err_to_name(err));
         return ESP_OK;
     }
     ESP_LOGI(TAG, "OTA image written + finalized (esp_ota_end ok) — verifying");
 
-    // V2.3.13: validate the just-written app's chip_id and project_name BEFORE
-    // committing the boot partition. The bootloader does its own chip-ID check
-    // on the next boot and rolls back automatically on mismatch — but that's
-    // an ugly recovery (one wasted OTA cycle, confusing reboot). Catching it
-    // here gives the user a clean HTTP 400 with explanation while leaving the
-    // current firmware untouched. Doesn't catch same-chip-different-board
-    // mistakes (e.g. WiFi LoRa 32 V2 vs WiFi Kit 32 V2 — both ESP32) but
-    // covers the common cross-family case (heltec_v2 ↔ feathers3_d).
+    // V2.3.13: validate the just-written app's project_name BEFORE committing
+    // the boot partition, so a foreign ESP-IDF firmware gets a clean HTTP 400
+    // and the current firmware stays untouched. (The chip ID is checked by
+    // esp_ota_end() itself — see ota_explain_wrong_chip(). Neither check
+    // catches same-chip-different-board mistakes, e.g. WiFi LoRa 32 V2 vs
+    // WiFi Kit 32 V2 — both ESP32 and both geiger_v2.)
     //
-    // Two reads are needed because the chip_id and project_name live in
-    // different structures within the binary:
+    // Two reads, because the two fields live in different structures:
     //   - chip_id lives in esp_image_header_t at partition offset 0
-    //     (NOT in esp_app_desc_t, which is what tripped the V2.3.13 first
-    //     build attempt). Read via esp_partition_read directly.
+    //     (NOT in esp_app_desc_t). Read via esp_partition_read directly;
+    //     only logged in the "OTA verified" line below.
     //   - project_name + version + date live in esp_app_desc_t, accessible
     //     via esp_ota_get_partition_description.
     esp_image_header_t img_hdr = {0};
@@ -3707,59 +3771,11 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    // Chip-ID check: catches heltec_v2 (ESP32) vs feathers3_d (ESP32-S3)
-    // cross-family mistakes. Map the running chip's esp_chip_model_t value
-    // into the image header's ESP_CHIP_ID_* enum for direct comparison.
-    esp_chip_info_t chip;
-    esp_chip_info(&chip);
-    esp_chip_id_t expected_chip_id;
-    const char  *expected_board;
-    // V2.5.20 (review R6): the error label now uses the RUNNING build's
-    // BOARD_NAME instead of hardcoded board names — a QT Py used to report
-    // itself as "heltec_v2 (ESP32)" and a XIAO as "feathers3_d (ESP32-S3)"
-    // in the refusal message. Only one case can match the firmware actually
-    // running, so BOARD_NAME is always the right device label.
-    switch (chip.model) {
-        case CHIP_ESP32:
-            expected_chip_id = ESP_CHIP_ID_ESP32;
-            expected_board   = BOARD_NAME " (ESP32)";
-            break;
-        case CHIP_ESP32S3:
-            expected_chip_id = ESP_CHIP_ID_ESP32S3;
-            expected_board   = BOARD_NAME " (ESP32-S3)";
-            break;
-        case CHIP_ESP32C5:
-            expected_chip_id = ESP_CHIP_ID_ESP32C5;
-            expected_board   = BOARD_NAME " (ESP32-C5)";
-            break;
-        default:
-            // Future-proofing: if someone ports the firmware to ESP32-C3/C6/H2
-            // without updating this switch, fall through and trust the
-            // bootloader as the safety net.
-            expected_chip_id = ESP_CHIP_ID_INVALID;
-            expected_board   = "(unrecognised chip family)";
-            break;
-    }
-
-    if (expected_chip_id != ESP_CHIP_ID_INVALID &&
-        img_hdr.chip_id != expected_chip_id) {
-        ESP_LOGE(TAG, "OTA refused: binary chip_id=0x%04x (version=%.32s), "
-                 "device chip_id=0x%04x (expected=%s)",
-                 (unsigned)img_hdr.chip_id, new_desc.version,
-                 (unsigned)expected_chip_id, expected_board);
-        // 384-byte buffer accommodates the longest expected_board (~24 chars),
-        // 32-char version field, 4-char hex chip_id, and ~230 chars of static
-        // text + NUL with comfortable margin.
-        char msg[384];
-        snprintf(msg, sizeof(msg),
-                 "OTA refused: this device is %s but the uploaded binary "
-                 "(version %.32s) is for chip_id 0x%04x. Check that you "
-                 "uploaded the correct geiger_v2_<board>.bin file from the "
-                 "GitHub release for THIS board family.",
-                 expected_board, new_desc.version, (unsigned)img_hdr.chip_id);
-        ota_send_fail(req, "400 Bad Request", msg);
-        return ESP_OK;
-    }
+    // Chip ID: no check needed here. esp_ota_end() above already verified
+    // the image against CONFIG_IDF_FIRMWARE_CHIP_ID and a mismatch never gets
+    // this far (ota_explain_wrong_chip() answers it). V2.8.33 removed the old
+    // per-chip switch that sat here: it could not fire, and a new chip family
+    // is covered by IDF's check without any case to add.
 
     ESP_LOGI(TAG, "OTA verified: project=%.32s version=%.32s built=%.16s "
              "chip_id=0x%04x — committing", new_desc.project_name,
@@ -4202,7 +4218,11 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
-    hc.max_uri_handlers  = 14;                 // 11 base: / /favicon.ico /config GET+POST /update GET+POST /reboot /log /coredump.elf /coredump_erase /api/env (+/lorawan_reset on HAL_HAS_LORAWAN boards, +/cert.pem on HAL_HAS_HTTPS boards — heltec_wifi_lora32_v4_r2 is both, so the worst case is 13 of 14)
+    // Slot count for the main instance's route table (k_routes[] further down;
+    // a _Static_assert there keeps the table within it). 11 base routes +
+    // /lorawan_reset (HAL_HAS_LORAWAN) + /cert.pem (HAL_HAS_HTTPS): 13 of 14
+    // on the two LoRaWAN boards (Heltec V4, XIAO + Wio), which have both.
+    hc.max_uri_handlers  = HTTPD_MAIN_URI_SLOTS;
     hc.lru_purge_enable = true;
     // CRITICAL — DO NOT change esp_http_server's threading model without
     // first reverting the static-buffer pattern used in V2.4.20 + V2.4.22.
@@ -4260,12 +4280,13 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     //   SILENT socket, so a shorter reap would kill an OTA the retry loop was
     //   about to save. 120 + 4 x 15 = 180 s: above TLS, equal to plain HTTP,
     //   where it only decides which of the two failure lines appears at 180 s.
-    //   Raise these together with that budget, never independently.
+    //   Raise these together with that budget, never independently — a
+    //   _Static_assert next to OTA_RECV_BUDGET_S enforces it (V2.8.33).
     // hc is copied wholesale into sc.httpd below, so :443 inherits it too.
     hc.keep_alive_enable   = true;
-    hc.keep_alive_idle     = 120;   // s of silence before the first probe
-    hc.keep_alive_interval = 15;    // s between unanswered probes
-    hc.keep_alive_count    = 4;     // unanswered probes before lwIP drops it
+    hc.keep_alive_idle     = HTTPD_KEEPALIVE_IDLE_S;
+    hc.keep_alive_interval = HTTPD_KEEPALIVE_INTERVAL_S;
+    hc.keep_alive_count    = HTTPD_KEEPALIVE_COUNT;
 
 #if HAL_HAS_HTTPS
     // V2.8.0: same httpd engine, TLS on top. `sc.httpd` is a full
@@ -4291,7 +4312,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
         sc.httpd.stack_size = 10240;
         // Five concurrent TLS sessions is plenty for one browser (page +
         // favicon + XHR) plus a script; LRU purge evicts idle ones beyond.
-        sc.httpd.max_open_sockets = 5;
+        sc.httpd.max_open_sockets = TLS_MAX_OPEN_SOCKETS;   // 5; sizes s_tls_sess[]
         // V2.8.0: 30 s (inherited from hc) is too long HERE. httpd_sess_new
         // calls open_fn synchronously on the httpd task, and httpd_ssl_open
         // does the blocking esp_tls_server_session_create on the freshly
@@ -4387,25 +4408,38 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     static const httpd_uri_t uri_lorawan_reset = {
         .uri = "/lorawan_reset", .method = HTTP_POST, .handler = lorawan_reset_post,
     };
-    httpd_register_uri_handler(s_server, &uri_lorawan_reset);
 #endif
-    httpd_register_uri_handler(s_server, &uri_favicon);
-    httpd_register_uri_handler(s_server, &uri_root);
-    httpd_register_uri_handler(s_server, &uri_config_get);
-    httpd_register_uri_handler(s_server, &uri_config_post);
-    httpd_register_uri_handler(s_server, &uri_update_get);
-    httpd_register_uri_handler(s_server, &uri_update_post);
-    httpd_register_uri_handler(s_server, &uri_reboot_post);
-    httpd_register_uri_handler(s_server, &uri_log_get);
-    httpd_register_uri_handler(s_server, &uri_api_env);
-    httpd_register_uri_handler(s_server, &uri_coredump_get);
-    httpd_register_uri_handler(s_server, &uri_coredump_erase);
 #if HAL_HAS_HTTPS
     static const httpd_uri_t uri_cert = {
         .uri = "/cert.pem", .method = HTTP_GET, .handler = cert_get,
     };
-    httpd_register_uri_handler(s_server, &uri_cert);
 #endif
+    // V2.8.33: one table + a checked loop, like the :80 listener below. Was 13
+    // separate unchecked calls: a route beyond max_uri_handlers got only IDF's
+    // anonymous "no slots left" warning, while the "routes:" line below still
+    // listed it. Order is irrelevant here (exact URI matching, no wildcard).
+    // When adding a route: add it here AND to the "routes:" log text below.
+    static const httpd_uri_t *const k_routes[] = {
+#if HAL_HAS_LORAWAN
+        &uri_lorawan_reset,
+#endif
+        &uri_favicon, &uri_root, &uri_config_get, &uri_config_post,
+        &uri_update_get, &uri_update_post, &uri_reboot_post, &uri_log_get,
+        &uri_api_env, &uri_coredump_get, &uri_coredump_erase,
+#if HAL_HAS_HTTPS
+        &uri_cert,
+#endif
+    };
+    _Static_assert(sizeof(k_routes) / sizeof(k_routes[0]) <= HTTPD_MAIN_URI_SLOTS,
+                   "main httpd route table exceeds HTTPD_MAIN_URI_SLOTS (max_uri_handlers)");
+    for (size_t i = 0; i < sizeof(k_routes) / sizeof(k_routes[0]); i++) {
+        esp_err_t e = httpd_register_uri_handler(s_server, k_routes[i]);
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "route %s %s failed to register: %s",
+                     k_routes[i]->method == HTTP_POST ? "POST" : "GET",
+                     k_routes[i]->uri, esp_err_to_name(e));
+        }
+    }
 #if HAL_HAS_HTTPS
     ESP_LOGI(TAG, "%s server listening on :%d (routes: / /favicon.ico /config /update /reboot /log /api/env /coredump.elf /coredump_erase /cert.pem"
 #if HAL_HAS_LORAWAN

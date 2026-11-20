@@ -1,6 +1,5 @@
 #include "transmission.h"
 
-#include <stdarg.h>             // V2.5.20: tx_append varargs
 #include <stddef.h>             // V2.5.5: offsetof (TX dispatch table)
 #include <stdio.h>
 #include <string.h>
@@ -391,28 +390,16 @@ static esp_http_client_handle_t open_push_client(const char *url, bool use_insec
 // UNtruncated would-be length, so one truncating call pushes `n` past `cap`
 // and the next call computes `cap - n` as a huge size_t — turning silent
 // truncation into an out-of-bounds write. Buffers are sized with margin
-// today, but one added field could cross the line. This helper clamps like
-// http_server.c::append_safe / mqtt.c::APPEND: once full, further calls
-// no-op and the body comes out truncated-but-in-bounds (the server rejects
-// invalid JSON — safe failure, no memory corruption).
+// today, but one added field could cross the line. They use util.h's
+// buf_append() (V2.8.33; was a file-local tx_append copy): once full, further
+// calls no-op and the body comes out truncated-but-in-bounds (the server
+// rejects invalid JSON — safe failure, no memory corruption).
 //
 // Planned (review 2.1 C4): before the next new sensor, upload target or
 // payload field, capture golden bodies/URLs from these builders as they are,
-// then move tx_append and the build_* functions to a host-testable
+// then move the build_* functions to a host-testable
 // tx_payload.c and check the goldens before and after. Most receiving
 // servers answer 200/201 even for a misnamed field, so only a test sees it.
-__attribute__((format(printf, 4, 5)))
-static int tx_append(char *buf, size_t cap, int n, const char *fmt, ...) {
-    if (n < 0 || (size_t)n >= cap) return (int)cap;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(buf + n, cap - n, fmt, ap);
-    va_end(ap);
-    if (w < 0) return n;
-    n += w;
-    if ((size_t)n > cap) n = (int)cap;
-    return n;
-}
 
 // --- Madavi -----------------------------------------------------------------
 // Single POST per cycle carrying everything Madavi's value_type whitelist
@@ -435,14 +422,14 @@ static int tx_append(char *buf, size_t cap, int n, const char *fmt, ...) {
 // present; an empty body is harmless but wastes a POST.
 static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) {
     bool have_pulse_stats = c->tube_enabled && (c->gm_counts > 1);
-    int n = tx_append(buf, cap, 0,
+    int n = buf_append(buf, cap, 0,
         "{\n"
         " \"software_version\": \"%s\",\n"
         " \"sensordatavalues\": [\n",
         c->sw_version);
 
     bool first = true;
-    #define COMMA() do { if (!first) n = tx_append(buf, cap, n, ",\n"); first = false; } while (0)
+    #define COMMA() do { if (!first) n = buf_append(buf, cap, n, ",\n"); first = false; } while (0)
 
     if (c->bme_valid) {
         // V2.3.29 fix: bme_valid is set when ANY sub-sensor in the env
@@ -474,7 +461,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
             // Full Bosch-family trio (BME280, BMP581, BMP390, BME688
             // — all relabelled to BME280_* since that's what Madavi's
             // hardcoded value_type whitelist recognises).
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
                 "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
                 "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
@@ -482,14 +469,14 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         } else if (have_h) {
             // SHT45 (or similar T+H-only) without a paired Bosch chip.
             // Use unprefixed names → Madavi's DHT RRD.
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 "  {\"value_type\": \"temperature\", \"value\": \"%.2f\"},\n"
                 "  {\"value_type\": \"humidity\", \"value\": \"%.2f\"}",
                 c->bme_temperature_c, c->bme_humidity_pct);
         } else {
             // Edge case: only T is valid (e.g. SHT45 H read failed
             // mid-cycle, leaving cached T but H=0). Emit T alone.
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 "  {\"value_type\": \"temperature\", \"value\": \"%.2f\"}",
                 c->bme_temperature_c);
         }
@@ -498,7 +485,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         // SPS30_* prefix matches Madavi's field-prefix routing convention
         // — keeps the PM RRDs separate from BME280_* in the back-end.
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
@@ -526,7 +513,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         // proper SPS30 fields on X-PIN 1; openSenseMap and aqi.eco continue
         // to receive SPS30_* only (their parsers handle the prefix natively).
         // Mirror of the existing BME280_* relabel hack for SHT45+BMP581 data.
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             ",\n"
             "  {\"value_type\": \"SDS_P1\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SDS_P2\", \"value\": \"%.2f\"}",
@@ -537,7 +524,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
         // Madavi's prefix-based routing requires it; sensor.community uses
         // the same naming on its dedicated X-PIN 15 POST.
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
@@ -545,7 +532,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
     }
     if (have_pulse_stats) {
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"samples\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"min_micro\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"max_micro\", \"value\": \"%lu\"}",
@@ -555,7 +542,7 @@ static void build_madavi_env_body(const tx_context_t *c, char *buf, size_t cap) 
     }
     COMMA();
     // Final write — return value not needed (nothing reads `n` after).
-    (void)tx_append(buf, cap, n,
+    (void)buf_append(buf, cap, n,
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
         " ]\n}",
         (int)c->rssi);
@@ -719,7 +706,7 @@ static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap)
     // 400'd because SC doesn't range-check magnitude, so it was silently wrong
     // for the whole BME-on-sensor.community history.
     float p_pa = c->bme_pressure_pa;
-    int n = tx_append(buf, cap, 0,
+    int n = buf_append(buf, cap, 0,
         "{\n"
         " \"software_version\": \"%s\",\n"
         " \"sensordatavalues\": [\n"
@@ -732,13 +719,13 @@ static void build_sensorc_bme_body(const tx_context_t *c, char *buf, size_t cap)
         // Barometric reduction to sea level: P0 = P * (1 - h * 0.0000226)^-5.257.
         // The factor is dimensionless, so Pa in -> Pa out (also fixed from hPa).
         float p_sl = p_pa * powf(1.0f - c->station_altitude_m * 0.0000226f, -5.257f);
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             ",\n"
             "  {\"value_type\": \"altitude\", \"value\": \"%.1f\"},\n"
             "  {\"value_type\": \"pressure_sealevel\", \"value\": \"%.2f\"}",
             c->station_altitude_m, p_sl);
     }
-    (void)tx_append(buf, cap, n, "\n ]\n}");
+    (void)buf_append(buf, cap, n, "\n ]\n}");
 }
 
 // True if a previously-attempted POST in the same TLS session failed at
@@ -1035,14 +1022,14 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
         // aqi.eco: strip "esp32-" so the value parses as bigint server-side.
         const char *aqi_id = c->chip_id;
         if (strncmp(aqi_id, "esp32-", 6) == 0) aqi_id += 6;
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "{\n"
             " \"esp8266id\": \"%s\",\n"
             " \"software_version\": \"%s\",\n"
             " \"sensordatavalues\": [\n",
             aqi_id, c->sw_version);
     } else {
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "{\n"
             " \"software_version\": \"%s\",\n"
             " \"sensordatavalues\": [\n",
@@ -1050,7 +1037,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     }
 
     bool first = true;
-    #define COMMA() do { if (!first) n = tx_append(buf, cap, n, ",\n"); first = false; } while (0)
+    #define COMMA() do { if (!first) n = buf_append(buf, cap, n, ",\n"); first = false; } while (0)
 
     // Radiation block — Si22G_* are not in aqi.eco's VALUE_MAPPING (no
     // radiation column), so skip the entire block for aqi.eco. openSenseMap
@@ -1058,7 +1045,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     if (c->tube_enabled && !prefix_aqi_id) {
         float msi = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type) / 1000.0f;
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"Si22G_counts_per_minute\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"Si22G_hv_pulses\", \"value\": \"%lu\"},\n"
             "  {\"value_type\": \"Si22G_counts\", \"value\": \"%lu\"},\n"
@@ -1067,7 +1054,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
             (unsigned long)c->cpm, (unsigned long)c->hv_pulses,
             (unsigned long)c->gm_counts, (unsigned long)c->dt_ms, msi);
         if (c->gm_counts > 1) {
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 ",\n"
                 "  {\"value_type\": \"samples\", \"value\": \"%lu\"},\n"
                 "  {\"value_type\": \"min_micro\", \"value\": \"%lu\"},\n"
@@ -1079,7 +1066,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     }
     if (c->bme_valid) {
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"BME280_temperature\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"BME280_humidity\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"BME280_pressure\", \"value\": \"%.2f\"}",
@@ -1091,7 +1078,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
             // same value under multiple aliases maximises compatibility
             // against any future server-side preference change. Same numeric
             // value, so picking SHT3X vs BME280 doesn't affect the data.
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 ",\n"
                 "  {\"value_type\": \"SHT3X_temperature\", \"value\": \"%.2f\"},\n"
                 "  {\"value_type\": \"SHT3X_humidity\", \"value\": \"%.2f\"},\n"
@@ -1101,7 +1088,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     }
     if (c->pm_valid) {
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"SPS30_P0\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_P2\", \"value\": \"%.2f\"},\n"
             "  {\"value_type\": \"SPS30_P4\", \"value\": \"%.2f\"},\n"
@@ -1116,7 +1103,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
         // SPS30_TS (typical particle size) — not in aqi.eco's VALUE_MAPPING.
         // Kept for openSenseMap which can route it to a per-box channel.
         if (!prefix_aqi_id) {
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 ",\n"
                 "  {\"value_type\": \"SPS30_TS\", \"value\": \"%.3f\"}",
                 c->pm.typ_size_um);
@@ -1127,11 +1114,11 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
         // (canonical column = noise_level). LA_min/LA_max have no
         // destination columns there — kept for openSenseMap only.
         COMMA();
-        n = tx_append(buf, cap, n,
+        n = buf_append(buf, cap, n,
             "  {\"value_type\": \"DNMS_noise_LAeq\", \"value\": \"%.2f\"}",
             c->noise.laeq);
         if (!prefix_aqi_id) {
-            n = tx_append(buf, cap, n,
+            n = buf_append(buf, cap, n,
                 ",\n"
                 "  {\"value_type\": \"DNMS_noise_LA_min\", \"value\": \"%.2f\"},\n"
                 "  {\"value_type\": \"DNMS_noise_LA_max\", \"value\": \"%.2f\"}",
@@ -1140,7 +1127,7 @@ static void build_luftdaten_body(const tx_context_t *c, char *buf, size_t cap,
     }
     COMMA();
     // Final write — return value not needed (nothing reads `n` after).
-    (void)tx_append(buf, cap, n,
+    (void)buf_append(buf, cap, n,
         "  {\"value_type\": \"signal\", \"value\": \"%d\"}\n"
         " ]\n}",
         (int)c->rssi);
@@ -1525,7 +1512,10 @@ static void tx_run(const tx_context_t *c) {
     // ONLY because TX_QUEUE_DEPTH == 1 and exactly one tx_task exists — tx_run is
     // never reentered. If either invariant ever changes (deeper queue OR a second
     // worker on the other core), promote to module-static with a per-target
-    // spinlock OR pass via the tx_context_t.
+    // spinlock OR pass via the tx_context_t. (V2.8.33: the depth half is
+    // enforced below; the one-worker half is tx_setup()'s single task create.)
+    _Static_assert(TX_QUEUE_DEPTH == 1,
+                   "tx_run's function-static fail_streak[] assumes a depth-1 TX queue");
     static int fail_streak[TX_TARGET_COUNT] = {0};
 
     // V2.6.21: one combined line (PSRAM-dominated free/min_free/max_alloc +

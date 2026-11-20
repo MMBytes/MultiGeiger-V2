@@ -1,6 +1,5 @@
 #include "config_form.h"
 
-#include <stdarg.h>
 #include <stddef.h>          // offsetof (V2.8.26 secret table)
 #include <stdio.h>
 #include <string.h>
@@ -156,28 +155,6 @@ static bool config_post_apply_field(config_t *next, const char *key, const char 
     return false;   // no schema field matched
 }
 
-// --- Bounded append ------------------------------------------------------------
-//
-// File-local copy of http_server.c::append_safe (same clamp and the same printf
-// format attribute as it and sd_logger.c's copy): returns the updated length,
-// stops growing once the buffer is full, and never lets a miscounted `n`
-// underflow `sz - n`. Kept per file
-// rather than shared through util.h because sd_logger.c already defines its own
-// static append_safe and includes util.h.
-
-__attribute__((format(printf, 4, 5)))
-static int form_append(char *out, size_t sz, int n, const char *fmt, ...) {
-    if (n < 0 || (size_t)n >= sz) return (int)sz;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(out + n, sz - n, fmt, ap);
-    va_end(ap);
-    if (w < 0) return n;
-    n += w;
-    if ((size_t)n > sz) n = (int)sz;
-    return n;
-}
-
 // --- V2.8.26: secret fields ---------------------------------------------------
 // One list drives the key table, the predicate and the change summary, so a
 // key and its config_t member can never drift apart.
@@ -279,7 +256,7 @@ void config_form_secret_changes(const config_t *prev, const config_t *next,
             if (strncmp(a, b, f->size) == 0) continue;
             const bool cleared = (a[0] != 0 && b[0] == 0);
             if (cleared != (pass == 1)) continue;
-            n = form_append(out, out_sz, n, "%s%s%s",
+            n = buf_append(out, out_sz, n, "%s%s%s",
                             first ? (n ? "; " : "") : ", ",
                             first ? (pass ? "cleared: " : "changed: ") : "",
                             f->key);
@@ -303,13 +280,13 @@ typedef struct {
 static void changes_add(changes_acc_t *a, const char *key) {
     if (config_form_is_secret_key(key)) return;
     const size_t need = (a->n ? 2u : 0u) + strlen(key);
-    // Checked BEFORE appending: form_append clamps on overflow, so checking
+    // Checked BEFORE appending: buf_append clamps on overflow, so checking
     // afterwards would leave half a key in the text.
     if (a->more || (size_t)a->n + need > a->limit) {
         a->more++;
         return;
     }
-    a->n = form_append(a->out, a->out_sz, a->n, "%s%s", a->n ? ", " : "", key);
+    a->n = buf_append(a->out, a->out_sz, a->n, "%s%s", a->n ? ", " : "", key);
 }
 
 void config_form_changes(const config_t *prev, const config_t *next, char *out, size_t out_sz) {
@@ -338,7 +315,7 @@ void config_form_changes(const config_t *prev, const config_t *next, char *out, 
     #undef X_U8
 
     if (a.more)
-        form_append(out, out_sz, a.n, "%s\xE2\x80\xA6 (+%u more)", a.n ? " " : "", a.more);
+        buf_append(out, out_sz, a.n, "%s\xE2\x80\xA6 (+%u more)", a.n ? " " : "", a.more);
 }
 
 /** @brief Count `*c` up by one, stopping at 255. */
@@ -361,18 +338,18 @@ static void unknown_add(config_form_result_t *res, int *un, const char *key) {
         sat_inc(&res->unknown_more);
         return;
     }
-    *un = form_append(res->unknown, sizeof(res->unknown), *un, "%s%s", *un ? ", " : "", key);
+    *un = buf_append(res->unknown, sizeof(res->unknown), *un, "%s%s", *un ? ", " : "", key);
 }
 
 void config_form_unknown_text(const config_form_result_t *res, char *out, size_t out_sz) {
     if (!out || out_sz == 0) return;
     out[0] = 0;
-    int n = form_append(out, out_sz, 0, "%s", res->unknown);
+    int n = buf_append(out, out_sz, 0, "%s", res->unknown);
     if (res->unknown_odd)
-        n = form_append(out, out_sz, n, "%s(+%u with other characters)", n ? " " : "",
+        n = buf_append(out, out_sz, n, "%s(+%u with other characters)", n ? " " : "",
                         (unsigned)res->unknown_odd);
     if (res->unknown_more)
-        form_append(out, out_sz, n, "%s(+%u more)", n ? " " : "", (unsigned)res->unknown_more);
+        buf_append(out, out_sz, n, "%s(+%u more)", n ? " " : "", (unsigned)res->unknown_more);
 }
 
 // --- Form parser + cross-field rules -----------------------------------------
@@ -534,7 +511,7 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
 
         // V2.5.34: accumulate any rejected field's key (comma-separated).
         if (oor) {
-            rej_n = form_append(rejected, rejected_sz, rej_n,
+            rej_n = buf_append(rejected, rejected_sz, rej_n,
                                 "%s%s%s", rej_n ? ", " : "", p, oor_why);
         }
 
@@ -622,7 +599,7 @@ void config_apply_form(config_t *next, const config_t *prev, char *body,
         safe_strcpy(next->mqtt_tls_ca, prev->mqtt_tls_ca,
                     sizeof(next->mqtt_tls_ca));
         // Last writer of `rejected`, so the returned length is not kept.
-        (void)form_append(rejected, rejected_sz, rej_n, "%s%s",
+        (void)buf_append(rejected, rejected_sz, rej_n, "%s%s",
                           rej_n ? ", " : "",
                           "mqtt_tls_m (Mode B needs a CA certificate)");
     }

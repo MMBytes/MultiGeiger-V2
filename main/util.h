@@ -9,6 +9,7 @@
  *  `test/` can include this header directly.
  */
 
+#include <stdarg.h>   // buf_append varargs
 #include <string.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -47,6 +48,43 @@ static inline void safe_strcpy(char *dst, const char *src, size_t dstsz) {
     while (n < dstsz - 1 && src[n] != '\0') n++;   // reads no further than the NUL
     memcpy(dst, src, n);
     memset(dst + n, 0, dstsz - n);
+}
+
+/** @brief Bounded printf-append: format into @p out at offset @p n and return
+ *         the new length, never past @p sz.
+ *
+ *  The fix for the bare `n += snprintf(out + n, sz - n, ...)` accumulation
+ *  pattern: snprintf returns the UNtruncated would-be length, so one
+ *  truncating call pushes n past sz and the next call's `sz - n` becomes a
+ *  huge size_t — an out-of-bounds write. Here, once the buffer is full every
+ *  further call is a no-op and returns sz, so the text comes out
+ *  truncated-but-in-bounds (always NUL-terminated by vsnprintf).
+ *
+ *  Returns sz when the buffer is full (or n is already out of range), n
+ *  unchanged on a vsnprintf encoding error. Callers that must know about
+ *  truncation compare the result with sz (or check the space BEFORE
+ *  appending, as config_form.c does).
+ *
+ *  V2.8.33: one shared, host-tested copy. Until then four identical
+ *  file-local copies existed (http_server.c and sd_logger.c append_safe,
+ *  config_form.c form_append, transmission.c tx_append), each justified by
+ *  pointing at the others as a "house convention" that was never actually
+ *  decided. mqtt.c / mqtt_discovery.c keep their APPEND macros: they clamp to
+ *  sz - 1 and track truncation differently on purpose.
+ *  @param out buffer, @p sz bytes
+ *  @param n   current length (the previous call's return value; 0 to start)
+ */
+__attribute__((format(printf, 4, 5)))
+static inline int buf_append(char *out, size_t sz, int n, const char *fmt, ...) {
+    if (n < 0 || (size_t)n >= sz) return (int)sz;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(out + n, sz - n, fmt, ap);
+    va_end(ap);
+    if (w < 0) return n;
+    n += w;
+    if ((size_t)n > sz) n = (int)sz;
+    return n;
 }
 
 /** @brief Copy a string into an exact-size byte field such as IDF's

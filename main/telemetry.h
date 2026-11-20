@@ -29,7 +29,7 @@
 // assuming every column — header or data cell — fits the same CELL_MAX
 // budget it applies to data cells (23 chars + NUL; a static assert there
 // ties the two constants together). A longer header would let the header
-// row outgrow a buffer every data row still fits, and append_safe would
+// row outgrow a buffer every data row still fits, and buf_append would
 // silently clamp it: trailing columns present in each data row but missing
 // from the header — a misaligned CSV with no error anywhere. So
 // telemetry_register() rejects over-long headers loudly instead.

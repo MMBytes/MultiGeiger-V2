@@ -816,6 +816,18 @@ static void log_next_uplink(TickType_t in_ticks, bool after_round) {
 #endif
 }
 
+// Start the next noise-sensor (DNMS) LAeq window. Called on every exit of
+// do_tx_cycle() that has read this window, so the next read covers a full
+// interval whatever happened to WiFi/NTP. V2.8.33: one helper for all four
+// exits — two of them used to ignore a failed trigger silently, so a lost
+// window showed up only as a missing noise value one cycle later.
+static void noise_retrigger(void) {
+    if (!noise_sensor_present()) return;
+    if (noise_sensor_trigger() != ESP_OK) {
+        ESP_LOGW(TAG, "%s: trigger for next window failed", noise_sensor_name());
+    }
+}
+
 static void do_tx_cycle(void) {
     uint32_t counts_raw, dt_ms, min_us, max_us, hv_pulses;
     bool hv_error;
@@ -1082,6 +1094,9 @@ static void do_tx_cycle(void) {
         if (pcnt_on) {
             uint32_t drop = (pc[0] >= pc[TUBE_PCNT_NWIDTHS - 1])
                                 ? (pc[0] - pc[TUBE_PCNT_NWIDTHS - 1]) : 0;
+            // V2.8.33: the PCNT line below spells out exactly four widths.
+            _Static_assert(TUBE_PCNT_NWIDTHS == 4,
+                           "PCNT log line hard-codes 4 widths: update it with TUBE_PCNT_NWIDTHS");
             ESP_LOGI(TAG, "PCNT: w_ns[%lu|%lu|%lu|%lu]=%lu %lu %lu %lu "
                      "(off≈raw_edges; off-widest=%lu narrow)",
                      (unsigned long)tube_pcnt_width_ns(0), (unsigned long)tube_pcnt_width_ns(1),
@@ -1394,11 +1409,7 @@ static void do_tx_cycle(void) {
         // per spec; the fused path above is untouched.
         env_sensor_refresh_all_for_telemetry();
         sd_logger_cycle();
-        if (noise_sensor_present()) {
-            if (noise_sensor_trigger() != ESP_OK) {
-                ESP_LOGW(TAG, "%s: trigger for next window failed", noise_sensor_name());
-            }
-        }
+        noise_retrigger();
         return;
     }
 
@@ -1442,13 +1453,13 @@ static void do_tx_cycle(void) {
                  (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) ? " (LoRaWAN uplink unaffected)" : "");
         // Still trigger the next DNMS window so we don't lose the cycle's
         // worth of integration time waiting for WiFi.
-        if (noise_sensor_present()) noise_sensor_trigger();
+        noise_retrigger();
         return;
     }
     if (!ntp_time_valid()) {
         ESP_LOGW(TAG, "skipping WiFi TX: time not valid (no NTP sync yet)%s",
                  (HAL_HAS_LORAWAN && g_cfg.lorawan_enabled) ? " (LoRaWAN uplink unaffected)" : "");
-        if (noise_sensor_present()) noise_sensor_trigger();
+        noise_retrigger();
         return;
     }
 
@@ -1487,11 +1498,7 @@ static void do_tx_cycle(void) {
     // ~150 s interval. Issue this AFTER tx_transmit (which is non-blocking —
     // it just enqueues the snapshot) so we don't add the I²C round-trip to
     // the user-facing TX latency.
-    if (noise_sensor_present()) {
-        if (noise_sensor_trigger() != ESP_OK) {
-            ESP_LOGW(TAG, "%s: trigger for next window failed", noise_sensor_name());
-        }
-    }
+    noise_retrigger();
 }
 
 void app_main(void) {
@@ -2287,6 +2294,13 @@ void app_main(void) {
         static int64_t s_ap_last_client_us = 0;
         static bool    s_ap_deferring      = false;
         bool ap_hold_for_client = false;
+        // V2.8.33: "has the boot AP window elapsed?" is read ONCE per loop
+        // pass. It used to be four separate esp_timer reads (client check,
+        // OTA guard, both close branches): when the 120 s mark fell between
+        // them, the client check saw "not yet" and skipped, then a close
+        // branch saw "elapsed" — the AP closed under a connected client with
+        // no "deferring close" line. One snapshot = one answer per pass.
+        const bool ap_window_over = (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US;
         // Only evaluate when a TIMED close is actually reachable this boot:
         // not after the STA switch / radio-off (interface gone), not in
         // permanent keep-AP-on mode (never closes), and only when some close
@@ -2295,7 +2309,7 @@ void app_main(void) {
         // close" in the always-on-AP / no-creds modes where nothing closes.)
         if (!g_sta_connect_allowed && !s_radio_off &&
             !s_standalone_ap_on_latched && (s_standalone_sd_latched || g_have_sta_creds) &&
-            (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+            ap_window_over) {
             wifi_sta_list_t apsta;
             if (esp_wifi_ap_get_sta_list(&apsta) == ESP_OK && apsta.num > 0) {
                 s_ap_last_client_us = esp_timer_get_time();
@@ -2318,8 +2332,7 @@ void app_main(void) {
         // elapsed and no AP client holding it). One rule for every mode:
         // ap_hold_for_client is only evaluated where a timed close exists
         // and is false elsewhere, which is exactly "would have closed".
-        ota_guard_tick(esp_timer_get_time(),
-                       (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US && !ap_hold_for_client);
+        ota_guard_tick(esp_timer_get_time(), ap_window_over && !ap_hold_for_client);
 
         if (s_standalone_ap_on_latched) {
             // V2.6.23: generalized keep-AP-on (was SD-standalone-only in
@@ -2328,15 +2341,14 @@ void app_main(void) {
             // the user wants permanently reachable — can always be
             // reconfigured. Costs ~50-80 mA; STA never starts.
         } else if (s_standalone_sd_latched) {
-            if (!s_radio_off && !ap_hold_for_client &&
-                (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+            if (!s_radio_off && !ap_hold_for_client && ap_window_over) {
                 ESP_LOGI(TAG, "AP window closed — standalone mode, radio off");
                 ESP_ERROR_CHECK(esp_wifi_stop());
                 ESP_ERROR_CHECK(esp_wifi_deinit());
                 s_radio_off = true;
             }
         } else if (!g_sta_connect_allowed && g_have_sta_creds && !ap_hold_for_client &&
-                   (esp_timer_get_time() - boot_time_us) > AP_WINDOW_US) {
+                   ap_window_over) {
             ESP_LOGI(TAG, "AP window closed — stopping AP and switching to STA");
 
             ESP_ERROR_CHECK(esp_wifi_stop());

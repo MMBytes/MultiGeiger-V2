@@ -118,7 +118,7 @@ static volatile uint32_t isr_hv_coincident    = 0;
 
 // --- V2.8.5: HV FET on-time telemetry (review 2.7, level 1) ---
 // The FET is driven high in S_PULSE_H and low by the NEXT gptimer tick that
-// reaches S_PULSE_L, nominally PERIODS(1500) later. That tick is a normal
+// reaches S_PULSE_L, nominally PERIODS(HV_PULSE_ON_US) later. That tick is a normal
 // interrupt: while the flash cache is disabled (an OTA erase, an NVS write)
 // it cannot run, so the FET can stay on for the whole erase — tens to
 // hundreds of ms at DCR-limited inductor current. Nothing measured this.
@@ -185,6 +185,17 @@ void tube_set_pulse_callback(tube_pulse_cb_t cb) {
 #define PERIODS(us) ((us) / PERIOD_DURATION_US)
 #define MAX_CHARGE_PULSES 3333
 
+// V2.8.33: the tube.h thresholds were derived from the pulse timing in prose
+// only. hv_on_long must stay above the nominal on-time plus one timer period
+// of tick jitter, and the coincidence window must cover one full on+off pulse
+// period (the 2-pulse train spacing seen in the phantom-count field data).
+_Static_assert(HV_ON_LONG_US > HV_PULSE_ON_US + PERIOD_DURATION_US,
+               "HV_ON_LONG_US must exceed the nominal FET on-time plus one timer period");
+_Static_assert(HV_COINCIDENT_MAX_US >= HV_PULSE_ON_US + HV_PULSE_OFF_US,
+               "HV_COINCIDENT_MAX_US must cover one full HV charge-pulse period");
+_Static_assert(HV_PULSE_ON_US % PERIOD_DURATION_US == 0 && HV_PULSE_OFF_US % PERIOD_DURATION_US == 0,
+               "HV pulse phases must be whole timer periods");
+
 static gptimer_handle_t recharge_timer = NULL;
 
 // V2.8.6 (review 2.7, level 3): the recharge interrupt is now cache-safe
@@ -236,7 +247,7 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
             isr_last_hv_pulse_us = (uint64_t)esp_timer_get_time();
             portEXIT_CRITICAL_ISR(&mux_hv);
             state = S_PULSE_L;
-            next_state = PERIODS(1500);
+            next_state = PERIODS(HV_PULSE_ON_US);   // 1500 µs FET on-time
             return false;
         }
         if (state == S_PULSE_L) {
@@ -259,7 +270,7 @@ static bool IRAM_ATTR recharge_tick(gptimer_handle_t timer,
             }
             portEXIT_CRITICAL_ISR(&mux_hv);
             state = S_CHECK;
-            next_state = PERIODS(1000);
+            next_state = PERIODS(HV_PULSE_OFF_US);  // 1000 µs off before the cap-full check
             return false;
         }
         if (state == S_CHECK) {

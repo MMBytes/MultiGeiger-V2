@@ -153,6 +153,16 @@ typedef struct {
 #define HV_COINCIDENT_MIN_US 200
 #define HV_COINCIDENT_MAX_US 3000
 
+// HV charge-pulse timing driven by tube.c's recharge_tick state machine:
+// FET on for HV_PULSE_ON_US (S_PULSE_H -> S_PULSE_L), then off for
+// HV_PULSE_OFF_US before the cap-full check (S_PULSE_L -> S_CHECK).
+// V2.8.33: named here because HV_COINCIDENT_MAX_US above and HV_ON_LONG_US
+// below are derived from them; tube.c _Static_asserts both relations, so
+// changing the on-time (e.g. a new HV board) cannot silently turn every pulse
+// into an hv_on_long DIAG alarm or push real HV phantoms past the window.
+#define HV_PULSE_ON_US  1500
+#define HV_PULSE_OFF_US 1000
+
 // V2.8.5: an HV FET pulse whose on-time exceeds this is counted as "long" in
 // the DIAG line (hv_on_long). Nominal on-time is the 1500 µs S_PULSE_H phase
 // plus up to one 100 µs timer period; 2 ms leaves room for ordinary interrupt

@@ -199,6 +199,33 @@ static int test_safe_strcpy_zero_fills_tail(void) {
     return 1;
 }
 
+// V2.8.33: util.h buf_append() — the one shared bounded append (was four
+// file-local copies). Normal append, exact fill, truncation clamps to sz and
+// later calls are no-ops, out-of-range n, always NUL-terminated.
+static int test_buf_append_basic_and_clamp(void) {
+    char b[8];
+    int n = 0;
+    n = buf_append(b, sizeof(b), n, "ab");
+    n = buf_append(b, sizeof(b), n, "%d", 12);
+    EXPECT_TRUE(n == 4);
+    EXPECT_STREQ(b, "ab12");
+    n = buf_append(b, sizeof(b), n, "XYZ");          // 7 chars + NUL = exact fit
+    EXPECT_TRUE(n == 7);
+    EXPECT_STREQ(b, "ab12XYZ");
+    n = buf_append(b, sizeof(b), n, "Q");            // full: truncates, clamps to sz
+    EXPECT_TRUE(n == (int)sizeof(b));
+    EXPECT_STREQ(b, "ab12XYZ");                      // still NUL-terminated, in bounds
+    n = buf_append(b, sizeof(b), n, "more");         // further calls are no-ops
+    EXPECT_TRUE(n == (int)sizeof(b));
+    EXPECT_STREQ(b, "ab12XYZ");
+    EXPECT_TRUE(buf_append(b, sizeof(b), -1, "x") == (int)sizeof(b));   // bad n
+    EXPECT_TRUE(buf_append(b, sizeof(b), 99, "x") == (int)sizeof(b));
+    char t[4];
+    EXPECT_TRUE(buf_append(t, sizeof(t), 0, "%s", "longer") == (int)sizeof(t));
+    EXPECT_STREQ(t, "lon");                          // one truncating call
+    return 1;
+}
+
 // ----------------------------------------------------------------------------
 // ct_memcmp
 // ----------------------------------------------------------------------------
@@ -1421,7 +1448,33 @@ static int test_rxobs_join_accept_not_ignored(void) {   // joining: own_addr 0
     rxobs_format(&g_rxt, g_rxt_buf, sizeof(g_rxt_buf), 0);
     EXPECT_STREQ(g_rxt_buf, "RX1 868.100 MHz SF12 opened +4991 ms after TX (open for up to 2996 ms): received: join accept, "
                             "17 B | RX2 not needed");
-    EXPECT_TRUE(!g_rxt.win[0].ignored);
+    EXPECT_TRUE(!g_rxt.rep[0].w[0].ignored);   // V2.8.33: per-repeat record (win[] = timing only)
+    return 1;
+}
+
+// V2.8.33: the join-accept window check in lorawan.cpp reads the join TX's own
+// window records (rxobs_hit) through rxobs_clean_frame(): a CRC-error RX1 must
+// not count, a clean RX2 must (accept_win = 2).
+static int test_rxobs_join_accept_in_rx2(void) {
+    g_rxt.own_addr = 0;
+    rxobs_begin(&g_rxt, 1);
+    rxt_sf(12); rxt_freq(868.1);
+    const uint8_t tx[4] = { OBS_CMD_SET_TX, 0, 0, 0 };
+    rxt_spi(tx, 4, NULL);
+    g_rxt_now += 1482000;
+    const uint8_t c[3] = { OBS_CMD_CLEAR_IRQ, 0, 0 };
+    rxt_spi(c, 3, NULL);
+    g_rxt_now += 4991000; rxt_rx(2996);
+    g_rxt_now += 50000; rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID | OBS_IRQ_CRC_ERR);
+    g_rxt_now += 950000; rxt_rx(2996);
+    g_rxt_now += 50000; rxt_irq(OBS_IRQ_RX_DONE | OBS_IRQ_HEADER_VALID);
+    rxt_frame(0x20, 0, 17);
+    EXPECT_TRUE(g_rxt.n_win == 2);
+    const rxobs_hit_t *h1 = rxobs_hit(&g_rxt, 0);
+    const rxobs_hit_t *h2 = rxobs_hit(&g_rxt, 1);
+    EXPECT_TRUE(h1 != NULL && h2 != NULL);
+    EXPECT_TRUE(!rxobs_clean_frame(h1->irq));
+    EXPECT_TRUE(rxobs_clean_frame(h2->irq) && !h2->ignored && h2->rx_seen);
     return 1;
 }
 // V2.8.32: a data frame while joining (no session address yet) says so.
@@ -4882,6 +4935,7 @@ int main(int argc, char **argv) {
     RUN(test_safe_strcpy_zero_dstsz);
     RUN(test_safe_strcpy_dstsz_1);
     RUN(test_safe_strcpy_zero_fills_tail);
+    RUN(test_buf_append_basic_and_clamp);
 
     printf("== ct_memcmp ==\n");
     RUN(test_ct_memcmp_equal);
@@ -5003,6 +5057,7 @@ int main(int argc, char **argv) {
     RUN(test_rxobs_nbtrans_above_max_rep);
     RUN(test_rxobs_truncation_keeps_verdict);
     RUN(test_rxobs_join_accept_not_ignored);
+    RUN(test_rxobs_join_accept_in_rx2);
     RUN(test_applog_asm_whole_line);
     RUN(test_applog_asm_cut_after_text);
     RUN(test_applog_asm_cut_after_prefix);

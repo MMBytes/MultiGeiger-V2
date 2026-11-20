@@ -9,6 +9,59 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.33 — A wrong firmware file is refused with a clear message, code clean-up
+
+For all boards. Three small fixes and one extra log line; the rest is
+internal clean-up and new build checks with no change in behaviour.
+
+1. **Uploading the firmware file of another board family is refused with a
+   clear message.** For example an ESP32 file on an ESP32-S3 board now
+   answers `OTA refused: this device is feathers3_d (ESP32-S3) but the
+   uploaded binary (version V2.8.33) is for ESP32. Check that you uploaded
+   the correct geiger_v2_<board>.bin file …`. Before, the update page showed
+   only `500 Internal Server Error` with `ESP_ERR_OTA_VALIDATE_FAILED`: the
+   chip check in ESP-IDF runs first and refused the file before the
+   firmware's own explanation was reached. As before, the node keeps running
+   and booting its current firmware. A file for another board with the same
+   chip (for example two ESP32 boards) is still not detected.
+2. **The boot setup window no longer closes under a connected phone or
+   laptop.** When the 2-minute window ran out at exactly the wrong moment,
+   the node could switch to WiFi client mode although a device was still
+   connected to its setup network, without the usual `AP window elapsed but
+   client connected — deferring close` line. Very rare; now the window
+   closes only after the last client has left, as intended.
+3. **Settings page: eight text fields now have a length limit** (WiFi
+   network name, Radmon user, FTP host, FTP user, FTP directory and the
+   three NTP servers). Before, a longer entry was cut off silently when
+   saved; now the browser stops at the length the node can store (for plain
+   ASCII text; names with umlauts or other non-ASCII characters can still be
+   shortened, as in the fields that already had a limit).
+4. **Noise sensor (DNMS):** if starting the next noise measurement fails
+   while WiFi is down or the clock is not yet set, the node log now says so
+   (`DNMS: trigger for next window failed`), as it already did in the other
+   cases.
+5. **Internal: build checks for settings that must match.** The build now
+   stops with a clear message when a board's settings contradict each
+   other, instead of failing much later or not visibly at all: OLED and TFT
+   display both set, TFT without PSRAM, PSRAM or LoRaWAN set differently in
+   `hal.h` and in the board's sdkconfig, and LoRaWAN on a single-core chip.
+   Numbers that must change together are checked too: the web server's
+   keepalive time against the OTA wait time, the TLS session table against
+   the open connections, the web routes against their slots, the high-voltage
+   pulse timing against the `hv_on_long` and coincidence limits, the
+   LoRaWAN ADR counts against RadioLib's values, and two smaller ones (the
+   upload queue depth and the PCNT log line).
+6. **Internal: the web routes are registered from one table** and a route
+   that fails to register is logged with its name.
+7. **Internal: one bounded text-append helper** (`buf_append()` in
+   `util.h`, host-tested) replaces four identical copies in the web server,
+   the SD-card logger, the settings parser and the upload code; the OLED
+   brightness list on the settings page uses it too.
+8. **Internal: LoRaWAN receive-window bookkeeping simplified.** A second
+   copy of each window's result, identical to the per-transmission record
+   whenever it was used, was removed; all log lines stay exactly the same.
+   New host tests cover the join-accept window check and `buf_append()`.
+
 ## V2.8.32 — LoRaWAN log lines say what happened and whether it matters
 
 Only the node log changes; the node behaves as before. On all boards, two

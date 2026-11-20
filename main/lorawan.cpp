@@ -1016,6 +1016,14 @@ static uint32_t airtime_add(uint32_t ms) {
 // backoff step every 32 after that) closely enough to explain DR changes —
 // but RadioLib's copy persists in the NVS session, ours restarts at boot.
 #define ADR_ACK_LIMIT 64u   // RADIOLIB_LORAWAN_ADR_ACK_LIMIT_EXP = 6
+// V2.8.33: our "no downlink for the last 64 uplinks" line and its "about 32
+// more uplinks" wording mirror RadioLib's compile-time ADR defaults; a
+// RadioLib upgrade that changes them must fail here, not drift silently.
+// (A network can still change the live exponents via MAC — not catchable.)
+static_assert(ADR_ACK_LIMIT == (1u << RADIOLIB_LORAWAN_ADR_ACK_LIMIT_EXP),
+              "ADR_ACK_LIMIT no longer matches RadioLib's ADR_ACK_LIMIT_EXP");
+static_assert(RADIOLIB_LORAWAN_ADR_ACK_DELAY_EXP == 5,
+              "ADR backoff wording says 'about 32 more uplinks' (2^5): update the log text");
 static uint32_t s_ul_since_dl = 0;
 // V2.8.25: a downlink (or a fresh join) since boot. From then on RadioLib's ADR counter
 // and ours restarted at the same downlink (parseDownlink: adrFCnt =
@@ -1913,8 +1921,10 @@ static void lorawan_task(void *arg) {
         if (sent) {
             const uint32_t air_24h = airtime_add(join_air_ms);
             for (int i = 0; i < s_obs.n_win; i++) {
-                if (rxobs_rank(rxobs_final(&s_obs.win[i])) == 6 &&   // clean RX_DONE ...
-                    !s_obs.win[i].ignored) {                          // ... handed to RadioLib
+                // The join's one TX (rxobs_begin(.., 1)): its own window records.
+                const rxobs_hit_t *h = rxobs_hit(&s_obs, i);
+                if (h && rxobs_clean_frame(h->irq) &&   // clean RX_DONE ...
+                    !h->ignored) {                      // ... handed to RadioLib
                     accept_win = i + 1;
                 }
             }
@@ -2182,6 +2192,12 @@ void lorawan_setup(void) {
     // RX-window waits) never starves CPU0's idle task / task watchdog.
     // Both LoRaWAN boards (Heltec V4, XIAO + Wio) are ESP32-S3 (dual-core) —
     // always the pinned branch here, unlike tx_setup()'s single-core carve-out.
+    // V2.8.33: on a single-core chip core 1 does not exist and this create
+    // would assert at boot; stop the build instead (port: copy tx_setup()'s
+    // CONFIG_FREERTOS_UNICORE branch).
+#if defined(CONFIG_FREERTOS_UNICORE)
+#error "lorawan.cpp: the LoRaWAN worker is pinned to core 1 — add a single-core branch like tx_setup()'s"
+#endif
     BaseType_t ok = xTaskCreatePinnedToCore(
         lorawan_task, "lorawan", 8192, NULL, (tskIDLE_PRIORITY + 1), NULL, 1);
     configASSERT(ok == pdPASS);

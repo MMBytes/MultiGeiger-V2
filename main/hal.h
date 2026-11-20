@@ -1834,6 +1834,52 @@
 #error "hal.h: HAL_REVC_CARRIER_FIXED and HAL_HAS_CARRIER_REV_SWITCH 1 are mutually exclusive"
 #endif
 
+// --- Combinations the code relies on (V2.8.33) ---------------------------------
+// Each of these used to be a comment only; a port that got one wrong still
+// built and failed somewhere else, or not visibly at all.
+
+// display.c picks ONE backend with #if HAL_HAS_OLED ... #elif HAL_HAS_TFT: with
+// both set the OLED branch wins and the TFT is silently never driven.
+#if HAL_HAS_OLED && HAL_HAS_TFT
+#error "hal.h: HAL_HAS_OLED and HAL_HAS_TFT are mutually exclusive (display.c drives one backend)"
+#endif
+
+// display_tft.c allocates its framebuffer with MALLOC_CAP_SPIRAM.
+#if HAL_HAS_TFT && !HAL_HAS_PSRAM
+#error "hal.h: HAL_HAS_TFT needs HAL_HAS_PSRAM 1 (the TFT framebuffer lives in PSRAM)"
+#endif
+
+// HAL flags vs the board's sdkconfig. hal.h itself includes nothing and is
+// often included before any IDF header, so sdkconfig.h is pulled in here,
+// gated on ESP_PLATFORM. Host tests do not define it and skip this block.
+// cppcheck DOES define it (-DESP_PLATFORM=1) but cannot find sdkconfig.h, so
+// it evaluates these checks against its per-board -D matrix
+// (.github/workflows/_cppcheck.yml, and the local _build.cmd table): a new
+// PSRAM or LoRaWAN leg must carry -DCONFIG_SPIRAM=1 / -DCONFIG_GEIGER_LORAWAN=1.
+// The value comes from the generated sdkconfig.<board>; the overlay only fills
+// keys missing there, so a stale local sdkconfig.<board> can trip these too.
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+// HAL_HAS_PSRAM 1 without CONFIG_SPIRAM: every MALLOC_CAP_SPIRAM allocation
+// returns NULL — the 1 MB log ring silently never installs (/log empty) and
+// the TLS server would run out of internal RAM. The reverse wastes the PSRAM.
+#if HAL_HAS_PSRAM && !defined(CONFIG_SPIRAM)
+#error "hal.h: HAL_HAS_PSRAM 1 but CONFIG_SPIRAM is off (board overlay, or a stale sdkconfig.<board> - delete it and rebuild; cppcheck: -D matrix)"
+#endif
+#if !HAL_HAS_PSRAM && defined(CONFIG_SPIRAM)
+#error "hal.h: CONFIG_SPIRAM is on but this board block says HAL_HAS_PSRAM 0"
+#endif
+// HAL_HAS_LORAWAN 1 without CONFIG_GEIGER_LORAWAN compiles lorawan.cpp empty
+// and fails at LINK time ("undefined reference to lorawan_*"); the reverse
+// clashes with lorawan.h's stubs. Either way: say it here.
+#if HAL_HAS_LORAWAN && !defined(CONFIG_GEIGER_LORAWAN)
+#error "hal.h: HAL_HAS_LORAWAN 1 but CONFIG_GEIGER_LORAWAN is off (board overlay, or a stale sdkconfig.<board> - delete it and rebuild; cppcheck: -D matrix)"
+#endif
+#if !HAL_HAS_LORAWAN && defined(CONFIG_GEIGER_LORAWAN)
+#error "hal.h: CONFIG_GEIGER_LORAWAN is on but this board block says HAL_HAS_LORAWAN 0"
+#endif
+#endif  // ESP_PLATFORM
+
 // --- Derived feature gates ----------------------------------------------------
 // Cross-board switches computed from the per-board block above. Keep them here
 // rather than repeating a line in every board block.

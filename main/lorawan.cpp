@@ -43,6 +43,7 @@ static_assert(LW_RXOBS_LINE_MAX + 56 <= APPLOG_LINE_MAX, "rx windows line would 
 #include "tube.h"            // tube_isr_service_installed()
 #include "config.h"
 #include "ntp.h"       // ntp_boot_epoch() — "has SNTP ever synced" gate for time sync
+#include "task_prio.h" // V2.8.34: TASK_PRIO_LORAWAN
 #include "version.h"   // VERSION_STR -> s_version_packed (lw_pack_version)
 }
 
@@ -94,9 +95,13 @@ static_assert(RADIOLIB_ERR_INVALID_SUBBAND == -1123, "lw_err_text code");
 static_assert(RADIOLIB_ERR_MAC_ANSWERS_PENDING == -1124, "lw_err_text code");
 
 // RadioLib HAL on raw IDF-6 drivers. CONFIG_FREERTOS_HZ stays 100: delay()
-// is a hybrid — whole ticks via vTaskDelay (scheduler-friendly for the
-// multi-second RX-window waits), sub-tick remainder busy-waited on esp_timer
-// so LoRaWAN's ms-scale window timing holds without a global tick-rate bump.
+// is a hybrid — whole ticks via vTaskDelay, sub-tick remainder busy-waited on
+// esp_timer. RadioLib uses it only for the radio's short SX126x delays: the
+// LoRaWAN waits (TX done, gap to RX1/RX2, the windows themselves) go through
+// LoRaWANNode::smartDelayUntil(), which spins on millis() + yield() because
+// no sleep callback is set. The worker therefore keeps core 1 busy for the
+// whole exchange (see task_prio.h); a sleep callback would change the TX-end
+// timestamp and the window timing and needs bench work of its own.
 //
 // Matches RadioLib 8.0's Hal.h: base-class constructor arity/order (input,
 // output, low, high, rising, falling) and the full pure-virtual list, with
@@ -2188,8 +2193,10 @@ void lorawan_setup(void) {
     configASSERT(s_q);
 
     // Same worker-task convention as transmission.c's tx_setup(): pinned to
-    // CPU1 so a multi-second join/uplink RadioLib call (blocking SPI polls +
-    // RX-window waits) never starves CPU0's idle task / task watchdog.
+    // CPU1 so a multi-second join/uplink RadioLib call (busy-waited, see the
+    // HAL note above) never takes CPU0. V2.8.34: priority 1 -> TASK_PRIO_LORAWAN
+    // (6), above the web server, so a TLS job cannot open a window late (a
+    // precaution: not seen at priority 1 either, see task_prio.h).
     // Both LoRaWAN boards (Heltec V4, XIAO + Wio) are ESP32-S3 (dual-core) —
     // always the pinned branch here, unlike tx_setup()'s single-core carve-out.
     // V2.8.33: on a single-core chip core 1 does not exist and this create
@@ -2199,7 +2206,7 @@ void lorawan_setup(void) {
 #error "lorawan.cpp: the LoRaWAN worker is pinned to core 1 — add a single-core branch like tx_setup()'s"
 #endif
     BaseType_t ok = xTaskCreatePinnedToCore(
-        lorawan_task, "lorawan", 8192, NULL, (tskIDLE_PRIORITY + 1), NULL, 1);
+        lorawan_task, "lorawan", 8192, NULL, TASK_PRIO_LORAWAN, NULL, 1);
     configASSERT(ok == pdPASS);
     ESP_LOGI(TAG, "LoRaWAN worker task created (session restore or join runs in the background)");
 }

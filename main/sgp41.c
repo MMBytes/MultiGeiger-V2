@@ -11,6 +11,7 @@
 #include "sensirion_crc.h"
 #include "sensirion_gas_index_algorithm.h"
 #include "sht45.h"
+#include "task_prio.h"   // V2.8.34: TASK_PRIO_SGP41
 #include "telemetry.h"
 
 static const char *TAG = "sgp41";
@@ -270,7 +271,7 @@ esp_err_t sgp41_init(i2c_master_bus_handle_t bus) {
     GasIndexAlgorithm_init(&s_nox_params, GasIndexAlgorithm_ALGORITHM_TYPE_NOX);
 
     BaseType_t ok = xTaskCreate(sgp41_task, "sgp41", 4096, NULL,
-                                tskIDLE_PRIORITY + 2, NULL);
+                                TASK_PRIO_SGP41, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "sampling task creation failed");
         i2c_dev_teardown(&s_dev);

@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "task_prio.h"   // V2.8.34: TASK_PRIO_PULSE
 #include "tube.h"   // tube_set_pulse_callback
 
 static const char *TAG = "neopixel";
@@ -196,7 +197,7 @@ esp_err_t neopixel_init(void) {
 void neopixel_register_pulse_tick(void) {
     if (s_pulse_task) return;   // idempotent
     BaseType_t ok = xTaskCreate(pulse_task, "neopixel", 2048, NULL,
-                                tskIDLE_PRIORITY + 2, &s_pulse_task);
+                                TASK_PRIO_PULSE, &s_pulse_task);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "pulse worker task creation failed");
         return;

@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "task_prio.h"   // V2.8.34: TASK_PRIO_PULSE
 #include "tube.h"   // tube_set_pulse_callback
 
 static const char *TAG = "led";
@@ -83,7 +84,7 @@ esp_err_t led_init(void) {
 void led_register_pulse_tick(void) {
     if (s_pulse_task) return;   // idempotent
     BaseType_t ok = xTaskCreate(pulse_task, "led", 2048, NULL,
-                                tskIDLE_PRIORITY + 2, &s_pulse_task);
+                                TASK_PRIO_PULSE, &s_pulse_task);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "pulse worker task creation failed");
         return;

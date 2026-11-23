@@ -27,6 +27,7 @@
 #include "esp_timer.h"          // V2.8.15: bounded LoRaWAN wait
 #include "lorawan.h"            // V2.8.15: lorawan_on_air() (includes hal.h)
 #include "radio_turn_rule.h"    // V2.8.15: no upload round while a LoRaWAN exchange is on air
+#include "task_prio.h"          // V2.8.34: TASK_PRIO_TX
 
 // V2.3.21: drive the OLED status-line slots for sensor.community, Madavi
 // and Radmon (V1 parity — see reference V1 transmission.cpp). OSM and
@@ -126,12 +127,12 @@ static void record_outcome(tx_target_id_t id, int rc, bool ok) {
     portEXIT_CRITICAL(&s_stats_mux);
 }
 
-// TX runs on its own task, CPU1-pinned on every dual-core board so mbedTLS
-// handshakes don't starve the CPU0 idle task (which feeds the task
-// watchdog); unpinned on the single-core BOARD_SPARKFUN_THING_PLUS_ESP32C5,
-// which has no second core to pin to — see tx_setup() below.
+// TX runs on its own task, CPU1-pinned on every dual-core board so TLS
+// handshakes stay off CPU0, where the main task and WiFi run (see tx_setup()
+// below); unpinned on the single-core BOARD_SPARKFUN_THING_PLUS_ESP32C5,
+// which has no second core to pin to. Priority: task_prio.h.
 #define TX_TASK_STACK_BYTES  16384   // V2.3.22: bumped from 10240. Safety margin for TLS 1.3 handshake stack usage (mbedTLS 4.x cert parsing + key derivation are deeper than 1.2 was).
-#define TX_TASK_PRIO         (tskIDLE_PRIORITY + 1)
+#define TX_TASK_PRIO         TASK_PRIO_TX   // V2.8.34: from task_prio.h (unchanged: 1)
 #define TX_QUEUE_DEPTH       1
 
 // V2.8.15: accessed with seq-cst atomics. Besides the gates that read it
@@ -244,6 +245,11 @@ static bool tx_round_has_targets(const tx_context_t *c);
 // with NbTrans 3 (~8 s per transmission incl. both receive windows). Bounded
 // at TX_LORA_WAIT_MAX_S: the network may set NbTrans up to 15 (~2 min at
 // SF12), past which the round goes ahead and overlaps the exchange.
+// V2.8.34: the LoRaWAN worker now outranks this task on the same core and
+// busy-waits through its exchange, so this loop does not run at all while an
+// exchange is on air; the bound only matters if the two ever stop sharing a
+// core. A round with no upload target is held up the same way (s_tx_busy
+// stays set until the exchange ends; harmless, a few seconds).
 // Boards without the radio compile this to nothing.
 #define TX_LORA_WAIT_MAX_S 150
 static void wait_for_lorawan_quiet(void) {

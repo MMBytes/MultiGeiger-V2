@@ -48,6 +48,7 @@
 #include "transmission.h"
 #include "veml7700.h"
 #include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
+#include "task_prio.h"         // V2.8.34: TASK_PRIO_MQTT
 #include "version.h"
 
 static const char *TAG = "mqtt";
@@ -301,6 +302,9 @@ void mqtt_init(const config_t *cfg, const char *chip_id) {
     // re-associates, so this slower timer only governs the broker-down-but-
     // WiFi-up case (e.g. broker host reboot), where 30 s is fine.
     mc.network.reconnect_timeout_ms     = 30000;
+    // V2.8.34: esp-mqtt's default task priority is 5, above the main task; a
+    // TLS reconnect is ~1 s of handshake CPU. See task_prio.h.
+    mc.task.priority                    = TASK_PRIO_MQTT;
     mc.session.last_will.topic          = s_topic_avail;
     mc.session.last_will.msg            = "offline";
     mc.session.last_will.msg_len        = 7;

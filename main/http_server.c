@@ -74,6 +74,7 @@
                                // (the LoRa EUI/key checks moved there with it)
 #include "ota_guard.h"         // V2.8.20: confirm the running image before an update / restart
 #include "auth_lockout.h"      // V2.8.26: admin login lockout rule
+#include "task_prio.h"         // V2.8.34: TASK_PRIO_HTTPD
 
 static const char *TAG = "http";
 
@@ -4218,6 +4219,10 @@ void http_server_start(config_t *cfg, const char *chip_id) {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.stack_size  = 8192;               // room for form+base64 on one stack
+    // V2.8.34: below measurement and the radio (IDF default 5); see task_prio.h.
+    // Copied into the :443 config by `sc.httpd = hc` and used as is by the
+    // plain fallback. The :80 instance below sets it on its own config.
+    hc.task_priority = TASK_PRIO_HTTPD;
     // Slot count for the main instance's route table (k_routes[] further down;
     // a _Static_assert there keeps the table within it). 11 base routes +
     // /lorawan_reset (HAL_HAS_LORAWAN) + /cert.pem (HAL_HAS_HTTPS): 13 of 14
@@ -4465,6 +4470,7 @@ void http_server_start(config_t *cfg, const char *chip_id) {
     if (s_https_up) {
         httpd_config_t rc = HTTPD_DEFAULT_CONFIG();
         rc.server_port      = 80;
+        rc.task_priority    = TASK_PRIO_HTTPD;   // V2.8.34: fresh default above is 5
         // Both instances would otherwise bind the same UDP control port
         // (32768) and the second httpd_start would fail with ESP_FAIL.
         // Note HTTPD_SSL_CONFIG_DEFAULT() itself sets ctrl_port to

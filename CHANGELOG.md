@@ -9,6 +9,32 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.34 — Downloading the node log no longer holds up the measurements
+
+For all boards. One change in how the node shares its processor time
+between its jobs.
+
+1. **A large download from the node no longer delays the sensor readings.**
+   While a browser or script fetched the node log over HTTPS (about 9
+   seconds for a full 4 MB log), the node's measurement cycle could be held
+   up for about 7 seconds, and the air-quality sensor (SGP41) could log a
+   read error. Measuring now comes before the web server, the MQTT
+   connection and the uploads: with the same download running, the sensor
+   readings take under 0.1 s as usual. The download on its own is as fast
+   as before, and so are firmware updates and the web pages.
+2. **LoRaWAN nodes: the radio now comes before everything else the node
+   does.** A busy web page or upload can no longer delay the opening of the
+   receive windows. This is a precaution; late windows were not seen in
+   testing.
+3. **Unchanged, but now visible:** a log download that runs at the same
+   time as the uploads to the data services makes both about 40 % slower,
+   as it always did (they share the WiFi link). Before, the delayed
+   measurement cycle started the uploads late and so kept them apart.
+4. **Internal:** the task priorities are in one table (`main/task_prio.h`)
+   instead of a number in each file.
+
+---
+
 ## V2.8.33 — A wrong firmware file is refused with a clear message, code clean-up
 
 For all boards. Three small fixes and one extra log line; the rest is

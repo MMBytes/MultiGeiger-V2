@@ -31,6 +31,7 @@
 #include "display.h"
 #include "display_serlcd.h"
 #include "hal.h"
+#include "task_prio.h"   // V2.8.34: TASK_PRIO_DISPLAY
 
 #include <stdint.h>
 
@@ -688,11 +689,11 @@ task_spawn:;
 
     // V2.3.29 / V2.4.9: Multi-page rotation task. 4 KB stack covers
     // snprintf into char[16] buffers + i2c_master_transmit ~200 B worst-
-    // case. Priority 5 sits below WiFi/lwIP (~14) and TX worker (~10) so
-    // display rendering never starves networking. V2.4.9 made the spawn
-    // a runtime decision (s_is_multipage) instead of compile-time guard.
+    // case. V2.4.9 made the spawn a runtime decision (s_is_multipage)
+    // instead of compile-time guard. V2.8.34: priority 5 -> TASK_PRIO_DISPLAY
+    // (2), the level of the other I2C users (main, SGP41); see task_prio.h.
     if (s_is_multipage) {
-        xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+        xTaskCreate(display_task, "display", 4096, NULL, TASK_PRIO_DISPLAY, NULL);
     }
     return true;
 }
@@ -1348,7 +1349,7 @@ bool display_setup(bool show_display, uint8_t brightness_pct, display_mode_t mod
     // renders via display_running() instead (~1 Hz from
     // display_live_tick() since V2.8.3), same split as the OLED branch.
     if (s_is_multipage) {
-        xTaskCreate(display_task, "display", 4096, NULL, 5, NULL);
+        xTaskCreate(display_task, "display", 4096, NULL, TASK_PRIO_DISPLAY, NULL);
     }
     ESP_LOGI(TAG, "display backend: ST7789 TFT (show=%d brightness=%d%% mode=%s)",
              show_display, brightness_pct, display_mode_str());

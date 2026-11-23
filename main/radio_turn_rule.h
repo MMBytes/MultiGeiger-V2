@@ -22,13 +22,15 @@
  *  marked busy, waits for a running exchange to end. A round therefore never
  *  waits more than one poll for an exchange that is itself waiting for the
  *  round (the exchange's brief publish-check-clear window) — no deadlock.
- *  A round with no upload target enabled doesn't wait at all.
+ *  A round with no upload target enabled doesn't wait at all (on a shared
+ *  core it still runs only after the exchange: task_prio.h, V2.8.34).
  *
  *  Why at all: on the XIAO + Wio bench node (2026-10-21) four LoRaWAN
  *  exchanges failed with RADIOLIB_ERR_TX_TIMEOUT (-5), each in the same
  *  second as a Madavi HTTPS upload started; none in the days before. Both
- *  workers run on CPU1 at the same priority; whether CPU contention or RF /
- *  power coupling is the cause is not proven, so the overlap itself goes.
+ *  workers ran on CPU1 at the same priority then (since V2.8.34 the LoRaWAN
+ *  worker is above it, task_prio.h); whether CPU contention or RF / power
+ *  coupling was the cause is not proven, so the overlap itself goes.
  *
  *  FTPS and a WiFi upload round never overlap anyway: FTPS runs on the main
  *  task only when tx_is_idle(), and no new round starts while it runs (the

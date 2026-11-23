@@ -58,6 +58,7 @@
 #include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
 #include "tube_pcnt.h"   // V2.5.16: PCNT pulse-width comb (V2.7.4: always on)
 #include "ota_guard.h"   // V2.8.20: OTA rollback — confirm the running image after probation
+#include "task_prio.h"   // V2.8.34: TASK_PRIO_MAIN
 #include "util.h"
 #include "version.h"
 
@@ -1502,6 +1503,11 @@ static void do_tx_cycle(void) {
 }
 
 void app_main(void) {
+    // V2.8.34: ESP-IDF starts app_main at ESP_TASK_MAIN_PRIO (1) and offers no
+    // Kconfig for it. Raise it above the web server / MQTT / uploads so a long
+    // TLS job (HTTPS GET /log) cannot stall the sensor reads; see task_prio.h.
+    vTaskPrioritySet(NULL, TASK_PRIO_MAIN);
+
     // Install vprintf hook first so the very first ESP_LOGx below (and
     // everything after — WiFi, HTTP, sensors, TX) lands in the /log buffer.
     applog_init();

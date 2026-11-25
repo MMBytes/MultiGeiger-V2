@@ -3,7 +3,11 @@
 #include "i2c_bus.h"
 #include "hal.h"
 
+// Only the rail/enable pins below drive a GPIO (Vext gate, I2C power gate, the
+// second bus's LDO enable or OLED Vext); keep this condition in step with them.
+#if HAL_HAS_VEXT_GATE || HAL_HAS_I2C_POWER_GATE || HAL_I2C2_KIND != HAL_I2C2_NONE
 #include "driver/gpio.h"
+#endif
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

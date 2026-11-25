@@ -22,7 +22,6 @@
 #include "config.h"         // CFG_*_MAX — by-value credential fields below
 #include "pm_sensor.h"      // pm_sample_t
 #include "noise_sensor.h"   // noise_sample_t
-#include "tx_rc.h"          // TX_RC_SKIPPED, TX_RC_NO_ANSWER (send results)
 
 // Circuit breaker applied to every upload target (per-target streak, see
 // tx_run()): 3 consecutive all-retry failures trip the breaker; the target is

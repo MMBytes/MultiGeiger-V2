@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include "driver/i2c_master.h"  // i2c_master_probe/transmit/receive
 #include "i2c_bus.h"
 #include "sensirion_crc.h"
 #include "sensirion_gas_index_algorithm.h"

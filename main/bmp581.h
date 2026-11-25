@@ -24,7 +24,7 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
-#include "driver/i2c_master.h"
+#include "driver/i2c_types.h"   // i2c_master_bus_handle_t (the driver API itself is in the .c)
 
 /** @brief Probe the bus for a BMP581 (chip ID 0x50) and apply the operating
  *         profile.

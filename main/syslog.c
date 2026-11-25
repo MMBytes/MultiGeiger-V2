@@ -62,8 +62,10 @@
 #include "fuel_gauge.h"        // fuel_gauge_chip_ready / fuel_gauge_present
 #include "tube.h"              // tube_is_enabled
 #include "applog.h"            // V2.8.17: applog_publish_mark / applog_stream_* — boot replay
+#if HAL_HAS_LORAWAN            // the banner line below is built only on LoRaWAN boards
 #include "lorawan.h"           // V2.8.21: lorawan_get_status / lorawan_region_name — LoRaWAN banner line
 #include "lorawan_boot_line.h" // V2.8.21: lw_boot_line
+#endif
 
 static const char *TAG = "syslog";
 

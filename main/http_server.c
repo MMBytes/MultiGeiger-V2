@@ -55,6 +55,7 @@
 #include "speaker.h"           // V2.7.5: silence the pulse tick in OTA teardown
 #include "history.h"            // V2.5.6: CPM history for the /status graph
 #include "transmission.h"
+#include "tx_rc.h"   // TX_RC_NO_ANSWER: "no answer" as the last result on the status page
 #include "log_ftp.h"
 #include "main_status.h"       // V2.4.1 (A4): consolidated status snapshot
 #include "mqtt.h"              // V2.4.4: MQTT connection state for /status row
@@ -65,10 +66,10 @@
 #include "lorawan.h"           // V2.6.23 (T8): lorawan_get_status()/_state_name()/_region_name()
                                // for /status; no-op stubs on the boards without LoRaWAN (see
                                // lorawan.h) so this include is unconditional like gnss.h/sgp41.h.
-#include "tls_cert.h"          // V2.8.0: PEM pointers + fingerprint for HTTPS
-#include "tls_logic.h"         // V2.8.0: https_redirect_location (Task 5)
 #include "freertos/task.h"     // V2.8.0: uxTaskGetStackHighWaterMark — httpd stack headroom on /
 #if HAL_HAS_HTTPS
+#include "tls_cert.h"          // V2.8.0: PEM pointers + fingerprint for HTTPS
+#include "tls_logic.h"         // V2.8.0: https_redirect_location (Task 5)
 #include "esp_https_server.h"  // V2.8.0: httpd_ssl_start — same httpd underneath, TLS on top
 #endif
 #include "config_form.h"       // V2.8.10 (C3b): /config POST parser + cross-field rules

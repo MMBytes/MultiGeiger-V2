@@ -23,8 +23,6 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-#include <string.h>
-#include <time.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -36,16 +34,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "lwip/ip4_addr.h"
 #include "mqtt_client.h"
 
 #include "als.h"
 #include "hal.h"              // V2.8.31: HAL_MQTT_RICH_STATE (an #if on an undefined macro is silently 0)
-#include "log_ftp.h"
+#if HAL_MQTT_RICH_STATE   // only the rich state topics use these (off on the PSRAM-less board)
+#include <string.h>
+#include <time.h>
 #include "history.h"
+#include "log_ftp.h"
+#include "transmission.h"
+#endif
 #include "mqtt_discovery.h"
 #include "sysinfo.h"
-#include "transmission.h"
 #include "veml7700.h"
 #include "fuel_gauge.h"        // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
 #include "task_prio.h"         // V2.8.34: TASK_PRIO_MQTT

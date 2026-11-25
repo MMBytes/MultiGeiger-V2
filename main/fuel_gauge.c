@@ -7,7 +7,9 @@
 #if HAL_HAS_FUEL_GAUGE
 
 #include "esp_log.h"
+#ifdef PIN_VBUS_DETECT   // only the USB-power sense input uses a GPIO
 #include "driver/gpio.h"
+#endif
 #include "i2c_bus.h"
 #include "telemetry.h"
 

@@ -29,8 +29,10 @@
 // need to know whether a display is fitted.
 
 #include "display.h"
-#include "display_serlcd.h"
 #include "hal.h"
+#if HAL_HAS_OLED   // the SerLCD probe lives in the OLED (I2C display) branch below
+#include "display_serlcd.h"
+#endif
 #include "task_prio.h"   // V2.8.34: TASK_PRIO_DISPLAY
 
 #include <stdint.h>
@@ -148,7 +150,9 @@ const uint8_t FONT8[95][8] = {
 #include <string.h>
 #include <stdio.h>
 
+#ifdef PIN_OLED_RESET   // only the reset pulse in try_oled_on_bus() drives a GPIO
 #include "driver/gpio.h"
+#endif
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"

@@ -9,6 +9,34 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.36 — Code clean-up: each source file includes the headers it uses
+
+For all boards. Internal clean-up only, no change in behaviour.
+
+1. **Internal: each file now includes the headers it actually uses, and
+   only those.** Checked with clangd's "unused include" analysis on all
+   eleven Xtensa boards (the ESP32-C5 builds but cannot be analysed this
+   way yet):
+   - The sensor and display headers (BME280, BME688, BMP390, BMP581, SHT45,
+     SPS30, SGP41, VEML7700, DNMS, GNSS, fuel gauge, SerLCD, and the
+     environment, particulate and noise front ends) include only the small
+     I²C types header (`driver/i2c_types.h`) for the bus handle they pass
+     around; the two files that call the I²C driver themselves include
+     `driver/i2c_master.h` directly.
+   - An include that is needed only on some boards now sits under the same
+     condition as the code that uses it (LoRaWAN, HTTPS, SD card, the
+     second I²C bus and power pins, the OLED reset pin, the antenna switch,
+     the battery USB-power input, the NeoPixel power pin, the speaker, and
+     the extra MQTT state topics). Nothing was removed that any board uses.
+   - The TFT display code includes the headers that declare what it calls
+     (`esp_lcd_panel_st7789.h`, `esp_lcd_panel_dev.h`,
+     `driver/spi_common.h`) instead of the bundle headers.
+   - Unused includes were removed (among them `nvs_flash.h` and `util.h`
+     in the settings code, `lwip/ip4_addr.h` in the MQTT client,
+     `mbedtls/ssl.h` in the periodic jobs, and `sdmmc_cmd.h` in the SD-card
+     code). The send result codes (`tx_rc.h`) are now included where they
+     are used instead of through `transmission.h`.
+
 ## V2.8.35 — openSenseMap uploads wait longer and are no longer stored twice, a data service that went down is tried again sooner, clearer LoRaWAN round lines
 
 For all boards. The LoRaWAN log lines only matter for LoRaWAN boards.

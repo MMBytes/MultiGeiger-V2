@@ -5,14 +5,14 @@
 #include <stdlib.h>
 #include "esp_log.h"
 #include "nvs.h"
-#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"   // vTaskDelay — pace the config dump (see config_log_summary)
 #include "freertos/task.h"
 
 #include "hal.h"   // HAL_HAS_I2C_PINOUT_SWITCH / _CARRIER_REV_SWITCH — gate their dump lines
+#if HAL_HAS_LORAWAN   // only the lorawan dump line uses it (that block is #if-gated too)
 #include "lorawan.h"   // V2.8.32: region name + has-sub-bands for the lorawan dump line
+#endif
 #include "tube_types.h"   // V2.6.1: tube_type_name() for the boot config dump
-#include "util.h"
 #include "tube_logic.h"   // guard_effective_us() — single-source guard on/off policy
 
 static const char *TAG = "config";

@@ -31,7 +31,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
-#include "driver/i2c_master.h"
+#include "driver/i2c_types.h"   // i2c_master_bus_handle_t (the driver API itself is in the .c)
 
 /** @brief Probe the bus for an SGP41, verify its serial number, and — if
  *         found — start the background ~1 Hz sampling task.

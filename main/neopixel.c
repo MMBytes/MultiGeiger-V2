@@ -5,7 +5,9 @@
 #if HAL_HAS_NEOPIXEL
 
 #include "driver/rmt_tx.h"
+#ifdef PIN_NEOPIXEL_POWER   // only the LED power-enable pin uses the GPIO API
 #include "driver/gpio.h"
+#endif
 #include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -13,7 +15,9 @@
 #include "freertos/task.h"
 
 #include "task_prio.h"   // V2.8.34: TASK_PRIO_PULSE
+#if !HAL_HAS_SPEAKER   // with a speaker, speaker.c owns the pulse callback (see neopixel_init)
 #include "tube.h"   // tube_set_pulse_callback
+#endif
 
 static const char *TAG = "neopixel";
 

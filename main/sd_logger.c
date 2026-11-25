@@ -2,25 +2,31 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <string.h>
-#include <time.h>
-#include <unistd.h>
-#include <stdlib.h>
-
-#include "esp_err.h"
-#include "esp_log.h"
-#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "hal.h"
+#include "sd_card.h"
+#include "util.h"
+
+// Used only by the logger itself; the status snapshot below compiles on every
+// board and needs none of these.
+#if HAL_HAS_SD_CARD
+#include <stdlib.h>   // qsort (column order)
+#include <string.h>
+#include <time.h>
+#include <unistd.h>   // fsync
+
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+
 #include "gnss.h"
 #include "neopixel.h"
 #include "ntp.h"
-#include "sd_card.h"
 #include "telemetry.h"
-#include "util.h"
+#endif
 
 // Status-snapshot state: sd_logger_get_status() compiles on every board
 // (http_server.c gates its only call site behind HAL_HAS_SD_CARD, but the

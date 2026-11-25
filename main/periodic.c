@@ -14,7 +14,6 @@
 #include "esp_log.h"
 
 #include "psa/crypto.h"        // mbedtls_psa_crypto_free / psa_crypto_init
-#include "mbedtls/ssl.h"       // pulls in supporting types for the PSA call
 
 #include "log_ftp.h"           // log_ftp_note_psa_refreshed (resets FTP-side OOM counter)
 #include "net_arp.h"           // net_arp_send_gratuitous

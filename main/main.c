@@ -15,7 +15,6 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
-#include "driver/gpio.h"
 
 #include "als.h"
 #include "veml7700.h"
@@ -24,6 +23,9 @@
 #include "applog.h"
 #include "coredump.h"
 #include "hal.h"
+#if HAL_HAS_ANTENNA_SWITCH   // only apply_antenna_routing() drives a GPIO
+#include "driver/gpio.h"
+#endif
 #include "env_sensor.h"
 #include "i2c_bus.h"            // V2.3.29: bus lifecycle (replaces env_sensor_get_i2c_bus)
 #include "pm_sensor.h"

@@ -30,7 +30,9 @@ extern "C" {
 #include "lorawan_codec.h"
 #include "lorawan_sched.h"   // V2.8.14: SF interval table, port-2 cadence, fixed DR
 #include "lorawan_rxobs.h"   // V2.8.21: RX-window observer + its log text
-#include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain for setOutputPowerOffset()
+#if HAL_HAS_LORA_FEM
+#include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain for setOutputPowerOffset() (FEM boards only)
+#endif
 #include "lorawan_mac.h"     // V2.8.23: MAC commands + answers in plain words
 #include "radio_turn_rule.h" // V2.8.15: no exchange while a WiFi upload runs
 #include "transmission.h"    // tx_is_idle()

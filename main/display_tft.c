@@ -12,9 +12,10 @@
 #include <string.h>
 #include <stdio.h>
 #include "driver/gpio.h"
-#include "driver/spi_master.h"
+#include "driver/spi_common.h"   // spi_bus_initialize / spi_bus_config_t (the panel IO does the SPI transfers)
 #include "esp_lcd_panel_io.h"     // esp_lcd_new_panel_io_spi / esp_lcd_panel_io_spi_config_t
-#include "esp_lcd_panel_vendor.h" // esp_lcd_new_panel_st7789 / esp_lcd_panel_dev_config_t
+#include "esp_lcd_panel_dev.h"    // esp_lcd_panel_dev_config_t
+#include "esp_lcd_panel_st7789.h" // esp_lcd_new_panel_st7789 (esp_lcd_panel_vendor.h only bundles this one)
 #include "esp_lcd_panel_ops.h"    // generic panel ops: reset/init/swap_xy/mirror/set_gap/disp_on_off/draw_bitmap
 #include "esp_heap_caps.h"
 #include "esp_log.h"

@@ -9,7 +9,6 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "esp_http_server.h"
-#include "sdmmc_cmd.h"
 #if HAL_SD_USE_SDMMC
 #include "driver/sdmmc_host.h"
 #else

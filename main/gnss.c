@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"   // vTaskDelay (NMEA auto-detect sniff)
+#include "driver/i2c_master.h"  // i2c_master_probe/transmit/receive, bus add/remove device
 
 static const char *TAG = "gnss";
 

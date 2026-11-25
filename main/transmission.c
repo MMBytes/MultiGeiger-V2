@@ -32,6 +32,7 @@
 #endif
 #include "task_prio.h"          // V2.8.34: TASK_PRIO_TX
 #include "osm_retry_rule.h"     // V2.8.35: OSM_TIMEOUT_MS, OSM_BUDGET_MS, osm_may_retry()
+#include "tx_rc.h"              // V2.8.35: TX_RC_SKIPPED / TX_RC_NO_ANSWER, tx_rc_word(), breaker rule
 #include "tube_types.h"         // tube_cps_to_usvph() (dose factor for the uploads)
 
 // V2.3.21: drive the OLED status-line slots for sensor.community, Madavi

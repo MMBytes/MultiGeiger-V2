@@ -35,7 +35,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
-#include "driver/i2c_master.h"
+#include "driver/i2c_types.h"   // i2c_master_bus_handle_t (the driver API itself is in the .c)
 #include "display.h"      // display_snapshot_t
 
 /** @brief Probe + initialise SerLCD on the given bus.

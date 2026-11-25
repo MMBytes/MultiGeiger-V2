@@ -26,8 +26,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT(_V3)
-
 // Fixed dead-time gate (µs): an edge becomes a count only if it follows the
 // last COUNTED pulse by more than this. Rejects contact/threshold noise and
 // double-counts on the count input, which is FALLING-edge triggered (see

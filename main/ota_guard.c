@@ -4,8 +4,6 @@
 
 #include "ota_guard.h"
 
-#include <stdlib.h>   // abort() — OTA_TEST_FAULT images only
-
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -24,6 +22,9 @@ static const char *TAG = "ota";
 #define OTA_TEST_FAULT 0
 #endif
 #define OTA_TEST_FAULT_AT_US (60 * 1000000LL)
+#if OTA_TEST_FAULT == 1
+#include <stdlib.h>   // abort() — only the crash test image calls it
+#endif
 
 // Written once by ota_guard_boot_report() (app_main, before any other task
 // can call in); afterwards s_needs only goes true -> false, under s_lock.

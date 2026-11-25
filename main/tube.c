@@ -1,7 +1,7 @@
 #include "tube.h"
 #include "tube_logic.h"
+#include "hal.h"   // PIN_HV_FET_OUTPUT, PIN_HV_CAP_FULL_INPUT, PIN_GMC_COUNT_INPUT(_V3)
 
-#include <string.h>
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 #include "esp_attr.h"

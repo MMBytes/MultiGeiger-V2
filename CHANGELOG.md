@@ -9,6 +9,88 @@ For build / flash / release workflow see `README.md` and the `_build.cmd` / `_me
 
 ---
 
+## V2.8.35 — openSenseMap uploads wait longer and are no longer stored twice, a data service that went down is tried again sooner, clearer LoRaWAN round lines
+
+For all boards. The LoRaWAN log lines only matter for LoRaWAN boards.
+
+1. **A data service that went down is tried again sooner.** After three
+   upload rounds in a row fail completely, the node pauses that service
+   (sensor.community, Madavi, openSenseMap, …) to save time and memory. The
+   pause is now 5 upload rounds instead of 20, about 12 minutes instead of
+   50 at the default interval of 150 seconds. In 30 days of logs from all
+   nodes the pause started 22 times, and the first round after it went
+   through in 19 of them: the service was usually back long before the
+   pause ended. If the service is still down, the node pauses again after
+   three more failed rounds, as before.
+2. **openSenseMap: an upload waits up to 25 seconds for an answer instead
+   of 15, and an upload without an answer is no longer sent again.** The
+   production openSenseMap server often answers slowly. Comparing 30 days
+   of one node's uploads with the values openSenseMap stored showed that
+   the server kept about 98 % of the uploads the node had given up on
+   waiting for: it had received them, only its answer came too late. Each
+   repeat therefore stored the same values a second (or third, or fourth)
+   time, and a round logged as "data not uploaded" was usually stored
+   several times. Now the node waits up to 25 seconds; if no answer comes
+   it does not send the data again and logs `openSenseMap: no answer within
+   25 s after the data was sent (attempt 1 of 4, 26 s used) - not sent
+   again: openSenseMap almost always stores such an upload anyway`,
+   followed by `openSenseMap: no answer, probably stored (rc=-4)`. Such a
+   round does not count toward pausing the service (see item 1). It still
+   counts as not confirmed in the upload figures (status page, display,
+   Home Assistant), because the node cannot know whether the data was
+   stored; the status page shows "no answer" as its last result.
+   A `502 Bad Gateway` or a failed connection still gets up to 4 attempts,
+   because then nothing was stored; a new attempt only starts if a full
+   25-second wait still fits into 90 seconds per upload. A round stopped
+   early says so: `openSenseMap: giving up after attempt 3 of 4 (rc=-1,
+   -1 = no connection) - 82 s of the 90 s time limit used, not enough left
+   for another try`. The closing line now gives the number of attempts and
+   the time: `openSenseMap: all retries exhausted (4 attempts in 26 s),
+   this cycle's data not uploaded`. A failed fourth attempt now reads
+   `(attempt 4/4 failed)` instead of `(retry 4/4)`, and the needless
+   2-second pause after it is gone. The other data services keep 15
+   seconds and 4 attempts.
+3. **A firmware update now waits until a running upload round has
+   finished, and no upload round can start during the update.** Before, the
+   node waited at most 60 seconds for a running round and then started the
+   update anyway, with the upload still using the WiFi and memory. It now
+   waits until the round has finished, at most 4 minutes, so a stuck upload
+   can never block the update that would fix it. A slow openSenseMap upload
+   normally takes at most 90 seconds, so the update can start a little later than
+   before; while waiting, the log says `OTA prep: still waiting for the
+   upload round to finish (30 s so far)` every 30 seconds, and the node's
+   web pages do not answer. The update page now says that the progress
+   bar can stop for up to 5 minutes and asks not to reload the page. Also, a round whose sensor readings began just
+   before the update started could still begin its uploads during the
+   update; such a round is now dropped (`upload round skipped - a firmware
+   update is running`). Upload tools must allow about 5 minutes before the
+   node starts reading the firmware file (4 minutes of waiting plus up to
+   1 minute to stop LoRaWAN).
+4. **LoRaWAN: the line after each upload round now says what really
+   happened.** It used to read `next LoRaWAN uplink at about 10:45:54 (in
+   4 min, SF7 schedule)` and came before the `uplink OK:` line of the uplink
+   that was just starting, which looked as if it were out of order. The
+   uplink line can only be written after the two receive windows, at least
+   about 6 seconds later (more while a WiFi upload is running, because the
+   radio waits for it). The line now reads `LoRaWAN transmission round started
+   (data handed to the radio) - next round at about 10:45:54 (in 4 min, SF7
+   schedule)`. When the interval changes between rounds (after boot, after
+   the join, or when the network changes the data rate) it reads `next
+   LoRaWAN round at about …`. The line that appears when the duty-cycle
+   limit holds back the next uplink still says `next LoRaWAN uplink at
+   about …`, because only there is the uplink time really known.
+5. **LoRaWAN: a node whose radio was stopped for a firmware update now says
+   so in every round.** For an update the node stops the LoRaWAN radio until
+   the next reboot. If the update fails, the node keeps running without
+   LoRaWAN, and the log said so only once. Now every round logs the warning
+   `LoRaWAN paused since an OTA update started — nothing is sent until the
+   next reboot` instead of the round line (or instead of `LoRaWAN still
+   joining …` if the node had not joined yet). The "round started" line is
+   not written when LoRaWAN was switched off on the settings page without a
+   reboot; the plain `next LoRaWAN round at about …` line appears instead.
+
+---
+
 ## V2.8.34 — Downloading the node log no longer holds up the measurements
 
 For all boards. One change in how the node shares its processor time

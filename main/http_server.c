@@ -50,6 +50,7 @@
 #include "sd_logger.h"         // V2.6.19: standalone-mode CSV logger status (/status card)
 #endif
 #include "tube.h"
+#include "tube_types.h"     // tube_type_name(), TUBE_TYPE_COUNT (was reached through transmission.h)
 #include "tube_pcnt.h"         // V2.5.16: release PCNT comb DRAM in OTA teardown
 #include "speaker.h"           // V2.7.5: silence the pulse tick in OTA teardown
 #include "history.h"            // V2.5.6: CPM history for the /status graph
@@ -1352,8 +1353,9 @@ static void format_uploads(char *out, size_t sz) {
             (s.last_rc == -1)                             ? "r" :
                                                             "o";
         char rc_buf[16];
-        if (s.attempted == 0) snprintf(rc_buf, sizeof(rc_buf), "—");
-        else                  snprintf(rc_buf, sizeof(rc_buf), "%d", s.last_rc);
+        if (s.attempted == 0)                  snprintf(rc_buf, sizeof(rc_buf), "—");
+        else if (s.last_rc == TX_RC_NO_ANSWER) snprintf(rc_buf, sizeof(rc_buf), "no answer");
+        else                                   snprintf(rc_buf, sizeof(rc_buf), "%d", s.last_rc);
 
         n = buf_append(out, sz, n,
             "<tr><td>%s</td>"
@@ -3188,6 +3190,15 @@ static esp_err_t update_get(httpd_req_t *req) {
         "</code></p>"
         "<p>Select a firmware .bin for " UPLOAD_PROMPT_BOARD ".</p>"
         UPLOAD_PROMPT_HW_NOTE
+        // V2.8.35: the handler first waits for a running upload round
+        // (OTA_TX_WAIT_MAX_S = 4 min) and the LoRaWAN stop (up to 60 s), so
+        // the progress bar stops for a while (2026-11-25 bench test, Chrome:
+        // jumps to ~12 % = what Windows buffers, stands still for the full
+        // 300 s wait, then completes; no browser timeout). A reload then
+        // would not stop the node's preparation.
+        "<p>Before the update starts, the node finishes a running upload round. "
+        "The progress bar can stop for up to 5 minutes meanwhile. Please do not "
+        "reload the page.</p>"
         "<input type=\"file\" id=\"f\" accept=\".bin\">"
         "<button id=\"go\" onclick=\"upload()\">Upload</button>"
         "<progress id=\"p\" value=\"0\" max=\"1\"></progress>"
@@ -3249,6 +3260,9 @@ fail:
 #define HTTPD_SEND_TIMEOUT_S      15
 // Receive, plain HTTP: V2.4.13 weak-WiFi OTA value (see http_server_start).
 #define HTTPD_RECV_TIMEOUT_S      30
+// V2.8.35: longest wait in update_post_inner() for the running upload round to
+// finish before the OTA starts; a safety net only (see there).
+#define OTA_TX_WAIT_MAX_S         240
 // Receive, TLS: shorter because the handshake runs on the single httpd task
 // (V2.8.0, see http_server_start); the OTA retry count makes up the budget.
 #define HTTPS_RECV_TIMEOUT_S      10
@@ -3477,16 +3491,38 @@ static esp_err_t update_post_inner(httpd_req_t *req) {
     // state with WiFi / MQTT / FTP still up.
     diag_log_heap("OTA prep");
 
-    // V2.4.32: wait up to 60s (was 10s) for the TX worker to go idle. A
-    // sensor.community / openSenseMap retry storm is up to 4 × ~15s ≈ 60s, so a
-    // 10s budget guaranteed we'd "proceed anyway" mid-storm and let the OTA
-    // write contend with an in-flight TLS upload. 60s covers the worst-case
-    // retry run so the OTA almost always starts on a quiet radio.
-    ESP_LOGI(TAG, "OTA prep: waiting for TX worker idle (up to 60s)");
-    int spins = 0;
-    while (!tx_is_idle() && spins++ < 600) vTaskDelay(pdMS_TO_TICKS(100));
-    if (spins >= 600) {
-        ESP_LOGW(TAG, "OTA prep: TX still busy after 60s — proceeding anyway");
+    // Wait for the upload round in progress to finish, so the OTA write does
+    // not share WiFi and TLS memory with it (V2.4.32: 60 s, was 10 s;
+    // V2.8.35: up to OTA_TX_WAIT_MAX_S = 4 min, since openSenseMap alone
+    // normally takes up to ~90 s, see osm_retry_rule.h).
+    // No new round can start meanwhile: main_ota_begin() above makes the main
+    // loop skip do_tx_cycle(), and a round queued just before that is dropped
+    // by the TX worker (tx_task(): it marks itself busy, then reads the flag;
+    // we set the flag, then read tx_is_idle() — seq-cst on both sides).
+    // The 4 min are a safety net: a stuck worker can never block the OTA
+    // that fixes it. Only many unreachable services in one round take longer
+    // (e.g. a WAN outage). With up to 60 s for the LoRaWAN stop below, an
+    // upload client needs ~5 min before the first byte is read: our scripts
+    // allow 600 s (curl -m) / 420 s per socket operation. The web pages do
+    // not answer while this handler waits.
+    ESP_LOGI(TAG, "OTA prep: waiting for the upload round to finish (up to %d min)",
+             OTA_TX_WAIT_MAX_S / 60);
+    const int64_t t_wait_us = esp_timer_get_time();
+    int64_t next_note_s = 30;
+    while (!tx_is_idle()) {
+        const int64_t waited_s = (esp_timer_get_time() - t_wait_us) / 1000000;
+        if (waited_s >= OTA_TX_WAIT_MAX_S) {
+            ESP_LOGW(TAG, "OTA prep: upload round still running after %d s - starting the update "
+                     "anyway (a round normally ends well within this time; only many unreachable services take longer)",
+                     OTA_TX_WAIT_MAX_S);
+            break;
+        }
+        if (waited_s >= next_note_s) {
+            ESP_LOGI(TAG, "OTA prep: still waiting for the upload round to finish (%d s so far)",
+                     (int)waited_s);
+            next_note_s += 30;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
     // V2.8.12: stop the LoRaWAN worker too and let a running exchange finish.
     // An RX-window DIO1 interrupt during the flash writes below (cache off,

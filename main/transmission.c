@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
-#include "sdkconfig.h"          // V2.8.11: CONFIG_FREERTOS_UNICORE (tx_setup)
+#include "sdkconfig.h"          // V2.8.11: CONFIG_FREERTOS_NUMBER_OF_CORES (tx_setup)
 #include "diag.h"               // V2.4.32: diag_log_heap (per-cycle net-RAM split)
 #include "syslog.h"             // V2.5.29: syslog_get_stats (per-cycle UDP drop report)
 #include "fuel_gauge.h"         // V2.6.6: MAX17048 battery fuel gauge (FeatherS3-D)
@@ -16,18 +16,23 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_system.h"
-#include "esp_tls.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "util.h"               // V2.5.20: url_encode_query_value (Radmon creds)
-#include "esp_timer.h"          // V2.8.15: bounded LoRaWAN wait
-#include "lorawan.h"            // V2.8.15: lorawan_on_air() (includes hal.h)
+#include "esp_timer.h"          // V2.8.15: bounded LoRaWAN wait; V2.8.35: OSM time budget
+#include "hal.h"                // HAL_HAS_LORAWAN
+// V2.8.35: only where wait_for_lorawan_quiet() uses them; on boards without
+// the radio they were included but unused.
+#if HAL_HAS_LORAWAN
+#include "lorawan.h"            // V2.8.15: lorawan_on_air()
 #include "radio_turn_rule.h"    // V2.8.15: no upload round while a LoRaWAN exchange is on air
+#endif
 #include "task_prio.h"          // V2.8.34: TASK_PRIO_TX
+#include "osm_retry_rule.h"     // V2.8.35: OSM_TIMEOUT_MS, OSM_BUDGET_MS, osm_may_retry()
+#include "tube_types.h"         // tube_cps_to_usvph() (dose factor for the uploads)
 
 // V2.3.21: drive the OLED status-line slots for sensor.community, Madavi
 // and Radmon (V1 parity — see reference V1 transmission.cpp). OSM and
@@ -63,7 +68,8 @@ const char *tx_target_name(tx_target_id_t id) {
 
 // V2.6.1: the tube characteristics table + tube_cps_to_usvph() / tube_type_name()
 // moved to the dependency-light tube_types.{c,h} leaf module (shared with config.c
-// and http_server.c). Reached here via transmission.h → tube_types.h.
+// and http_server.c). Included directly at the top (V2.8.35; was reached through
+// transmission.h, which itself uses nothing from it).
 
 // V2.4.1 (C9): static URL table for the three "fixed-URL" upload targets.
 // Pre-V2.4.1 these literals lived inline in main.c::build_tx_context, which
@@ -148,6 +154,7 @@ static QueueHandle_t s_tx_queue;
 
 #define HTTP_TIMEOUT_MS     15000
 #define HTTP_MAX_RETRIES    4
+// openSenseMap's own timeout, budget and retry rule: osm_retry_rule.h (V2.8.35).
 #define RESP_BUF_SIZE       512
 
 // Small user-event handler that captures response body for Radmon "OK" check.
@@ -250,7 +257,8 @@ static bool tx_round_has_targets(const tx_context_t *c);
 // exchange is on air; the bound only matters if the two ever stop sharing a
 // core. A round with no upload target is held up the same way (s_tx_busy
 // stays set until the exchange ends; harmless, a few seconds).
-// Boards without the radio compile this to nothing.
+// Boards without the radio compile this to nothing (with lorawan.h's stub
+// the loop condition would be constant, which cppcheck rejects).
 #define TX_LORA_WAIT_MAX_S 150
 static void wait_for_lorawan_quiet(void) {
 #if HAL_HAS_LORAWAN
@@ -287,6 +295,19 @@ static void tx_task(void *arg) {
         if (xQueuePeek(s_tx_queue, &ctx, portMAX_DELAY) == pdTRUE) {
             __atomic_store_n(&s_tx_busy, true, __ATOMIC_SEQ_CST);
             (void)xQueueReceive(s_tx_queue, &ctx, 0);
+            // V2.8.35: the main loop checks for an OTA only before
+            // do_tx_cycle(), which reads the sensors for seconds before it
+            // queues the round, so a round can still arrive after the OTA
+            // began. Same handshake as the LoRaWAN rule (radio_turn_rule.h):
+            // busy is published above (seq-cst), THEN the OTA flag is read;
+            // update_post_inner() sets the flag, THEN reads tx_is_idle().
+            // So either the OTA waits for this round, or the round sees the
+            // OTA and is dropped here — never both running.
+            if (main_ota_in_progress()) {
+                __atomic_store_n(&s_tx_busy, false, __ATOMIC_SEQ_CST);
+                ESP_LOGW(TAG, "upload round skipped - a firmware update is running");
+                continue;
+            }
             // V2.8.15: a round with no upload target enabled (e.g. a
             // LoRaWAN node that keeps WiFi only for MQTT / web / OTA) runs
             // in milliseconds and sends nothing — it doesn't wait.
@@ -307,9 +328,12 @@ void tx_setup(void) {
     // core-isolation design this pinning exists for has no bearing on a
     // single-core chip, so this board just gets a plain, unpinned task.
     // V2.8.11 (review 2.9): keyed on what the code needs — one core — rather
-    // than on the board. IDF sets CONFIG_FREERTOS_UNICORE on single-core chips;
-    // today that is the ESP32-C5 build only.
-#if CONFIG_FREERTOS_UNICORE
+    // than on the board. Today the ESP32-C5 build is the only single-core one.
+    // V2.8.35: tests CONFIG_FREERTOS_NUMBER_OF_CORES (defined on every chip)
+    // instead of CONFIG_FREERTOS_UNICORE (defined only on single-core ones):
+    // an undefined macro in #if counts as 0 silently, which hides a typo and
+    // makes tools think sdkconfig.h is unused on dual-core boards.
+#if CONFIG_FREERTOS_NUMBER_OF_CORES == 1
     BaseType_t ok = xTaskCreate(
         tx_task, "tx", TX_TASK_STACK_BYTES, NULL, TX_TASK_PRIO, NULL);
     configASSERT(ok == pdPASS);
@@ -803,7 +827,7 @@ static int send_sensorc(const tx_context_t *c) {
 static int send_radmon(const tx_context_t *c) {
     if (!c->radmon_user[0] || !c->radmon_password[0]) {
         ESP_LOGW(TAG, "Radmon: credentials empty, skipping.");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     const char *base = c->radmon.use_https ? c->radmon.url_https : c->radmon.url_http;
     // V2.5.20 (review R2): percent-encode the credentials — raw interpolation
@@ -848,7 +872,7 @@ static int send_radmon(const tx_context_t *c) {
 static int send_gmc(const tx_context_t *c) {
     if (!c->gmc_account_id[0] || !c->gmc_geiger_id[0]) {
         ESP_LOGW(TAG, "GMC: account/counter ID empty, skipping.");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     float usv = (c->cpm / 60.0f) * tube_cps_to_usvph(c->tube_type);   // µSv/h
     // V2.8.5: percent-encode the two IDs, as Radmon's credentials have been
@@ -895,7 +919,7 @@ static int send_gmc(const tx_context_t *c) {
 static int send_thingspeak(const tx_context_t *c) {
     if (!c->thingspeak_api_key[0]) {
         ESP_LOGW(TAG, "ThingSpeak: API key empty, skipping.");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     const char *base = c->thingspeak.use_https ? c->thingspeak.url_https
                                                : c->thingspeak.url_http;
@@ -954,11 +978,11 @@ static int send_thingspeak(const tx_context_t *c) {
 static int send_thingspeak_pm(const tx_context_t *c) {
     if (!c->thingspeak_pm_api_key[0]) {
         ESP_LOGW(TAG, "ThingSpeak PM: API key empty, skipping.");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     if (!c->pm_valid) {
         ESP_LOGW(TAG, "ThingSpeak PM: no PM reading, skipping.");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     const char *base = c->thingspeak_pm.use_https
                        ? c->thingspeak_pm.url_https : c->thingspeak_pm.url_http;
@@ -1159,7 +1183,7 @@ static int send_osm_to(const tx_context_t *c, const char *label, const char *hos
                        const char *box_id, const char *token, bool use_insecure) {
     if (box_id[0] == 0) {   // array field — never NULL (V2.5.20 R8)
         ESP_LOGW(TAG, "%s[%s]: box_id empty, skipping", label, host);
-        return -3;
+        return TX_RC_SKIPPED;
     }
     char url[160];
     snprintf(url, sizeof(url),
@@ -1195,13 +1219,20 @@ static int send_osm_to(const tx_context_t *c, const char *label, const char *hos
     char authz[80];
     if (have_token) snprintf(authz, sizeof(authz), "%s", token);
 
+    // V2.8.35: longer timeout per attempt, attempts bounded by a time budget
+    // (see osm_retry_rule.h). esp_http_client applies timeout_ms to the connect,
+    // the TLS handshake and each wait for data, so it is a silence limit,
+    // not a cap on the whole request.
+    const int64_t t0 = esp_timer_get_time();
+    int attempts = 0;
     for (int i = 0; i < HTTP_MAX_RETRIES; i++) {
         if (!wifi_up()) return -2;
+        attempts = i + 1;
         // Inline init+perform+cleanup so we can attach the optional auth
         // header. Mirrors do_request() but with one extra set_header call.
         esp_http_client_config_t cfg = {
             .url = url,
-            .timeout_ms = HTTP_TIMEOUT_MS,
+            .timeout_ms = OSM_TIMEOUT_MS,
             .method = HTTP_METHOD_POST,
             .event_handler = http_event_cb,
             .buffer_size = 1024,
@@ -1228,14 +1259,44 @@ static int send_osm_to(const tx_context_t *c, const char *label, const char *hos
         esp_http_client_cleanup(client);
 
         if (rc == 201 || rc == 200) return rc;
+        // V2.8.35: request handed to the network, no answer within OSM_TIMEOUT_MS. In blocking
+        // mode esp_http_client returns EAGAIN only while waiting for the
+        // response (connect / TLS / send failures end as other errors), and
+        // openSenseMap stored ~98 % of such attempts anyway (TX_RC_NO_ANSWER):
+        // a retry would store the data twice and add load to a busy server.
+        if (err == ESP_ERR_HTTP_EAGAIN) {
+            ESP_LOGW(TAG, "%s: no answer within %d s after the data was sent (attempt %d of %d, %d s used) "
+                     "- not sent again: openSenseMap almost always stores such an upload anyway",
+                     label, OSM_TIMEOUT_MS / 1000, i + 1, HTTP_MAX_RETRIES,
+                     (int)((esp_timer_get_time() - t0) / 1000000));
+            return TX_RC_NO_ANSWER;
+        }
         if (rc > 0 && rc != 408 && rc < 500) {
             ESP_LOGW(TAG, "%s rc=%d (4xx) — not retrying", label, rc);
             return rc;
         }
+        // Last attempt: no pause, straight to the summary line below.
+        if (i + 1 == HTTP_MAX_RETRIES) {
+            ESP_LOGW(TAG, "%s rc=%d (attempt %d/%d failed)", label, rc, i + 1, HTTP_MAX_RETRIES);
+            break;
+        }
+        // Another attempt only if the 2 s pause plus a full timeout still fit
+        // in the budget; otherwise stop now rather than overrun it.
+        const int64_t used_ms = (esp_timer_get_time() - t0) / 1000;
+        if (!osm_may_retry(used_ms)) {
+            // The rc legend only where it applies (rc < 0); an HTTP code speaks for itself.
+            ESP_LOGW(TAG, "%s: giving up after attempt %d of %d (rc=%d%s) "
+                     "- %d s of the %d s time limit used, not enough left for another try",
+                     label, i + 1, HTTP_MAX_RETRIES, rc, rc < 0 ? ", -1 = no connection" : "",
+                     (int)(used_ms / 1000), OSM_BUDGET_MS / 1000);
+            break;
+        }
         ESP_LOGW(TAG, "%s rc=%d (retry %d/%d)", label, rc, i + 1, HTTP_MAX_RETRIES);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(OSM_RETRY_PAUSE_MS));
     }
-    ESP_LOGW(TAG, "%s: all retries exhausted", label);
+    // Wording kept ("all retries exhausted") so log searches still find it.
+    ESP_LOGW(TAG, "%s: all retries exhausted (%d attempts in %d s), this cycle's data not uploaded",
+             label, attempts, (int)((esp_timer_get_time() - t0) / 1000000));
     return -1;
 }
 
@@ -1262,7 +1323,7 @@ static int send_osm_staging(const tx_context_t *c) {
 static int send_aqi(const tx_context_t *c) {
     if (c->aqi_token[0] == 0) {    // array field — never NULL (V2.5.20 R8)
         ESP_LOGW(TAG, "aqi.eco: token empty, skipping");
-        return -3;
+        return TX_RC_SKIPPED;
     }
     char url[160];
     snprintf(url, sizeof(url), "https://api.aqi.eco/update/%s", c->aqi_token);
@@ -1298,8 +1359,9 @@ void tx_transmit(const tx_context_t *c) {
     // the remaining const char* fields (sw_version, chip_id) are static
     // literals, so the queue copy is fully self-contained.
     // Queue depth = 1, non-blocking: if the worker is still busy with the
-    // previous cycle, drop the new one (150 s TX interval vs. <15 s worker time
-    // makes overlap unlikely, but we don't want main to block on TLS).
+    // previous cycle, drop the new one — main must not block on TLS. (150 s
+    // TX interval vs. a typical round of 10-25 s makes overlap unlikely; only
+    // several slow targets in one round can pass 150 s.)
     if (xQueueSend(s_tx_queue, c, 0) != pdTRUE) {
         ESP_LOGW(TAG, "TX queue full — dropping this cycle");
     }
@@ -1345,10 +1407,12 @@ static const tx_dispatch_t TX_TABLE[] = {
       "aqi.eco: skipping (no payload)" },
     // V2.5.x: openSenseMap targets deliberately LAST. The dispatch loop runs
     // each send() synchronously, so a slow/hung target blocks every row below
-    // it. OSM's ingress has been the worst offender for connect-timeouts
-    // (ESP_ERR_HTTP_EAGAIN) and 502s — at ~16-18 s/attempt × 4 retries that is
-    // ~70 s a cycle. Running OSM after the reliable targets means their data is
-    // already away before OSM is allowed to spend the time budget. Staging
+    // it. OSM's ingress has been the worst offender for response timeouts
+    // and 502s — normally at most ~90 s per OSM target and cycle, ~180 s
+    // with staging enabled too (V2.8.35: a 90 s time budget each, see
+    // osm_retry_rule.h; was 4 x ~17 s). Running OSM after the
+    // reliable targets means their data is already away before OSM is
+    // allowed to spend the time budget. Staging
     // (normally disabled) sits above prod so prod OSM is the very last row.
     { TX_TARGET_OSM_STAGING,   offsetof(tx_context_t, osm_staging),   send_osm_staging,   201, 200, GATE_ANY_PAYLOAD, -1,
       "openSenseMap STAGING: skipping (no payload)" },
@@ -1416,12 +1480,13 @@ static void tx_dispatch_one(const tx_context_t *c, const tx_dispatch_t *e,
     int rc = e->send(c);
     bool ok = (rc == e->ok1) || (e->ok2 && rc == e->ok2);
     record_outcome(e->id, rc, ok);
-    ESP_LOGI(TAG, "%s: %s (rc=%d)", name, ok ? "ok" : "error", rc);
+    ESP_LOGI(TAG, "%s: %s (rc=%d)", name, tx_rc_word(rc, ok), rc);
     if (slot >= 0) display_set_status(slot, ok ? DSP_SRV_IDLE : DSP_SRV_ERROR);
 
     if (ok) {
         *fail_streak = 0;
-    } else if (rc == -1) {                   // only full retry-exhaustion trips it
+    } else if (tx_rc_counts_to_breaker(rc, ok)) {   // only full retry-exhaustion (-1)
+                                                    // trips it (not TX_RC_NO_ANSWER, V2.8.35)
         (*fail_streak)++;
         if (*fail_streak >= TX_CB_FAIL_THRESHOLD) {
             portENTER_CRITICAL(&s_stats_mux);

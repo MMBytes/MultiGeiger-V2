@@ -55,6 +55,7 @@
 #include "tls_cert.h"          // V2.8.0: per-device HTTPS credential (PSRAM boards)
 #include "transmission.h"
 #include "tube.h"
+#include "tube_types.h"     // tube_cps_to_usvph() (was reached through transmission.h)
 #include "tube_logic.h"   // V2.6.31: pcnt_blank_wide (width-aware blank subtract)
 #include "tube_pcnt.h"   // V2.5.16: PCNT pulse-width comb (V2.7.4: always on)
 #include "ota_guard.h"   // V2.8.20: OTA rollback — confirm the running image after probation
@@ -116,18 +117,22 @@ bool main_services_suspended(void) {
 // Set on entry to update_post, cleared on every return path. Read by the
 // main loop's TX-cycle scheduler to skip do_tx_cycle while an OTA upload
 // is consuming the WiFi link.
-static volatile bool g_ota_in_progress = false;
+// V2.8.35: seq-cst atomics (was plain volatile). The TX worker also reads it,
+// right after publishing its busy flag, while update_post_inner() sets it and
+// then reads tx_is_idle(): that store->load handshake across two cores needs
+// sequential consistency, which volatile does not give (see tx_task()).
+static bool g_ota_in_progress = false;
 
 void main_ota_begin(void) {
-    g_ota_in_progress = true;
+    __atomic_store_n(&g_ota_in_progress, true, __ATOMIC_SEQ_CST);
 }
 
 void main_ota_end(void) {
-    g_ota_in_progress = false;
+    __atomic_store_n(&g_ota_in_progress, false, __ATOMIC_SEQ_CST);
 }
 
 bool main_ota_in_progress(void) {
-    return g_ota_in_progress;
+    return __atomic_load_n(&g_ota_in_progress, __ATOMIC_SEQ_CST);
 }
 
 // --- Soak diagnostics (carried over) ---
@@ -767,7 +772,7 @@ static void display_live_tick(uint32_t now_ms, bool use_filtered) {
     s_last_draw_ms = now_ms;
 }
 
-/** @brief Log when the next LoRaWAN uplink comes (V2.8.21, user request), from
+/** @brief Log when the next LoRaWAN round comes (V2.8.21, user request), from
  *         the main loop, which owns the schedule. Only while the LoRaWAN
  *         schedule drives the upload rounds (lorawan_cycle_interval_ms() != 0);
  *         WiFi-only boards log nothing. @p in_ticks = ticks until the next round.
@@ -776,12 +781,23 @@ static void display_live_tick(uint32_t now_ms, bool use_filtered) {
  *         only the after-round call logs, and says the queued data goes out
  *         after the join; the interval-change call stays silent then (at boot
  *         nothing is queued yet, and a quick join sends at the first round).
+ *         V2.8.35: once an OTA suspended the worker (joined or not), the
+ *         after-round call says LoRaWAN is paused until the next reboot.
+ *
+ *  V2.8.35 (user): the after-round line starts with "LoRaWAN transmission
+ *  round started (data handed to the radio)" when the snapshot was really
+ *  handed over (see `handed` below), and says "next round", not
+ *  "next uplink". This task only queues the snapshot; the worker's
+ *  "uplink OK:" line follows after the RX windows (at least ~6 s later,
+ *  more while a WiFi upload round holds the radio turn), and only the
+ *  worker knows when the next uplink really goes out.
  *
  *  Schedule only: this runs when the round is QUEUED, before its exchanges,
- *  so the duty-cycle wait they leave is not known yet. The worker logs the
- *  same line with the later time after the round's last exchange if the
- *  limiter holds the next uplink past this round (lorawan.cpp,
- *  log_duty_hold()); lorawan_note_next_round() tells it when the round is. */
+ *  so the duty-cycle wait they leave is not known yet. The worker logs
+ *  "next LoRaWAN uplink at about …" with the later time after the round's
+ *  last exchange if the limiter holds the next uplink past this round
+ *  (lorawan.cpp, log_duty_hold()); lorawan_note_next_round() tells it when
+ *  the round is. */
 static void log_next_uplink(TickType_t in_ticks, bool after_round) {
 #if HAL_HAS_LORAWAN
     if (lorawan_cycle_interval_ms() == 0) return;
@@ -789,6 +805,18 @@ static void log_next_uplink(TickType_t in_ticks, bool after_round) {
     lorawan_get_status(&st);
     const uint32_t in_ms = (uint32_t)pdTICKS_TO_MS(in_ticks);
     lorawan_note_next_round(in_ms);
+    // V2.8.35: a worker suspended for an OTA (lorawan_suspend(), never undone
+    // until reboot — also after a FAILED OTA) stays parked, joined or not: it
+    // neither joins nor sends, so neither "round started" nor "the first
+    // uplink follows the join" would be true. Say what really happens instead.
+    // The worker logs "suspended for OTA" once when it parks (at its next
+    // exchange attempt); this repeats it per round so the log of a node left
+    // in that state still explains why no LoRaWAN data goes out.
+    if (after_round && lorawan_is_suspended()) {
+        // WARN (user, V2.8.35): LoRaWAN stays off until a reboot — someone has to act.
+        ESP_LOGW(TAG, "LoRaWAN paused since an OTA update started — nothing is sent until the next reboot");
+        return;
+    }
     // Still joining (the schedule already follows the join data rate, on
     // every band: lorawan_setup() seeds it from the join DR, fixed plans like
     // AU915 included): no uplink goes out at the round — the worker sends the
@@ -808,8 +836,17 @@ static void log_next_uplink(TickType_t in_ticks, bool after_round) {
         localtime_r(&at, &lt);
         hh = lt.tm_hour; mm = lt.tm_min; ss = lt.tm_sec;
     }
-    char line[128];
-    lw_next_uplink_line(line, sizeof(line), in_s, hh, mm, ss, st.cycle_sf, 0);   // 0: no duty-cycle part
+    // "round started (data handed to the radio)" only when do_tx_cycle()
+    // really handed a snapshot over: it calls lorawan_transmit() only while
+    // lorawan_enabled is set (read live — a plain Save can untick it without
+    // the reboot that stops the worker); the suspended case returned above.
+    // Otherwise the plain "next LoRaWAN round" text. Not covered: a round with
+    // nothing to send (no tube, no environment reading) — only the worker
+    // decides that, and it logs its own "nothing to send" warning.
+    const bool handed = after_round && g_cfg.lorawan_enabled;
+    char line[160];   // worst case ~125 chars: round-start lead + clock-not-set tail
+    lw_next_uplink_line(line, sizeof(line), in_s, hh, mm, ss, st.cycle_sf, 0,   // 0: no duty-cycle part
+                        handed);                                              // round-start lead only if handed over
     ESP_LOGI(TAG, "%s", line);
 #else
     (void)in_ticks;

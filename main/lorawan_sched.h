@@ -104,13 +104,26 @@ static inline bool lw_sched_frame_is_ours(bool joined, uint32_t own_addr, const 
     return addr == own_addr;
 }
 
-/** @brief The "next LoRaWAN uplink" line (V2.8.21, user request: the node log
- *         says WHEN the next uplink comes, not only the interval). main.c logs
- *         it after every upload round with @p duty_s 0 (schedule only); the
- *         LoRaWAN worker logs it again after the round's last exchange when
- *         the duty-cycle limiter holds the next uplink past that round
- *         (lorawan.cpp, log_duty_hold()). "about": the uplink can still wait a
- *         few seconds for a WiFi transfer.
+/** @brief The "next LoRaWAN round / uplink" line (V2.8.21, user request: the
+ *         node log says WHEN the next round comes, not only the interval).
+ *         Three callers, three texts (V2.8.35, user: each line claims only
+ *         what its task knows):
+ *         - main.c right after a round queued its snapshot (@p round_start):
+ *           "LoRaWAN transmission round started (data handed to the radio) -
+ *           next round at about …". The main task only hands the data to the
+ *           worker; the worker's "uplink OK:" line follows at least ~6 s later,
+ *           after the RX windows (later still while a WiFi upload round holds
+ *           the radio turn), so without the "started" part the log read as if
+ *           the next-round line came before the uplink it announces.
+ *         - main.c when the interval changes between rounds (boot, join, ADR):
+ *           "next LoRaWAN round at about …".
+ *         - the LoRaWAN worker after a round's last exchange when RadioLib's
+ *           duty-cycle limiter holds the next UPLINK past the next round
+ *           (lorawan.cpp, log_duty_hold(), @p duty_s > @p in_s):
+ *           "next LoRaWAN uplink at about …". Only the worker knows the uplink
+ *           time; main.c only knows the round time.
+ *         "about": the round follows the main-loop tick; the uplink itself can
+ *         additionally wait for a running WiFi transfer (radio turn rule).
  *  @param in_s  seconds until the next round (whole minutes from 60 s on, rounded)
  *  @param hh    local hour of that moment, or < 0 if the clock is not set yet
  *               (a LoRaWAN-only node may still read 1970 — no time is shown then)
@@ -118,9 +131,13 @@ static inline bool lw_sched_frame_is_ours(bool joined, uint32_t own_addr, const 
  *  @param duty_s seconds until RadioLib's duty-cycle limiter allows the next uplink
  *               (0 = no wait). If it outlasts @p in_s, the uplink comes then, not at
  *               the round: the line says so, and hh/mm/ss must be THAT moment.
- *  @return the snprintf() length. */
+ *  @param round_start true = main.c's call right after a round was queued (adds
+ *               the "round started" lead). Ignored for the duty-cycle text.
+ *  @return the snprintf() length. main.c's worst case ~125 chars (round-start
+ *          lead + clock-not-set tail; 160-byte buffer), the worker's duty text
+ *          ~115 chars (128-byte buffer). */
 static inline int lw_next_uplink_line(char *out, size_t n, uint32_t in_s, int hh, int mm, int ss, uint8_t sf,
-                                      uint32_t duty_s) {
+                                      uint32_t duty_s, bool round_start) {
     if (out == NULL || n == 0) return 0;
     const bool duty = duty_s > in_s;
     const uint32_t eff_s = duty ? duty_s : in_s;
@@ -134,14 +151,17 @@ static inline int lw_next_uplink_line(char *out, size_t n, uint32_t in_s, int hh
     if (sf) snprintf(sched, sizeof(sched), "SF%u schedule", (unsigned)sf);
     char why[64] = "";   // "duty-cycle wait; upload round in " (33) + round (<= 15) + ", "
     if (duty) snprintf(why, sizeof(why), "duty-cycle wait; upload round in %s%s", round, sf ? ", " : "");
+    // Subject: the worker's duty-cycle line names the UPLINK (it knows when
+    // that goes out); main.c's lines name the ROUND (all it knows).
+    const char *subj = duty          ? "next LoRaWAN uplink"
+                       : round_start ? "LoRaWAN transmission round started (data handed to the radio) - next round"
+                                     : "next LoRaWAN round";
     if (hh < 0) {
-        return snprintf(out, n, "next LoRaWAN uplink in about %s (%s%s%sclock not set yet)", in, why, sched,
+        return snprintf(out, n, "%s in about %s (%s%s%sclock not set yet)", subj, in, why, sched,
                         (sf || duty) ? "; " : "");
     }
     if (duty) {
-        return snprintf(out, n, "next LoRaWAN uplink at about %02d:%02d:%02d (in %s: %s%s)", hh, mm, ss, in, why,
-                        sched);
+        return snprintf(out, n, "%s at about %02d:%02d:%02d (in %s: %s%s)", subj, hh, mm, ss, in, why, sched);
     }
-    return snprintf(out, n, "next LoRaWAN uplink at about %02d:%02d:%02d (in %s%s%s)", hh, mm, ss, in,
-                    sf ? ", " : "", sched);
+    return snprintf(out, n, "%s at about %02d:%02d:%02d (in %s%s%s)", subj, hh, mm, ss, in, sf ? ", " : "", sched);
 }

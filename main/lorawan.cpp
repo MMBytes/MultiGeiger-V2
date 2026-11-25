@@ -1690,11 +1690,12 @@ static int16_t send_app_frame(GeigerNode &node, const uint8_t *data, size_t len,
 
 // --- Duty-cycle hold note (V2.8.21) -------------------------------------------
 //
-// main.c logs "next LoRaWAN uplink" when it QUEUES a round — before that
-// round's exchanges run — so its line can only show the schedule. The
-// duty-cycle wait those exchanges leave behind is known here, after the
-// round's last one: if it holds the next uplink past the next round, the same
-// line follows with that later time and the reason.
+// main.c logs "LoRaWAN transmission round started … - next round at about …"
+// when it QUEUES a round — before that round's exchanges run — so its line can
+// only show the schedule (the round time). The duty-cycle wait those exchanges
+// leave behind is known here, after the round's last one: if it holds the next
+// uplink past the next round, "next LoRaWAN uplink at about …" follows with
+// that later time and the reason.
 
 // esp_timer ms at which the next round starts (lorawan_note_next_round());
 // 0 = not known yet. Under s_status_mux (64-bit: no single atomic store).
@@ -1732,7 +1733,7 @@ static void log_duty_hold(GeigerNode &node) {
     }
     char line[128];   // lw_next_uplink_line()'s worst case is ~115 chars
     lw_next_uplink_line(line, sizeof(line), in_s, hh, mm, ss, __atomic_load_n(&s_cycle_sf, __ATOMIC_RELAXED),
-                        duty_s);
+                        duty_s, false);   // false: no round-start lead (ignored for the duty text anyway)
     ESP_LOGI(TAG, "%s", line);
 }
 
@@ -2201,8 +2202,11 @@ void lorawan_setup(void) {
     // always the pinned branch here, unlike tx_setup()'s single-core carve-out.
     // V2.8.33: on a single-core chip core 1 does not exist and this create
     // would assert at boot; stop the build instead (port: copy tx_setup()'s
-    // CONFIG_FREERTOS_UNICORE branch).
-#if defined(CONFIG_FREERTOS_UNICORE)
+    // single-core branch). V2.8.35: same test as tx_setup()
+    // (CONFIG_FREERTOS_NUMBER_OF_CORES, defined on every chip). Not "< 2":
+    // cppcheck runs without sdkconfig.h, sees the symbol as 0 and would hit
+    // the #error on every LoRaWAN board.
+#if CONFIG_FREERTOS_NUMBER_OF_CORES == 1
 #error "lorawan.cpp: the LoRaWAN worker is pinned to core 1 — add a single-core branch like tx_setup()'s"
 #endif
     BaseType_t ok = xTaskCreatePinnedToCore(
@@ -2246,6 +2250,8 @@ bool lorawan_is_idle(void) {
 }
 
 bool lorawan_on_air(void) { return __atomic_load_n(&s_busy, __ATOMIC_SEQ_CST); }
+
+bool lorawan_is_suspended(void) { return __atomic_load_n(&s_suspended, __ATOMIC_SEQ_CST); }
 
 // OTA prep (httpd task). Publishes the suspension, then waits for any
 // exchange already on air — join attempt or uplink incl. its RX windows — to

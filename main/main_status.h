@@ -120,6 +120,11 @@ bool main_services_suspended(void);
  *  fired during the OTA recv-retry window. Not the root cause of that
  *  particular failure (client-side WiFi flake was), but strict
  *  improvement for every OTA on every device.
+ *
+ *  V2.8.35: the TX worker reads it too and drops a round that was queued
+ *  after the OTA began (the main loop checks only before do_tx_cycle()).
+ *  Seq-cst atomic, so the OTA prep's "set flag, then wait for tx_is_idle()"
+ *  and the worker's "mark busy, then read flag" can't both miss each other.
  */
 void main_ota_begin(void);
 

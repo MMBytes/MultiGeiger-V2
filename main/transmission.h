@@ -22,14 +22,16 @@
 #include "config.h"         // CFG_*_MAX — by-value credential fields below
 #include "pm_sensor.h"      // pm_sample_t
 #include "noise_sensor.h"   // noise_sample_t
-#include "tube_types.h"     // V2.6.1: tube_type_t + tube_cps_to_usvph() (dose factor)
+#include "tx_rc.h"          // TX_RC_SKIPPED, TX_RC_NO_ANSWER (send results)
 
 // Circuit breaker applied to every upload target (per-target streak, see
 // tx_run()): 3 consecutive all-retry failures trip the breaker; the target is
-// then skipped for 20 cycles (~50 min at the default 150 s tx_interval_ms)
-// before being retried.
+// then skipped for 5 cycles (~12.5 min at the default 150 s tx_interval_ms)
+// before being retried. V2.8.35: was 20 cycles — in 30 days of fleet logs the
+// first round after the pause succeeded in 19 of 22 trips, so the outage was
+// usually over long before the pause ended.
 #define TX_CB_FAIL_THRESHOLD 3
-#define TX_CB_SKIP_CYCLES    20
+#define TX_CB_SKIP_CYCLES    5
 
 typedef struct {
     bool        enabled;
@@ -199,7 +201,8 @@ bool tx_is_idle(void);
  *  Counters cover the lifetime of the boot. `attempted` counts every cycle
  *  the target was actually called (skipped-because-breaker-open cycles do
  *  NOT increment attempted — they're suppressed before send). `last_rc` is
- *  the HTTP status from the last send (or -1 on transport error). `last_at`
+ *  the HTTP status from the last send, or a negative code (-1 transport
+ *  error, -2 WiFi down, TX_RC_SKIPPED, TX_RC_NO_ANSWER; see tx_rc.h). `last_at`
  *  is the unix-epoch timestamp of the last send attempt (0 = never sent).
  *  `breaker_open_cycles` is the number of TX cycles remaining until the
  *  circuit breaker re-closes (0 = closed / normal).

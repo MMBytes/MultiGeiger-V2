@@ -84,6 +84,7 @@ static inline void lorawan_setup(void) {}
 static inline void lorawan_transmit(const lorawan_snapshot_t *snap) { (void)snap; }
 static inline bool lorawan_is_idle(void) { return true; }
 static inline bool lorawan_on_air(void) { return false; }
+static inline bool lorawan_is_suspended(void) { return false; }
 static inline bool lorawan_suspend(uint32_t timeout_ms) { (void)timeout_ms; return true; }
 static inline uint32_t lorawan_cycle_interval_ms(void) { return 0; }
 static inline void lorawan_note_next_round(uint32_t in_ms) { (void)in_ms; }
@@ -122,6 +123,13 @@ bool lorawan_is_idle(void);
  *         from any task (one seq-cst load). */
 bool lorawan_on_air(void);
 
+/** @brief True once lorawan_suspend() ran (OTA prep, V2.8.12): the worker
+ *         sends nothing more until reboot, also after a failed OTA. main.c
+ *         uses it to log "LoRaWAN paused … until the next reboot" per round
+ *         instead of its "round started" / "still joining" lines while the
+ *         worker is parked (V2.8.35). Safe from any task (one seq-cst load). */
+bool lorawan_is_suspended(void);
+
 /** @brief OTA prep (V2.8.12): stop all further LoRaWAN radio activity until
  *         reboot and wait for an exchange already on air to finish.
  *
@@ -151,7 +159,7 @@ uint32_t lorawan_cycle_interval_ms(void);
 /** @brief When the next upload round starts (V2.8.21), so the worker can tell
  *         after an exchange whether RadioLib's duty-cycle limiter holds the
  *         next uplink past that round — and log the later time then. main.c
- *         calls it wherever it logs "next LoRaWAN uplink" (every round and on
+ *         calls it wherever it logs the next LoRaWAN round (every round and on
  *         an interval change). Safe from any task (short critical section).
  *  @param in_ms  ms from now until the next round. */
 void lorawan_note_next_round(uint32_t in_ms);

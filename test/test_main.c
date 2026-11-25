@@ -47,6 +47,8 @@
 #include "lorawan_pa.h"      // V2.8.22: Heltec V4 PA gain RadioLib subtracts
 #include "lorawan_mac.h"     // V2.8.23: MAC commands + answers in plain words
 #include "radio_turn_rule.h" // V2.8.15: rt_lorawan/ftps/tx_round_may_start
+#include "osm_retry_rule.h"  // V2.8.35: osm_may_retry (openSenseMap time budget)
+#include "tx_rc.h"           // V2.8.35: send result codes + round-log classification
 #include "env_api.h"         // env_api_format (/api/env wire contract; parse follows)
 #include "speaker_logic.h"   // tick_defer_request/poll/clear (V2.7.4 tick defer)
 #include "tls_logic.h"       // fingerprint_hex, https_redirect_location, civil_to_epoch (V2.8.0 HTTPS)
@@ -999,6 +1001,42 @@ static int test_radio_turn_rule(void) {
     return 1;
 }
 
+// V2.8.35 openSenseMap budget: another attempt only if the 2 s pause plus a
+// full 25 s timeout still fit in 90 s.
+static int test_osm_may_retry(void) {
+    EXPECT_TRUE(osm_may_retry(0));
+    EXPECT_TRUE(osm_may_retry(26000));       // after one slow connect failure (~26 s)
+    EXPECT_TRUE(osm_may_retry(54000));       // after two (26 + 2 + 26 s): a third fits
+    EXPECT_TRUE(osm_may_retry(63000));       // boundary: that attempt ends at exactly 90 s
+    EXPECT_TRUE(!osm_may_retry(63001));
+    EXPECT_TRUE(!osm_may_retry(82000));      // after three: no fourth
+    // the budget arithmetic must not overflow or wrap for a huge elapsed time
+    EXPECT_TRUE(!osm_may_retry((int64_t)1 << 40));
+    return 1;
+}
+
+// V2.8.35: the send result codes stay distinct, and only a transport failure
+// trips the breaker. rc6 gave "no answer" the value -3 that the "not
+// configured, skipped" returns already used: a node with an empty Radmon
+// password would have logged "Radmon: no answer, probably stored" every round.
+static int test_tx_rc_classification(void) {
+    EXPECT_TRUE(TX_RC_SKIPPED != TX_RC_NO_ANSWER);
+    EXPECT_TRUE(TX_RC_SKIPPED != -1 && TX_RC_SKIPPED != -2);
+    EXPECT_TRUE(TX_RC_NO_ANSWER != -1 && TX_RC_NO_ANSWER != -2);
+    EXPECT_TRUE(strcmp(tx_rc_word(201, true), "ok") == 0);
+    EXPECT_TRUE(strcmp(tx_rc_word(TX_RC_NO_ANSWER, false), "no answer, probably stored") == 0);
+    EXPECT_TRUE(strcmp(tx_rc_word(TX_RC_SKIPPED, false), "error") == 0);
+    EXPECT_TRUE(strcmp(tx_rc_word(-1, false), "error") == 0);
+    EXPECT_TRUE(strcmp(tx_rc_word(502, false), "error") == 0);
+    EXPECT_TRUE(tx_rc_counts_to_breaker(-1, false));
+    EXPECT_TRUE(!tx_rc_counts_to_breaker(TX_RC_NO_ANSWER, false));
+    EXPECT_TRUE(!tx_rc_counts_to_breaker(TX_RC_SKIPPED, false));
+    EXPECT_TRUE(!tx_rc_counts_to_breaker(-2, false));
+    EXPECT_TRUE(!tx_rc_counts_to_breaker(502, false));
+    EXPECT_TRUE(!tx_rc_counts_to_breaker(200, true));
+    return 1;
+}
+
 static int test_lw_sched_frame_is_ours(void) {
     // Unconfirmed data down (MHDR 0x60) for DevAddr 0x0A0B0C0D (made up), 12 B minimum frame.
     uint8_t f[33] = { 0x60, 0x0D, 0x0C, 0x0B, 0x0A, 0x00, 0x01, 0x00, 0, 0, 0, 0 };
@@ -1315,29 +1353,49 @@ static int test_lw_err_text(void) {
     return 1;
 }
 
-// V2.8.21 (user): every upload round says when the next LoRaWAN uplink comes.
+// V2.8.21 (user): every upload round says when the next LoRaWAN round comes.
+// V2.8.35 (user): main.c's lines name the ROUND (the after-round one with a
+// "round started" lead), only the worker's duty-cycle line names the UPLINK.
 static int test_lw_next_uplink_line(void) {
-    char out[128];   // as main.c's line buffer
-    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 0);
-    EXPECT_STREQ(out, "next LoRaWAN uplink at about 12:41:07 (in 30 min, SF12 schedule)");
-    lw_next_uplink_line(out, sizeof(out), 1800, -1, 0, 0, 12, 0);   // clock not set yet
-    EXPECT_STREQ(out, "next LoRaWAN uplink in about 30 min (SF12 schedule; clock not set yet)");
-    lw_next_uplink_line(out, sizeof(out), 239, 9, 5, 0, 7, 0);      // rounds to whole minutes
-    EXPECT_STREQ(out, "next LoRaWAN uplink at about 09:05:00 (in 4 min, SF7 schedule)");
-    lw_next_uplink_line(out, sizeof(out), 45, 9, 5, 0, 7, 0);       // under a minute: seconds
-    EXPECT_STREQ(out, "next LoRaWAN uplink at about 09:05:00 (in 45 s, SF7 schedule)");
-    lw_next_uplink_line(out, sizeof(out), 600, 23, 59, 59, 0, 0);   // SF not known: no schedule tail
-    EXPECT_STREQ(out, "next LoRaWAN uplink at about 23:59:59 (in 10 min)");
+    char out[160];   // as main.c's line buffer (the worker's is 128, checked below)
+    // main.c, interval change between rounds (no lead)
+    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 0, false);
+    EXPECT_STREQ(out, "next LoRaWAN round at about 12:41:07 (in 30 min, SF12 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 1800, -1, 0, 0, 12, 0, false);   // clock not set yet
+    EXPECT_STREQ(out, "next LoRaWAN round in about 30 min (SF12 schedule; clock not set yet)");
+    lw_next_uplink_line(out, sizeof(out), 239, 9, 5, 0, 7, 0, false);      // rounds to whole minutes
+    EXPECT_STREQ(out, "next LoRaWAN round at about 09:05:00 (in 4 min, SF7 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 45, 9, 5, 0, 7, 0, false);       // under a minute: seconds
+    EXPECT_STREQ(out, "next LoRaWAN round at about 09:05:00 (in 45 s, SF7 schedule)");
+    lw_next_uplink_line(out, sizeof(out), 600, 23, 59, 59, 0, 0, false);   // SF not known: no schedule tail
+    EXPECT_STREQ(out, "next LoRaWAN round at about 23:59:59 (in 10 min)");
+    // main.c, right after a round was queued: the "round started" lead
+    lw_next_uplink_line(out, sizeof(out), 240, 10, 45, 54, 7, 0, true);
+    EXPECT_STREQ(out, "LoRaWAN transmission round started (data handed to the radio) - next round at about "
+                      "10:45:54 (in 4 min, SF7 schedule)");
+    // longest main.c text (lead + clock-not-set tail) must fit the 160-byte buffer untruncated
+    const int len = lw_next_uplink_line(out, sizeof(out), 1800, -1, 0, 0, 12, 0, true);
+    EXPECT_STREQ(out, "LoRaWAN transmission round started (data handed to the radio) - next round in about "
+                      "30 min (SF12 schedule; clock not set yet)");
+    EXPECT_TRUE(len > 0 && len < (int)sizeof(out));
+    lw_next_uplink_line(out, sizeof(out), 600, 23, 59, 59, 0, 0, true);   // lead without SF: no schedule tail
+    EXPECT_STREQ(out, "LoRaWAN transmission round started (data handed to the radio) - next round at about "
+                      "23:59:59 (in 10 min)");
     // rc3: RadioLib's duty-cycle limiter holds the uplink past the next round —
-    // the time is the later moment (caller's job), the line names why.
-    lw_next_uplink_line(out, sizeof(out), 180, 15, 8, 10, 12, 500);
+    // the time is the later moment (caller's job), the line names why. The
+    // round-start flag is ignored for this (worker) text.
+    lw_next_uplink_line(out, sizeof(out), 180, 15, 8, 10, 12, 500, false);
     EXPECT_STREQ(out, "next LoRaWAN uplink at about 15:08:10 (in 8 min: duty-cycle wait; upload round in 3 min, "
                       "SF12 schedule)");
-    lw_next_uplink_line(out, sizeof(out), 180, -1, 0, 0, 12, 500);
+    lw_next_uplink_line(out, sizeof(out), 180, 15, 8, 10, 12, 500, true);
+    EXPECT_STREQ(out, "next LoRaWAN uplink at about 15:08:10 (in 8 min: duty-cycle wait; upload round in 3 min, "
+                      "SF12 schedule)");
+    const int dlen = lw_next_uplink_line(out, sizeof(out), 180, -1, 0, 0, 12, 500, false);
     EXPECT_STREQ(out, "next LoRaWAN uplink in about 8 min (duty-cycle wait; upload round in 3 min, SF12 schedule; "
                       "clock not set yet)");
-    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 500);   // wait shorter than the round: no mention
-    EXPECT_STREQ(out, "next LoRaWAN uplink at about 12:41:07 (in 30 min, SF12 schedule)");
+    EXPECT_TRUE(dlen > 0 && dlen < 128);   // a long worker text fits lorawan.cpp's 128-byte buffer with room
+    lw_next_uplink_line(out, sizeof(out), 1800, 12, 41, 7, 12, 500, false);   // wait shorter than the round: no mention
+    EXPECT_STREQ(out, "next LoRaWAN round at about 12:41:07 (in 30 min, SF12 schedule)");
     return 1;
 }
 
@@ -5074,6 +5132,8 @@ int main(int argc, char **argv) {
     RUN(test_lw_boot_line_states);
     RUN(test_lw_boot_line_variants);
     RUN(test_radio_turn_rule);
+    RUN(test_osm_may_retry);
+    RUN(test_tx_rc_classification);
 
     printf("== env_api_format ==\n");
     RUN(test_env_api_format_typical);

@@ -100,7 +100,7 @@ A microSD socket (SDMMC 4-bit on ESP32-S3 boards, SPI where the chip has no SDMM
 
 ## Upload targets
 
-All **nine** targets are fully optional and independently configurable. Each has per-target circuit-breaker logic (V2.3.x) — 3 consecutive all-retry failures suspend that target for 20 cycles to prevent failed TLS handshakes from fragmenting heap.
+All **nine** targets are fully optional and independently configurable. Each has per-target circuit-breaker logic (V2.3.x) — 3 consecutive all-retry failures suspend that target for 5 cycles to prevent failed TLS handshakes from fragmenting heap.
 
 | Target | Endpoint | Auth | Fields posted |
 |---|---|---|---|
